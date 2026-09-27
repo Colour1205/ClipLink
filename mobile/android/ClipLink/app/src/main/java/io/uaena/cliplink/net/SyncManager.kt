@@ -166,8 +166,13 @@ class SyncManager(
         }
     }
 
-    private fun isVerifiedAndTrusted(entry: ClipboardEntry): Boolean =
-        Signing.verify(entry) && trustStore.isTrusted(entry.deviceId)
+    /**
+     * The entry as its signer signed it, or null if the signature or trust
+     * check fails. Store and apply what this returns, not what arrived - see
+     * [Signing.verified].
+     */
+    private fun verifiedAndTrusted(entry: ClipboardEntry): ClipboardEntry? =
+        Signing.verified(entry)?.takeIf { trustStore.isTrusted(it.deviceId) }
 
     private suspend fun handleMessage(message: String, conn: PeerConnection) {
         val envelope = Envelope.parse(message) ?: run {
@@ -176,10 +181,10 @@ class SyncManager(
         }
         when (envelope.type) {
             Protocol.TYPE_ENTRY -> {
-                val entry = parseEntry(envelope.payload) ?: return
-                if (!isVerifiedAndTrusted(entry)) {
+                val received = parseEntry(envelope.payload) ?: return
+                val entry = verifiedAndTrusted(received) ?: run {
                     onLog?.invoke(
-                        "dropped ${entry.type} entry from ${entry.deviceId.take(12)}… " +
+                        "dropped ${received.type} entry from ${received.deviceId.take(12)}… " +
                             "- failed signature/trust check",
                     )
                     return
@@ -195,9 +200,9 @@ class SyncManager(
                     onLog?.invoke("received invalid message from peer (bad history_batch JSON)")
                     return
                 }
-                for (entry in entries) {
+                for (received in entries) {
                     // Skip just the bad entry, keep processing the rest of the batch.
-                    if (!isVerifiedAndTrusted(entry)) continue
+                    val entry = verifiedAndTrusted(received) ?: continue
                     if (history.add(entry)) applyAndReport(entry)
                 }
             }

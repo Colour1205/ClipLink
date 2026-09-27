@@ -18,6 +18,15 @@
 // format string directly). This is safe because .NET's "o" format is
 // specifically designed to round-trip losslessly - parsing a well-formed
 // "o" string and reformatting it with "o" reproduces the identical string.
+//
+// The one catch: Windows SIGNS over ToString("o") but SENDS entries
+// serialized by System.Text.Json, which trims trailing fractional zeros
+// ("...:56.1234500Z" goes out as "...:56.12345Z", and "...:56.0000000Z" as
+// "...:56Z"). That is the same instant but not the signed text, so it fails
+// a verify over the raw string - about one in ten Windows entries, and
+// every entry from this device that Windows relays in a history_batch.
+// verifiedEntry() repairs that by string surgery only (never a Date), see
+// paddedDotNetTimestamp().
 
 import { util } from '@kit.ArkTS';
 import { DeviceIdentity, verifyRawSignature } from '../identity/DeviceIdentity';
@@ -51,13 +60,36 @@ function stringToBytes(s: string): Uint8Array {
 
 // Matches .NET's DateTime.ToString("o") for a freshly-generated UTC
 // timestamp: yyyy-MM-ddTHH:mm:ss.fffffffZ, exactly 7 fractional digits.
-// JS's toISOString() gives exactly 3 - pad with 4 zeros. Since those
-// trailing digits are genuinely zero (this device has no finer time
-// source than milliseconds to offer anyway), .NET parsing this string and
-// reformatting via "o" reproduces it exactly, byte for byte.
+// JS's toISOString() gives exactly 3 - extend with "0001", i.e. one extra
+// 100ns tick (this device has no finer time source than milliseconds, so
+// the tick is invisible). .NET parsing this string and reformatting via
+// "o" reproduces it exactly, byte for byte. The final 1 matters: with
+// "0000" there, Windows' JSON serializer trimmed the zeros whenever it
+// relayed the entry, and peers verifying the raw text rejected it.
 export function nowAsDotNetRoundTrip(): string {
   const iso = new Date().toISOString(); // "...ss.SSSZ"
-  return `${iso.slice(0, -1)}0000Z`;
+  return `${iso.slice(0, -1)}0001Z`;
+}
+
+const DOTNET_TIMESTAMP = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,7}))?(Z|[+-]\d{2}:\d{2})?$/;
+
+// What ToString("o") wrote before System.Text.Json trimmed it: the fraction
+// right-padded to 7 digits (".0000000" when it was dropped), suffix kept.
+// null when the timestamp already has 7 digits (nothing was trimmed) or
+// isn't a shape .NET produces.
+export function paddedDotNetTimestamp(timestamp: string): string | null {
+  const match = DOTNET_TIMESTAMP.exec(timestamp);
+  if (match === null) return null;
+  const fraction: string = match[2] ?? '';
+  if (fraction.length === 7) return null;
+  return `${match[1]}.${(fraction + '0000000').slice(0, 7)}${match[3] ?? ''}`;
+}
+
+// The form to compare and sort on: trimmed and untrimmed spellings of one
+// instant become equal, and "...:56Z" no longer sorts after "...:56.5Z"
+// just because 'Z' > '.'.
+export function canonicalTimestamp(timestamp: string): string {
+  return paddedDotNetTimestamp(timestamp) ?? timestamp;
 }
 
 function signableData(entry: ClipboardEntry): Uint8Array {
@@ -71,15 +103,32 @@ export async function signEntry(identity: DeviceIdentity, content: string, type:
   return entry;
 }
 
+// Returns the entry exactly as its signer signed it, or null when the
+// signature doesn't hold. Callers must store and relay what this returns,
+// not what arrived: if the timestamp was trimmed in transit, the returned
+// copy carries the padded, signed text, which every platform can verify.
+//
 // Verifies against entry.DeviceId itself - matches how Program.cs always
 // calls SigningService.Verify(entry, entry.DeviceId) in practice.
-export async function verifyEntry(entry: ClipboardEntry): Promise<boolean> {
-  if (!entry.Signature) return false;
+export async function verifiedEntry(entry: ClipboardEntry): Promise<ClipboardEntry | null> {
+  if (!entry.Signature) return null;
   let sigBytes: Uint8Array;
   try {
     sigBytes = base64Helper.decodeSync(entry.Signature);
   } catch (e) {
-    return false; // malformed base64 from a misbehaving/hostile peer
+    return null; // malformed base64 from a misbehaving/hostile peer
   }
-  return await verifyRawSignature(entry.DeviceId, signableData(entry), sigBytes);
+  if (await verifyRawSignature(entry.DeviceId, signableData(entry), sigBytes)) {
+    return entry;
+  }
+  const padded = paddedDotNetTimestamp(entry.Timestamp);
+  if (padded === null) return null;
+  const restored: ClipboardEntry = {
+    Content: entry.Content,
+    Type: entry.Type,
+    DeviceId: entry.DeviceId,
+    Timestamp: padded,
+    Signature: entry.Signature,
+  };
+  return (await verifyRawSignature(restored.DeviceId, signableData(restored), sigBytes)) ? restored : null;
 }

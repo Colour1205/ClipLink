@@ -2,6 +2,7 @@ package io.uaena.cliplink.store
 
 import android.content.Context
 import io.uaena.cliplink.core.ClipboardEntry
+import io.uaena.cliplink.core.DotNetTimestamp
 import io.uaena.cliplink.net.FilePayload
 import org.json.JSONArray
 
@@ -59,17 +60,25 @@ class HistoryStore(context: Context, private val fileStore: FileStore) {
         save(emptyList())
     }
 
+    // Timestamps compare in canonical form so a trimmed and an untrimmed
+    // spelling of one instant (see DotNetTimestamp) count as the same entry.
     private fun ClipboardEntry.isSameAs(other: ClipboardEntry): Boolean =
         content == other.content && type == other.type && deviceId == other.deviceId &&
-            timestamp == other.timestamp && signature == other.signature
+            DotNetTimestamp.canonical(timestamp) == DotNetTimestamp.canonical(other.timestamp) &&
+            signature == other.signature
 
     private fun trim(entries: MutableList<ClipboardEntry>) {
         while (entries.size > MAX_ITEMS) {
             // Timestamps are .NET round-trip format, which is fixed-width and
             // UTC - so lexicographic order IS chronological order, no parsing.
+            // Canonical form restores the fixed width if a relay trimmed it.
             var oldest = 0
             for (i in 1 until entries.size) {
-                if (entries[i].timestamp < entries[oldest].timestamp) oldest = i
+                if (DotNetTimestamp.canonical(entries[i].timestamp) <
+                    DotNetTimestamp.canonical(entries[oldest].timestamp)
+                ) {
+                    oldest = i
+                }
             }
             releaseBlob(entries.removeAt(oldest))
         }
