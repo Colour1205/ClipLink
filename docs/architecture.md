@@ -15,7 +15,7 @@ There is no "server" role. A daemon (Windows) and a foreground app (iOS/Android/
 | Platform | Runs as | Sync trigger |
 |---|---|---|
 | Windows | Background daemon + tray icon | Continuous — watches clipboard, listens for peers at all times |
-| iOS | Foreground app | On launch / foreground: broadcast presence, pull history from any reachable peer, push local clipboard once |
+| iOS | Foreground app + Background App Refresh + Share extension | On launch / foreground: announce presence (unicast beacons + /24 sweep when iOS blocks broadcast), pull history from any reachable peer, push local clipboard once; iOS-scheduled background rounds catch up history; "Share → ClipLink" sends from any app |
 | Android | Foreground app (+ optional short-lived background window if OS allows) | Same as iOS |
 | HarmonyOS | Foreground app | Same as iOS |
 
