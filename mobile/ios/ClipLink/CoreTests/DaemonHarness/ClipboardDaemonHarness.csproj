@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The REAL windows/daemon sources (copied verbatim into src/), built for
+       macOS with a few platform shims: DPAPI -> plain bytes, WinForms
+       clipboard -> scriptable fake (stdin/stdout), discovery ports from env. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>ClipboardDaemon</RootNamespace>
+    <NoWarn>CS8618;CS8602;CS8604;CS1998;CS0168</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="src/Clipboard/ClipboardSync.cs" />
+    <Compile Remove="shim/**" />
+    <Compile Include="shim/FakeClipboardSync.cs" />
+  </ItemGroup>
+</Project>

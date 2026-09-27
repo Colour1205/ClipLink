@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Shared storage (history, trust, files) and Keychain items (identity,
+	     passcode key) between ClipLink and its Share extension. App Groups
+	     work with a free Apple ID personal team. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.io.uaena.ClipLink</string>
+	</array>
+</dict>
+</plist>

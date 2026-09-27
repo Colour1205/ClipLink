@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged with the build-setting-generated Info.plist (GENERATE_INFOPLIST_FILE).
+  Only the array- and dictionary-valued keys live here; simple strings are
+  INFOPLIST_KEY_* build settings. This file sits outside the synchronized ClipLink/ folder on
+  purpose, so Xcode doesn't also copy it into the bundle as a resource.
+-->
+<plist version="1.0">
+<dict>
+	<!-- One window: all UI state (the pairing sheet, toasts, alerts) lives in
+	     the single AppModel, so a second iPad window would only mirror it.
+	     Split View and Slide Over still work. Replaces the generated manifest
+	     (INFOPLIST_KEY_UIApplicationSceneManifest_Generation = NO). -->
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+	</dict>
+	<!-- Received files saved with "Save to Files" can also be browsed under
+	     On My iPhone › ClipLink (this key is ignored as a build setting). -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<!-- Background App Refresh + background processing: iOS wakes ClipLink
+	     now and then to reconnect to paired devices and catch up history. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>processing</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>io.uaena.ClipLink.refresh</string>
+		<string>io.uaena.ClipLink.sync</string>
+	</array>
+	<!-- "Open in ClipLink" / Copy to ClipLink from the share sheet and Files:
+	     any document handed to the app is sent to paired devices. -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Any file</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.item</string>
+				<string>public.content</string>
+				<string>public.data</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
