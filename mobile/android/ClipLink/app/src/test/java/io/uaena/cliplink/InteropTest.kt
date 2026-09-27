@@ -1,15 +1,19 @@
 package io.uaena.cliplink
 
+import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.core.EcdsaDer
 import io.uaena.cliplink.core.Pbkdf2
 import io.uaena.cliplink.core.Signing
 import io.uaena.cliplink.core.fixedTimeEquals
 import io.uaena.cliplink.core.toHex
 import io.uaena.cliplink.net.Discovery
+import io.uaena.cliplink.net.HandshakeMessage
+import io.uaena.cliplink.net.PairingInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.json.JSONObject
 import org.junit.Test
 import java.security.KeyPairGenerator
 import java.security.Signature
@@ -186,5 +190,48 @@ class InteropTest {
         val beacon = Discovery.parse("49000:$deviceId:-:-:-", "10.0.0.2")
         checkNotNull(beacon)
         assertEquals(deviceId, beacon.deviceId)
+    }
+
+    // ---- JSON null fields -------------------------------------------------
+
+    // System.Text.Json writes an unset `string?` as an explicit null, and
+    // Android's org.json optString reads that back as the text "null". These
+    // pin that every optional field the daemon can null out reads as absent.
+
+    @Test
+    fun `pairing info with a null address has no address`() {
+        // Exactly what the daemon's get_pairing_info emits with no Tailscale IP.
+        val info = PairingInfo.parse("""{"PublicKey":"K","Address":null}""")
+        checkNotNull(info)
+        assertEquals("K", info.publicKey)
+        assertNull(info.address)
+
+        assertNull(PairingInfo.parse("""{"PublicKey":"K","Address":"  "}""")?.address)
+        assertEquals("100.64.0.1", PairingInfo.parse("""{"PublicKey":"K","Address":"100.64.0.1"}""")?.address)
+    }
+
+    @Test
+    fun `handshake with a null passphrase proof has no proof`() {
+        // What the daemon sends when no passcode is set.
+        val handshake = HandshakeMessage.parse(
+            """{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S","PassphraseProof":null}""",
+        )
+        checkNotNull(handshake)
+        assertEquals("S", handshake.signature)
+        assertNull(handshake.passphraseProof)
+    }
+
+    @Test
+    fun `clipboard entry with a null signature has no signature`() {
+        val entry = ClipboardEntry.fromJson(
+            JSONObject("""{"Content":"hi","Type":"text","DeviceId":"D","Timestamp":"T","Signature":null}"""),
+        )
+        checkNotNull(entry)
+        assertNull(entry.signature)
+
+        // toJson itself writes an unsigned entry's Signature as JSON null, so
+        // this is also what reloading one of our own entries goes through.
+        val unsigned = ClipboardEntry("hi", ClipboardEntry.TYPE_TEXT, "D", "T")
+        assertEquals(unsigned, ClipboardEntry.fromJson(JSONObject(unsigned.toJson().toString())))
     }
 }

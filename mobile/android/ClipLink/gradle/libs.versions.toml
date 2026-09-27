@@ -16,6 +16,7 @@ zxing = "3.5.3"
 camerax = "1.4.1"
 junit = "4.13.2"
 junitVersion = "1.2.1"
+androidJson = "0.0.20131108.vaadin1"
 espressoCore = "3.6.1"
 
 [libraries]
@@ -46,6 +47,12 @@ androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycl
 androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "camerax" }
 
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+# Local unit tests run against a stubbed android.jar whose org.json throws
+# "not mocked", so they need a real implementation - and it has to be
+# Android's own. The canonical org.json:json returns the fallback for a JSON
+# null in optString, where Android returns the text "null"; testing against
+# it would hide exactly the null-field bugs InteropTest guards against.
+android-json = { group = "com.vaadin.external.google", name = "android-json", version.ref = "androidJson" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
 

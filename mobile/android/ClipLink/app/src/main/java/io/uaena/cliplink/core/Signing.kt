@@ -48,7 +48,7 @@ data class ClipboardEntry(
             val deviceId = json.optString("DeviceId", "")
             val timestamp = json.optString("Timestamp", "")
             if (type.isEmpty() || deviceId.isEmpty() || timestamp.isEmpty()) return null
-            val signature = json.optString("Signature", "").takeIf { it.isNotEmpty() }
+            val signature = json.optStringOrNull("Signature")
             return ClipboardEntry(content, type, deviceId, timestamp, signature)
         }
 

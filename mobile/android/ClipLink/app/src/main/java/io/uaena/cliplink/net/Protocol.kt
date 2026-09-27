@@ -1,5 +1,6 @@
 package io.uaena.cliplink.net
 
+import io.uaena.cliplink.core.optStringOrNull
 import org.json.JSONObject
 
 /**
@@ -148,7 +149,7 @@ data class HandshakeMessage(
                     ephemeralPublicKey = ephemeral,
                     identityPublicKey = identity,
                     signature = signature,
-                    passphraseProof = obj.optString("PassphraseProof", "").takeIf { it.isNotEmpty() },
+                    passphraseProof = obj.optStringOrNull("PassphraseProof"),
                 )
             }
         } catch (e: Exception) {
@@ -187,7 +188,7 @@ data class PairingInfo(val publicKey: String, val address: String?) {
                 if (key.isEmpty()) {
                     null
                 } else {
-                    PairingInfo(key, obj.optString("Address", "").takeIf { it.isNotEmpty() })
+                    PairingInfo(key, obj.optStringOrNull("Address")?.takeIf { it.isNotBlank() })
                 }
             } catch (e: Exception) {
                 null
