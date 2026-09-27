@@ -7,7 +7,7 @@
 
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
-import { ClipboardEntry } from '../crypto/Signing';
+import { ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
 import { FileStore } from './FileStore';
 import { FilePayload } from './FilePayload';
 
@@ -55,9 +55,11 @@ export class HistoryAccess {
     await prefs.flush();
   }
 
+  // Timestamps compare in canonical form so a trimmed and an untrimmed
+  // spelling of one instant (see Signing.ets) count as the same entry.
   private isSameEntry(a: ClipboardEntry, b: ClipboardEntry): boolean {
     return a.Content === b.Content && a.Type === b.Type && a.DeviceId === b.DeviceId
-      && a.Timestamp === b.Timestamp && a.Signature === b.Signature;
+      && canonicalTimestamp(a.Timestamp) === canonicalTimestamp(b.Timestamp) && a.Signature === b.Signature;
   }
 
   // Returns true only if the entry was genuinely new (not a duplicate) -
@@ -77,12 +79,13 @@ export class HistoryAccess {
   }
 
   // Oldest-first eviction once over the cap - also deletes the backing
-  // FileStore blob for evicted file-type entries, same as Windows.
+  // FileStore blob for evicted file-type entries, same as Windows. Compared
+  // in canonical form, which is fixed-width, so text order is time order.
   private async trimToLimit(entries: ClipboardEntry[]): Promise<void> {
     while (entries.length > MAX_HISTORY_ITEMS) {
       let oldestIndex = 0;
       for (let i = 1; i < entries.length; i++) {
-        if (entries[i].Timestamp < entries[oldestIndex].Timestamp) {
+        if (canonicalTimestamp(entries[i].Timestamp) < canonicalTimestamp(entries[oldestIndex].Timestamp)) {
           oldestIndex = i;
         }
       }

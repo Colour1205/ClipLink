@@ -1,6 +1,7 @@
 package io.uaena.cliplink
 
 import io.uaena.cliplink.core.ClipboardEntry
+import io.uaena.cliplink.core.DotNetTimestamp
 import io.uaena.cliplink.core.EcdsaDer
 import io.uaena.cliplink.core.Pbkdf2
 import io.uaena.cliplink.core.Signing
@@ -12,6 +13,7 @@ import io.uaena.cliplink.net.PairingInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.json.JSONObject
 import org.junit.Test
@@ -141,6 +143,140 @@ class InteropTest {
         val muchLater = "2026-09-22T09:00:00.0000000Z"
         assertTrue(early < later)
         assertTrue(later < muchLater)
+    }
+
+    @Test
+    fun `generated timestamp never ends in a zero digit`() {
+        // A trailing zero is what the Windows daemon's JSON serializer trims
+        // when it relays an entry, so avoiding one keeps the signed text
+        // byte-identical for peers that only verify the raw string.
+        repeat(1000) {
+            val timestamp = Signing.nowAsDotNetRoundTrip()
+            assertFalse("got '$timestamp'", timestamp.endsWith("0Z"))
+        }
+    }
+
+    // ---- timestamps trimmed in transit by the Windows daemon ---------------
+
+    @Test
+    fun `trimmed timestamp pads back to the seven digits dotnet signed`() {
+        assertEquals(
+            "2026-09-26T12:34:56.1234500Z",
+            DotNetTimestamp.padded("2026-09-26T12:34:56.12345Z"),
+        )
+    }
+
+    @Test
+    fun `fractionless timestamp pads to seven zeros`() {
+        assertEquals(
+            "2026-09-26T12:34:56.0000000Z",
+            DotNetTimestamp.padded("2026-09-26T12:34:56Z"),
+        )
+    }
+
+    @Test
+    fun `padding keeps the suffix and leaves everything else alone`() {
+        assertEquals(
+            "2026-09-26T12:34:56.1000000+08:00",
+            DotNetTimestamp.padded("2026-09-26T12:34:56.1+08:00"),
+        )
+        assertEquals("2026-09-26T12:34:56.0000000", DotNetTimestamp.padded("2026-09-26T12:34:56"))
+        // Already seven digits: nothing was trimmed, nothing to add.
+        assertNull(DotNetTimestamp.padded("2026-09-26T12:34:56.1234500Z"))
+        // Not a shape .NET writes.
+        assertNull(DotNetTimestamp.padded("2026-09-26T12:34:56.12345678Z"))
+        assertNull(DotNetTimestamp.padded("2026-09-26 12:34:56Z"))
+        assertNull(DotNetTimestamp.padded("2026-09-26T12:34:56Z\n"))
+        assertNull(DotNetTimestamp.padded(""))
+    }
+
+    @Test
+    fun `canonical form sorts trimmed timestamps chronologically`() {
+        // As raw strings "...:56Z" sorts AFTER "...:56.5Z" because 'Z' > '.'.
+        val whole = "2026-09-26T12:34:56Z"
+        val half = "2026-09-26T12:34:56.5Z"
+        assertTrue("raw comparison is the bug", whole > half)
+        assertTrue(DotNetTimestamp.canonical(whole) < DotNetTimestamp.canonical(half))
+        // And both spellings of one instant compare equal.
+        assertEquals(
+            DotNetTimestamp.canonical("2026-09-26T12:34:56.12345Z"),
+            DotNetTimestamp.canonical("2026-09-26T12:34:56.1234500Z"),
+        )
+    }
+
+    @Test
+    fun `entry signed over seven digits verifies after the fraction is trimmed`() {
+        val signer = TestSigner()
+        val signed = signer.sign("2026-09-26T12:34:56.1234500Z")
+        val received = signed.copy(timestamp = "2026-09-26T12:34:56.12345Z")
+
+        assertFalse("the raw text alone must not verify", signer.holds(received))
+        val verified = Signing.verified(received, signer::holds)
+        checkNotNull(verified)
+        // Stored and relayed with the signed text, so every platform verifies it.
+        assertEquals("2026-09-26T12:34:56.1234500Z", verified.timestamp)
+        assertEquals(signed, verified)
+    }
+
+    @Test
+    fun `entry signed over seven digits verifies after the fraction is dropped`() {
+        val signer = TestSigner()
+        val signed = signer.sign("2026-09-26T12:34:56.0000000Z")
+        val received = signed.copy(timestamp = "2026-09-26T12:34:56Z")
+
+        assertFalse("the raw text alone must not verify", signer.holds(received))
+        val verified = Signing.verified(received, signer::holds)
+        checkNotNull(verified)
+        assertEquals("2026-09-26T12:34:56.0000000Z", verified.timestamp)
+    }
+
+    @Test
+    fun `an untrimmed timestamp verifies as received`() {
+        val signer = TestSigner()
+        val signed = signer.sign("2026-09-26T12:34:56.1234567Z")
+        assertSame(signed, Signing.verified(signed, signer::holds))
+    }
+
+    @Test
+    fun `padding never rescues a signature over different text`() {
+        val signer = TestSigner()
+        // Signed over the trimmed text itself, so the padded form is NOT what
+        // was signed - but the raw form is, and must still verify first.
+        val trimmedSigned = signer.sign("2026-09-26T12:34:56.12345Z")
+        assertSame(trimmedSigned, Signing.verified(trimmedSigned, signer::holds))
+
+        // A different instant, trimmed or not, stays rejected.
+        val signed = signer.sign("2026-09-26T12:34:56.1234500Z")
+        assertNull(Signing.verified(signed.copy(timestamp = "2026-09-26T12:34:56.12346Z"), signer::holds))
+        // And so does another key's signature, even over the padded text.
+        assertNull(Signing.verified(signed.copy(timestamp = "2026-09-26T12:34:56.12345Z"), TestSigner()::holds))
+    }
+
+    /** A plain-JVM stand-in for a peer's identity key; B64 and the keystore need Android. */
+    private class TestSigner {
+        private val keyPair = KeyPairGenerator.getInstance("EC").run {
+            initialize(ECGenParameterSpec("secp256r1"))
+            generateKeyPair()
+        }
+
+        fun sign(timestamp: String): ClipboardEntry {
+            val unsigned = ClipboardEntry("héllo", ClipboardEntry.TYPE_TEXT, "SOMEDEVICE", timestamp)
+            val signature = Signature.getInstance("SHA256withECDSA").run {
+                initSign(keyPair.private)
+                update(Signing.signableData(unsigned))
+                sign()
+            }
+            return unsigned.copy(signature = signature.toHex())
+        }
+
+        fun holds(entry: ClipboardEntry): Boolean = Signature.getInstance("SHA256withECDSA").run {
+            initVerify(keyPair.public)
+            update(Signing.signableData(entry))
+            verify(hexToBytes(checkNotNull(entry.signature)))
+        }
+
+        private fun hexToBytes(hex: String): ByteArray =
+            ByteArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
     }
 
     // ---- beacon wire format ----------------------------------------------

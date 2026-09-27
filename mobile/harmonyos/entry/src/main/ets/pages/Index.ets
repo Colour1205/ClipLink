@@ -44,7 +44,7 @@ import { TcpServer, connectTcp } from '../networking/TcpTransport';
 import { HandshakeReport, PeerConnection, PeerVerdict, TcpSocketAdapter, TcpSocketConnectionAdapter } from '../networking/PeerConnection';
 import { SyncManager } from '../networking/SyncManager';
 import { connection } from '@kit.NetworkKit';
-import { signEntry, ClipboardEntry } from '../crypto/Signing';
+import { signEntry, ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
 import { ApplyResult } from '../clipboard/ClipboardApply';
 import socket from '@ohos.net.socket';
 
@@ -1963,10 +1963,15 @@ struct Index {
   // this device's own entries from peers'.
   private async loadHistoryIntoList(): Promise<void> {
     const saved: ClipboardEntry[] = (await this.syncManager?.getHistory()) ?? [];
-    // Timestamps are .NET round-trip ISO strings, which sort as text.
+    // Timestamps are .NET round-trip ISO strings, which sort as text once
+    // canonicalised (a relay may have trimmed their fraction).
     const restored: SyncedItem[] = saved
       .slice()
-      .sort((a: ClipboardEntry, b: ClipboardEntry) => a.Timestamp < b.Timestamp ? 1 : (a.Timestamp > b.Timestamp ? -1 : 0))
+      .sort((a: ClipboardEntry, b: ClipboardEntry) => {
+        const at = canonicalTimestamp(a.Timestamp);
+        const bt = canonicalTimestamp(b.Timestamp);
+        return at < bt ? 1 : (at > bt ? -1 : 0);
+      })
       .map((entry: ClipboardEntry) => this.syncedItemFor(entry, entry.DeviceId !== this.ownDeviceId));
     // Anything that arrived live while this was loading stays on top.
     const liveIds: Set<string> = new Set(this.syncedItems.map((i: SyncedItem) => i.id));

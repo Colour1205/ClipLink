@@ -9,6 +9,7 @@ import io.uaena.cliplink.clipboard.ClipboardBridge
 import io.uaena.cliplink.core.B64
 import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.core.DeviceIdentity
+import io.uaena.cliplink.core.DotNetTimestamp
 import io.uaena.cliplink.core.Signing
 import io.uaena.cliplink.net.Discovery
 import io.uaena.cliplink.net.FilePayload
@@ -710,7 +711,8 @@ class ClipLinkEngine(context: Context) {
     private fun refreshItems() {
         val own = _ownDeviceId.value
         _items.value = historyStore.all()
-            .sortedByDescending { it.timestamp } // .NET round-trip format sorts chronologically
+            // .NET round-trip format sorts chronologically once canonicalised.
+            .sortedByDescending { DotNetTimestamp.canonical(it.timestamp) }
             .map { entry ->
                 SyncedItem(
                     entry = entry,

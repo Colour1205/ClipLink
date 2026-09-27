@@ -13,7 +13,7 @@ import { TrustStore } from '../identity/TrustStore';
 import { HistoryAccess } from '../storage/HistoryAccess';
 import { FileStore } from '../storage/FileStore';
 import { FilePayload } from '../storage/FilePayload';
-import { ClipboardEntry, verifyEntry } from '../crypto/Signing';
+import { ClipboardEntry, verifiedEntry } from '../crypto/Signing';
 import { applyEntryToClipboard, ApplyResult } from '../clipboard/ClipboardApply';
 
 const base64Helper = new util.Base64Helper();
@@ -209,8 +209,13 @@ export class SyncManager {
     }
   }
 
-  private async isVerifiedAndTrusted(entry: ClipboardEntry): Promise<boolean> {
-    return (await verifyEntry(entry)) && (await this.trustStore.isTrusted(this.context, entry.DeviceId));
+  // The entry as its signer signed it, or null if the signature or trust
+  // check fails. Store and apply what this returns, not what arrived - see
+  // verifiedEntry().
+  private async verifiedAndTrusted(entry: ClipboardEntry): Promise<ClipboardEntry | null> {
+    const verified = await verifiedEntry(entry);
+    if (verified === null) return null;
+    return (await this.trustStore.isTrusted(this.context, verified.DeviceId)) ? verified : null;
   }
 
   private async applyAndReport(entry: ClipboardEntry): Promise<void> {
@@ -405,14 +410,15 @@ export class SyncManager {
     }
 
     if (envelope.Type === 'entry') {
-      let entry: ClipboardEntry;
+      let received: ClipboardEntry;
       try {
-        entry = JSON.parse(envelope.Payload) as ClipboardEntry;
+        received = JSON.parse(envelope.Payload) as ClipboardEntry;
       } catch (e) {
         this.logCallback?.('received invalid message from peer (bad entry JSON)');
         return;
       }
-      if (!(await this.isVerifiedAndTrusted(entry))) {
+      const entry = await this.verifiedAndTrusted(received);
+      if (entry === null) {
         // Was silent (a routine consequence of trust mismatches during
         // normal pairing setup) - re-enabled while chasing the image/file
         // sync bug, since a silent drop here is indistinguishable from
@@ -420,7 +426,7 @@ export class SyncManager {
         // actually happens. type/deviceId included since this is the
         // first concrete data point telling us whether it's even getting
         // this far.
-        this.logCallback?.(`dropped ${entry.Type} entry from ${entry.DeviceId.slice(0, 12)}... - failed signature/trust check`);
+        this.logCallback?.(`dropped ${received.Type} entry from ${received.DeviceId.slice(0, 12)}... - failed signature/trust check`);
         return;
       }
       await this.applyAndReport(entry);
@@ -433,8 +439,9 @@ export class SyncManager {
         this.logCallback?.('received invalid message from peer (bad history_batch JSON)');
         return;
       }
-      for (const entry of entries) {
-        if (!(await this.isVerifiedAndTrusted(entry))) {
+      for (const received of entries) {
+        const entry = await this.verifiedAndTrusted(received);
+        if (entry === null) {
           continue; // skip just this bad entry, keep processing the rest of the batch
         }
         const isNew = await this.history.addToHistory(this.context, entry);
