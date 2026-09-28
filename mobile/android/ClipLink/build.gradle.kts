@@ -18,13 +18,20 @@ plugins {
 // ./app/build layout with no config change.
 //
 // Override the destination with -Pcliplink.buildRoot=<path> if needed.
+//
+// The default is a fixed per-user folder, NOT java.io.tmpdir: that comes from
+// whichever Gradle daemon runs the build, and Android Studio reuses a daemon a
+// command-line build started with a different TEMP. The build then landed
+// somewhere other than where the IDE looks, and Run installed a stale APK -
+// seen as INSTALL_FAILED_NO_MATCHING_ABIS from an old emulator-only build.
 val syncedFolderNames = listOf("onedrive", "dropbox", "google drive", "icloud")
 val projectPath = rootDir.absolutePath.replace('\\', '/').lowercase()
 val insideSyncedFolder = syncedFolderNames.any { projectPath.contains("/$it") }
 
 if (insideSyncedFolder) {
-    val buildRoot = providers.gradleProperty("cliplink.buildRoot").orNull
-        ?: "${System.getProperty("java.io.tmpdir")}/cliplink-build"
+    val defaultBuildRoot = System.getenv("LOCALAPPDATA")?.let { "$it/cliplink-build" }
+        ?: "${System.getProperty("user.home")}/.cliplink-build"
+    val buildRoot = providers.gradleProperty("cliplink.buildRoot").orNull ?: defaultBuildRoot
     allprojects {
         layout.buildDirectory.set(file("$buildRoot/${rootProject.name}/${project.name}"))
     }
