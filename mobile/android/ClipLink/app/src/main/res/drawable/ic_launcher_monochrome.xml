@@ -1,39 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Themed-icon (monochrome) layer: two overlapping rounded squares, the
-     same two-card shape as the full-colour icon artwork in
-     mipmap-*/ic_launcher_foreground.png, which can't serve as a monochrome
-     layer itself (the system only uses a layer's alpha, and the artwork is
-     an opaque square).
+<!-- Themed-icon (monochrome) layer: the full-colour icon artwork
+     (mipmap-*/ic_launcher_foreground.png) traced as one flat shape - the
+     back card offset up-left, the front card in front of it with a thin gap,
+     and "LI / NK" knocked out of the front card. The artwork itself can't be
+     this layer: the system only uses a layer's alpha, and the artwork is an
+     opaque square. Without this, themed-icon launchers kept showing the
+     previous design.
 
-     Everything sits inside the 72x72 safe zone centred in the 108x108 canvas
-     (18dp margin on every side); a launcher mask can clip anything outside it. -->
+     Sized to stay inside the 66dp circle centred in the 108x108 canvas, the
+     tightest mask a launcher applies. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Back sheet: offset up-left, dimmed to read as "the other device". -->
+    <!-- Back card: only the part left visible around the front card. -->
     <path
         android:fillColor="#FFFFFF"
         android:fillAlpha="0.45"
-        android:pathData="M36,30 h26 a8,8 0 0,1 8,8 v26 a8,8 0 0,1 -8,8 h-26 a8,8 0 0,1 -8,-8 v-26 a8,8 0 0,1 8,-8 z" />
+        android:pathData="M37.5,29 H58.5 A7.5,7.5 0 0,1 64.5,32 H46.2 A9,9 0 0,0 37.2,41 V73.3 A7.5,7.5 0 0,1 30,65.8 V36.5 A7.5,7.5 0 0,1 37.5,29 Z" />
 
-    <!-- Front sheet, knocked out of the back one by the gap the stroke leaves. -->
+    <!-- Front card, with the letters cut out (evenOdd). -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M46,40 h26 a8,8 0 0,1 8,8 v26 a8,8 0 0,1 -8,8 h-26 a8,8 0 0,1 -8,-8 v-26 a8,8 0 0,1 8,-8 z" />
-
-    <!-- The clip tab on the front sheet. -->
-    <path
-        android:fillColor="#3B5BFE"
-        android:pathData="M54,36 h10 a3,3 0 0,1 3,3 v4 a3,3 0 0,1 -3,3 h-10 a3,3 0 0,1 -3,-3 v-4 a3,3 0 0,1 3,-3 z" />
-
-    <!-- Two content lines. -->
-    <path
-        android:fillColor="#3B5BFE"
-        android:pathData="M48,56 h22 a2.5,2.5 0 0,1 0,5 h-22 a2.5,2.5 0 0,1 0,-5 z" />
-    <path
-        android:fillColor="#3B5BFE"
-        android:pathData="M48,66 h14 a2.5,2.5 0 0,1 0,5 h-14 a2.5,2.5 0 0,1 0,-5 z" />
+        android:fillType="evenOdd"
+        android:pathData="M46.2,33.5 H70.5 A7.5,7.5 0 0,1 78,41 V71.5 A7.5,7.5 0 0,1 70.5,79 H46.2 A7.5,7.5 0 0,1 38.7,71.5 V41 A7.5,7.5 0 0,1 46.2,33.5 Z
+            M49.2,43 H51.4 V52.9 H55.8 V55 H49.2 Z
+            M59.6,43 H66.8 V45 H64.3 V53 H66.8 V55 H59.6 V53 H62.2 V45 H59.6 Z
+            M49.2,58 H51.6 L56.7,66.4 V58 H58.8 V70 H56.4 L51.3,61.6 V70 H49.2 Z
+            M60,58 H62.1 V63.2 L65.9,58 H68.4 L63.8,64 L68.4,70 H65.9 L62.1,64.8 V70 H60 Z" />
 </vector>
