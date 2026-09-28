@@ -100,6 +100,12 @@ public class ClipboardSync
                 try
                 {
                     setContent(pendingSet.content, pendingSet.type);
+                    // Our own write bumps the sequence number too - take it as
+                    // already seen, or the next tick reads it back as a fresh
+                    // local copy and sends it straight back out. The hash
+                    // check alone misses that for images: the bitmap re-reads
+                    // and re-encodes to different PNG bytes than were written.
+                    last_sequence_num = GetClipboardSequenceNumber();
                 }
                 catch (Exception)
                 {
@@ -186,9 +192,12 @@ public class ClipboardSync
         {
             byte[] imageBytes = Convert.FromBase64String(content);
             _lastKnownHash = ComputeHash(imageBytes);
-            using var ms = new MemoryStream(imageBytes);
-            using var image = System.Drawing.Image.FromStream(ms);
-            System.Windows.Forms.Clipboard.SetImage(image);
+            // Saved as a real file too, and put on the clipboard both ways (see
+            // SetImageAndFile) - a bitmap alone pasted into Word or Paint but
+            // not into an Explorer folder, which only accepts files.
+            string destPath = GetNonCollidingPath(ReceivedFilesDir(), $"ClipLink image {DateTime.Now:yyyy-MM-dd HHmmss}{ImageExtension(imageBytes)}");
+            File.WriteAllBytes(destPath, imageBytes);
+            SetImageAndFile(imageBytes, destPath);
         }
         else if (type == "file")
         {
@@ -202,14 +211,19 @@ public class ClipboardSync
                 return;
             }
 
-            string receivedDir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "ClipboardDaemon", "ReceivedFiles");
-            Directory.CreateDirectory(receivedDir);
-
-            string destPath = GetNonCollidingPath(receivedDir, payload.FileName);
+            string destPath = GetNonCollidingPath(ReceivedFilesDir(), payload.FileName);
             File.Copy(fileStore.GetPath(payload.FileHash), destPath);
             _lastKnownHash = ComputeHash(System.Text.Encoding.UTF8.GetBytes(payload.FileHash)); // suppress our own echo of this apply
+
+            // The same merge the other way round: a received image FILE also
+            // goes on as a picture, so it pastes into documents as well as
+            // into folders.
+            var info = new FileInfo(destPath);
+            if (ImageFileExtensions.Contains(info.Extension) && info.Length <= MaxInlineImageBytes)
+            {
+                SetImageAndFile(File.ReadAllBytes(destPath), destPath);
+                return;
+            }
 
             var fileList = new System.Collections.Specialized.StringCollection();
             fileList.Add(destPath);
@@ -225,6 +239,66 @@ public class ClipboardSync
 {
     return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data));
 }
+
+    // Image files GDI+ can decode, and the largest one worth also putting on
+    // the clipboard as a bitmap (a decoded bitmap is far bigger than the file).
+    private static readonly HashSet<string> ImageFileExtensions = new(StringComparer.OrdinalIgnoreCase) { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff" };
+    private const long MaxInlineImageBytes = 50L * 1024 * 1024;
+
+    private static string ReceivedFilesDir()
+    {
+        string dir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "ClipboardDaemon", "ReceivedFiles");
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    // One clipboard item carrying the picture AND the file it's saved as:
+    // apps that paste images (Word, Paint, chat apps) take the bitmap - or
+    // the "PNG" format, which keeps transparency, for the ones that look for
+    // it - while Explorer takes the file. If the bytes aren't an image GDI+
+    // can decode (e.g. WebP or HEIC from a phone), the file alone still pastes.
+    private static void SetImageAndFile(byte[] imageBytes, string filePath)
+    {
+        var data = new System.Windows.Forms.DataObject();
+        data.SetFileDropList(new System.Collections.Specialized.StringCollection { filePath });
+        System.Drawing.Image? image = null;
+        try
+        {
+            image = System.Drawing.Image.FromStream(new MemoryStream(imageBytes));
+            data.SetImage(image);
+            if (ImageExtension(imageBytes) == ".png")
+            {
+                data.SetData("PNG", new MemoryStream(imageBytes));
+            }
+        }
+        catch (ArgumentException)
+        {
+            Console.WriteLine($"image format not decodable here, putting it on the clipboard as a file only: {filePath}");
+        }
+        try
+        {
+            // copy: true renders every format now, so the data outlives this call.
+            System.Windows.Forms.Clipboard.SetDataObject(data, true);
+        }
+        finally
+        {
+            image?.Dispose();
+        }
+    }
+
+    // From the file's magic bytes - phones send PNG or JPEG, sometimes others.
+    private static string ImageExtension(byte[] bytes)
+    {
+        bool StartsWith(params byte[] magic) => bytes.Length >= magic.Length && bytes.AsSpan(0, magic.Length).SequenceEqual(magic);
+        if (StartsWith(0x89, 0x50, 0x4E, 0x47)) return ".png";
+        if (StartsWith(0xFF, 0xD8, 0xFF)) return ".jpg";
+        if (StartsWith(0x47, 0x49, 0x46, 0x38)) return ".gif";
+        if (StartsWith(0x42, 0x4D)) return ".bmp";
+        if (bytes.Length >= 12 && StartsWith(0x52, 0x49, 0x46, 0x46) && bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50) return ".webp";
+        return ".png";
+    }
 
     // If "photo.jpg" already exists, try "photo (1).jpg", "photo (2).jpg", etc.
     private string GetNonCollidingPath(string dir, string fileName)
