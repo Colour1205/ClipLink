@@ -125,6 +125,53 @@ final class EngineIntegrationTests: XCTestCase {
         XCTAssertEqual(payload.fileSize, Int64(bytes.count))
     }
 
+    /// The passcode can be set, changed and cleared at any time - any length
+    /// that isn't blank - and the very next beacon and handshake carry the new
+    /// state. Clearing it keeps the devices that are already trusted.
+    func testPasscodeCanBeSetChangedAndClearedAnyTime() throws {
+        let (a, b) = makePair()
+        // The proof A's next beacon and next handshake would carry.
+        func proofs() -> (beacon: String?, handshake: String?) {
+            a.engine.queue.sync { () -> (beacon: String?, handshake: String?) in
+                let beacon = Beacon.parse(String(decoding: a.engine.currentBeacon(), as: UTF8.self), senderIP: "127.0.0.1")
+                let handshake = a.engine.handshakeContext().passphraseKey.map { PassphraseAuth.proof(key: $0, deviceId: a.engine.ownId) }
+                return (beacon?.proof, handshake)
+            }
+        }
+        func expected(_ code: String) -> String {
+            PassphraseAuth.proof(key: PassphraseAuth.deriveKey(passphrase: code), deviceId: a.engine.ownId)
+        }
+        XCTAssertNil(proofs().beacon)
+        XCTAssertNil(proofs().handshake)
+
+        setPasscode(a, "7") // no minimum length
+        let short = expected("7")
+        XCTAssertEqual(proofs().beacon, short)
+        XCTAssertEqual(proofs().handshake, short)
+
+        setPasscode(a, "  new code ") // changed without a restart, trimmed
+        let changed = expected("new code")
+        XCTAssertEqual(proofs().beacon, changed)
+        XCTAssertEqual(proofs().handshake, changed)
+
+        // The changed passcode is the one that pairs.
+        setPasscode(b, "new code")
+        a.engine.enterForeground()
+        b.engine.enterForeground()
+        wait("both connected") { a.recorder.connectedCount == 1 && b.recorder.connectedCount == 1 }
+
+        a.engine.clearPassphrase()
+        XCTAssertNil(proofs().beacon)
+        XCTAssertNil(proofs().handshake)
+        wait("A shows the passcode off") { !a.recorder.snapshot.hasPassphrase }
+        XCTAssertTrue(a.engine.queue.sync { a.engine.trust.isTrusted(b.engine.ownId) }, "clearing never untrusts")
+        XCTAssertTrue(a.engine.queue.sync { a.engine.handshakeContext().trusted.contains(b.engine.ownId) })
+
+        // ... and it can be set again straight away.
+        setPasscode(a, "again")
+        XCTAssertEqual(proofs().beacon, expected("again"))
+    }
+
     func testHistoryCatchUpOnConnectAppliesOnlyNewest() throws {
         let (a, b) = makePair()
         setPasscode(a, "pw")

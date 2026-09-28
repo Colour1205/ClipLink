@@ -138,7 +138,14 @@ class ClipLinkEngine(context: Context) {
     private val _toast = MutableStateFlow<String?>(null)
     val toast: StateFlow<String?> = _toast.asStateFlow()
 
+    /**
+     * Written on an IO thread whenever the passcode is set, changed or
+     * cleared, and read by the beacon loop on another - volatile so the very
+     * next beacon carries the new proof (or none) instead of a stale one.
+     */
+    @Volatile
     private var cachedProof: String? = null
+    private val passphraseStateLock = Any()
     private var started = false
 
     /**
@@ -619,13 +626,18 @@ class ClipLinkEngine(context: Context) {
     }
 
     private suspend fun refreshPassphraseState() = withContext(Dispatchers.IO) {
-        val has = passphraseKeyStore.hasPassphrase()
-        _hasPassphrase.value = has
-        val id = _ownDeviceId.value
-        cachedProof = if (has && id.isNotEmpty()) {
-            passphraseKeyStore.key()?.let { passphraseKeyStore.computeProof(it, id) }
-        } else {
-            null
+        // One at a time, each reading the store afresh: otherwise the refresh
+        // after a Set, still holding the key it read, could finish after the
+        // Clear's and put the old proof back into the beacons.
+        synchronized(passphraseStateLock) {
+            val has = passphraseKeyStore.hasPassphrase()
+            _hasPassphrase.value = has
+            val id = _ownDeviceId.value
+            cachedProof = if (has && id.isNotEmpty()) {
+                passphraseKeyStore.key()?.let { passphraseKeyStore.computeProof(it, id) }
+            } else {
+                null
+            }
         }
     }
 

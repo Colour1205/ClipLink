@@ -227,6 +227,7 @@ private fun SyncedHeader(
 private fun SyncedCard(item: SyncedItem, actions: SyncedActions, compact: Boolean) {
     val style = typeStyleOf(item)
     var menuOpen by remember { mutableStateOf(false) }
+    var confirmingDelete by remember { mutableStateOf(false) }
 
     Surface(
         shape = RoundedCornerShape(26.dp),
@@ -310,11 +311,21 @@ private fun SyncedCard(item: SyncedItem, actions: SyncedActions, compact: Boolea
                     leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
                     onClick = {
                         menuOpen = false
-                        actions.onDelete(item)
+                        confirmingDelete = true
                     },
                 )
             }
         }
+    }
+
+    if (confirmingDelete) {
+        ConfirmDeleteItemDialog(
+            onConfirm = {
+                confirmingDelete = false
+                actions.onDelete(item)
+            },
+            onDismiss = { confirmingDelete = false },
+        )
     }
 }
 

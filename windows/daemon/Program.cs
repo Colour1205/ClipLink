@@ -856,10 +856,36 @@ class Program
             {
                 return new IpcResponse(true, passphraseKeyStore.HasPassphrase.ToString());
             }
-            else if (request.Command == "set_passphrase" && request.Payload != null)
+            else if (request.Command == "set_passphrase")
             {
-                passphraseKeyStore.SetPassphrase(request.Payload);
-                return new IpcResponse(true, "passphrase set");
+                // Sets or changes it, any time. Blank (after trimming) is the
+                // only thing refused. Beacons and new handshakes use it from
+                // the next one; live connections are left as they are.
+                try
+                {
+                    return passphraseKeyStore.SetPassphrase(request.Payload ?? "")
+                        ? new IpcResponse(true, "passphrase set")
+                        : new IpcResponse(false, "passphrase is empty");
+                }
+                catch (Exception ex)
+                {
+                    return new IpcResponse(false, $"could not save passphrase: {ex.Message}");
+                }
+            }
+            else if (request.Command == "clear_passphrase")
+            {
+                // Back to no passcode: has_passphrase is False and beacons and
+                // new handshakes carry no proof. Devices already trusted (by
+                // passcode or any other way) stay trusted.
+                try
+                {
+                    passphraseKeyStore.Clear();
+                    return new IpcResponse(true, "passphrase cleared");
+                }
+                catch (Exception ex)
+                {
+                    return new IpcResponse(false, $"could not clear passphrase: {ex.Message}");
+                }
             }
             else if (request.Command == "trust_device" && request.Payload != null)
             {
@@ -1165,8 +1191,8 @@ class Program
                 // Excludes our own id: UDP broadcasts loop back to the sender on
                 // localhost, so without this check a device would "auto-trust" itself.
                 if (other_device_id != identity.GetPublicKey()
-                    && !trustStore.IsTrusted(other_device_id) && proof != null && passphraseKeyStore.HasPassphrase
-                    && PassphraseAuth.VerifyProof(passphraseKeyStore.GetKey()!, other_device_id, proof))
+                    && !trustStore.IsTrusted(other_device_id) && proof != null && passphraseKeyStore.GetKey() is byte[] passphraseKey
+                    && PassphraseAuth.VerifyProof(passphraseKey, other_device_id, proof))
                 {
                     Console.WriteLine($"Auto-trusting {other_device_id} — proved knowledge of shared passphrase");
                     trustStore.Trust(other_device_id, peerAddress, otherName);
@@ -1270,8 +1296,8 @@ class Program
         });
 
         await discovery.Start(identity.GetPublicKey(), int.Parse(port), () =>
-            passphraseKeyStore.HasPassphrase
-                ? PassphraseAuth.ComputeProof(passphraseKeyStore.GetKey()!, identity.GetPublicKey())
+            passphraseKeyStore.GetKey() is byte[] passphraseKey
+                ? PassphraseAuth.ComputeProof(passphraseKey, identity.GetPublicKey())
                 : null,
             ownTailscaleAddress,
             () => pairingState.ModeOpen,
