@@ -1,0 +1,74 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ClipLink.exe, the Windows app: a tray icon and a Fluent window (WPF +
+       WPF-UI) with the engine (../daemon, ClipLinkEngine) running in-process.
+       `dotnet build` for development; ../publish.ps1 makes the one
+       self-contained ClipLink.exe in ../dist. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <!-- The tray icon is a WinForms NotifyIcon (the engine's clipboard
+         watcher is WinForms too). -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>ClipLink</AssemblyName>
+    <RootNamespace>ClipLink</RootNamespace>
+    <Product>ClipLink</Product>
+    <Version>1.0.0</Version>
+    <ApplicationIcon>..\ClipLink.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!-- Release packaging: one self-contained exe, runtime included. -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- Uncompressed: compression saves ~85 MB on disk but costs ~60 MB of
+         memory for as long as the app runs, which is all day in the tray.
+         Zip the exe to ship it instead. -->
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <DebugType>embedded</DebugType>
+    <!-- WPF and WinForms don't support trimming. -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- WFO0003 wants WinForms' DPI mode set in code, but in a WPF app the
+         manifest (PerMonitorV2) is what counts. -->
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- WPF and WinForms both have Application, Clipboard, MessageBox, ...:
+         no WinForms global usings - WinForms types are qualified (alias
+         WinForms = System.Windows.Forms). -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Program.Main is the entry point (the single-instance check runs
+         before WPF starts), so App.xaml is an ordinary page. -->
+    <ApplicationDefinition Remove="App.xaml" />
+    <Page Include="App.xaml" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="QRCoder" Version="1.6.0" />
+    <PackageReference Include="WPF-UI" Version="4.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\daemon\ClipboardDaemon.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The one icon, shared with the rest of windows/ (linked, not copied):
+         embedded for the tray icon (ApplicationIcon only brands the exe),
+         and a WPF resource (pack://application:,,,/ClipLink.ico) for the
+         window. -->
+    <EmbeddedResource Include="..\ClipLink.ico" Link="ClipLink.ico" LogicalName="ClipLink.ico" />
+    <Resource Include="..\ClipLink.ico" Link="ClipLink.ico" />
+  </ItemGroup>
+
+</Project>

@@ -29,7 +29,7 @@ public class PassphraseKeyStore
             catch (Exception ex)
             {
                 // corrupt file — treat as "no passphrase set" rather than crash;
-                // the user can just set one again via the tray
+                // the user can just set one again in settings
                 Console.WriteLine($"Could not load passphrase key ({ex.Message}) — treating as not set.");
             }
         }

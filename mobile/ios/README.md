@@ -17,7 +17,7 @@ mobile/ios/ClipLink/
     Core/              wire protocol, crypto, networking, stores, SyncEngine (no UIKit)
     Platform/          Keychain identity & secrets, App Group storage, item loading
   CoreTests/           `swift test` harness for Shared/Core on macOS (not part of the app)
-    DaemonHarness/     builds the REAL Windows daemon for macOS for interop tests
+    DaemonHarness/     builds the REAL Windows engine for macOS for interop tests
   ClipLink-Info.plist, ClipLinkShare-Info.plist, *.entitlements
 ```
 
@@ -45,17 +45,19 @@ independent implementation (OpenSSL), JSON/timestamp edge cases, and two full
 sync engines talking over real sockets (passcode pairing, QR-style pairing,
 text/image/file sync, history catch-up, background refresh rounds).
 
-Against the **actual Windows daemon code** (needs a .NET 8+ SDK):
+Against the **actual Windows engine code** (needs the .NET 10 SDK):
 
 ```bash
 cd CoreTests && DOTNET=/path/to/dotnet ./run-daemon-interop.sh
 ```
 
-This compiles `windows/daemon` for macOS with only platform shims (DPAPI,
-WinForms clipboard, ports) and runs the iOS engine against it: passcode
-pairing in both tie-breaker directions with and without broadcast, QR/tray
-pairing with Accept on both sides via the daemon's real IPC, text/image/file
-both ways, echo suppression, untrust.
+This compiles `windows/daemon` (the engine library the Windows app runs
+in-process) for macOS with only platform shims (DPAPI, WinForms clipboard,
+ports) and runs the iOS engine against it: passcode pairing in both
+tie-breaker directions with and without broadcast, QR-style pairing with
+Accept on both sides through the engine's pairing methods (the harness host
+still takes the old tray pipe commands), text/image/file both ways, echo
+suppression, untrust.
 
 ## Things that will surprise you
 

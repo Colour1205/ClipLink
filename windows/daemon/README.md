@@ -1,13 +1,26 @@
-# windows/daemon/
+# windows/daemon/ — the ClipLink engine
 
-Build order (each step should run/work before moving to the next):
+A class library (`ClipboardDaemon.dll`; namespaces keep the `ClipboardDaemon.*`
+names from when this was a separate daemon process) holding the whole P2P node:
+LAN discovery, peer connections, the clipboard watcher, history, trust and
+pairing. The ClipLink app runs it in-process; nothing talks to it over a pipe
+any more.
 
-1. `Program.cs` — hello-world console app, confirm `dotnet run` works.
-2. `Clipboard/ClipboardSync.cs` — read/watch/set the Windows clipboard.
-3. `Identity/DeviceIdentity.cs` — generate/load this device's keypair.
-4. `Networking/Discovery.cs` — UDP broadcast presence + listen for peers.
-5. `Networking/PeerConnection.cs` — TCP link to a discovered peer.
-6. `Crypto/SigningService.cs` — sign outgoing entries, verify incoming ones.
-7. `Storage/HistoryStore.cs` — persist clipboard history to disk.
+- `Engine/ClipLinkEngine*.cs` — the node. `Start(label, port)` loads the stores
+  from `%APPDATA%\ClipboardDaemon` (files suffixed with the label; the app uses
+  `"default"`) and starts everything; `Stop()` ends it. Typed methods for the
+  UI (`ClipLinkEngine.Api.cs`) and events (`HistoryChanged`, `DevicesChanged`,
+  `PairingRequested`, `PairingResolved`, `StatusChanged`), raised in order on
+  a background thread — a UI marshals them to its own thread.
+- `Engine/EngineModels.cs` — what the API hands out (`DeviceListing`,
+  `HistoryItem`, `PendingPairing`, `PairOutcome`, `EngineStatus`, ...).
+- `Engine/DeviceLabel.cs` — how to show a device's name safely.
+- `Engine/ConsoleLog.cs` — sends the engine's Console logging to a rolling
+  log file (`%LOCALAPPDATA%\ClipLink\logs\cliplink.log`).
+- `Clipboard/`, `Identity/`, `Networking/`, `Storage/`, `Crypto/` — the pieces
+  the engine wires together (see `docs/protocol.md` for the wire format).
 
-Then wire these together in `Program.cs` into the actual daemon loop.
+Build: `dotnet build -c Debug` here. The iOS interop tests compile these same
+sources for macOS (`mobile/ios/ClipLink/CoreTests/DaemonHarness`), patching a
+few lines by exact text — `prepare.py` stops with "shim anchor not found" if one
+of those lines changes.

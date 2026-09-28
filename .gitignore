@@ -1,6 +1,8 @@
 # Build output
 bin/
 obj/
+# windows/publish.ps1 output (ClipLink.exe)
+windows/dist/
 
 # VS / VS Code
 .vs/

@@ -2,16 +2,29 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "build-daemon",
+            "label": "build-cliplink",
             "command": "dotnet",
             "type": "process",
             "args": [
                 "build",
-                "${workspaceFolder}/windows/daemon/ClipboardDaemon.csproj",
+                "${workspaceFolder}/windows/ClipLink/ClipLink.csproj",
                 "/property:GenerateFullPaths=true",
                 "/consoleloggerparameters:NoSummary"
             ],
             "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "publish-cliplink",
+            "command": "powershell",
+            "type": "process",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/windows/publish.ps1"
+            ],
+            "problemMatcher": []
         }
     ]
 }

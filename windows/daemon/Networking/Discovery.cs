@@ -18,9 +18,9 @@ public class Discovery
     public int PORT = 49000;
 
     // getProof is called fresh on every beacon, not just once at startup — a
-    // passphrase set later via the tray (the normal flow: daemon starts first,
-    // then the user sets a passcode), or changed or cleared later, must take
-    // effect without a restart.
+    // passphrase set later in the app's settings (the normal flow: the engine
+    // starts first, then the user sets a passcode), or changed or cleared
+    // later, must take effect without a restart.
     // Result lets a peer that knows the same passphrase auto-trust this device
     // without any manual QR/key exchange — see Crypto/PassphraseAuth.cs.
     // "-" means "no passphrase configured", since the beacon is plain-text UDP.
@@ -38,9 +38,12 @@ public class Discovery
     // getName (also fresh on every beacon, so a rename shows up on the next
     // one) is this device's display name - the 6th field, see EncodeName.
     // The pairing field is always sent, so the name is always at index 5.
-    public async Task Start(string deviceID, int tcpPort, Func<string?>? getProof = null, string? ownAddress = null, Func<bool>? getPairingOpen = null, Func<string?>? getName = null)
+    //
+    // Runs until cancellationToken is cancelled (the engine stopping), then
+    // closes the socket.
+    public async Task Start(string deviceID, int tcpPort, Func<string?>? getProof = null, string? ownAddress = null, Func<bool>? getPairingOpen = null, Func<string?>? getName = null, CancellationToken cancellationToken = default)
     {
-        UdpClient client = new UdpClient();
+        using UdpClient client = new UdpClient();
         client.EnableBroadcast = true;
         client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
         client.Client.Bind(new System.Net.IPEndPoint(IPAddress.Any, PORT));
@@ -55,7 +58,7 @@ public class Discovery
         Task sendTask = Task.Run(async () =>
         {
             bool failing = false;
-            while (true)
+            while (!cancellationToken.IsCancellationRequested)
             {
                 try
                 {
@@ -69,7 +72,7 @@ public class Discovery
                         failing = false;
                     }
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
                     // Logged once per outage, not every 2s while offline.
                     if (!failing)
@@ -78,17 +81,19 @@ public class Discovery
                         failing = true;
                     }
                 }
-                await Task.Delay(2000);
+                catch (Exception) { break; } // stopping
+                try { await Task.Delay(2000, cancellationToken); }
+                catch (OperationCanceledException) { break; }
             }
         });
 
         Task receiveTask = Task.Run(async () =>
         {
-            while (true)
+            while (!cancellationToken.IsCancellationRequested)
             {
                 try
                 {
-                    var result = await Receive(client);
+                    var result = await Receive(client, cancellationToken);
                     string message = result.message;
                     IPAddress sender = result.sender;
                     string[] parts = message.Split(':');
@@ -103,7 +108,7 @@ public class Discovery
 
                     PeerDiscovered?.Invoke(other_device_id, sender, other_port, receivedProof, receivedAddress, receivedPairing, receivedName);
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
                     // e.g. a SocketException from an ICMP "port unreachable"
                     // bounced back at this UDP socket. Brief pause so a
@@ -111,6 +116,7 @@ public class Discovery
                     Console.WriteLine($"[discovery] receive failed, still listening: {ex.Message}");
                     await Task.Delay(200);
                 }
+                catch (Exception) { break; } // stopping
             }
         });
 
@@ -153,11 +159,11 @@ public class Discovery
         await client.SendAsync(data, data.Length, new IPEndPoint(IPAddress.Broadcast, PORT));
     }
 
-    private async Task<(string message, IPAddress sender)> Receive(UdpClient client)
+    private async Task<(string message, IPAddress sender)> Receive(UdpClient client, CancellationToken cancellationToken)
     {
         while (true)
         {
-            var result = await client.ReceiveAsync();
+            var result = await client.ReceiveAsync(cancellationToken);
             string message = byteToStr(result.Buffer);
             return (message, result.RemoteEndPoint.Address);
         }

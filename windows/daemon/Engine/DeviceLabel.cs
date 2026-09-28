@@ -1,7 +1,7 @@
-namespace ClipboardTray;
+namespace ClipboardDaemon.Engine;
 
-// How the tray names a device anywhere it shows one: its display name, or
-// the shortened id while it hasn't told us one (an older build).
+// How to name a device anywhere the UI shows one: its display name, or the
+// shortened id while it hasn't told us one (an older build).
 public static class DeviceLabel
 {
     // The name is whatever the other device chose to send, so it's shown on

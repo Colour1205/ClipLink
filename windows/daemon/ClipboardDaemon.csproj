@@ -1,13 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- The ClipLink engine (ClipLinkEngine): the P2P node - discovery, peer
+       connections, clipboard watcher, history, trust, pairing - as a library
+       the ClipLink app (windows/ClipLink) runs in-process. Namespaces keep
+       the ClipboardDaemon.* names from when this was a separate daemon. -->
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>Library</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>ClipboardDaemon</RootNamespace>
     <UseWindowsForms>true</UseWindowsForms>
-    <ApplicationIcon>..\ClipLink.ico</ApplicationIcon>
   </PropertyGroup>
 
 </Project>
