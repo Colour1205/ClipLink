@@ -482,7 +482,8 @@ public final class SyncEngine {
                 return
             }
             let id = request.link.peerDeviceId
-            trust.trust(id, address: request.address, name: request.link.peerName ?? peerName(for: id))
+            // The handshake's name only: the sighting's may be a beacon's.
+            trust.trust(id, address: request.address, name: request.link.peerName)
             log("paired: \(DeviceLabel.short(id))")
             register(request.link, acceptedByUser: true)
             notice("Paired.")
@@ -513,11 +514,12 @@ public final class SyncEngine {
 
     /// The Devices tab's "Trust" on a discovered device: trusts it here and
     /// dials it, ignoring the tie-breaker (like Android/HarmonyOS). The other
-    /// side still decides for itself.
+    /// side still decides for itself. Its name is stored once a handshake
+    /// completes; until then the beacon's is shown but not stored.
     public func trustDevice(_ deviceId: String) {
         queue.async { [self] in
             let address = addressCandidates(for: deviceId).first
-            trust.trust(deviceId, address: address, name: sightings[deviceId]?.name)
+            trust.trust(deviceId, address: address)
             log("trusted \(DeviceLabel.short(deviceId))")
             schedulePublish()
             if let address, links[deviceId] == nil {
@@ -724,10 +726,12 @@ public final class SyncEngine {
         nicknames[deviceId] ?? peerName(for: deviceId) ?? DeviceLabel.short(deviceId)
     }
 
-    /// The latest name a peer gave itself: heard this session (beacon or
-    /// handshake), else remembered in the trust store.
+    /// The name a peer gave itself: the one stored from its handshake or
+    /// pairing, else - for a stranger, or a paired device with none stored
+    /// yet - the latest heard this session (beacon or handshake line), which
+    /// a beacon can change but never overrides a stored one.
     func peerName(for deviceId: String) -> String? {
-        sightings[deviceId]?.name ?? trust.device(deviceId)?.name
+        trust.device(deviceId)?.name ?? sightings[deviceId]?.name
     }
 
     public var pairingPayloadAddress: String? {
@@ -757,8 +761,8 @@ public final class SyncEngine {
         s.sweeping = sweeping
         s.nicknames = nicknames
         var names: [String: String] = [:]
-        for device in trust.all { names[device.publicKey] = device.name }
-        for (id, sighting) in sightings where sighting.name != nil { names[id] = sighting.name }
+        // The same rule as the Devices rows: a stored name beats a beacon's.
+        for id in trust.all.map(\.publicKey) + Array(sightings.keys) { names[id] = peerName(for: id) }
         // A pairing prompt names its peer even after the sighting ages out.
         if let pending, names[pending.link.peerDeviceId] == nil { names[pending.link.peerDeviceId] = pending.link.peerName }
         s.deviceNames = names
@@ -832,7 +836,7 @@ struct Sighting {
     var pairing = false
     var pairingSeen = Date.distantPast
     /// The latest name it gave itself (beacon or handshake); a message
-    /// without one never clears it.
+    /// without one never clears it. Memory only, for display.
     var name: String?
 }
 

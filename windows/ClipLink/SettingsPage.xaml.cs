@@ -78,8 +78,16 @@ public partial class SettingsPage : Page
 
     private void SaveName_Click(object sender, RoutedEventArgs e)
     {
-        // Blank goes back to the computer's name. From the next beacon and
-        // handshake on - connections already open keep the old name.
+        // The box shows the name in effect - the computer's, while no name
+        // of your own is set - so Save without an edit saves nothing (it
+        // would pin the computer's name). Blank, or the computer's name,
+        // goes back to following the computer's name. From the next beacon
+        // and handshake on - connections already open keep the old name.
+        if (DeviceNameBox.Text.Trim() == host.Engine.DeviceName)
+        {
+            DeviceNameBox.Text = host.Engine.DeviceName;
+            return;
+        }
         string now = host.Engine.SetDeviceName(DeviceNameBox.Text);
         DeviceNameBox.Text = now;
         App.MainAppWindow.Toast("Device name saved", $"Your other devices will see \"{now}\".");

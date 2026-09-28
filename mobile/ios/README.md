@@ -123,6 +123,12 @@ nothing deleted comes back when a peer reconnects and resends its history.
 see until you set *Me › Device Name*. The app reads the OS name on the main
 actor and stores it, with that setting, in the App Group - the Share extension
 and background rounds send the same name without touching UIKit.
+Beacons are unauthenticated, so a name heard in one is only kept in memory and
+shown for nearby devices (and for a paired one with no stored name yet); only
+a completed handshake or an accepted pairing stores a name, so a paired
+device's rename shows once it reconnects. Every name a peer sends loses control,
+bidi and zero-width characters (`DeviceName.sanitize`), and a pairing request
+shows the requester's id fingerprint beside its name.
 
 **Files.** Hashes go out UPPERCASE: Windows' echo suppression compares
 uppercase hex, and a lowercase hash makes it re-broadcast your file. Blobs are

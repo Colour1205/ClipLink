@@ -296,6 +296,34 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertEqual(hs?.deviceName, colour)
     }
 
+    /// Peers choose their own names, so every way one arrives - beacon,
+    /// handshake, pairing code, and what earlier builds stored - drops control
+    /// characters and invisible bidi/format ones, then trims and caps.
+    func testPeerNamesAreSanitisedOnEveryPath() throws {
+        let hostile = "\u{FEFF} Desk\u{7}\n\u{7F}\u{85} PC\u{202E}\u{2066}\u{61C}\u{200B}\u{200D}\u{200E} \u{1F4BB}\u{2069}\u{202C}\t "
+        let clean = "Desk PC \u{1F4BB}"
+        XCTAssertEqual(DeviceName.sanitize(hostile), clean)
+        XCTAssertEqual(Beacon.parse("49000:K:-:-:-:" + Data(hostile.utf8).base64EncodedString(), senderIP: "x")?.name, clean)
+        XCTAssertEqual(HandshakeMessage.parse(WireJSON.string(["EphemeralPublicKey": "E", "IdentityPublicKey": "I", "Signature": "S", "DeviceName": hostile]))?.deviceName, clean)
+        // Escaped, as System.Text.Json writes them.
+        XCTAssertEqual(HandshakeMessage.parse(#"{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S","DeviceName":"\u202EDesk\u0007 PC\u200F"}"#)?.deviceName, "Desk PC")
+        XCTAssertEqual(PairingInfo.parse(WireJSON.string(["PublicKey": "KEY", "Name": hostile]))?.name, clean)
+
+        // Hidden characters alone are no name at all, and they go before the cap.
+        XCTAssertNil(DeviceName.sanitize("\u{202E}\u{200B}\u{FEFF}\r\n"))
+        XCTAssertEqual(DeviceName.sanitize(String(repeating: "\u{200B}", count: 100) + String(repeating: "n", count: 70)), String(repeating: "n", count: 64))
+        // Everything visible stays: accents, combining marks, CJK, RTL letters, emoji.
+        let fine = "Zo\u{EB}'s e\u{301} \u{6211}\u{7684} \u{5D0}\u{5D1} \u{1F1EC}\u{1F1E7}"
+        XCTAssertEqual(DeviceName.sanitize(fine), fine)
+
+        // A name an earlier build stored as it came is cleaned when read back.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("trust-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: [["publicKey": "A", "name": hostile]]).write(to: dir.appendingPathComponent("trusted_devices.json"))
+        XCTAssertEqual(TrustStore(directory: dir).device("A")?.name, clean)
+    }
+
     // MARK: framing
 
     func testFramerHandlesCRLFSplitsAndEmptyLines() throws {

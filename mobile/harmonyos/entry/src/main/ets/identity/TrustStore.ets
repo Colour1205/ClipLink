@@ -8,6 +8,7 @@
 
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
+import { normalizeDeviceName } from './DeviceName';
 
 const PREFERENCES_NAME = 'cliplink_trust_store';
 const DEVICES_KEY = 'trusted_devices';
@@ -15,9 +16,10 @@ const DEVICES_KEY = 'trusted_devices';
 export interface TrustedDevice {
   publicKey: string;
   address?: string;
-  // The peer's own display name, latest seen in its handshake or beacon.
-  // Absent in records written before names existed, or for a peer that
-  // never sent one.
+  // The peer's own display name, latest seen in its authenticated handshake
+  // or at pairing - never from a beacon, which anyone on the LAN can forge
+  // (beacon names stay in memory, see Index.ets's deviceRows). Absent in
+  // records written before names existed, or for a peer that never sent one.
   name?: string;
 }
 
@@ -35,7 +37,13 @@ export class TrustStore {
     const prefs = await this.getPrefs(context);
     const json = prefs.getSync(DEVICES_KEY, '[]') as string;
     try {
-      return JSON.parse(json) as TrustedDevice[];
+      const devices = JSON.parse(json) as TrustedDevice[];
+      // Older builds stored names unsanitised - clean them on the way out
+      // rather than trusting what's on disk.
+      for (const d of devices) {
+        if (typeof d.name === 'string') d.name = normalizeDeviceName(d.name) ?? undefined;
+      }
+      return devices;
     } catch (e) {
       // corrupt preferences value — regenerate rather than crash startup,
       // same policy HistoryAccess.cs/TrustStore.cs use on the Windows side
@@ -66,7 +74,8 @@ export class TrustStore {
 
   // Name-only update for a device that's already trusted: never adds a
   // record and never touches the address. Resolves true only when something
-  // changed, so a caller (e.g. every 2s beacon) can skip needless refreshes.
+  // changed, so a caller can skip needless refreshes. Only for a name from
+  // the authenticated handshake - never a beacon's (see TrustedDevice.name).
   async rememberName(context: common.UIAbilityContext, publicKey: string, name: string): Promise<boolean> {
     if (name.length === 0) return false;
     const devices = await this.loadAll(context);

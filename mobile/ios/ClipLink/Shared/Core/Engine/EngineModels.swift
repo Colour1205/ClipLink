@@ -21,7 +21,8 @@ public struct EngineSnapshot: Equatable {
     public var sweeping = false
     /// Local names the user gave trusted devices (never sent anywhere).
     public var nicknames: [String: String] = [:]
-    /// The names peers give themselves (beacons, handshakes, trust store).
+    /// The names peers give themselves: the stored one (handshake, pairing),
+    /// else - never overriding it - the latest heard in a beacon.
     public var deviceNames: [String: String] = [:]
     /// The name this device goes by on the wire ("" when it has none).
     public var deviceName = ""

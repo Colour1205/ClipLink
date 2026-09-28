@@ -53,20 +53,23 @@ internal static class SignInStartup
         ForgetApproval(options);
     }
 
-    // The exe was moved (or replaced by a build somewhere else): an entry
-    // left pointing at a file that's gone is pointed at this one instead.
+    // The exe was moved, or a build somewhere else is the one running now:
+    // an entry pointing at any other exe - gone, or another copy - is
+    // pointed at this one, keeping its arguments (--background, a test
+    // copy's --label...). Only the Run value changes, so an entry switched
+    // off in Task Manager stays off.
     public static void RepairPath(AppOptions options)
     {
         try
         {
-            using var run = Registry.CurrentUser.OpenSubKey(RunKey);
+            string? running = Environment.ProcessPath;
+            if (running == null) return;
+            using var run = Registry.CurrentUser.OpenSubKey(RunKey, writable: true);
             if (run?.GetValue(ValueName(options)) is not string command) return;
-            string? exe = ExeOf(command);
-            if (exe != null && !File.Exists(exe))
-            {
-                Console.WriteLine($"[startup] sign-in entry pointed at {exe}, which is gone - now {Environment.ProcessPath}");
-                Enable(options);
-            }
+            var (exe, arguments) = Split(command);
+            if (exe != null && string.Equals(Path.GetFullPath(exe), Path.GetFullPath(running), StringComparison.OrdinalIgnoreCase)) return;
+            Console.WriteLine($"[startup] sign-in entry pointed at {exe ?? command} - now {running}");
+            run.SetValue(ValueName(options), exe != null ? $"\"{running}\"{arguments}" : Command(options), RegistryValueKind.String);
         }
         catch (Exception ex)
         {
@@ -74,16 +77,20 @@ internal static class SignInStartup
         }
     }
 
-    private static string? ExeOf(string command)
+    // A Run command's exe (null if it can't be read) and the rest of the
+    // command line after it, leading space included.
+    private static (string? Exe, string Arguments) Split(string command)
     {
         command = command.Trim();
         if (command.StartsWith('"'))
         {
             int end = command.IndexOf('"', 1);
-            return end > 1 ? command[1..end] : null;
+            return end > 1 ? (command[1..end], command[(end + 1)..]) : (null, "");
         }
-        int space = command.IndexOf(' ');
-        return space > 0 ? command[..space] : command;
+        // Unquoted, a path with spaces still ends at ".exe".
+        int exeEnd = command.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
+        int split = exeEnd > 0 ? exeEnd + ".exe".Length : command.IndexOf(' ');
+        return split > 0 && split < command.Length ? (command[..split], command[split..]) : (command, "");
     }
 
     private static void ForgetApproval(AppOptions options)

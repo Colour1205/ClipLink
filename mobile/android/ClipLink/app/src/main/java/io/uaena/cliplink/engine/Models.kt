@@ -1,7 +1,9 @@
 package io.uaena.cliplink.engine
 
 import io.uaena.cliplink.core.ClipboardEntry
+import io.uaena.cliplink.core.toHex
 import io.uaena.cliplink.net.FilePayload
+import java.security.MessageDigest
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -55,7 +57,7 @@ data class DeviceRow(
     val pairing: Boolean,
     val lastSeenAtMs: Long?,
 ) {
-    val shortId: String get() = deviceId.take(12)
+    val shortId: String get() = shortIdOf(deviceId)
 
     /** The row's title: its name, else the shortened id. */
     val title: String get() = displayNameOf(deviceId, name)
@@ -78,11 +80,31 @@ data class DeviceRow(
 
 /** How a peer is shown anywhere in the UI: its name, else the shortened id. */
 fun displayNameOf(deviceId: String, name: String?): String =
-    name?.takeIf { it.isNotBlank() } ?: "${deviceId.take(12)}…"
+    name?.takeIf { it.isNotBlank() } ?: shortIdOf(deviceId)
+
+/** How an id is shown: "Device AB12·CD34", its [fingerprintOf] - the same label iOS shows. */
+fun shortIdOf(deviceId: String): String = "Device ${fingerprintOf(deviceId)}"
+
+/**
+ * The first four bytes of the id's SHA-256, as "AB12·CD34". Not the id's
+ * first characters: every id is a P-256 public key whose first 36 base64
+ * characters are the same for every device, so those tell no two apart.
+ */
+fun fingerprintOf(deviceId: String): String {
+    val hex = MessageDigest.getInstance("SHA-256")
+        .digest(deviceId.toByteArray(Charsets.UTF_8))
+        .copyOf(4).toHex().uppercase()
+    return "${hex.take(4)}·${hex.takeLast(4)}"
+}
 
 data class LogLine(val time: String, val message: String)
 
-/** A peer that completed a handshake but isn't trusted yet - awaiting an explicit decision. */
+/**
+ * A peer that completed a handshake but isn't trusted yet - awaiting an
+ * explicit decision. [name] is self-claimed, so the prompt always shows
+ * [shortId] and [address] beside it: a stranger can copy a known device's
+ * name, never its id.
+ */
 data class PairingRequest(val deviceId: String, val address: String?, val name: String? = null) {
-    val title: String get() = displayNameOf(deviceId, name)
+    val shortId: String get() = shortIdOf(deviceId)
 }

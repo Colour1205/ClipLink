@@ -275,7 +275,7 @@ public struct HandshakeMessage: Equatable {
             identityPublicKey: identity,
             signature: signature,
             passphraseProof: proof,
-            deviceName: DeviceName.clean(WireJSON.str(obj, "DeviceName"))
+            deviceName: DeviceName.sanitize(WireJSON.str(obj, "DeviceName"))
         )
     }
 }
@@ -315,7 +315,7 @@ public struct PairingInfo: Equatable {
         return PairingInfo(
             publicKey: key,
             address: (address?.isEmpty ?? true) ? nil : address,
-            name: DeviceName.clean(WireJSON.str(obj, "Name"))
+            name: DeviceName.sanitize(WireJSON.str(obj, "Name"))
         )
     }
 }

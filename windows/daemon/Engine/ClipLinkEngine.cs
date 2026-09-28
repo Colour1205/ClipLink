@@ -82,9 +82,12 @@ public sealed partial class ClipLinkEngine : IDisposable
 
     // The latest beacon heard from another device, trusted or not. Memory
     // only: it's what GetDevices shows for a device's LAN address, and the
-    // only place an untrusted device's name is kept (a trusted one's is also
-    // written to the trust store). Name keeps the last known one when a later
-    // beacon carries none.
+    // only place a beacon's name is ever kept. Beacons are unauthenticated
+    // (anyone on the LAN can send one under any device id), so that name is
+    // never written to the trust store - only a handshake's or a pairing
+    // payload's is - and it's shown for an untrusted device, or a trusted
+    // one with no stored name yet. Name keeps the last known one when a
+    // later beacon carries none.
     private record SeenPeer(string? Name, string LanAddress, string? AdvertisedAddress, bool PairingOpen, DateTime LastSeenUtc);
 
     // Set once by Start, before anything can use them.
@@ -119,6 +122,9 @@ public sealed partial class ClipLinkEngine : IDisposable
     private readonly ConcurrentDictionary<string, byte> connectingTo = new();
     // Latest beacon per other device - see SeenPeer.
     private readonly ConcurrentDictionary<string, SeenPeer> seenPeers = new();
+    // One GetFileToOpen at a time picks and writes a copy, so two opens of
+    // the same entry at once don't both write the same new file.
+    private readonly object openCopiesGate = new();
 
     // Computed once, when discovery starts - Tailscale IPs are stable, and
     // shelling out to the CLI on every 2-second beacon would be wasteful.
@@ -183,12 +189,15 @@ public sealed partial class ClipLinkEngine : IDisposable
             trustStore = new TrustStore(label);
             passphraseKeyStore = new PassphraseKeyStore(label);
             deviceName = new DeviceNameStore(label);
-            clipboardSync = new ClipboardSync(fileStore);
+            clipboardSync = new ClipboardSync(fileStore, label);
             clipboardSync.ClipboardChanged += OnLocalClipboardChanged;
             ownId = identity.GetPublicKey();
             storesLoaded = true;
             Console.WriteLine($"Device ID (public key): {ownId}");
             Console.WriteLine($"Device name: {deviceName.Current}");
+            // Copies opened from Synced last time (see GetFileToOpen) - all
+            // but the ones the user has edited.
+            DeleteOpenCopies(OpenCopiesRoot());
 
             return TryRun();
         }
@@ -394,7 +403,8 @@ public sealed partial class ClipLinkEngine : IDisposable
 
             // Remember every other device's latest beacon (our own loops
             // back on localhost) - its name and LAN address for the
-            // Devices list, whether or not it's trusted.
+            // Devices list, whether or not it's trusted. In memory only:
+            // nothing a beacon says about a name is ever saved (see SeenPeer).
             if (other_device_id != ownId)
             {
                 RememberBeacon(other_device_id,
@@ -411,14 +421,12 @@ public sealed partial class ClipLinkEngine : IDisposable
                 && PassphraseAuth.VerifyProof(passphraseKey, other_device_id, proof))
             {
                 Console.WriteLine($"Auto-trusting {other_device_id} — proved knowledge of shared passphrase");
-                trustStore.Trust(other_device_id, peerAddress, otherName);
+                // Not the beacon's name: the handshake that follows
+                // stores this device's name.
+                trustStore.Trust(other_device_id, peerAddress);
             }
 
             bool isTrusted = trustStore.IsTrusted(other_device_id);
-            if (isTrusted)
-            {
-                trustStore.UpdateName(other_device_id, otherName); // no-op unless it changed
-            }
             if (other_device_id != ownId)
             {
                 NotifyDevicesChanged(); // an event only if the list really changed

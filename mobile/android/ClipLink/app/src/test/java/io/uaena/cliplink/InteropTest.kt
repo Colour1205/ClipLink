@@ -8,6 +8,10 @@ import io.uaena.cliplink.core.Signing
 import io.uaena.cliplink.core.fixedTimeEquals
 import io.uaena.cliplink.core.toHex
 import io.uaena.cliplink.engine.DeviceRow
+import io.uaena.cliplink.engine.PeerNames
+import io.uaena.cliplink.engine.displayNameOf
+import io.uaena.cliplink.engine.fingerprintOf
+import io.uaena.cliplink.engine.shortIdOf
 import io.uaena.cliplink.net.Discovery
 import io.uaena.cliplink.net.HandshakeMessage
 import io.uaena.cliplink.net.PairingInfo
@@ -415,6 +419,35 @@ class InteropTest {
     }
 
     @Test
+    fun `device names lose control bidi and zero width characters`() {
+        val unsafe = (0x00..0x1F) + (0x7F..0x9F) + 0x061C + (0x200B..0x200F) +
+            (0x202A..0x202E) + (0x2066..0x2069) + 0xFEFF
+        for (codePoint in unsafe) {
+            val name = "a" + String(Character.toChars(codePoint)) + "b"
+            assertEquals("U+%04X".format(codePoint), "ab", Protocol.normalizeDeviceName(name))
+        }
+        // A right-to-left override is how one name renders as another.
+        assertEquals("Colour's PC", Protocol.normalizeDeviceName("\u202EColour's PC\u202C"))
+        // Stripped, THEN trimmed: spaces the controls were hiding go too...
+        assertEquals("Pixel 8", Protocol.normalizeDeviceName("\u200E Pixel 8 \u2069"))
+        assertNull(Protocol.normalizeDeviceName("\u202E\u200B\u0007"))
+        // ...then capped, so they can't use up any of the 64.
+        assertEquals("a".repeat(64), Protocol.normalizeDeviceName("\u200B".repeat(10) + "a".repeat(70)))
+        // Everything else is left alone: combining marks, emoji, CJK.
+        assertEquals("e\u0301 😀 我", Protocol.normalizeDeviceName("e\u0301 😀 我"))
+
+        // Every way a peer's name comes in goes through it: beacon, handshake, pairing code.
+        val beaconField = java.util.Base64.getEncoder()
+            .encodeToString("Pixel\u202E 8\u0000".toByteArray(Charsets.UTF_8))
+        assertEquals("Pixel 8", Discovery.parse("49000:K:-:-:-:$beaconField", "10.0.0.2")?.name)
+        val handshake = HandshakeMessage.parse(
+            """{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S","DeviceName":"Pixel\u202E 8\n"}""",
+        )
+        assertEquals("Pixel 8", handshake?.deviceName)
+        assertEquals("Pixel 8", PairingInfo.parse("""{"PublicKey":"K","Name":"\u2067Pixel 8\u200B"}""")?.name)
+    }
+
+    @Test
     fun `beacon name field matches the other platforms byte for byte`() {
         // Golden values from the Windows daemon's Discovery.EncodeName; the
         // HarmonyOS and iOS encoders produce the same strings.
@@ -549,6 +582,55 @@ class InteropTest {
         assertNull(start.withName("A", null))
         assertNull(start.withName("A", ""))
         assertNull(start.withName("Z", "Stranger"))
+    }
+
+    // ---- beacon names never reach the trust store ---------------------------
+
+    @Test
+    fun `a beacon name is shown but never persisted`() {
+        val names = PeerNames()
+        names.heardInBeacon("A", "Laptop")
+        names.heardInBeacon("A", "Laptop") // the same name again
+        names.heardInBeacon("A", "Evil twin") // and a different one
+        // Unauthenticated, so nothing to write - however often it repeats or changes.
+        assertNull(names.persistable("A"))
+        // Shown for a device that isn't trusted, or is but has no stored name...
+        assertEquals("Evil twin", names.display("A", null))
+        // ...but never over a trusted device's stored name.
+        assertEquals("Desk", names.display("A", "Desk"))
+        assertNull(names.display("B", null))
+    }
+
+    @Test
+    fun `only a handshake name is persisted and a beacon can't displace it`() {
+        val names = PeerNames()
+        names.heardInBeacon("A", "From a beacon")
+        names.heardInHandshake("A", "Pixel 8")
+        assertEquals("Pixel 8", names.persistable("A"))
+        assertEquals("Pixel 8", names.display("A", null))
+
+        // A later beacon claiming another name changes neither.
+        names.heardInBeacon("A", "Spoofed")
+        assertEquals("Pixel 8", names.persistable("A"))
+        assertEquals("Pixel 8", names.display("A", null))
+        // Nor does an older build's nameless handshake blank it out.
+        names.heardInHandshake("A", null)
+        assertEquals("Pixel 8", names.persistable("A"))
+    }
+
+    // ---- how an id is shown -------------------------------------------------
+
+    @Test
+    fun `an id is shown by the same fingerprint iOS shows`() {
+        // SHA-256("abc") starts ba7816bf - the FIPS 180-2 test vector.
+        assertEquals("BA78·16BF", fingerprintOf("abc"))
+        assertEquals("Device BA78·16BF", shortIdOf("abc"))
+        // Every P-256 id starts with the same 36 characters, so a prefix
+        // would label these two alike; the fingerprint doesn't.
+        val spkiPrefix = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE"
+        assertEquals("Device E601·FFD9", displayNameOf(spkiPrefix + "aaaa", null))
+        assertEquals("Device BD03·7086", displayNameOf(spkiPrefix + "bbbb", " "))
+        assertEquals("Pixel 8", displayNameOf(spkiPrefix + "aaaa", "Pixel 8"))
     }
 
     // ---- device list order --------------------------------------------------

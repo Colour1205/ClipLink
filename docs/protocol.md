@@ -9,7 +9,7 @@ Concrete message shapes live in `protocol/schema/`. This doc covers behavior.
 
 ## Message types
 
-- `HELLO` — presence beacon (broadcast, unencrypted metadata only: device id, display name, protocol version).
+- `HELLO` — presence beacon (broadcast, unencrypted metadata only: device id, display name, protocol version). Nothing in it is authenticated, so its display name is only shown, never persisted (see [Device names](#device-names)).
 - `CLIP_PUSH` — "here is a new clipboard entry" (sent to all currently-connected peers when the local clipboard changes).
 - `HISTORY_REQUEST` — "send me everything you have after vector-clock/timestamp X".
 - `HISTORY_RESPONSE` — batch of clipboard entries answering a `HISTORY_REQUEST`.
@@ -19,7 +19,7 @@ Concrete message shapes live in `protocol/schema/`. This doc covers behavior.
 
 Every device has a display name: the user's "Device name" override if set, otherwise the OS's own device/computer name. It is carried in three places. All of them are optional on receipt, so builds without names keep working in both directions: older peers ignore the new fields, and newer peers accept messages that don't have them.
 
-**Normalisation.** A sender trims the name, then caps it at 64 characters before encoding it. Characters are counted as Unicode code points (scalars), not UTF-16 units and not user-perceived characters: an emoji counts as one, a combining accent as one of its own, and a surrogate pair is never split. Receivers apply the same rule, and an empty result means "unknown". Each platform trims with its own built-in whitespace set. These sets differ only on a few invisible control characters (U+0085, U+001C–U+001F, U+FEFF), so one platform may keep such a character at the edge of a name where another trims it. The name is only a label, so this is harmless.
+**Normalisation.** A sender trims the name, then caps it at 64 characters before encoding it. Characters are counted as Unicode code points (scalars), not UTF-16 units and not user-perceived characters: an emoji counts as one, a combining accent as one of its own, and a surrogate pair is never split. A peer's name is untrusted text, so receivers first remove every control character (C0 and C1: U+0000–U+001F and U+007F–U+009F) and the invisible bidi and zero-width characters (U+061C, U+200B–U+200F, U+202A–U+202E, U+2066–U+2069 and U+FEFF), then trim and cap it by the same rule; an empty result means "unknown". The mobile apps do this before they store or show a peer's name. Windows trims and caps the name when it arrives and removes those characters wherever it shows it. Each platform trims with its own built-in whitespace set, and these sets differ only on a few invisible characters (U+0085, U+001C–U+001F, U+FEFF). So a sender may leave one of them at the edge of the name it sends, but every receiver removes it, since they are all in the set above.
 
 **Beacon** (UDP broadcast, one line of colon-separated fields). The 6th field is the name:
 
@@ -39,6 +39,7 @@ Every device has a display name: the user's "Device name" override if set, other
 - Senders always emit the pairing field (`1` or `-`), so the name is always at index 5.
 - The Base64 alphabet has no `:`, so splitting the line on `:` is still safe.
 - For receivers, index 5 is optional. A missing field, `-`, an empty value, bad Base64 or bad UTF-8 all mean the name is unknown (null). A bad name field never causes the beacon to be rejected.
+- The beacon is unauthenticated, so its name is for display only: receivers keep it in memory and never persist it (see **What receivers store** below).
 
 **Handshake JSON** (the first, unencrypted line on every TCP connection) gains an optional field, `"DeviceName": "<string>"`. It is a plain JSON string with the same 64-character cap. Senders always include it when the name is known. If it is absent, `null` or empty, the name is unknown. Example:
 
@@ -48,7 +49,9 @@ Every device has a display name: the user's "Device name" override if set, other
 
 **Pairing payload** (the QR code / "copy pairing info" JSON) gains an optional `"Name"`: `{"PublicKey":"…","Address":"100.64.0.1","Name":"Colour's Laptop"}`. Parsers must treat `Name` as optional.
 
-**What receivers store.** A trusted peer's stored name is updated whenever its handshake or beacon carries a non-empty name that differs from the stored one. An unknown name never overwrites a known one, and updating a name never changes the stored address (the reverse also holds). For devices that are discovered but not trusted, the name is kept in memory only, together with their latest beacon.
+**What receivers store.** Beacons are unauthenticated: anyone on the LAN can broadcast one under any device id, with any name. So a name that arrives in a beacon is **never written to the trust store or persisted anywhere**, on every platform. Receivers keep it in memory only, together with the device's latest beacon (the nearby / seen-peers cache), and use it only for display: for a discovered device that isn't trusted, and for a trusted device only while it has no stored name yet. Receiving the same or a different name in a beacon never causes a disk write.
+
+A trusted peer's stored name comes only from the handshake's `DeviceName` (updated whenever it carries a non-empty name that differs from the stored one), and from the pairing payload's `Name`, or the name recorded when a pairing request is accepted. The handshake's `DeviceName` is not authenticated either, though: the handshake signature covers only `EphemeralPublicKey`, so anyone who captured one of a trusted device's cleartext handshakes can replay it with any `DeviceName`, and that name is stored when the connection opens, even though the replayer can never decrypt or send a message on it. Closing this needs every platform to change together: either store the name only once the connection's first message decrypts, or sign `DeviceName` along with the ephemeral key (see `docs/security.md`). An unknown name never overwrites a known one, and updating a name never changes the stored address (the reverse also holds). As a result, a trusted peer's rename is stored at its next handshake (reconnect), not at its next beacon.
 
 ## Clipboard entry (conceptual shape)
 

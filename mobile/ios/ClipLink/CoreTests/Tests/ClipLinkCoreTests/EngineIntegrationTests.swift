@@ -7,7 +7,8 @@ final class EngineIntegrationTests: XCTestCase {
 
     final class Recorder: SyncEngineDelegate {
         private let lock = NSLock()
-        private(set) var snapshot = EngineSnapshot()
+        // Written on the main queue: read only through the locked accessors.
+        private var snapshot = EngineSnapshot()
         private(set) var received: [(ClipboardEntry, URL?)] = []
         private(set) var notices: [String] = []
 
@@ -25,6 +26,8 @@ final class EngineIntegrationTests: XCTestCase {
         var items: [SyncedItem] { lock.lock(); defer { lock.unlock() }; return snapshot.items }
         var pairingRequest: PairingRequest? { lock.lock(); defer { lock.unlock() }; return snapshot.pairingRequest }
         var devices: [DeviceRow] { lock.lock(); defer { lock.unlock() }; return snapshot.devices }
+        var hasPassphrase: Bool { lock.lock(); defer { lock.unlock() }; return snapshot.hasPassphrase }
+        var running: Bool { lock.lock(); defer { lock.unlock() }; return snapshot.network.running }
     }
 
     struct Node {
@@ -163,7 +166,7 @@ final class EngineIntegrationTests: XCTestCase {
         a.engine.clearPassphrase()
         XCTAssertNil(proofs().beacon)
         XCTAssertNil(proofs().handshake)
-        wait("A shows the passcode off") { !a.recorder.snapshot.hasPassphrase }
+        wait("A shows the passcode off") { !a.recorder.hasPassphrase }
         XCTAssertTrue(a.engine.queue.sync { a.engine.trust.isTrusted(b.engine.ownId) }, "clearing never untrusts")
         XCTAssertTrue(a.engine.queue.sync { a.engine.handshakeContext().trusted.contains(b.engine.ownId) })
 
@@ -290,19 +293,91 @@ final class EngineIntegrationTests: XCTestCase {
         wait("B shows A's OS default name") { name(b, of: a) == "iPhone" }
         wait("A stored it") { TrustStore(directory: a.dir).device(b.engine.ownId)?.name == "Colour's PC" }
 
-        // A rename reaches the peer with the next beacon - no reconnect.
+        // A rename goes out in the very next beacon, but beacons are
+        // unauthenticated: it's heard, yet a paired device keeps the name its
+        // handshake stored - on screen and on disk - until the next handshake.
+        func heard(_ node: Node, from other: Node) -> String? {
+            node.engine.queue.sync { node.engine.sightings[other.engine.ownId]?.name }
+        }
+        func shownNow(_ node: Node, of other: Node) -> String? {
+            node.engine.queue.sync { node.engine.buildSnapshot().devices.first(where: { $0.deviceId == other.engine.ownId })?.name }
+        }
         b.engine.setDeviceName("Studio PC")
-        wait("A sees the rename") { name(a, of: b) == "Studio PC" }
-        wait("A stored the rename") { TrustStore(directory: a.dir).device(b.engine.ownId)?.name == "Studio PC" }
+        a.engine.setDeviceName("Desk iPhone")
+        wait("A heard B's rename") { heard(a, from: b) == "Studio PC" }
+        wait("B heard A's rename") { heard(b, from: a) == "Desk iPhone" }
+        XCTAssertEqual(shownNow(a, of: b), "Colour's PC", "a beacon never overrides a stored name")
+        XCTAssertEqual(shownNow(b, of: a), "iPhone")
+        XCTAssertEqual(TrustStore(directory: a.dir).device(b.engine.ownId)?.name, "Colour's PC", "nor is it stored")
+        XCTAssertEqual(a.recorder.connectedCount, 1, "renames never drop the link")
+
+        // The next handshake carries the new names, and stores them.
+        reconnect(b, to: a)
+        wait("A shows B's new name") { name(a, of: b) == "Studio PC" }
+        wait("B shows A's new name") { name(b, of: a) == "Desk iPhone" }
+        XCTAssertEqual(TrustStore(directory: a.dir).device(b.engine.ownId)?.name, "Studio PC")
+        XCTAssertEqual(TrustStore(directory: b.dir).device(a.engine.ownId)?.name, "Desk iPhone")
 
         // A local nickname still wins; clearing the setting falls back to the OS name.
         a.engine.setNickname("My PC", for: b.engine.ownId)
         wait("nickname wins") { name(a, of: b) == "My PC" }
-        a.engine.setDeviceName("Desk iPhone")
-        wait("B sees A's setting") { name(b, of: a) == "Desk iPhone" }
         a.engine.setDeviceName("")
-        wait("B sees A's OS name again") { name(b, of: a) == "iPhone" }
-        XCTAssertEqual(a.recorder.connectedCount, 1, "renames never drop the link")
+        let beacon = a.engine.queue.sync { Beacon.parse(String(decoding: a.engine.currentBeacon(), as: UTF8.self), senderIP: "127.0.0.1") }
+        XCTAssertEqual(beacon?.name, "iPhone")
+    }
+
+    /// Beacons are unauthenticated UDP: the name one carries is only ever
+    /// shown - for a stranger, or a paired device with no stored name yet -
+    /// never written to disk, and never shown over a name a handshake stored.
+    func testBeaconNamesAreShownButNeverStored() throws {
+        let (a, _) = makePair()
+        setPasscode(a, "pw")
+        let trustFile = a.dir.appendingPathComponent("trusted_devices.json")
+        func hear(_ id: String, _ name: String?, proof: String? = nil) {
+            let beacon = Beacon(tcpPort: 9, deviceId: id, proof: proof, address: nil, pairing: false, name: name, senderIP: "127.0.0.1")
+            a.engine.queue.sync { a.engine.onBeacon(beacon) }
+        }
+        // The Devices row, then the label prompts, toasts and history use.
+        func shown(_ id: String) -> [String?] {
+            a.engine.queue.sync { () -> [String?] in
+                let snapshot = a.engine.buildSnapshot()
+                return [snapshot.devices.first(where: { $0.deviceId == id })?.name, snapshot.deviceNames[id]]
+            }
+        }
+        func stored(_ id: String) -> String? { TrustStore(directory: a.dir).device(id)?.name }
+        func stamp() -> Date? { (try? FileManager.default.attributesOfItem(atPath: trustFile.path))?[.modificationDate] as? Date }
+
+        // A stranger nearby: shown by its beacon name, and nothing more.
+        let stranger = SoftwareIdentity().publicKeyBase64
+        hear(stranger, "Kitchen iPad")
+        XCTAssertEqual(shown(stranger), ["Kitchen iPad", "Kitchen iPad"])
+        XCTAssertNil(TrustStore(directory: a.dir).device(stranger))
+
+        // Paired, with the name its handshake stored: beacons with that name
+        // or another change nothing on screen or on disk.
+        let desk = SoftwareIdentity().publicKeyBase64
+        a.engine.queue.sync { a.engine.trust.trust(desk, address: "127.0.0.1", name: "Desk PC") }
+        let before = try Data(contentsOf: trustFile)
+        let written = stamp()
+        for name in ["Desk PC", "Evil PC", "Desk PC", "Evil PC"] { hear(desk, name) }
+        XCTAssertEqual(shown(desk), ["Desk PC", "Desk PC"], "a beacon never overrides a stored name")
+        XCTAssertEqual(try Data(contentsOf: trustFile), before)
+        XCTAssertEqual(stamp(), written, "no disk write for a beacon name")
+
+        // Paired by its beacon's passcode proof, before any handshake: the
+        // beacon's name is shown while none is stored, but isn't stored.
+        let laptop = SoftwareIdentity().publicKeyBase64
+        let proof = PassphraseAuth.proof(key: PassphraseAuth.deriveKey(passphrase: "pw"), deviceId: laptop)
+        hear(laptop, "Travel Mac", proof: proof)
+        XCTAssertTrue(a.engine.queue.sync { a.engine.trust.isTrusted(laptop) }, "auto-trusted by the proof")
+        XCTAssertNil(stored(laptop), "nameless until its handshake")
+        XCTAssertEqual(shown(laptop), ["Travel Mac", "Travel Mac"])
+        let paired = stamp()
+        hear(laptop, "Other Mac", proof: proof)
+        XCTAssertEqual(shown(laptop), ["Other Mac", "Other Mac"])
+        XCTAssertNil(stored(laptop))
+        XCTAssertEqual(stamp(), paired, "no disk write for a beacon name")
+        XCTAssertEqual(stored(desk), "Desk PC")
     }
 
     func testUntrustedPeerIsRefusedWithoutPairingOrPasscode() throws {
@@ -339,7 +414,7 @@ final class EngineIntegrationTests: XCTestCase {
         wait(for: [done], timeout: 30)
         XCTAssertEqual(got.map(\.content), ["copied on the PC while the phone was asleep"])
         XCTAssertEqual(b.recorder.items.count, 1)
-        wait("B tore down") { b.recorder.snapshot.network.running == false && a.recorder.connectedCount == 0 }
+        wait("B tore down") { !b.recorder.running && a.recorder.connectedCount == 0 }
     }
 
     /// The Share extension is a second process running its own engine over

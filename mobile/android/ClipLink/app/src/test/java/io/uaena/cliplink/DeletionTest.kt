@@ -134,12 +134,24 @@ class DeletionTest {
     @Test
     fun `a deleted file's blob goes only when no remaining entry still uses it`() {
         val first = fileEntry("abc123", "2026-09-26T10:00:00.0000001Z")
-        val resent = fileEntry("ABC123", "2026-09-26T11:00:00.0000001Z")
+        val resent = fileEntry("abc123", "2026-09-26T11:00:00.0000001Z")
         val other = fileEntry("def456", "2026-09-26T12:00:00.0000001Z")
 
         assertEquals("abc123", first.blobToRelease(listOf(other)))
         // The same file sent twice is one blob - deleting one copy keeps it.
         assertNull(first.blobToRelease(listOf(resent, other)))
         assertNull(entry("text", "2026-09-26T10:00:00.0000001Z").blobToRelease(emptyList()))
+    }
+
+    @Test
+    fun `a hash spelled in the other case is a different blob`() {
+        // FileStore names each blob by the hash exactly as the entry spells
+        // it, on a case-sensitive filesystem: these are two files, and
+        // deleting either entry must release its own rather than orphan it.
+        val lower = fileEntry("abc123", "2026-09-26T10:00:00.0000001Z")
+        val upper = fileEntry("ABC123", "2026-09-26T11:00:00.0000001Z")
+
+        assertEquals("abc123", lower.blobToRelease(listOf(upper)))
+        assertEquals("ABC123", upper.blobToRelease(listOf(lower)))
     }
 }

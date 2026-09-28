@@ -39,15 +39,24 @@ it to ship it). Run it from anywhere; nothing is installed.
   Right-click or Shift+F10 on a card for Copy / Open / Show in folder / Delete.
 - First run turns on **Start ClipLink when I sign in** (Settings): an
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value "ClipLink"
-  starting it with `--background` (tray icon only).
+  starting it with `--background` (tray icon only). If the value points at
+  another `ClipLink.exe` (moved, or another build), each start points it at
+  the running one, keeping its arguments.
 - Data: `%APPDATA%\ClipboardDaemon` — the same files the old daemon used, so
   an existing identity, trusted devices and history carry over:
   `identitydefault.key`, `truststoredefault.json`, `historydefault.json`,
   `deleteddefault.json` (deleted items), `passphrasekeydefault.key`,
   `devicenamedefault.txt`, `filestoredefault\` (synced files by hash) and
-  `ReceivedFiles\` (files and images put on the clipboard). The app's own
+  `ReceivedFiles\` (files and images put on the clipboard; received images
+  are named by their content, `ClipLink image <hash>.png`, only the newest 50
+  are kept, and **Clear synced history** deletes them; a copy started with
+  another `--label` keeps its received images in `receivedimages<label>\`
+  instead, so it never touches these). The app's own
   preferences: `%LOCALAPPDATA%\ClipLink\settings.json`. Files opened from
-  Synced are copied to `%TEMP%\ClipLink\default` first.
+  Synced are copied to `%TEMP%\ClipLink\default` first, one folder per item.
+  A copy you've edited is never overwritten (opening the item again makes a
+  fresh copy next to it) and never deleted. The other copies are deleted with
+  their item, on **Clear synced history** and whenever ClipLink starts.
 - Log: `%LOCALAPPDATA%\ClipLink\logs\cliplink.log`, rolled over to
   `cliplink.1.log` at 5 MB (Settings > About > Open log folder).
 - The first run from a new location may bring up a Windows Firewall prompt

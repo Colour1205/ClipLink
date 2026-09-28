@@ -123,7 +123,8 @@ public final class TrustStore {
         return raw.compactMap { obj in
             guard let key = obj["publicKey"] as? String, !key.isEmpty else { return nil }
             let address = (obj["address"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-            let name = (obj["name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            // Earlier builds stored peers' names exactly as they came.
+            let name = DeviceName.sanitize(obj["name"] as? String)
             return TrustedDevice(publicKey: key, address: address, name: name)
         }
     }
@@ -163,12 +164,13 @@ public final class TrustStore {
         }
     }
 
-    /// Records the latest name a TRUSTED device gave itself (beacon or
-    /// handshake). Never adds trust, never touches the address, and an
-    /// unknown (nil/empty) name never erases a known one.
+    /// Records the latest name a TRUSTED device gave itself in a handshake -
+    /// never a beacon's, which is unauthenticated UDP. Never adds trust,
+    /// never touches the address, and an unknown (nil/empty) name never
+    /// erases a known one.
     public func updateName(_ publicKey: String, name: String?) {
         guard let name = name.flatMap({ $0.isEmpty ? nil : $0 }) else { return }
-        // Beacons arrive every 2 s: skip the lock and file check when
+        // Every connection calls this: skip the lock and file check when
         // nothing changed.
         guard let current = device(publicKey), current.name != name else { return }
         mutate {

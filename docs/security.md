@@ -37,6 +37,7 @@ Self-review of the implemented Windows daemon, thinking as an attacker. Ordered 
 3. **No size limit on any line read from the network** (handshake, envelope, chunk) — `ReadLineAsync()` will buffer an attacker-supplied line of unbounded length, a memory-exhaustion vector.
 4. **Abandoned file transfers are never cleaned up.** `HandleFileChunk` opens a `FileStream` per hash with no timeout or cap on concurrent transfers; sending `file_chunk` messages for bogus hashes and never sending `IsLast` leaks file handles and disk space indefinitely.
 5. **Passphrase auto-trust proof is broadcast in cleartext**, enabling offline brute-force of a weak user-chosen passphrase by anyone who passively captures one beacon (no live throttling applies to an offline attack).
+   - So a short passcode can be guessed offline from one captured beacon proof, and a longer passcode is safer. No minimum length is enforced, by design (the passcode can be set, changed or cleared at any time, at any length).
 
 ### Medium
 6. **Trust revocation doesn't propagate.** `Untrust` only edits the local trust store — revoking a stolen device on one of your devices leaves it fully trusted on every other device until each is separately revoked.
@@ -46,4 +47,5 @@ Self-review of the implemented Windows daemon, thinking as an attacker. Ordered 
 ### Low
 - No re-keying on long-lived connections (one compromised session key exposes that connection's whole lifetime of traffic).
 - Beacon spoofing (fake deviceId + port) can't achieve impersonation (the identity-signed handshake blocks it) but can cause wasted/nuisance connection attempts against a victim's real address.
+- The handshake's `DeviceName` isn't covered by its signature (only `EphemeralPublicKey` is), on every platform. Replaying a captured handshake of a trusted device with another `DeviceName` gets that name stored for the device: a rename only, since the replayer can't decrypt or send anything on the connection. Fix on all platforms together: store the handshake name only after the connection's first envelope decrypts, or sign `DeviceName` with the ephemeral key (see `docs/protocol.md`, Device names).
 - `TrayLauncher`/`DaemonLauncher`'s path-guessing is fine for the current same-user dev layout but needs hardening before ever being installed to a shared location. *(Gone with the one-app merge.)*

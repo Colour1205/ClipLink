@@ -2,4 +2,5 @@
     <string name="app_name">ClipLink</string>
     <string name="service_channel_name">Clipboard sync</string>
     <string name="service_channel_description">Keeps ClipLink connected to your paired devices.</string>
+    <string name="passcode_length_hint">Longer passcodes are harder to guess.</string>
 </resources>

@@ -40,7 +40,7 @@ import { DeviceSettings } from '../identity/DeviceSettings';
 import { effectiveDeviceName, getLocalDeviceName, normalizeDeviceName } from '../identity/DeviceName';
 import { FileStore } from '../storage/FileStore';
 import { FilePayload } from '../storage/FilePayload';
-import { entryKey } from '../storage/DeletedEntries';
+import { entryKey, sha256Hex } from '../storage/DeletedEntries';
 import { Discovery, PeerBeacon } from '../networking/Discovery';
 import { TcpServer, connectTcp } from '../networking/TcpTransport';
 import { HandshakeReport, PeerConnection, PeerVerdict, TcpSocketAdapter, TcpSocketConnectionAdapter } from '../networking/PeerConnection';
@@ -107,8 +107,9 @@ function tapHaptic(): void {
 // device we haven't heard from recently is "trusted only".
 interface DeviceRow {
   deviceId: string;
-  // What the device calls itself (its latest beacon, else the trust store),
-  // or null if it never said - see deviceRowTitle.
+  // What the device calls itself (the trust store's, else its latest
+  // beacon's - see deviceRows), or null if it never said - see
+  // deviceRowTitle.
   name: string | null;
   // Every address this peer is reachable at, de-duplicated: the LAN IP the
   // beacon actually arrived from, the address the beacon advertises (which
@@ -124,9 +125,13 @@ interface DeviceRow {
   connected: boolean;
 }
 
-// How a device without a known name is shown - same on every platform.
+// How a device without a known name is shown - same on every platform: the
+// first 4 bytes of SHA-256 over the id, as "XXXX·XXXX". Not the id's first
+// characters - every P-256 SPKI starts with the same base64 prefix, so those
+// read "MFkwEwYHKoZI…" for every device and can't tell a spoofed name apart.
 function shortDeviceId(deviceId: string): string {
-  return `${deviceId.slice(0, 12)}…`;
+  const hex: string = sha256Hex(deviceId).slice(0, 8).toUpperCase();
+  return `${hex.slice(0, 4)}·${hex.slice(4)}`;
 }
 
 function deviceRowTitle(row: DeviceRow): string {
@@ -534,6 +539,10 @@ struct Index {
   // this cache is what bridges the two.
   private cachedProof: string | null = null;
   private passphraseStateGen: number = 0;
+  // Bumped by every Clear. A Set that started before it (its PBKDF2 takes
+  // seconds) drops its key instead of storing it afterwards, which would
+  // quietly undo the Clear - see setPassphrase.
+  private passphraseClearGen: number = 0;
 
   aboutToAppear(): void {
     this.immersiveSupported = uiMaterial.isImmersiveMaterialSupported();
@@ -548,7 +557,7 @@ struct Index {
       // unreadable prefs - keep the defaults
     }
     // Here rather than later so the very first beacon already carries it.
-    this.systemDeviceName = getLocalDeviceName(getContext(this) as common.UIAbilityContext);
+    this.refreshSystemDeviceName();
 
     // Initial (home) route on each stack, pushed with animation off (the
     // `false` second argument) - matches Huawei's own documented pattern
@@ -645,7 +654,8 @@ struct Index {
         updated[existingIndex] = beacon;
         this.receivedBeacons = updated;
       }
-      void this.maybeRememberPeerName(beacon.deviceId, beacon.name);
+      // The beacon's name stays here, in memory: beacons are unsigned, so
+      // it's never written to the trust store (see TrustedDevice.name).
       void this.maybeAutoTrustViaPassphrase(beacon);
       void this.maybeAutoConnect(beacon);
       void this.maybeConnectForPairing(beacon);
@@ -723,6 +733,9 @@ struct Index {
     void this.restartDiscovery();
     void this.reconnectOffLanPeers();
     this.refreshLocalAddresses();
+    // The phone may have been renamed in Settings while ClipLink was in the
+    // background - with no override set, that's the name to go by now.
+    this.refreshSystemDeviceName();
     // HarmonyOS's closest equivalent of Android's "send my clipboard when I
     // open ClipLink": reading the clipboard needs READ_PASTEBOARD (an ACL-only
     // restricted permission) or a PasteButton tap, so the app can't send it
@@ -768,6 +781,16 @@ struct Index {
   // time, so a rename reaches the next beacon/handshake without a restart.
   private ownDeviceName(): string | null {
     return effectiveDeviceName(this.deviceNameOverride, this.systemDeviceName);
+  }
+
+  // Re-read on every return to the foreground (onPageShow), not just once:
+  // aboutToAppear runs only on a cold start. Beacons and handshakes read
+  // ownDeviceName() fresh; the pairing code is rebuilt here.
+  private refreshSystemDeviceName(): void {
+    const name: string = getLocalDeviceName(getContext(this) as common.UIAbilityContext);
+    if (name === this.systemDeviceName) return;
+    this.systemDeviceName = name;
+    if (this.ownDeviceId.length > 0) this.refreshPairingPayload();
   }
 
   aboutToDisappear(): void {
@@ -842,9 +865,10 @@ struct Index {
     this.trustedDevices = await this.trustStore.getAllTrustedDevices(context);
   }
 
-  // Keeps a trusted device's stored name current from its beacons, so the
-  // Devices list still names it once it's off the LAN. Checked against the
-  // in-memory list first - this runs on every beacon, every 2 seconds.
+  // Keeps a trusted device's stored name current from its authenticated
+  // handshake, so the Devices list still names it once it's off the LAN.
+  // Never given a beacon's name - anyone on the LAN can send one. Checked
+  // against the in-memory list first, so an unchanged name writes nothing.
   private async maybeRememberPeerName(deviceId: string, name: string | null): Promise<void> {
     if (name === null) return;
     const known: TrustedDevice | undefined = this.trustedDevices.find((d: TrustedDevice) => d.publicKey === deviceId);
@@ -856,14 +880,31 @@ struct Index {
   }
 
   // A peer's name for prompts and toasts: the one just received if given,
-  // else the latest from its beacon or trust record, else its short id.
+  // else its trust record's, else its beacon's (unsigned, so only while
+  // nothing better is known - same rule as deviceRows), else its short id.
   private peerLabel(deviceId: string, name: string | null = null): string {
+    return this.peerName(deviceId, name) ?? shortDeviceId(deviceId);
+  }
+
+  private peerName(deviceId: string, name: string | null): string | null {
     if (name !== null && name.length > 0) return name;
-    const beacon: PeerBeacon | undefined = this.receivedBeacons.find((b: PeerBeacon) => b.deviceId === deviceId);
-    if (beacon !== undefined && beacon.name !== null) return beacon.name;
     const known: TrustedDevice | undefined = this.trustedDevices.find((d: TrustedDevice) => d.publicKey === deviceId);
     if (known !== undefined && known.name !== undefined && known.name.length > 0) return known.name;
-    return shortDeviceId(deviceId);
+    const beacon: PeerBeacon | undefined = this.receivedBeacons.find((b: PeerBeacon) => b.deviceId === deviceId);
+    if (beacon !== undefined && beacon.name !== null) return beacon.name;
+    return null;
+  }
+
+  // The Accept/Reject prompt's text. The name is whatever the other device
+  // chose to call itself, so it could claim to be one of yours; its short id
+  // and address are shown under it, on lines of their own that a name can't
+  // fake (a sanitised name holds no line breaks - see normalizeDeviceName).
+  private pairingRequestMessage(deviceId: string, name: string | null, address: string | null): string {
+    const claimed: string | null = this.peerName(deviceId, name);
+    const who: string = claimed !== null ? `"${claimed}"` : 'A device';
+    let text: string = `${who} wants to pair with this device.\nID: ${shortDeviceId(deviceId)}`;
+    if (address !== null && address.length > 0) text += `\nAddress: ${address}`;
+    return `${text}\n\nOnly accept if you expect this - your Pairing screen being open is what let this request reach you at all.`;
   }
 
   // The actual "foreground lifecycle" requirement: connect automatically
@@ -984,7 +1025,7 @@ struct Index {
     this.pendingPairingAddress = address ?? '';
     this.getUIContext().showAlertDialog({
       title: 'Pairing request',
-      message: `${this.peerLabel(peerConn.peerDeviceId, peerConn.peerName)} wants to pair with this device. Only accept if you expect this - your Pairing screen being open is what let this request reach you at all.`,
+      message: this.pairingRequestMessage(peerConn.peerDeviceId, peerConn.peerName, address),
       primaryButton: { value: 'Accept', action: () => { void this.acceptPairing(); } },
       secondaryButton: { value: 'Reject', action: () => { this.rejectPairing(); } },
       cancel: () => { this.rejectPairing(); },
@@ -1154,9 +1195,11 @@ struct Index {
   // Trusting a freshly-discovered device also immediately attempts to
   // connect to it (rather than waiting for its next beacon) - feels more
   // responsive when the user just tapped Trust specifically to connect.
+  // No name is stored from the beacon (it's unsigned) - the handshake that
+  // follows stores the device's own, via handleNewConnection.
   async trustAndConnect(beacon: PeerBeacon): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
-    await this.trustStore.trust(context, beacon.deviceId, beacon.senderIp, beacon.name ?? undefined);
+    await this.trustStore.trust(context, beacon.deviceId, beacon.senderIp);
     await this.refreshTrustedDevices();
     await this.connectToBeacon(beacon);
   }
@@ -1269,6 +1312,9 @@ struct Index {
   }
 
   async clearPassphrase(): Promise<void> {
+    // Before any await, so a Set still deriving its key sees it - see
+    // passphraseClearGen.
+    this.passphraseClearGen++;
     try {
       const context = getContext(this) as common.UIAbilityContext;
       await this.passphraseKeyStore.clearPassphrase(context);
@@ -1401,9 +1447,11 @@ struct Index {
     // on-device. Without this pending state the button looked broken:
     // nothing visibly happened until it finally resolved.
     this.settingPassphrase = true;
+    const clearGen: number = this.passphraseClearGen;
     try {
       const context = getContext(this) as common.UIAbilityContext;
-      await this.passphraseKeyStore.setPassphrase(context, passphrase);
+      const stored: boolean = await this.passphraseKeyStore.setPassphrase(context, passphrase, () => clearGen === this.passphraseClearGen);
+      if (!stored) return; // cleared while deriving - the Clear stands
       this.passphraseInput = '';
       this.passcodeChanging = false;
       await this.refreshPassphraseState();
@@ -1432,7 +1480,9 @@ struct Index {
     const verified = await this.passphraseKeyStore.verifyProof(key, beacon.deviceId, beacon.proof);
     if (!verified) return;
     this.log(`auto-trusting ${beacon.deviceId.slice(0, 12)}... (shared passcode)`);
-    await this.trustStore.trust(context, beacon.deviceId, beacon.address ?? undefined, beacon.name ?? undefined);
+    // The proof covers the device id only, not the name beside it - that
+    // waits for the handshake (see TrustedDevice.name).
+    await this.trustStore.trust(context, beacon.deviceId, beacon.address ?? undefined);
     await this.refreshTrustedDevices();
   }
 
@@ -2101,8 +2151,10 @@ struct Index {
       row.discovered = true;
       row.tcpPort = b.tcpPort;
       row.connected = this.syncManager?.isConnected(b.deviceId) ?? false;
-      // The beacon is the latest word on its name.
-      if (b.name !== null) row.name = b.name;
+      // A beacon is unsigned, so its name is only a fallback: it names an
+      // untrusted device, or a trusted one with no stored name yet - never
+      // overriding what the trust store got from a handshake or pairing.
+      if (b.name !== null && row.name === null) row.name = b.name;
       // senderIp is where the packet really came from (the LAN address, so
       // it goes first); b.address is what the peer advertises for itself
       // (its Tailscale IP when configured).
@@ -4094,18 +4146,22 @@ struct Index {
             Text('Passcode is set on this device.').fontSize(13).fontColor($r('sys.color.confirm'))
             // Change and Clear, as on Android. Clearing only stops this
             // device proving the passcode to new devices - ones it already
-            // auto-trusted stay trusted.
+            // auto-trusted stay trusted. Both wait for a Set still deriving
+            // (leaving this screen mid-Set shows them again) - see
+            // passphraseClearGen.
             Row({ space: 10 }) {
               Button('Change Passcode')
                 .fontSize(14)
                 .fontColor(this.accent())
                 .backgroundColor(this.accentTint())
                 .systemMaterial(this.buttonMaterial())
+                .enabled(!this.settingPassphrase)
                 .onClick(() => { tapHaptic(); this.passphraseInput = ''; this.passcodeChanging = true; })
               Button('Clear')
                 .fontSize(14)
                 .fontColor($r('sys.color.font_secondary'))
                 .backgroundColor($r('sys.color.comp_background_tertiary'))
+                .enabled(!this.settingPassphrase)
                 .onClick(() => { tapHaptic(); this.confirmClearPassphrase(); })
             }
           } else {
@@ -4114,6 +4170,8 @@ struct Index {
               .fontSize(14)
               .enabled(!this.settingPassphrase)
               .onChange((value: string) => { this.passphraseInput = value; })
+            // Advice only - any non-empty passcode is accepted.
+            Text($r('app.string.passcode_length_hint')).fontSize(12).fontColor($r('sys.color.font_secondary'))
             Row({ space: 10 }) {
               Button(this.settingPassphrase ? 'Setting...' : 'Set Passcode')
                 .fontSize(14)

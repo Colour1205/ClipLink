@@ -229,16 +229,18 @@ extension SyncEngine {
         sighting.pairing = beacon.pairing
         if beacon.pairing { sighting.pairingSeen = Date() }
         // A beacon without a name (an older build) keeps the one we know.
+        // Beacons are unauthenticated UDP: the name is held here, in memory,
+        // for display only - never written to the trust store.
         if let name = beacon.name { sighting.name = name }
         sightings[id] = sighting
         capStrangerSightings()
-        trust.updateName(id, name: beacon.name)
         schedulePublish()
 
         if !trust.isTrusted(id), let key = passphraseKey, let proof = beacon.proof,
            PassphraseAuth.verifyProof(key: key, deviceId: id, proofBase64: proof) {
             log("auto-trusting \(DeviceLabel.short(id)) (shared passcode)")
-            trust.trust(id, address: beacon.address, name: sighting.name)
+            // Nameless until its handshake: that stores the name.
+            trust.trust(id, address: beacon.address)
         }
 
         guard links[id] == nil, !connectingTo.contains(id), DeviceOrder.shouldDial(peerId: id, ownId: ownId) else { return }
@@ -382,7 +384,9 @@ extension SyncEngine {
         }
     }
 
-    /// `name`: what the device's handshake called itself, if anything.
+    /// `name`: what the device's handshake called itself, if anything. Held
+    /// in memory only: a refused or unwanted handshake line was never
+    /// verified, so storing a name is handleNewConnection's job.
     func noteSighting(_ id: String, address: String?, name: String? = nil) {
         guard id != ownId else { return }
         var sighting = sightings[id] ?? Sighting(lastSeen: Date())
@@ -391,7 +395,6 @@ extension SyncEngine {
         if let name { sighting.name = name }
         sightings[id] = sighting
         capStrangerSightings()
-        trust.updateName(id, name: name)
         schedulePublish()
     }
 
@@ -695,8 +698,11 @@ extension SyncEngine {
     /// made it (inbound, beacon dial, reconnect, sweep, manual pairing).
     func handleNewConnection(_ link: PeerLink, address: String?) {
         let id = link.peerDeviceId
-        // Also records a trusted peer's handshake name in the trust store.
         noteSighting(id, address: address, name: link.peerName)
+        // Only a completed handshake (signature verified) stores a peer's
+        // name: here, on passcode pairing below and on Accept. A beacon's
+        // name is only ever displayed.
+        trust.updateName(id, name: link.peerName)
         guard running else {
             link.close()
             return
@@ -728,7 +734,7 @@ extension SyncEngine {
         // trust-store bookkeeping below.
         register(link, acceptedByUser: false)
         if link.newlyTrustedViaPassphrase {
-            trust.trust(id, address: address, name: peerName(for: id))
+            trust.trust(id, address: address, name: link.peerName)
             log("auto-paired via passcode: \(DeviceLabel.short(id))")
             notice("Paired with \(displayName(for: id)) using your passcode.")
         } else {

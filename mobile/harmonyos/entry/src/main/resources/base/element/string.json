@@ -11,6 +11,10 @@
     {
       "name": "EntryAbility_label",
       "value": "ClipLink"
+    },
+    {
+      "name": "passcode_length_hint",
+      "value": "Longer passcodes are harder to guess."
     }
   ]
 }

@@ -65,11 +65,16 @@ export class PassphraseKeyStore {
     return prefs.hasSync(KEY_KEY);
   }
 
-  async setPassphrase(context: common.UIAbilityContext, passphrase: string): Promise<void> {
+  // stillWanted is asked after the (seconds-long) derivation, right before
+  // the key is stored: false drops the result and resolves false. Index.ets
+  // uses it so a Clear made while this was deriving isn't undone by it.
+  async setPassphrase(context: common.UIAbilityContext, passphrase: string, stillWanted: () => boolean = () => true): Promise<boolean> {
     const key = await pbkdf2Sha256Manual(stringToBytes(passphrase), stringToBytes(FIXED_SALT), ITERATIONS, KEY_LEN_BYTES);
     const prefs = await this.getPrefs(context);
+    if (!stillWanted()) return false;
     prefs.putSync(KEY_KEY, base64Helper.encodeToStringSync(key));
     await prefs.flush();
+    return true;
   }
 
   // Devices already auto-trusted via the passcode stay trusted - this only

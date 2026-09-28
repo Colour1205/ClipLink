@@ -143,7 +143,11 @@ internal fun ClipboardEntry.blobToRelease(remaining: List<ClipboardEntry>): Stri
     return hash.takeIf { remaining.none { it.usesBlob(hash) } }
 }
 
-private fun ClipboardEntry.usesBlob(hash: String): Boolean = fileHash().equals(hash, ignoreCase = true)
+// Exact, case and all: FileStore names a blob by the hash string exactly as
+// the entry spells it, on a case-sensitive filesystem - so "abc" and "ABC"
+// are two different files, and a case-insensitive match here would leave one
+// orphaned when the other spelling's entry is deleted.
+private fun ClipboardEntry.usesBlob(hash: String): Boolean = fileHash() == hash
 
 private fun ClipboardEntry.fileHash(): String? =
     if (type == ClipboardEntry.TYPE_FILE) FilePayload.parse(content)?.fileHash else null

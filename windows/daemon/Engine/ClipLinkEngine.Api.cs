@@ -32,9 +32,10 @@ public sealed partial class ClipLinkEngine
     }
 
     // Sets the name other devices see. Blank (or null) clears the override,
-    // back to the computer's name. Returns the name now in effect. Used from
-    // the next beacon and the next handshake - live connections keep the
-    // name they opened with. ("set_device_name")
+    // back to the computer's name - and so does the computer's name itself,
+    // so the name keeps following it. Returns the name now in effect. Used
+    // from the next beacon and the next handshake - live connections keep
+    // the name they opened with. ("set_device_name")
     public string SetDeviceName(string? name)
     {
         RequireStores();
@@ -116,18 +117,20 @@ public sealed partial class ClipLinkEngine
     }
 
     // Trusts a device seen on the LAN (a discovered row's Trust), with the
-    // name and address its latest beacon carried (its advertised off-LAN
-    // one, else the LAN address it came from). One-sided: it connects once
-    // that device trusts this PC too (paired or same passcode there). False
-    // for a blank id or this device's own; true, changing nothing, if it's
-    // already trusted.
+    // address its latest beacon carried (its advertised off-LAN one, else
+    // the LAN address it came from). Not its beacon's name: beacons are
+    // unauthenticated, so that name is only shown (see SeenPeer) until the
+    // device's first handshake stores its name. One-sided: it
+    // connects once that device trusts this PC too (paired or same passcode
+    // there). False for a blank id or this device's own; true, changing
+    // nothing, if it's already trusted.
     public bool TrustDevice(string deviceId)
     {
         RequireStores();
         if (string.IsNullOrWhiteSpace(deviceId) || deviceId == ownId) return false;
         if (trustStore.IsTrusted(deviceId)) return true;
         seenPeers.TryGetValue(deviceId, out var seen);
-        trustStore.Trust(deviceId, seen?.AdvertisedAddress ?? seen?.LanAddress, seen?.Name);
+        trustStore.Trust(deviceId, seen?.AdvertisedAddress ?? seen?.LanAddress);
         NotifyDevicesChanged();
         return true;
     }
@@ -217,8 +220,9 @@ public sealed partial class ClipLinkEngine
         return new PendingPairing(pendingId, pendingName, pending.Value.address);
     }
 
-    // Accepts the pending request: trusts the device (with its name and
-    // address) and starts syncing over the connection it's waiting on - once
+    // Accepts the pending request: trusts the device (with its address and
+    // its handshake's name - never a beacon's, which is unauthenticated and
+    // only shown) and starts syncing over the connection it's waiting on - once
     // the other device accepts too. False if nothing is pending. Both happen
     // just after this returns, off the caller's thread - DevicesChanged
     // reports them. ("accept_pairing")
@@ -247,7 +251,7 @@ public sealed partial class ClipLinkEngine
         {
             try
             {
-                trustStore.Trust(takenId, address, NameOfCandidate(conn));
+                trustStore.Trust(takenId, address, conn.PeerDeviceName);
                 RegisterConnection(conn);
             }
             catch (Exception ex)
@@ -366,10 +370,17 @@ public sealed partial class ClipLinkEngine
 
     // A local copy of a file or image entry to open with its default app
     // (e.g. ShellExecute), named as its sender named it - made safe as a
-    // file name - in a folder of its own under %TEMP%\ClipLink. Null if key
-    // isn't a file or image in history, or a file's bytes aren't here
-    // (IsAvailable false). The first call copies the file, so for a big one
-    // call it off the UI thread. Throws IOException if the copy fails.
+    // file name - in the entry's own folder under %TEMP%\ClipLink (see
+    // OpenFolderFor). Null if key isn't a file or image in history, or a
+    // file's bytes aren't here (IsAvailable false). A copy made earlier is
+    // handed out again only while it's still exactly the entry's bytes: one
+    // the user has since edited is never overwritten - a fresh copy goes
+    // next to it ("name (1).ext"), and isn't deleted with the others (see
+    // OpenCopiesRoot). Whatever writes to a copy afterwards (the app's Mark
+    // of the Web) must put its last-write time back, or it passes for an
+    // edited one and is never cleaned up. Copying (and checking an earlier
+    // copy) reads the whole file, so for a big one call it off the UI
+    // thread. Throws IOException if the copy fails.
     public string? GetFileToOpen(string key)
     {
         var entry = FindEntry(key);
@@ -379,22 +390,31 @@ public sealed partial class ClipLinkEngine
             var payload = FilePayloadOf(entry);
             if (payload == null || !IsStored(payload)) return null;
             string source = fileStore.GetPath(payload.FileHash);
-            string path = Path.Combine(OpenFolderFor(entry), FileNames.Safe(payload.FileName, "file"));
-            // Kept between opens - only (re)copied if missing or different.
-            if (!File.Exists(path) || new FileInfo(path).Length != new FileInfo(source).Length)
+            long length = new FileInfo(source).Length;
+            lock (openCopiesGate)
             {
-                File.Copy(source, path, overwrite: true);
+                var (path, exists) = FileNames.CopyPath(CreateOpenFolderFor(entry), FileNames.Safe(payload.FileName, "file"),
+                    copy => IsUnchangedCopy(copy, payload.FileHash, length));
+                if (!exists)
+                {
+                    File.Copy(source, path);
+                }
+                return path;
             }
-            return path;
         }
         if (entry.Type == "image" && DecodeImage(entry) is byte[] bytes)
         {
-            string path = Path.Combine(OpenFolderFor(entry), $"ClipLink image {ToUtc(entry.Timestamp).ToLocalTime():yyyy-MM-dd HHmmss}{ImageFiles.Extension(bytes)}");
-            if (!File.Exists(path))
+            string hash = Convert.ToHexString(SHA256.HashData(bytes));
+            lock (openCopiesGate)
             {
-                File.WriteAllBytes(path, bytes);
+                var (path, exists) = FileNames.CopyPath(CreateOpenFolderFor(entry), $"ClipLink image {ToUtc(entry.Timestamp).ToLocalTime():yyyy-MM-dd HHmmss}{ImageFiles.Extension(bytes)}",
+                    copy => IsUnchangedCopy(copy, hash, bytes.Length));
+                if (!exists)
+                {
+                    File.WriteAllBytes(path, bytes);
+                }
+                return path;
             }
-            return path;
         }
         return null;
     }
@@ -435,26 +455,36 @@ public sealed partial class ClipLinkEngine
 
     // Deletes one entry (a GetHistory Key) for good - local only: peers keep
     // their copy, and the clipboard is left alone. Remembered as deleted
-    // either way, so a peer's next history batch can't restore it. False if
-    // it wasn't in history. ("delete_history_entry")
+    // either way, so a peer's next history batch can't restore it. Its
+    // copies opened from here (GetFileToOpen) go too, unless the user has
+    // edited them. False if it wasn't in history. ("delete_history_entry")
     public bool DeleteHistoryEntry(string key)
     {
         RequireStores();
         if (string.IsNullOrEmpty(key)) return false;
         var removed = historyAccess.removeFromHistory(key);
         ForgetPendingApplies(removed);
+        foreach (var entry in removed)
+        {
+            DeleteOpenCopies(OpenFolderFor(entry));
+        }
         if (removed.Count == 0) return false;
         NotifyHistoryChanged();
         return true;
     }
 
     // "Clear synced history" - every current entry is remembered as deleted,
-    // so it stays cleared when peers reconnect. ("clear_history")
+    // so it stays cleared when peers reconnect. Every copy opened from here
+    // (GetFileToOpen) but the ones the user has edited, and every image this
+    // label received and saved for the clipboard (see ReceivedFiles), goes
+    // too - best effort: one an app still has open stays. ("clear_history")
     public void ClearHistory()
     {
         RequireStores();
         var removed = historyAccess.clearHistory();
         ForgetPendingApplies(removed);
+        DeleteOpenCopies(OpenCopiesRoot());
+        ReceivedFiles.DeleteImages(label);
         NotifyHistoryChanged();
     }
 
@@ -548,14 +578,85 @@ public sealed partial class ClipLinkEngine
     // SHA-256 hex hash (see FileStore.IsValidHash).
     private bool IsStored(FilePayload payload) => fileStore.Exists(payload.FileHash);
 
-    // One folder per entry (named by a hash of its key), so two entries with
-    // the same file name never overwrite each other's copy.
+    // Copies opened from Synced live under %TEMP%\ClipLink\<label>: one
+    // folder per entry (named by a hash of its key), so two entries with the
+    // same file name never overwrite each other's copy. An entry's folder is
+    // deleted with the entry, and all of them on Clear synced history and
+    // when the engine starts - except any copy the user has edited (see
+    // IsEditedCopy), which is theirs to keep.
+    private string OpenCopiesRoot() => Path.Combine(Path.GetTempPath(), "ClipLink", FileNames.Safe(label, DefaultLabel));
+
     private string OpenFolderFor(ClipboardEntry entry)
     {
         string entryHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(entry.Key())))[..16];
-        string dir = Path.Combine(Path.GetTempPath(), "ClipLink", FileNames.Safe(label, DefaultLabel), entryHash);
+        return Path.Combine(OpenCopiesRoot(), entryHash);
+    }
+
+    private string CreateOpenFolderFor(ClipboardEntry entry)
+    {
+        string dir = OpenFolderFor(entry);
         Directory.CreateDirectory(dir);
         return dir;
     }
 
+    // Whether an earlier copy is still exactly the entry's bytes (same size,
+    // same SHA-256) - false if the user has edited it, or it can't be read.
+    // Read while an app may still have it open, hence the sharing.
+    private static bool IsUnchangedCopy(string copy, string sha256Hex, long length)
+    {
+        try
+        {
+            if (new FileInfo(copy).Length != length) return false;
+            using var stream = new FileStream(copy, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            return Convert.ToHexString(SHA256.HashData(stream)).Equals(sha256Hex, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    // Whether the user has saved changes to a copy since GetFileToOpen made
+    // it. File.Copy keeps the stored file's (earlier) last-write time and
+    // WriteAllBytes sets it as the file is created, so a copy ClipLink wrote
+    // was last written no later than it was created; saving it in an app
+    // makes that later. An app that saves by replacing the file counts too:
+    // NTFS carries the old file's creation time over to the new one. (So
+    // whatever marks a copy - the app's Mark of the Web - keeps its
+    // last-write time: see GetFileToOpen.)
+    private static bool IsEditedCopy(string file)
+    {
+        var info = new FileInfo(file);
+        return info.LastWriteTimeUtc > info.CreationTimeUtc.AddSeconds(2);
+    }
+
+    // Deletes a folder of opened copies (OpenCopiesRoot, or one entry's) and
+    // everything in it but the copies the user has edited (IsEditedCopy) -
+    // those, and the folders holding them, stay. Best effort: a copy an app
+    // still has open (locked) stays, and goes next time.
+    private static void DeleteOpenCopies(string dir)
+    {
+        try
+        {
+            if (!Directory.Exists(dir)) return;
+            foreach (string file in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories).ToList())
+            {
+                try
+                {
+                    if (!IsEditedCopy(file)) File.Delete(file);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
+            // Then every folder that's now empty, innermost first.
+            foreach (string folder in Directory.EnumerateDirectories(dir, "*", SearchOption.AllDirectories).Append(dir).OrderByDescending(path => path.Length).ToList())
+            {
+                try { Directory.Delete(folder); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.WriteLine($"[engine] couldn't delete opened copies in {dir}: {ex.Message}");
+        }
+    }
 }

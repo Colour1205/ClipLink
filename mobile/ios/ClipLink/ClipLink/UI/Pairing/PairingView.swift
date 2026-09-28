@@ -101,6 +101,16 @@ struct PairingView: View {
             .cardBackground(transparency: settings.cardTransparency)
     }
 
+    /// Who's asking: the name is whatever that device chose, so its short id
+    /// goes beside it (and the address, when known) - a copied name can't
+    /// pass for a device you know.
+    private func requester(_ request: PairingRequest) -> String {
+        let id = DeviceLabel.short(request.deviceId)
+        let name = model.name(for: request.deviceId)
+        let who = name == id ? id : "\(name) (\(id))"
+        return who + (request.address.map { " at \($0)" } ?? "")
+    }
+
     /// Inline Accept / Reject, like Android's prompt card: the request only
     /// ever arrives while this sheet is up, and the root view can't present
     /// an alert over its own sheet.
@@ -114,7 +124,7 @@ struct PairingView: View {
                     Image(systemName: "laptopcomputer.and.iphone")
                         .foregroundColor(accent)
                 }
-                Text("\(model.name(for: request.deviceId))\(request.address.map { " at \($0)" } ?? "") wants to pair with this \(ThisDeviceNoun.current). Only accept if you expect this.")
+                Text("\(requester(request)) wants to pair with this \(ThisDeviceNoun.current). Only accept if you expect this.")
                     .font(.subheadline)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 10) {
