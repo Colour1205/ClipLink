@@ -19,7 +19,8 @@ public class Discovery
 
     // getProof is called fresh on every beacon, not just once at startup — a
     // passphrase set later via the tray (the normal flow: daemon starts first,
-    // then the user sets a passcode) must take effect without a restart.
+    // then the user sets a passcode), or changed or cleared later, must take
+    // effect without a restart.
     // Result lets a peer that knows the same passphrase auto-trust this device
     // without any manual QR/key exchange — see Crypto/PassphraseAuth.cs.
     // "-" means "no passphrase configured", since the beacon is plain-text UDP.

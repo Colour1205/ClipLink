@@ -22,9 +22,11 @@ import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Smartphone
 import androidx.compose.material.icons.outlined.TextFields
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -233,5 +235,29 @@ fun SectionHeader(text: String, modifier: Modifier = Modifier) {
         fontWeight = FontWeight.Bold,
         color = MaterialTheme.colorScheme.primary,
         modifier = modifier.padding(start = 8.dp, top = 24.dp, bottom = 10.dp),
+    )
+}
+
+/**
+ * Asks before one synced item is deleted - the same shape as the "Clear synced
+ * history" confirmation, since both are undo-less and both stick.
+ */
+@Composable
+fun ConfirmDeleteItemDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Delete this item?") },
+        text = {
+            Text(
+                "It's deleted from this phone, and won't come back from your other devices. " +
+                    "They keep their own copies.",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("Delete") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
     )
 }

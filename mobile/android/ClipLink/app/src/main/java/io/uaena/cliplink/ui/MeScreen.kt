@@ -74,6 +74,7 @@ fun MeScreen(
     var deviceName by remember(state.deviceNameOverride) { mutableStateOf(state.deviceNameOverride) }
     val shownName = state.deviceNameOverride.ifBlank { state.defaultDeviceName }
     var confirmingClear by remember { mutableStateOf(false) }
+    var confirmingClearPassphrase by remember { mutableStateOf(false) }
 
     LazyColumn(
         contentPadding = PaddingValues(
@@ -241,6 +242,8 @@ fun MeScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        // No minimum length - blank is the only thing refused,
+                        // and the engine trims before deriving the key.
                         Button(
                             onClick = {
                                 actions.onSetPassphrase(passphrase)
@@ -248,10 +251,12 @@ fun MeScreen(
                             },
                             enabled = passphrase.isNotBlank(),
                         ) {
-                            Text("Set passcode")
+                            Text(if (state.hasPassphrase) "Change passcode" else "Set passcode")
                         }
                         if (state.hasPassphrase) {
-                            TextButton(onClick = actions.onClearPassphrase) { Text("Clear") }
+                            TextButton(onClick = { confirmingClearPassphrase = true }) {
+                                Text("Clear")
+                            }
                         }
                     }
                 }
@@ -351,6 +356,32 @@ fun MeScreen(
             },
             dismissButton = {
                 TextButton(onClick = { confirmingClear = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (confirmingClearPassphrase) {
+        AlertDialog(
+            onDismissRequest = { confirmingClearPassphrase = false },
+            title = { Text("Clear passcode?") },
+            text = {
+                Text(
+                    "New devices will need a QR code or address to pair with this phone. " +
+                        "Devices that are already paired stay paired.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmingClearPassphrase = false
+                        actions.onClearPassphrase()
+                    },
+                ) {
+                    Text("Clear")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmingClearPassphrase = false }) { Text("Cancel") }
             },
         )
     }

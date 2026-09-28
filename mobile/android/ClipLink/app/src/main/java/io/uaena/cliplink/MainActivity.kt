@@ -127,9 +127,13 @@ class MainActivity : ComponentActivity() {
                         ),
                         me = MeActions(
                             onSetPassphrase = { passphrase ->
+                                val changing = engine.hasPassphrase.value
                                 lifecycleScope.launch {
                                     if (engine.setPassphrase(passphrase)) {
-                                        engine.showToast("Passcode set — matching devices will auto-trust.")
+                                        engine.showToast(
+                                            (if (changing) "Passcode changed" else "Passcode set") +
+                                                " — matching devices will auto-trust.",
+                                        )
                                     }
                                 }
                             },

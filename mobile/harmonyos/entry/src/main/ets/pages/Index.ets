@@ -533,6 +533,7 @@ struct Index {
   // setInterval tick), but computing an HMAC via cryptoFramework is async -
   // this cache is what bridges the two.
   private cachedProof: string | null = null;
+  private passphraseStateGen: number = 0;
 
   aboutToAppear(): void {
     this.immersiveSupported = uiMaterial.isImmersiveMaterialSupported();
@@ -1257,13 +1258,28 @@ struct Index {
     }
   }
 
+  // Asked first, like Clear synced history.
+  private confirmClearPassphrase(): void {
+    this.getUIContext().showAlertDialog({
+      title: 'Clear passcode?',
+      message: 'New devices won\'t trust this device automatically any more. Devices already paired stay paired.',
+      primaryButton: { value: 'Cancel', action: () => {} },
+      secondaryButton: { value: 'Clear', fontColor: $r('sys.color.warning'), action: () => { void this.clearPassphrase(); } },
+    });
+  }
+
   async clearPassphrase(): Promise<void> {
-    const context = getContext(this) as common.UIAbilityContext;
-    await this.passphraseKeyStore.clearPassphrase(context);
-    this.passcodeChanging = false;
-    this.passphraseInput = '';
-    await this.refreshPassphraseState();
-    promptAction.showToast({ message: 'Passcode cleared.' });
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      await this.passphraseKeyStore.clearPassphrase(context);
+      this.passcodeChanging = false;
+      this.passphraseInput = '';
+      await this.refreshPassphraseState();
+      promptAction.showToast({ message: 'Passcode cleared.' });
+    } catch (e) {
+      const be = e as BusinessError;
+      promptAction.showToast({ message: `Failed to clear passcode: ${be.message ?? e}`, duration: 3000 });
+    }
   }
 
   private confirmClearHistory(): void {
@@ -1353,17 +1369,23 @@ struct Index {
     }
   }
 
+  // Only the latest call writes cachedProof: a slower earlier one (e.g. the
+  // startup refresh, or the one after a Change) finishing after a Clear
+  // would otherwise put the old proof back into the beacons.
   private async refreshPassphraseState(): Promise<void> {
+    const gen = ++this.passphraseStateGen;
     const context = getContext(this) as common.UIAbilityContext;
-    this.hasPassphrase = await this.passphraseKeyStore.hasPassphrase(context);
-    if (this.hasPassphrase && this.ownDeviceId.length > 0) {
+    const has = await this.passphraseKeyStore.hasPassphrase(context);
+    let proof: string | null = null;
+    if (has && this.ownDeviceId.length > 0) {
       const key = await this.passphraseKeyStore.getKey(context);
       if (key !== null) {
-        this.cachedProof = await this.passphraseKeyStore.computeProof(key, this.ownDeviceId);
+        proof = await this.passphraseKeyStore.computeProof(key, this.ownDeviceId);
       }
-    } else {
-      this.cachedProof = null;
     }
+    if (gen !== this.passphraseStateGen) return;
+    this.hasPassphrase = has;
+    this.cachedProof = proof;
   }
 
   async setPassphrase(): Promise<void> {
@@ -4084,7 +4106,7 @@ struct Index {
                 .fontSize(14)
                 .fontColor($r('sys.color.font_secondary'))
                 .backgroundColor($r('sys.color.comp_background_tertiary'))
-                .onClick(() => { tapHaptic(); void this.clearPassphrase(); })
+                .onClick(() => { tapHaptic(); this.confirmClearPassphrase(); })
             }
           } else {
             TextInput({ placeholder: this.hasPassphrase ? 'Enter a new shared passcode' : 'Enter a shared passcode', text: this.passphraseInput })

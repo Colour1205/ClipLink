@@ -57,6 +57,7 @@ fun DetailScreen(
 ) {
     val style = typeStyleOf(item)
     var menuOpen by remember { mutableStateOf(false) }
+    var confirmingDelete by remember { mutableStateOf(false) }
 
     Column(
         modifier
@@ -83,9 +84,9 @@ fun DetailScreen(
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            // A menu rather than a bare bin icon: the delete is immediate and
-            // has no undo, so it gets the same labelled "Delete" item as the
-            // long-press menu on the card.
+            // A menu rather than a bare bin icon: the delete has no undo, so it
+            // gets the same labelled "Delete" item, and the same confirmation,
+            // as the long-press menu on the card.
             Box {
                 IconButton(onClick = { menuOpen = true }) {
                     Icon(Icons.Outlined.MoreVert, contentDescription = "More options")
@@ -96,7 +97,7 @@ fun DetailScreen(
                         leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
                         onClick = {
                             menuOpen = false
-                            onDelete()
+                            confirmingDelete = true
                         },
                     )
                 }
@@ -214,5 +215,15 @@ fun DetailScreen(
                 Text("Share")
             }
         }
+    }
+
+    if (confirmingDelete) {
+        ConfirmDeleteItemDialog(
+            onConfirm = {
+                confirmingDelete = false
+                onDelete()
+            },
+            onDismiss = { confirmingDelete = false },
+        )
     }
 }
