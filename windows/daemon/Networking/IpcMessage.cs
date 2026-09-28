@@ -26,3 +26,8 @@ public record DeviceListing(string PublicKey, string? Name, bool Trusted, bool C
 // Accept/Reject ("" when none): get_pending_pairing's peer id, plus the
 // peer's display name (null if unknown) and the address it connected from.
 public record PendingPairingInfo(string PublicKey, string? Name, string? Address);
+
+// One row of "get_history", newest first: a ClipboardEntry's own fields
+// (Content is the text, the base64 image, or a file's FilePayload JSON) plus
+// Key, its ClipboardEntry.Key() - what "delete_history_entry" takes.
+public record HistoryListing(string Key, string Content, string Type, string DeviceId, DateTime Timestamp, string? Signature);

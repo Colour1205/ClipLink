@@ -78,6 +78,8 @@ public final class SyncEngine {
     let trust: TrustStore
     public let files: FileStore
     let history: HistoryStore
+    /// Items deleted or cleared here: never taken back from a peer.
+    let deleted: DeletedStore
     let settingsFile: JSONFile
 
     // Networking
@@ -156,6 +158,7 @@ public final class SyncEngine {
         trust = TrustStore(directory: config.storageDirectory)
         files = FileStore(directory: config.storageDirectory)
         history = HistoryStore(directory: config.storageDirectory, fileStore: files)
+        deleted = DeletedStore(directory: config.storageDirectory)
         settingsFile = JSONFile(url: config.storageDirectory.appendingPathComponent("engine_settings.json"))
         let settings = settingsFile.read() as? [String: Any] ?? [:]
         tailscaleIP = settings["tailscale_ip"] as? String ?? ""
@@ -379,6 +382,7 @@ public final class SyncEngine {
     func reloadFromDisk() {
         trust.reload()
         history.reload()
+        deleted.reload()
         let settings = settingsFile.read() as? [String: Any] ?? [:]
         tailscaleIP = settings["tailscale_ip"] as? String ?? tailscaleIP
         nicknames = settings["nicknames"] as? [String: String] ?? nicknames
@@ -635,20 +639,38 @@ public final class SyncEngine {
 
     // MARK: - History API
 
+    /// Local only: never touches the clipboard or tells peers. The item is
+    /// remembered as deleted (by its signature) BEFORE it goes, so a peer
+    /// that still has it can't bring it back with its next history_batch.
+    /// Its file blob goes too, unless another remaining item has the same bytes.
     public func deleteItem(id: String) {
         queue.async { [self] in
+            guard let entry = history.entries.first(where: { HistoryStore.identity(of: $0) == id }) else {
+                schedulePublish() // already gone: just refresh the list
+                return
+            }
+            deleted.add([entry])
             history.remove(identity: id)
+            if entry.type == Wire.EntryType.file, let payload = FilePayload.parse(entry.content), !files.exists(payload.fileHash) {
+                files.removeExport(payload.fileHash)
+            }
+            dropUnreferencedFiles()
             schedulePublish()
         }
     }
 
-    /// Local only, as everywhere: peers keep their copies and may send other
-    /// devices' items back on the next connect. Also drops waiting file
-    /// entries (the HarmonyOS fix), so a transfer finishing later can't apply.
+    /// Local only, as everywhere: peers keep their copies. Every item is
+    /// remembered as deleted first, so their next history_batch doesn't bring
+    /// it back. Also drops waiting and in-flight file transfers (the
+    /// HarmonyOS fix), so one finishing later can't apply.
     public func clearHistory() {
         queue.async { [self] in
+            // Everything that's about to go, including anything the Share
+            // extension added since this process last looked.
+            history.reload()
+            deleted.add(history.entries)
             history.clear()
-            pendingFiles.removeAll()
+            dropUnreferencedFiles()
             files.clearExports()
             schedulePublish()
         }

@@ -20,6 +20,8 @@ extension SyncEngine {
                 log("received invalid message from peer (bad entry JSON)")
                 return
             }
+            // Deleted here: neither back into history nor onto the clipboard.
+            guard !deleted.contains(entry) else { return }
             guard let verified = verifiedAndTrusted(entry) else {
                 log("dropped \(entry.type) entry from \(DeviceLabel.short(entry.deviceId)) - failed signature/trust check")
                 return
@@ -41,9 +43,11 @@ extension SyncEngine {
                 log("ignored an oversized history batch (\(entries.count) entries)")
                 return
             }
+            // Items deleted here are skipped before anything else: a peer
+            // resends everything it still has on every connect.
             // A bad entry is skipped on its own; the rest of the batch stands.
             // Added in one write, not one full rewrite of history per entry.
-            let fresh = history.add(contentsOf: entries.compactMap(verifiedAndTrusted))
+            let fresh = history.add(contentsOf: deleted.removingDeleted(entries).compactMap(verifiedAndTrusted))
             guard !fresh.isEmpty else { return }
             // Apply only the newest new entry, and only if it is the newest
             // thing we have at all. Every other port applies each new entry in
@@ -155,6 +159,29 @@ extension SyncEngine {
         }
     }
 
+    /// Lowercase keys of every blob a history entry points at.
+    func referencedFileKeys() -> Set<String> {
+        Set(history.entries.compactMap { entry -> String? in
+            guard entry.type == Wire.EntryType.file, let payload = FilePayload.parse(entry.content) else { return nil }
+            return FileStore.key(payload.fileHash)
+        })
+    }
+
+    /// After a delete or clear: stop waiting for, or receiving, bytes no
+    /// remaining entry points at - a transfer finishing later must neither
+    /// apply nor leave an orphaned blob behind.
+    func dropUnreferencedFiles() {
+        let referenced = referencedFileKeys()
+        for key in Array(pendingFiles.keys) where !referenced.contains(key) {
+            pendingFiles[key] = nil
+            requestedAt[key] = nil
+        }
+        for (key, transfer) in incoming where !referenced.contains(key) {
+            transfer.abort()
+            incoming[key] = nil
+        }
+    }
+
     // MARK: - Files: receiving
 
     func handleFileChunk(_ payload: String, from link: PeerLink) {
@@ -246,6 +273,13 @@ extension SyncEngine {
                     self.requestedAt[key] = nil
                     // Ask again - maybe another peer's copy is intact.
                     if self.pendingFiles[key] != nil { self.requestFile(transfer.wireHash, from: Array(self.links.values)) }
+                    self.schedulePublish()
+                    return
+                }
+                // Its item was deleted (or history cleared) while this was
+                // being checked: nothing wants these bytes any more.
+                guard self.pendingFiles[key] != nil || self.referencedFileKeys().contains(key) else {
+                    try? FileManager.default.removeItem(at: url)
                     self.schedulePublish()
                     return
                 }

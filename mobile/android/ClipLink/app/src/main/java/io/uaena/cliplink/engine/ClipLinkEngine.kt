@@ -17,6 +17,7 @@ import io.uaena.cliplink.net.PairingInfo
 import io.uaena.cliplink.net.PeerConnection
 import io.uaena.cliplink.net.Protocol
 import io.uaena.cliplink.net.SyncManager
+import io.uaena.cliplink.store.DeletedStore
 import io.uaena.cliplink.store.DeviceSettings
 import io.uaena.cliplink.store.FileStore
 import io.uaena.cliplink.store.HistoryStore
@@ -63,7 +64,7 @@ class ClipLinkEngine(context: Context) {
     val passphraseKeyStore = PassphraseKeyStore(appContext)
     val deviceSettings = DeviceSettings(appContext)
     val fileStore = FileStore(appContext)
-    private val historyStore = HistoryStore(appContext, fileStore)
+    private val historyStore = HistoryStore(appContext, fileStore, DeletedStore(appContext))
     val clipboard = ClipboardBridge(appContext, fileStore)
 
     private val identity = DeviceIdentity()
@@ -686,6 +687,7 @@ class ClipLinkEngine(context: Context) {
                 is Capture.Text -> broadcastText(capture.text, quiet)
                 is Capture.Image -> broadcastImage(capture.pngBytes, quiet)
                 is Capture.Payload -> broadcastFile(capture.fileName, capture.bytes, quiet)
+                Capture.Ours -> alreadySynced(quiet)
             }
         }
     }
@@ -774,11 +776,17 @@ class ClipLinkEngine(context: Context) {
 
     fun applyToClipboard(item: SyncedItem): Boolean = clipboard.apply(item.entry)
 
+    /**
+     * Deletes an item from this phone only, and for good - a peer's next
+     * history_batch won't bring it back. The clipboard and the peers are left
+     * exactly as they were.
+     */
     fun deleteItem(item: SyncedItem) {
-        historyStore.remove(item.entry)
+        historyStore.delete(item.entry)
         refreshItems()
     }
 
+    /** [deleteItem] for everything - the items stay deleted the same way. */
     fun clearHistory() {
         historyStore.clear()
         refreshItems()

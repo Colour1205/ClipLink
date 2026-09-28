@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -72,6 +73,7 @@ fun MeScreen(
     var tailscale by remember(state.tailscaleIp) { mutableStateOf(state.tailscaleIp) }
     var deviceName by remember(state.deviceNameOverride) { mutableStateOf(state.deviceNameOverride) }
     val shownName = state.deviceNameOverride.ifBlank { state.defaultDeviceName }
+    var confirmingClear by remember { mutableStateOf(false) }
 
     LazyColumn(
         contentPadding = PaddingValues(
@@ -287,6 +289,17 @@ fun MeScreen(
             }
         }
 
+        item { SectionHeader("Synced history") }
+        item {
+            // Above the activity log rather than after it - the log runs to
+            // sixty lines, and nobody would scroll past them to find this.
+            SettingRow(
+                title = "Clear synced history",
+                subtitle = "Deletes every item from this phone. Your other devices keep theirs.",
+                onClick = { confirmingClear = true },
+            )
+        }
+
         item { SectionHeader("Activity") }
         if (state.log.isEmpty()) {
             item {
@@ -314,10 +327,31 @@ fun MeScreen(
                 }
             }
         }
+    }
 
-        item {
-            Spacer(Modifier.height(12.dp))
-            TextButton(onClick = actions.onClearHistory) { Text("Clear synced history") }
-        }
+    if (confirmingClear) {
+        AlertDialog(
+            onDismissRequest = { confirmingClear = false },
+            title = { Text("Clear synced history?") },
+            text = {
+                Text(
+                    "Every synced item is deleted from this phone, and won't come back from " +
+                        "your other devices. They keep their own copies.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmingClear = false
+                        actions.onClearHistory()
+                    },
+                ) {
+                    Text("Clear")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmingClear = false }) { Text("Cancel") }
+            },
+        )
     }
 }

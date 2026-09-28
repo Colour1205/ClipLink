@@ -496,7 +496,7 @@ struct MeView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Removes every synced item and any files saved for them from this iPhone. Paired devices keep their own copies, and may send them back when they next reconnect.")
+                Text("Removes every synced item and any files saved for them from this iPhone. Paired devices keep their own copies, but won't send these back.")
             }
             .meRow(transparency: transparency)
         } header: {

@@ -309,6 +309,11 @@ public final class FileStore {
         try? FileManager.default.createDirectory(at: exports, withIntermediateDirectories: true)
     }
 
+    /// Drops one blob's human-named copies (see exportCopy).
+    public func removeExport(_ hash: String) {
+        try? FileManager.default.removeItem(at: exports.appendingPathComponent(Self.key(hash), isDirectory: true))
+    }
+
     public static func sanitize(_ name: String) -> String {
         let bad = CharacterSet(charactersIn: "\\/:*?\"<>|\0").union(.newlines).union(.controlCharacters)
         var cleaned = name.components(separatedBy: bad).joined(separator: "_").trimmingCharacters(in: .whitespaces)
@@ -450,5 +455,100 @@ public final class HistoryStore {
 
     private func save() {
         file.write(entries.map { $0.jsonObject() })
+    }
+}
+
+// MARK: - Deleted-entries store
+
+/// Tombstones for items the user deleted or cleared on this device, so a
+/// peer - which resends its whole history on every connect - can't bring
+/// them back. Local only: nothing about a deletion goes on the wire. Windows
+/// keeps the same list in deleted{label}.json. Capped, oldest dropped first.
+public final class DeletedStore {
+    public static let cap = 2000
+
+    private struct Tombstone {
+        let key: String
+        /// Milliseconds since the epoch.
+        let deletedAt: Int64
+    }
+
+    private let file: JSONFile
+    private let lock: StoreLock
+    /// Oldest first.
+    private var tombstones: [Tombstone] = []
+    private var keys: Set<String> = []
+    private var stamp: Date?
+
+    public init(directory: URL) {
+        file = JSONFile(url: directory.appendingPathComponent("deleted_entries.json"))
+        lock = StoreLock.shared(for: directory)
+        load()
+    }
+
+    /// What an entry is remembered by: its signature, exactly as stored.
+    /// Every synced entry has one; the fallback only covers unsigned ones.
+    public static func key(of entry: ClipboardEntry) -> String {
+        if let signature = entry.signature, !signature.isEmpty { return signature }
+        return "\(entry.deviceId)|\(entry.type)|\(entry.timestamp)|\(ContentHash.sha256Hex(Data(entry.content.utf8)))"
+    }
+
+    public var count: Int { tombstones.count }
+
+    /// Re-reads the file (see TrustStore.reload).
+    public func reload() {
+        lock.withLock { load() }
+    }
+
+    public func contains(_ entry: ClipboardEntry) -> Bool {
+        removingDeleted([entry]).isEmpty
+    }
+
+    /// The entries that were NOT deleted here. Costs one stat per call; the
+    /// file is re-read only when the other process (the app, for the Share
+    /// extension's node) changed it meanwhile.
+    public func removingDeleted(_ entries: [ClipboardEntry]) -> [ClipboardEntry] {
+        if file.stamp() != stamp { reload() }
+        guard !keys.isEmpty else { return entries }
+        return entries.filter { !keys.contains(Self.key(of: $0)) }
+    }
+
+    /// Remembers these entries as deleted now. One deleted again moves up to
+    /// newest, so the cap evicts it last.
+    public func add(_ entries: [ClipboardEntry]) {
+        let added = entries.map(Self.key(of:))
+        guard !added.isEmpty else { return }
+        let now = Int64((Date().timeIntervalSince1970 * 1000).rounded())
+        lock.withLock {
+            if file.stamp() != stamp { load() }
+            let addedSet = Set(added)
+            tombstones.removeAll { addedSet.contains($0.key) }
+            var seen = Set<String>()
+            for key in added where seen.insert(key).inserted {
+                tombstones.append(Tombstone(key: key, deletedAt: now))
+            }
+            if tombstones.count > Self.cap {
+                tombstones.removeFirst(tombstones.count - Self.cap)
+            }
+            keys = Set(tombstones.map(\.key))
+            save()
+            stamp = file.stamp()
+        }
+    }
+
+    private func load() {
+        let raw = file.read() as? [[String: Any]] ?? [] // corrupt -> start empty
+        tombstones = raw.compactMap { obj -> Tombstone? in
+            guard let key = obj["Key"] as? String, !key.isEmpty else { return nil }
+            return Tombstone(key: key, deletedAt: (obj["DeletedAt"] as? NSNumber)?.int64Value ?? 0)
+        }
+        keys = Set(tombstones.map(\.key))
+        stamp = file.stamp()
+    }
+
+    private func save() {
+        file.write(tombstones.map { tombstone -> [String: Any] in
+            ["Key": tombstone.key, "DeletedAt": NSNumber(value: tombstone.deletedAt)]
+        })
     }
 }

@@ -109,6 +109,13 @@ Keychain identity, so it *is* this iPhone on the network. It sends
 immediately; devices it can't reach get the item from history on the next
 connection.
 
+**Deleting.** Delete (a card's menu or the item screen; both ask first)
+and *Me › Clear Synced History* are local: nothing goes on the wire, the clipboard is left
+alone, and peers keep their copies. Each removed item is remembered by its
+signature (the latest 2000, in the App Group, so the Share extension's node
+honours them too), and incoming entries and history batches skip those - so
+nothing deleted comes back when a peer reconnects and resends its history.
+
 **Device names.** Without Apple's user-assigned-device-name entitlement, iOS
 16+ reports every device as plain "iPhone" or "iPad", so that is what peers
 see until you set *Me › Device Name*. The app reads the OS name on the main

@@ -2,6 +2,7 @@ package io.uaena.cliplink.core
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.MessageDigest
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
@@ -41,6 +42,17 @@ data class ClipboardEntry(
     /** Stable identity for dedup/UI keys - matches what the history store compares. */
     val key: String get() = "$deviceId|${DotNetTimestamp.canonical(timestamp)}|$type"
 
+    /**
+     * What a deletion is recorded under (see DeletedStore), spelled the same
+     * on every platform: the signature text exactly as received, which no
+     * relay or timestamp repair ever changes. The fallback only covers an
+     * entry with no signature, and nothing unsigned is ever accepted from a
+     * peer.
+     */
+    val deletionKey: String
+        get() = signature?.takeIf { it.isNotEmpty() }
+            ?: "$deviceId|$type|$timestamp|${sha256Hex(content.toByteArray(Charsets.UTF_8))}"
+
     companion object {
         const val TYPE_TEXT = "text"
         const val TYPE_IMAGE = "image"
@@ -70,6 +82,9 @@ data class ClipboardEntry(
             entries.forEach { array.put(it.toJson()) }
             return array
         }
+
+        private fun sha256Hex(bytes: ByteArray): String =
+            MessageDigest.getInstance("SHA-256").digest(bytes).toHex()
     }
 }
 

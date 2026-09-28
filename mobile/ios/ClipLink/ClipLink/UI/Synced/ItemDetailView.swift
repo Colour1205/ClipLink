@@ -44,7 +44,7 @@ struct ItemDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("It's removed from this device only. Paired devices keep their own copies.")
+            Text("It's removed from this device only. Paired devices keep their own copies, but won't send it back.")
         }
         .onChange(of: item == nil) { gone in
             if gone { dismiss() }
