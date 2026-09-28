@@ -37,6 +37,7 @@ import { DeviceIdentity } from '../identity/DeviceIdentity';
 import { TrustStore, TrustedDevice } from '../identity/TrustStore';
 import { PassphraseKeyStore } from '../identity/PassphraseKeyStore';
 import { DeviceSettings } from '../identity/DeviceSettings';
+import { effectiveDeviceName, getLocalDeviceName, normalizeDeviceName } from '../identity/DeviceName';
 import { FileStore } from '../storage/FileStore';
 import { FilePayload } from '../storage/FilePayload';
 import { Discovery, PeerBeacon } from '../networking/Discovery';
@@ -105,6 +106,9 @@ function tapHaptic(): void {
 // device we haven't heard from recently is "trusted only".
 interface DeviceRow {
   deviceId: string;
+  // What the device calls itself (its latest beacon, else the trust store),
+  // or null if it never said - see deviceRowTitle.
+  name: string | null;
   // Every address this peer is reachable at, de-duplicated: the LAN IP the
   // beacon actually arrived from, the address the beacon advertises (which
   // is the Tailscale/off-LAN one when set), and whatever the trust store
@@ -117,6 +121,31 @@ interface DeviceRow {
   discovered: boolean;
   tcpPort: number | null;
   connected: boolean;
+}
+
+// How a device without a known name is shown - same on every platform.
+function shortDeviceId(deviceId: string): string {
+  return `${deviceId.slice(0, 12)}…`;
+}
+
+function deviceRowTitle(row: DeviceRow): string {
+  return row.name !== null ? row.name : shortDeviceId(row.deviceId);
+}
+
+// Fixed order for the Devices list: trusted before merely discovered, then
+// by name (case-insensitive, named before unnamed), then by id. Nothing
+// that changes on its own - last beacon, connection state, arrival order -
+// takes part, so a device coming online never makes the list jump.
+function compareDeviceRows(a: DeviceRow, b: DeviceRow): number {
+  if (a.trusted !== b.trusted) return a.trusted ? -1 : 1;
+  if (a.name !== null && b.name === null) return -1;
+  if (a.name === null && b.name !== null) return 1;
+  if (a.name !== null && b.name !== null) {
+    const an: string = a.name.toLowerCase();
+    const bn: string = b.name.toLowerCase();
+    if (an !== bn) return an < bn ? -1 : 1;
+  }
+  return a.deviceId < b.deviceId ? -1 : (a.deviceId > b.deviceId ? 1 : 0);
 }
 
 // A single synced clipboard item for the list UI - built from a verified
@@ -147,6 +176,8 @@ interface SyncedItem {
 interface PairingInfo {
   PublicKey: string;
   Address?: string;
+  // Optional: the device's display name. Codes from older builds lack it.
+  Name?: string;
 }
 
 // How a dial to a peer ended (Index's connectToAddress):
@@ -367,6 +398,13 @@ struct Index {
   // for why this can't be auto-detected on HarmonyOS the way Windows does.
   @State tailscaleIp: string = '';
   @State savingTailscaleIp: boolean = false;
+  // This device's display name (see DeviceName.ets): the system's, and the
+  // user's saved override ('' = use the system's). ownDeviceName() picks.
+  @State systemDeviceName: string = '';
+  @State deviceNameOverride: string = '';
+  // What's typed on the Device name screen, saved by saveDeviceName.
+  @State deviceNameInput: string = '';
+  @State savingDeviceName: boolean = false;
   // Mirror of DeviceSettings.getAutoApply, pushed into SyncManager too.
   @State autoApply: boolean = true;
   // DeviceSettings.getNoticeNewCopies - see onPageShow.
@@ -411,7 +449,7 @@ struct Index {
   // Which Me screen is showing - a real separate screen per section
   // (pairing/QR, passcode, diagnostics, activity log) rather than one
   // combined page, per request.
-  @State meScreen: 'main' | 'pairing' | 'passcode' | 'network' | 'diagnostics' | 'log' = 'main';
+  @State meScreen: 'main' | 'pairing' | 'passcode' | 'network' | 'devicename' | 'diagnostics' | 'log' = 'main';
   // True only while the Pairing screen is open - see setMeScreen. This is
   // the live "I'm expecting to pair right now" signal broadcast in the LAN
   // beacon and checked by PeerConnection.create's relaxed trust gate; a
@@ -482,6 +520,7 @@ struct Index {
   private pairingScroller: Scroller = new Scroller();
   private passcodeScroller: Scroller = new Scroller();
   private networkScroller: Scroller = new Scroller();
+  private deviceNameScroller: Scroller = new Scroller();
   private diagnosticsScroller: Scroller = new Scroller();
   private logScroller: Scroller = new Scroller();
   // Deterministic for a given (key, deviceId) pair - computed once whenever
@@ -500,9 +539,12 @@ struct Index {
       this.bottomGlowOn = this.deviceSettings.getBottomGlowSync(ctx);
       this.cardTransparency = this.deviceSettings.getCardTransparencySync(ctx);
       this.watcher.restoreSeen(this.deviceSettings.getLastSeenClipCountSync(ctx));
+      this.deviceNameOverride = this.deviceSettings.getDeviceNameSync(ctx);
     } catch (e) {
       // unreadable prefs - keep the defaults
     }
+    // Here rather than later so the very first beacon already carries it.
+    this.systemDeviceName = getLocalDeviceName(getContext(this) as common.UIAbilityContext);
 
     // Initial (home) route on each stack, pushed with animation off (the
     // `false` second argument) - matches Huawei's own documented pattern
@@ -574,7 +616,7 @@ struct Index {
         .then((addr: socket.NetAddress) => addr.address)
         .catch(() => null)
         .then((remoteAddress: string | null) => {
-          PeerConnection.create(new TcpSocketConnectionAdapter(conn), identity, this.trustStore, context, this.pairingOpen, this.passphraseKeyStore)
+          PeerConnection.create(new TcpSocketConnectionAdapter(conn), identity, this.trustStore, context, this.pairingOpen, this.passphraseKeyStore, this.ownDeviceName())
             .then((peerConn: PeerConnection | null) => {
               if (peerConn === null) {
                 conn.close().catch(() => { /* already closed - fine */ });
@@ -593,10 +635,13 @@ struct Index {
       if (existingIndex === -1) {
         this.receivedBeacons = [beacon, ...this.receivedBeacons].slice(0, 30);
       } else {
+        // A known name is never forgotten over a beacon that lacks one.
+        if (beacon.name === null) beacon.name = this.receivedBeacons[existingIndex].name;
         const updated = this.receivedBeacons.slice();
         updated[existingIndex] = beacon;
         this.receivedBeacons = updated;
       }
+      void this.maybeRememberPeerName(beacon.deviceId, beacon.name);
       void this.maybeAutoTrustViaPassphrase(beacon);
       void this.maybeAutoConnect(beacon);
       void this.maybeConnectForPairing(beacon);
@@ -710,7 +755,15 @@ struct Index {
       () => this.cachedProof,
       () => this.tailscaleIp.length > 0 ? this.tailscaleIp : null,
       () => this.pairingOpen,
+      () => this.ownDeviceName(),
     );
+  }
+
+  // The name this device sends in beacons, handshakes and its pairing code:
+  // the Me screen's override if set, else the system's. Read fresh each
+  // time, so a rename reaches the next beacon/handshake without a restart.
+  private ownDeviceName(): string | null {
+    return effectiveDeviceName(this.deviceNameOverride, this.systemDeviceName);
   }
 
   aboutToDisappear(): void {
@@ -758,7 +811,7 @@ struct Index {
     this.setMeScreen('pairing');
   }
 
-  private setMeScreen(screen: 'main' | 'pairing' | 'passcode' | 'network' | 'diagnostics' | 'log'): void {
+  private setMeScreen(screen: 'main' | 'pairing' | 'passcode' | 'network' | 'devicename' | 'diagnostics' | 'log'): void {
     const previous = this.meScreen;
     this.meScreen = screen;
     this.pairingOpen = screen === 'pairing';
@@ -783,6 +836,30 @@ struct Index {
   private async refreshTrustedDevices(): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
     this.trustedDevices = await this.trustStore.getAllTrustedDevices(context);
+  }
+
+  // Keeps a trusted device's stored name current from its beacons, so the
+  // Devices list still names it once it's off the LAN. Checked against the
+  // in-memory list first - this runs on every beacon, every 2 seconds.
+  private async maybeRememberPeerName(deviceId: string, name: string | null): Promise<void> {
+    if (name === null) return;
+    const known: TrustedDevice | undefined = this.trustedDevices.find((d: TrustedDevice) => d.publicKey === deviceId);
+    if (known === undefined || known.name === name) return;
+    const context = getContext(this) as common.UIAbilityContext;
+    if (await this.trustStore.rememberName(context, deviceId, name)) {
+      await this.refreshTrustedDevices();
+    }
+  }
+
+  // A peer's name for prompts and toasts: the one just received if given,
+  // else the latest from its beacon or trust record, else its short id.
+  private peerLabel(deviceId: string, name: string | null = null): string {
+    if (name !== null && name.length > 0) return name;
+    const beacon: PeerBeacon | undefined = this.receivedBeacons.find((b: PeerBeacon) => b.deviceId === deviceId);
+    if (beacon !== undefined && beacon.name !== null) return beacon.name;
+    const known: TrustedDevice | undefined = this.trustedDevices.find((d: TrustedDevice) => d.publicKey === deviceId);
+    if (known !== undefined && known.name !== undefined && known.name.length > 0) return known.name;
+    return shortDeviceId(deviceId);
   }
 
   // The actual "foreground lifecycle" requirement: connect automatically
@@ -868,7 +945,7 @@ struct Index {
         // Address over Tailscale). Persist it so future reconnects don't
         // need the passphrase proof again.
         const context = getContext(this) as common.UIAbilityContext;
-        void this.trustStore.trust(context, peerConn.peerDeviceId, address ?? undefined).then(() => { void this.refreshTrustedDevices(); });
+        void this.trustStore.trust(context, peerConn.peerDeviceId, address ?? undefined, peerConn.peerName ?? undefined).then(() => { void this.refreshTrustedDevices(); });
         this.log(`auto-paired via passcode: ${peerConn.peerDeviceId.slice(0, 12)}...`);
       } else {
         if (address !== null) {
@@ -880,8 +957,12 @@ struct Index {
           // when the accept loop didn't capture an address at all (an old
           // bug - it always passed null), instead of leaving it permanently
           // stuck with no address to reconnect off-LAN with.
+          // Its handshake's name rides along; trust() never erases a
+          // stored name when this one is unknown.
           const context = getContext(this) as common.UIAbilityContext;
-          void this.trustStore.trust(context, peerConn.peerDeviceId, address).then(() => { void this.refreshTrustedDevices(); });
+          void this.trustStore.trust(context, peerConn.peerDeviceId, address, peerConn.peerName ?? undefined).then(() => { void this.refreshTrustedDevices(); });
+        } else if (peerConn.peerName !== null) {
+          void this.maybeRememberPeerName(peerConn.peerDeviceId, peerConn.peerName);
         }
         this.log(`connected: ${peerConn.peerDeviceId.slice(0, 12)}...`);
       }
@@ -899,7 +980,7 @@ struct Index {
     this.pendingPairingAddress = address ?? '';
     this.getUIContext().showAlertDialog({
       title: 'Pairing request',
-      message: `${peerConn.peerDeviceId.slice(0, 20)}... wants to pair with this device. Only accept if you expect this - your Pairing screen being open is what let this request reach you at all.`,
+      message: `${this.peerLabel(peerConn.peerDeviceId, peerConn.peerName)} wants to pair with this device. Only accept if you expect this - your Pairing screen being open is what let this request reach you at all.`,
       primaryButton: { value: 'Accept', action: () => { void this.acceptPairing(); } },
       secondaryButton: { value: 'Reject', action: () => { this.rejectPairing(); } },
       cancel: () => { this.rejectPairing(); },
@@ -920,7 +1001,7 @@ struct Index {
     }
     const context = getContext(this) as common.UIAbilityContext;
     const address = this.pendingPairingAddress.length > 0 ? this.pendingPairingAddress : undefined;
-    await this.trustStore.trust(context, conn.peerDeviceId, address);
+    await this.trustStore.trust(context, conn.peerDeviceId, address, conn.peerName ?? undefined);
     await this.refreshTrustedDevices();
     this.pendingPairingConn = null;
     this.pendingPairingPeerId = '';
@@ -942,7 +1023,7 @@ struct Index {
       const client = await connectTcp(beacon.senderIp, beacon.tcpPort);
       const identity = new DeviceIdentity();
       const context = getContext(this) as common.UIAbilityContext;
-      const conn = await PeerConnection.create(new TcpSocketAdapter(client), identity, this.trustStore, context, this.pairingOpen, this.passphraseKeyStore);
+      const conn = await PeerConnection.create(new TcpSocketAdapter(client), identity, this.trustStore, context, this.pairingOpen, this.passphraseKeyStore, this.ownDeviceName());
       if (conn === null) {
         client.close().catch(() => { /* already closed - fine */ });
         this.log(`connect failed: ${beacon.deviceId.slice(0, 12)}...`);
@@ -1028,7 +1109,7 @@ struct Index {
       const identity = new DeviceIdentity();
       const context = getContext(this) as common.UIAbilityContext;
       const report = new HandshakeReport();
-      const conn = await PeerConnection.create(new TcpSocketAdapter(client), identity, this.trustStore, context, this.pairingOpen, this.passphraseKeyStore, report);
+      const conn = await PeerConnection.create(new TcpSocketAdapter(client), identity, this.trustStore, context, this.pairingOpen, this.passphraseKeyStore, this.ownDeviceName(), report);
       if (conn === null) {
         netLog(`connectToAddress ${address}:${port}: TCP connected but no usable handshake (${report.timedOut ? 'no answer' : 'peer closed, or refused locally'})`);
         client.close().catch(() => { /* already closed - fine */ });
@@ -1071,13 +1152,15 @@ struct Index {
   // responsive when the user just tapped Trust specifically to connect.
   async trustAndConnect(beacon: PeerBeacon): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
-    await this.trustStore.trust(context, beacon.deviceId, beacon.senderIp);
+    await this.trustStore.trust(context, beacon.deviceId, beacon.senderIp, beacon.name ?? undefined);
     await this.refreshTrustedDevices();
     await this.connectToBeacon(beacon);
   }
 
   async untrustDevice(deviceId: string): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
+    // Before the record (and the name it may hold) is gone.
+    const label: string = this.peerLabel(deviceId);
     await this.trustStore.untrust(context, deviceId);
     await this.refreshTrustedDevices();
     // Explicit confirmation matters here: a just-untrusted device doesn't
@@ -1086,16 +1169,21 @@ struct Index {
     // with Remove) - without this, tapping Remove on a device that's still
     // on the LAN looks like it silently did nothing.
     this.log(`untrusted ${deviceId.slice(0, 12)}...`);
-    promptAction.showToast({ message: `Removed ${deviceId.slice(0, 12)}...` });
+    promptAction.showToast({ message: `Removed ${label}` });
   }
 
-  // Recomputes the QR/manual pairing payload - called whenever ownDeviceId
-  // or tailscaleIp changes, since the QR code needs to reflect whichever
-  // is current rather than whatever was true when the screen first opened.
+  // Recomputes the QR/manual pairing payload - called whenever ownDeviceId,
+  // tailscaleIp or the device name changes, since the QR code needs to
+  // reflect whichever is current rather than whatever was true when the
+  // screen first opened.
   private refreshPairingPayload(): void {
     const pairingInfo: PairingInfo = { PublicKey: this.ownDeviceId };
     if (this.tailscaleIp.length > 0) {
       pairingInfo.Address = this.tailscaleIp;
+    }
+    const name: string | null = this.ownDeviceName();
+    if (name !== null) {
+      pairingInfo.Name = name;
     }
     this.myPairingPayload = JSON.stringify(pairingInfo);
   }
@@ -1215,6 +1303,28 @@ struct Index {
     }
   }
 
+  // Empty saves "no override" - the system's name is used again. Trimmed and
+  // capped here, so the field shows exactly what will be sent. Beacons read
+  // it fresh (see startDiscovery); the next handshake picks it up too.
+  async saveDeviceName(): Promise<void> {
+    if (this.savingDeviceName) return; // already running - ignore a double-tap
+    this.savingDeviceName = true;
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const saved: string = normalizeDeviceName(this.deviceNameInput) ?? '';
+      await this.deviceSettings.setDeviceName(context, saved);
+      this.deviceNameOverride = saved;
+      this.deviceNameInput = saved;
+      this.refreshPairingPayload();
+      promptAction.showToast({ message: saved.length > 0 ? 'Device name saved.' : 'Using the system device name.' });
+    } catch (e) {
+      const be = e as BusinessError;
+      promptAction.showToast({ message: `Failed to save: ${be.message ?? e}`, duration: 3000 });
+    } finally {
+      this.savingDeviceName = false;
+    }
+  }
+
   private async refreshPassphraseState(): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
     this.hasPassphrase = await this.passphraseKeyStore.hasPassphrase(context);
@@ -1272,7 +1382,7 @@ struct Index {
     const verified = await this.passphraseKeyStore.verifyProof(key, beacon.deviceId, beacon.proof);
     if (!verified) return;
     this.log(`auto-trusting ${beacon.deviceId.slice(0, 12)}... (shared passcode)`);
-    await this.trustStore.trust(context, beacon.deviceId, beacon.address ?? undefined);
+    await this.trustStore.trust(context, beacon.deviceId, beacon.address ?? undefined, beacon.name ?? undefined);
     await this.refreshTrustedDevices();
   }
 
@@ -1369,8 +1479,11 @@ struct Index {
         return;
       }
       const address: string | undefined = pairingInfo !== null && typeof pairingInfo.Address === 'string' ? pairingInfo.Address : undefined;
+      // Optional - codes from older builds carry no name.
+      const sentName: string | undefined = pairingInfo !== null ? pairingInfo.Name : undefined;
+      const scannedName: string | null = typeof sentName === 'string' ? normalizeDeviceName(sentName) : null;
       if (address === undefined) {
-        this.scanStatus = `${publicKey.slice(0, 12)}... has no address in its code - if it's on the same network, just keep this screen open and its beacon will trigger pairing automatically.`;
+        this.scanStatus = `${this.peerLabel(publicKey, scannedName)} has no address in its code - if it's on the same network, just keep this screen open and its beacon will trigger pairing automatically.`;
         return;
       }
       const candidates = this.addressCandidatesFor(publicKey, address);
@@ -1909,6 +2022,7 @@ struct Index {
     for (const t of this.trustedDevices) {
       const row: DeviceRow = {
         deviceId: t.publicKey,
+        name: t.name !== undefined && t.name.length > 0 ? t.name : null,
         addresses: [],
         address: null,
         trusted: true,
@@ -1916,7 +2030,6 @@ struct Index {
         tcpPort: null,
         connected: this.syncManager?.isConnected(t.publicKey) ?? false,
       };
-      addAddress(row, t.address);
       rows.set(t.publicKey, row);
     }
     for (const b of this.receivedBeacons) {
@@ -1925,6 +2038,7 @@ struct Index {
       if (row === undefined) {
         row = {
           deviceId: b.deviceId,
+          name: null,
           addresses: [],
           address: null,
           trusted: false,
@@ -1937,12 +2051,21 @@ struct Index {
       row.discovered = true;
       row.tcpPort = b.tcpPort;
       row.connected = this.syncManager?.isConnected(b.deviceId) ?? false;
-      // senderIp is where the packet really came from; b.address is what
-      // the peer advertises for itself (its Tailscale IP when configured).
+      // The beacon is the latest word on its name.
+      if (b.name !== null) row.name = b.name;
+      // senderIp is where the packet really came from (the LAN address, so
+      // it goes first); b.address is what the peer advertises for itself
+      // (its Tailscale IP when configured).
       addAddress(row, b.senderIp);
       addAddress(row, b.address);
     }
-    return Array.from(rows.values());
+    // The trust store's cached address (last pairing/connection address)
+    // after the live ones - it may be the same as either, or older.
+    for (const t of this.trustedDevices) {
+      const row = rows.get(t.publicKey);
+      if (row !== undefined) addAddress(row, t.address);
+    }
+    return Array.from(rows.values()).sort(compareDeviceRows);
   }
 
   private syncedItemFor(entry: ClipboardEntry, fromPeer: boolean): SyncedItem {
@@ -3191,26 +3314,21 @@ struct Index {
       .height(28)
 
       Column({ space: 2 }) {
-        if (row.addresses.length === 0) {
-          Text('Unknown address')
-            .fontSize(15)
-            .fontWeight(FontWeight.Medium)
-            .fontColor($r('sys.color.font_primary'))
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-        } else {
-          // One line per address - a peer can legitimately be reachable at
-          // both a LAN IP and a Tailscale IP, and which one it is paired on
-          // matters when diagnosing a connection.
-          ForEach(row.addresses, (addr: string) => {
-            Text(addr)
-              .fontSize(15)
-              .fontWeight(FontWeight.Medium)
-              .fontColor($r('sys.color.font_primary'))
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-          }, (addr: string) => addr)
-        }
+        // The name it gives itself, else its short id.
+        Text(deviceRowTitle(row))
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('sys.color.font_primary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        // Every address, LAN first - a peer can legitimately be reachable at
+        // both a LAN IP and a Tailscale IP, and which one it is paired on
+        // matters when diagnosing a connection.
+        Text(row.addresses.length > 0 ? row.addresses.join(' · ') : 'Unknown address')
+          .fontSize(12)
+          .fontColor($r('sys.color.font_secondary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(row.connected ? 'Connected' : row.trusted ? 'Trusted · not connected' : 'Discovered nearby')
           .fontSize(12)
           .fontColor(row.connected ? $r('sys.color.confirm') : $r('sys.color.font_secondary'))
@@ -3305,8 +3423,8 @@ struct Index {
           // status, leaving the card frozen at whatever it was first
           // rendered with (while the live connectedCount text above kept
           // updating) - same failure mode already documented on
-          // SyncedItem.id above.
-        }, (row: DeviceRow) => `${row.deviceId}:${row.connected}:${row.trusted}:${row.discovered}:${row.addresses.join(',')}`)
+          // SyncedItem.id above. The name is in it for the same reason.
+        }, (row: DeviceRow) => `${row.deviceId}:${row.connected}:${row.trusted}:${row.discovered}:${row.addresses.join(',')}:${row.name ?? ''}`)
       }
     }
     // Single column, not the old 2-column WaterFlow: this list is
@@ -3416,7 +3534,12 @@ struct Index {
         .height(22)
       Text(opts.title).fontSize(14).layoutWeight(1)
       if (opts.value.length > 0) {
+        // Capped so a long value (a device name can be 64 characters)
+        // ellipsizes instead of squeezing the title out.
         Text(opts.value).fontSize(13).fontColor($r('sys.color.font_secondary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .constraintSize({ maxWidth: '55%' })
       }
       if (opts.navigates) {
         Image($r('app.media.ic_chevron_right'))
@@ -3623,6 +3746,16 @@ struct Index {
       .hideBackButton(false)
       .onBackPressed(() => { this.setMeScreen('main'); return true; })
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    } else if (name === 'devicename') {
+      HdsNavDestination() {
+        this.deviceNameScreenContent()
+      }
+      .titleBar(this.hdsTitleBar('Device name', false, []))
+      .titleMode(HdsNavDestinationTitleMode.MINI)
+      .bindToScrollable([this.deviceNameScroller])
+      .hideBackButton(false)
+      .onBackPressed(() => { this.setMeScreen('main'); return true; })
+      .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
     } else if (name === 'diagnostics') {
       HdsNavDestination() {
         this.diagnosticsScreenContent()
@@ -3675,6 +3808,9 @@ struct Index {
             .width('100%')
             .alignItems(HorizontalAlign.Start)
             .padding(14)
+            Divider().color($r('sys.color.comp_divider'))
+            // What other devices list this one as - see DeviceName.ets.
+            this.settingsRow({ title: 'Device name', value: this.ownDeviceName() ?? 'Not set', navigates: true, icon: $r('app.media.ic_device_phone'), onTap: () => { this.deviceNameInput = this.deviceNameOverride; this.setMeScreen('devicename'); } })
             Divider().color($r('sys.color.comp_divider'))
             this.settingsRow({ title: 'Copy device ID', value: '', navigates: false, icon: $r('app.media.ic_menu_copy'), onTap: () => { void this.copyDeviceId(); } })
           }
@@ -4001,6 +4137,49 @@ struct Index {
     .height('100%')
     .align(Alignment.Top)
     .edgeEffect(EdgeEffect.Spring)    .transition(TransitionEffect.OPACITY.combine(TransitionEffect.move(TransitionEdge.END)))
+    .backgroundColor($r('sys.color.background_secondary'))
+    .linearGradient(this.bottomGlow())
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+  }
+
+  // This device's display name - what other devices' lists, pairing prompts
+  // and toasts show for it (see DeviceName.ets). Same shape as the Tailscale
+  // IP screen above; the system's name is the placeholder, so leaving the
+  // field empty visibly means "use that".
+  @Builder
+  deviceNameScreenContent() {
+    Scroll(this.deviceNameScroller) {
+      Column({ space: 16 }) {
+        Column({ space: 10 }) {
+          Text('Other devices show this name instead of this device\'s ID. Leave it empty to use the name from system settings.').fontSize(12).fontColor($r('sys.color.font_secondary'))
+          TextInput({ placeholder: this.systemDeviceName.length > 0 ? this.systemDeviceName : 'Device name', text: this.deviceNameInput })
+            .type(InputType.Normal)
+            .fontSize(14)
+            .enabled(!this.savingDeviceName)
+            .onChange((value: string) => { this.deviceNameInput = value; })
+          Button(this.savingDeviceName ? 'Saving...' : 'Save')
+            .fontSize(14)
+            .fontColor(this.accent())
+            .backgroundColor(this.accentTint())
+            .systemMaterial(this.buttonMaterial())
+            .enabled(!this.savingDeviceName)
+            .onClick(() => { tapHaptic(); void this.saveDeviceName(); })
+        }
+        .width('100%')
+        .padding(16)
+        .borderRadius(16)
+        .backgroundColor(this.cardFill())
+        .alignItems(HorizontalAlign.Start)
+      }
+      .width('100%')
+      .padding({ left: 16, right: 16, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE })
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+    .height('100%')
+    .align(Alignment.Top)
+    .edgeEffect(EdgeEffect.Spring)
+    .transition(TransitionEffect.OPACITY.combine(TransitionEffect.move(TransitionEdge.END)))
     .backgroundColor($r('sys.color.background_secondary'))
     .linearGradient(this.bottomGlow())
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])

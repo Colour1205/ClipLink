@@ -109,6 +109,12 @@ Keychain identity, so it *is* this iPhone on the network. It sends
 immediately; devices it can't reach get the item from history on the next
 connection.
 
+**Device names.** Without Apple's user-assigned-device-name entitlement, iOS
+16+ reports every device as plain "iPhone" or "iPad", so that is what peers
+see until you set *Me › Device Name*. The app reads the OS name on the main
+actor and stores it, with that setting, in the App Group - the Share extension
+and background rounds send the same name without touching UIKit.
+
 **Files.** Hashes go out UPPERCASE: Windows' echo suppression compares
 uppercase hex, and a lowercase hash makes it re-broadcast your file. Blobs are
 stored lowercase-keyed; peers' own spellings are always echoed back

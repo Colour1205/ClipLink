@@ -2,13 +2,16 @@ using System.Text.Json;
 
 namespace ClipboardTray;
 
-// Lists every trusted device, marks which ones are currently connected, and
-// lets you untrust one — the missing "revoke" side of pairing.
+// Lists every trusted device (then any untrusted one currently beaconing on
+// the LAN) by name with the addresses it's reachable at, marks which ones
+// are currently connected, and lets you untrust one — the missing "revoke"
+// side of pairing. Hover a row for its full device id.
 public class ManageDevicesForm : Form
 {
     private readonly IpcClient ipcClient;
     private readonly ListView listView;
     private readonly Label statusLabel;
+    private readonly Button untrustButton;
     private readonly System.Windows.Forms.Timer pollTimer;
     // Guards against overlapping polls - without it, a Tick firing while a
     // previous RefreshDevices() is still awaiting (e.g. the daemon isn't
@@ -22,7 +25,7 @@ public class ManageDevicesForm : Form
         this.ipcClient = ipcClient;
         Text = "Manage Devices";
         Icon = AppIcon.Window;
-        Width = 480;
+        Width = 640;
         Height = 400;
         StartPosition = FormStartPosition.CenterScreen;
 
@@ -39,12 +42,15 @@ public class ManageDevicesForm : Form
         {
             Dock = DockStyle.Fill,
             View = View.Details,
-            FullRowSelect = true
+            FullRowSelect = true,
+            MultiSelect = false,
+            ShowItemToolTips = true
         };
-        listView.Columns.Add("Device", 320);
-        listView.Columns.Add("Status", 110);
+        listView.Columns.Add("Device", 200);
+        listView.Columns.Add("Addresses", 230);
+        listView.Columns.Add("Status", 170);
 
-        var untrustButton = new Button
+        untrustButton = new Button
         {
             Text = "Untrust Selected",
             Dock = DockStyle.Bottom,
@@ -52,11 +58,13 @@ public class ManageDevicesForm : Form
         };
         untrustButton.Click += async (s, e) =>
         {
-            if (listView.SelectedItems.Count == 0) return;
-            string key = (string)listView.SelectedItems[0].Tag!;
-            await ipcClient.Send(new IpcRequest("untrust_device", key));
+            if (SelectedDevice() is not { Trusted: true } device) return;
+            await ipcClient.Send(new IpcRequest("untrust_device", device.PublicKey));
             await RefreshDevices();
         };
+        // Only a trusted device can be untrusted - a discovered one has
+        // nothing to revoke.
+        listView.SelectedIndexChanged += (s, e) => untrustButton.Enabled = SelectedDevice()?.Trusted != false;
 
         Controls.Add(listView);
         Controls.Add(statusLabel);
@@ -74,10 +82,16 @@ public class ManageDevicesForm : Form
         Load += async (s, e) => { await RefreshDevices(); pollTimer.Start(); };
     }
 
-    // Rebuilding the whole list every poll (rather than diffing in place)
-    // does lose the current selection - acceptable here since this list is
-    // short and mostly glanced at, not actively navigated with the keyboard
-    // between polls.
+    private DeviceListing? SelectedDevice() =>
+        listView.SelectedItems.Count > 0 ? listView.SelectedItems[0].Tag as DeviceListing : null;
+
+    // The daemon's list_devices order is stable - never by connection state
+    // or last-seen time - so a poll usually returns the same devices in the
+    // same order, and those rows are just updated in place: rebuilding them
+    // every 1.5s would reset the scroll position and close the hover tooltip
+    // (the only place the full device id shows). Only when a device comes or
+    // goes, or a name changes its place, is the list rebuilt, re-selecting
+    // the previously selected device afterwards.
     private async Task RefreshDevices()
     {
         if (isRefreshing) return; // previous poll still in flight - don't pile another on top
@@ -94,37 +108,85 @@ public class ManageDevicesForm : Form
 
     private async Task RefreshDevicesCore()
     {
-        var trustedResponse = await ipcClient.Send(new IpcRequest("list_trusted"));
-        var connectedResponse = await ipcClient.Send(new IpcRequest("list_connections"));
+        var response = await ipcClient.Send(new IpcRequest("list_devices"));
 
-        if (trustedResponse == null || !trustedResponse.Success)
+        if (response == null || !response.Success)
         {
             // Inline status text, not a MessageBox - this runs on every poll
             // tick while the daemon is unreachable, and a modal dialog per
             // tick is exactly what caused the earlier cascade. The list
             // itself is left as-is (not cleared) so a transient hiccup
             // doesn't blank it out.
-            statusLabel.Text = "Could not reach the daemon - is it running?";
+            statusLabel.Text = response == null
+                ? "Could not reach the daemon - is it running?"
+                : "The daemon is out of date - restart it.";
             statusLabel.Visible = true;
             return;
         }
         statusLabel.Visible = false;
 
-        listView.Items.Clear();
-        var trusted = trustedResponse.Data != null
-            ? JsonSerializer.Deserialize<List<TrustedDevice>>(trustedResponse.Data) ?? new()
-            : new List<TrustedDevice>();
-        var connected = connectedResponse?.Data != null
-            ? JsonSerializer.Deserialize<List<string>>(connectedResponse.Data) ?? new()
-            : new List<string>();
+        var devices = response.Data != null
+            ? JsonSerializer.Deserialize<List<DeviceListing>>(response.Data) ?? new()
+            : new List<DeviceListing>();
 
-        foreach (var device in trusted)
+        bool sameRows = listView.Items.Count == devices.Count
+            && devices.Select((device, i) => (listView.Items[i].Tag as DeviceListing)?.PublicKey == device.PublicKey).All(same => same);
+        if (sameRows)
         {
-            string shortKey = device.PublicKey.Length > 28 ? device.PublicKey[..28] + "..." : device.PublicKey;
-            var item = new ListViewItem(shortKey);
-            item.SubItems.Add(connected.Contains(device.PublicKey) ? "Connected" : "Not connected");
-            item.Tag = device.PublicKey;
-            listView.Items.Add(item);
+            for (int i = 0; i < devices.Count; i++)
+            {
+                FillRow(listView.Items[i], devices[i]);
+            }
         }
+        else
+        {
+            string? selectedKey = SelectedDevice()?.PublicKey;
+            listView.BeginUpdate();
+            try
+            {
+                listView.Items.Clear();
+                foreach (var device in devices)
+                {
+                    var item = new ListViewItem { ToolTipText = device.PublicKey };
+                    item.SubItems.Add("");
+                    item.SubItems.Add("");
+                    FillRow(item, device);
+                    listView.Items.Add(item);
+                    if (device.PublicKey == selectedKey)
+                    {
+                        item.Selected = true;
+                        item.Focused = true;
+                    }
+                }
+            }
+            finally
+            {
+                listView.EndUpdate();
+            }
+        }
+        // Also when the selected row just went away (no selection event
+        // is guaranteed for that).
+        untrustButton.Enabled = SelectedDevice()?.Trusted != false;
+    }
+
+    // Only assigns text that actually changed - an unchanged poll then
+    // doesn't touch the native control at all.
+    private static void FillRow(ListViewItem item, DeviceListing device)
+    {
+        SetText(item.SubItems[0], DeviceLabel.Of(device.PublicKey, device.Name));
+        SetText(item.SubItems[1], string.Join(" · ", device.Addresses ?? new List<string>()));
+        SetText(item.SubItems[2], StatusText(device));
+        item.Tag = device;
+    }
+
+    private static void SetText(ListViewItem.ListViewSubItem subItem, string text)
+    {
+        if (subItem.Text != text) subItem.Text = text;
+    }
+
+    private static string StatusText(DeviceListing device)
+    {
+        if (device.Trusted) return device.Connected ? "Connected" : "Not connected";
+        return device.PairingOpen ? "Discovered - pairing open" : "Discovered";
     }
 }

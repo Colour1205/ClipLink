@@ -19,11 +19,28 @@ object Protocol {
     const val TYPE_FILE_CHUNK = "file_chunk"
     const val TYPE_FILE_REQUEST = "file_request"
 
+    /** Display names travel capped at this many Unicode code points, on every platform. */
+    const val MAX_DEVICE_NAME_LENGTH = 64
+
     fun envelope(type: String, payload: String): String =
         JSONObject().apply {
             put("Type", type)
             put("Payload", payload)
         }.toString()
+
+    /**
+     * Trimmed and capped at [MAX_DEVICE_NAME_LENGTH] code points, or null
+     * when nothing is left. Applied to our own name before it goes out AND to
+     * every name that comes in - a peer's name is self-claimed and a handshake
+     * line has no length limit of its own. Counted in code points rather than
+     * UTF-16 units so the cut can never split a surrogate pair.
+     */
+    fun normalizeDeviceName(raw: String?): String? {
+        val trimmed = raw?.trim().orEmpty()
+        if (trimmed.isEmpty()) return null
+        if (trimmed.codePointCount(0, trimmed.length) <= MAX_DEVICE_NAME_LENGTH) return trimmed
+        return trimmed.substring(0, trimmed.offsetByCodePoints(0, MAX_DEVICE_NAME_LENGTH))
+    }
 }
 
 /** `{Type, Payload}` - Payload is itself a JSON *string*, not a nested object. */
@@ -128,12 +145,19 @@ data class HandshakeMessage(
     val identityPublicKey: String,
     val signature: String,
     val passphraseProof: String?,
+    /**
+     * The sender's display name. Optional on the wire - older builds neither
+     * send it nor expect it - and self-claimed, so it is only ever a label,
+     * never part of any trust decision.
+     */
+    val deviceName: String? = null,
 ) {
     fun toJson(): String = JSONObject().apply {
         put("EphemeralPublicKey", ephemeralPublicKey)
         put("IdentityPublicKey", identityPublicKey)
         put("Signature", signature)
         passphraseProof?.let { put("PassphraseProof", it) }
+        Protocol.normalizeDeviceName(deviceName)?.let { put("DeviceName", it) }
     }.toString()
 
     companion object {
@@ -150,6 +174,7 @@ data class HandshakeMessage(
                     identityPublicKey = identity,
                     signature = signature,
                     passphraseProof = obj.optStringOrNull("PassphraseProof"),
+                    deviceName = Protocol.normalizeDeviceName(obj.optStringOrNull("DeviceName")),
                 )
             }
         } catch (e: Exception) {
@@ -158,11 +183,12 @@ data class HandshakeMessage(
     }
 }
 
-/** What a QR code / manual pairing string carries. */
-data class PairingInfo(val publicKey: String, val address: String?) {
+/** What a QR code / manual pairing string carries. [name] is optional - older codes have none. */
+data class PairingInfo(val publicKey: String, val address: String?, val name: String? = null) {
     fun toJson(): String = JSONObject().apply {
         put("PublicKey", publicKey)
         address?.takeIf { it.isNotEmpty() }?.let { put("Address", it) }
+        Protocol.normalizeDeviceName(name)?.let { put("Name", it) }
     }.toString()
 
     companion object {
@@ -188,7 +214,11 @@ data class PairingInfo(val publicKey: String, val address: String?) {
                 if (key.isEmpty()) {
                     null
                 } else {
-                    PairingInfo(key, obj.optStringOrNull("Address")?.takeIf { it.isNotBlank() })
+                    PairingInfo(
+                        key,
+                        obj.optStringOrNull("Address")?.takeIf { it.isNotBlank() },
+                        Protocol.normalizeDeviceName(obj.optStringOrNull("Name")),
+                    )
                 }
             } catch (e: Exception) {
                 null

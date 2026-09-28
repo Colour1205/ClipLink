@@ -5,7 +5,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -17,7 +16,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -99,7 +97,6 @@ fun ScreenTitle(text: String, topPadding: androidx.compose.ui.unit.Dp) {
     )
 }
 
-@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun DeviceCard(
     device: DeviceRow,
@@ -140,46 +137,28 @@ private fun DeviceCard(
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
                     Text(
-                        "${device.shortId}…",
+                        device.title,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                         color = colors.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    val status = when {
+                        device.connected -> "Connected"
+                        device.trusted -> "Trusted — waiting for it"
+                        device.pairing -> "Discovered — pairing mode open"
+                        else -> "Discovered"
+                    }
+                    // Every address it's reachable at, not just one. A device
+                    // can beacon from a LAN IP while advertising a Tailscale IP
+                    // and having a third cached from pairing - showing one of
+                    // them hides why a dial is failing.
                     Text(
-                        text = when {
-                            device.connected -> "Connected"
-                            device.trusted -> "Trusted — waiting for it"
-                            device.pairing -> "Discovered — pairing mode open"
-                            else -> "Discovered"
-                        },
+                        text = (listOf(status) + device.addresses).joinToString(" · "),
                         style = MaterialTheme.typography.bodySmall,
                         color = colors.onSurfaceVariant,
                     )
-                }
-            }
-
-            if (device.addresses.isNotEmpty()) {
-                Spacer(Modifier.height(12.dp))
-                // Every address it's reachable at, not just one. A device can
-                // beacon from a LAN IP while advertising a Tailscale IP and
-                // having a third cached from pairing - showing one of them
-                // hides why a dial is failing.
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    device.addresses.forEach { address ->
-                        Text(
-                            address,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = colors.onSurfaceVariant,
-                            modifier = Modifier
-                                .background(colors.surfaceContainerHigh, CircleShape)
-                                .padding(horizontal = 10.dp, vertical = 5.dp),
-                        )
-                    }
                 }
             }
 

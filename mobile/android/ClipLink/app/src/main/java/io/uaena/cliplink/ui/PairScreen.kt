@@ -216,9 +216,10 @@ private fun QrPanel(payload: String) {
     }
 }
 
+/** [title] is the peer's name, or its short id when it didn't send one. */
 @Composable
 fun PairingPromptCard(
-    deviceId: String,
+    title: String,
     onAccept: () -> Unit,
     onReject: () -> Unit,
     modifier: Modifier = Modifier,
@@ -237,7 +238,7 @@ fun PairingPromptCard(
             )
             Spacer(Modifier.height(8.dp))
             Text(
-                "${deviceId.take(20)}… wants to pair. Only accept if you're expecting this — " +
+                "$title wants to pair. Only accept if you're expecting this — " +
                     "your pairing screen being open is what let the request reach you at all.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onTertiaryContainer,

@@ -12,6 +12,8 @@ struct HandshakeContext {
     /// "My pairing screen is open right now": lets an untrusted peer finish
     /// the handshake so the user can accept or reject it.
     let pairingOpen: Bool
+    /// This device's display name, sent as the handshake's `DeviceName`.
+    let deviceName: String?
 }
 
 enum HandshakeFailure: Error, CustomStringConvertible {
@@ -25,7 +27,8 @@ enum HandshakeFailure: Error, CustomStringConvertible {
     case closedEarly
     case malformed
     /// We refused them: untrusted, no matching passcode, pairing closed.
-    case refused(peerId: String)
+    /// `name` is their handshake's `DeviceName` (nil from older builds).
+    case refused(peerId: String, name: String?)
     /// Outbound only: we read their line and chose not to continue - they
     /// never saw our handshake, so nothing was registered on their side.
     case notWanted(HandshakeMessage)
@@ -39,7 +42,7 @@ enum HandshakeFailure: Error, CustomStringConvertible {
         case .silent: return "no handshake received"
         case .closedEarly: return "closed before handshake"
         case .malformed: return "malformed handshake"
-        case .refused(let id): return "refused untrusted \(id.prefix(12))…"
+        case .refused(let id, _): return "refused untrusted \(id.prefix(12))…"
         case .notWanted(let theirs): return "not wanted: \(theirs.identityPublicKey.prefix(12))…"
         case .badSignature: return "bad handshake signature"
         case .selfConnection: return "connected to itself"
@@ -69,6 +72,8 @@ final class PeerLink {
     let direction: Direction
     let remoteAddress: String?
     private(set) var peerDeviceId = ""
+    /// The name the peer's handshake gave itself; nil for older builds.
+    private(set) var peerName: String?
     /// False: only here because our pairing screen was open - must be
     /// accepted by the user before it is registered.
     private(set) var wasAlreadyTrusted = false
@@ -262,7 +267,8 @@ final class PeerLink {
                 ephemeralPublicKey: ephemeralSPKI.base64EncodedString(),
                 identityPublicKey: ownId,
                 signature: signature.base64EncodedString(),
-                passphraseProof: context.passphraseKey.map { PassphraseAuth.proof(key: $0, deviceId: ownId) }
+                passphraseProof: context.passphraseKey.map { PassphraseAuth.proof(key: $0, deviceId: ownId) },
+                deviceName: context.deviceName
             )
         } catch {
             finish(.failure(.unreachable("signing failed: \(error)")))
@@ -297,7 +303,7 @@ final class PeerLink {
             } == true
             let effectivelyTrusted = alreadyTrusted || passphraseVerified
             guard effectivelyTrusted || context.pairingOpen else {
-                finish(.failure(.refused(peerId: theirs.identityPublicKey)))
+                finish(.failure(.refused(peerId: theirs.identityPublicKey, name: theirs.deviceName)))
                 return
             }
 
@@ -312,6 +318,7 @@ final class PeerLink {
             if direction == .outbound { writeMine() }
 
             peerDeviceId = theirs.identityPublicKey
+            peerName = theirs.deviceName
             wasAlreadyTrusted = effectivelyTrusted
             newlyTrustedViaPassphrase = passphraseVerified
             cipher = SessionCipher(key: key)

@@ -82,6 +82,16 @@ class ClipLinkEngine(context: Context) {
     private val beacons = ConcurrentHashMap<String, Discovery.Beacon>()
     private val beaconSeenAt = ConcurrentHashMap<String, Long>()
 
+    /**
+     * The latest name each peer announced, by beacon or handshake - trusted
+     * or not. Only ever replaced by another name, never by "unknown", so an
+     * older build's nameless beacon can't blank out what we already know.
+     */
+    private val peerNames = ConcurrentHashMap<String, String>()
+
+    /** The remote address of each peer's most recent connection, for the Devices tab. */
+    private val connectionAddresses = ConcurrentHashMap<String, String>()
+
     private var pendingPairingConnection: PeerConnection? = null
 
     // ---- observable state -------------------------------------------------
@@ -112,6 +122,14 @@ class ClipLinkEngine(context: Context) {
 
     private val _tailscaleIp = MutableStateFlow("")
     val tailscaleIp: StateFlow<String> = _tailscaleIp.asStateFlow()
+
+    /** The name typed on the Me screen; empty means [defaultDeviceName] is used. */
+    private val _deviceNameOverride = MutableStateFlow("")
+    val deviceNameOverride: StateFlow<String> = _deviceNameOverride.asStateFlow()
+
+    /** What the phone itself is called - the fallback when there is no override. */
+    private val _defaultDeviceName = MutableStateFlow("")
+    val defaultDeviceName: StateFlow<String> = _defaultDeviceName.asStateFlow()
 
     private val _discoveryRunning = MutableStateFlow(false)
     val discoveryRunning: StateFlow<Boolean> = _discoveryRunning.asStateFlow()
@@ -144,6 +162,8 @@ class ClipLinkEngine(context: Context) {
             val id = withContext(Dispatchers.IO) { identity.publicKeyBase64() }
             _ownDeviceId.value = id
             _tailscaleIp.value = deviceSettings.tailscaleIp
+            _deviceNameOverride.value = deviceSettings.deviceNameOverride
+            _defaultDeviceName.value = deviceSettings.systemDeviceName()
             refreshPassphraseState()
             refreshItems()
             refreshDevices()
@@ -184,6 +204,9 @@ class ClipLinkEngine(context: Context) {
     fun onForeground() {
         if (!started) return
         scope.launch {
+            // The phone may have been renamed in system settings while away.
+            // With no override set, that new name is ours from the next beacon.
+            _defaultDeviceName.value = deviceSettings.systemDeviceName()
             restartDiscovery()
             reconnectOffLanPeers()
             // The only automatic capture Android permits: the clipboard is
@@ -233,6 +256,7 @@ class ClipLinkEngine(context: Context) {
                 proof = { cachedProof },
                 ownAddress = { _tailscaleIp.value.takeIf { it.isNotEmpty() } },
                 pairingOpen = { _pairingOpen.value },
+                ownName = ::ownName,
             )
             _discoveryRunning.value = true
         } catch (e: Exception) {
@@ -249,6 +273,7 @@ class ClipLinkEngine(context: Context) {
                     proof = { cachedProof },
                     ownAddress = { _tailscaleIp.value.takeIf { it.isNotEmpty() } },
                     pairingOpen = { _pairingOpen.value },
+                    ownName = ::ownName,
                 )
                 _discoveryRunning.value = true
             } catch (retry: Exception) {
@@ -262,6 +287,7 @@ class ClipLinkEngine(context: Context) {
         if (beacon.deviceId == _ownDeviceId.value) return // our own broadcast, looped back
         beacons[beacon.deviceId] = beacon
         beaconSeenAt[beacon.deviceId] = System.currentTimeMillis()
+        recordPeerName(beacon.deviceId, beacon.name)
         refreshDevices()
 
         scope.launch {
@@ -282,9 +308,24 @@ class ClipLinkEngine(context: Context) {
         val key = withContext(Dispatchers.IO) { passphraseKeyStore.key() } ?: return
         if (!passphraseKeyStore.verifyProof(key, beacon.deviceId, proof)) return
         log("auto-trusting ${beacon.deviceId.take(12)}… (shared passcode)")
-        trustStore.trust(beacon.deviceId, beacon.address)
+        trustStore.trust(beacon.deviceId, beacon.address, beacon.name ?: peerNames[beacon.deviceId])
         refreshDevices()
     }
+
+    /**
+     * Keeps a peer's latest announced name: in memory for everyone, and in
+     * the trust record too when the peer is trusted. A null name (an older
+     * build, or a field that didn't decode) changes nothing.
+     */
+    private fun recordPeerName(deviceId: String, name: String?) {
+        if (name == null) return
+        peerNames[deviceId] = name
+        trustStore.rememberName(deviceId, name)
+    }
+
+    /** The best name we have for a peer, from this session or from its trust record. */
+    private fun knownNameOf(deviceId: String): String? =
+        peerNames[deviceId] ?: trustStore.all().firstOrNull { it.publicKey == deviceId }?.name
 
     /** Connect to an already-trusted device the moment its beacon is heard. */
     private suspend fun maybeAutoConnect(beacon: Discovery.Beacon) {
@@ -369,6 +410,7 @@ class ClipLinkEngine(context: Context) {
             trustStore = trustStore,
             passphraseKeyStore = passphraseKeyStore,
             pairingModeOpen = _pairingOpen.value,
+            ownName = ownName(),
         ) ?: return
         handleNewConnection(conn, remoteAddress)
     }
@@ -392,6 +434,7 @@ class ClipLinkEngine(context: Context) {
                 trustStore = trustStore,
                 passphraseKeyStore = passphraseKeyStore,
                 pairingModeOpen = _pairingOpen.value,
+                ownName = ownName(),
             ) ?: return@withContext false
             handleNewConnection(conn, address)
             true
@@ -410,7 +453,12 @@ class ClipLinkEngine(context: Context) {
                 return
             }
             pendingPairingConnection = conn
-            _pairingRequest.value = PairingRequest(conn.peerDeviceId, address)
+            recordPeerName(conn.peerDeviceId, conn.peerName) // in memory only - not trusted
+            _pairingRequest.value = PairingRequest(
+                conn.peerDeviceId,
+                address,
+                conn.peerName ?: peerNames[conn.peerDeviceId],
+            )
             return
         }
 
@@ -420,8 +468,9 @@ class ClipLinkEngine(context: Context) {
         // while the peer redials every two seconds forever.
         syncManager.registerConnection(conn)
 
+        (conn.remoteAddress ?: address)?.let { connectionAddresses[conn.peerDeviceId] = it }
         if (conn.newlyTrustedViaPassphrase) {
-            trustStore.trust(conn.peerDeviceId, address)
+            trustStore.trust(conn.peerDeviceId, address, conn.peerName ?: peerNames[conn.peerDeviceId])
             log("auto-paired via passcode: ${conn.peerDeviceId.take(12)}…")
         } else {
             // Already trusted, but we may have just learned a real address -
@@ -431,6 +480,9 @@ class ClipLinkEngine(context: Context) {
             if (address != null) trustStore.trust(conn.peerDeviceId, address)
             log("connected: ${conn.peerDeviceId.take(12)}…")
         }
+        // After the trust writes, so the record exists: this is what picks up
+        // a trusted peer that has been renamed since we last heard from it.
+        recordPeerName(conn.peerDeviceId, conn.peerName)
         refreshDevices()
     }
 
@@ -439,7 +491,8 @@ class ClipLinkEngine(context: Context) {
         val request = _pairingRequest.value
         pendingPairingConnection = null
         _pairingRequest.value = null
-        trustStore.trust(conn.peerDeviceId, request?.address)
+        trustStore.trust(conn.peerDeviceId, request?.address, request?.name ?: conn.peerName)
+        conn.remoteAddress?.let { connectionAddresses[conn.peerDeviceId] = it }
         log("paired: ${conn.peerDeviceId.take(12)}…")
         syncManager.registerConnection(conn)
         refreshDevices()
@@ -495,7 +548,16 @@ class ClipLinkEngine(context: Context) {
     }
 
     fun pairingPayload(): String =
-        PairingInfo(_ownDeviceId.value, _tailscaleIp.value.takeIf { it.isNotEmpty() }).toJson()
+        PairingInfo(_ownDeviceId.value, _tailscaleIp.value.takeIf { it.isNotEmpty() }, ownName()).toJson()
+
+    /**
+     * The name that goes on the wire - beacon, handshake and pairing code:
+     * the override if one is set, else what the phone calls itself. Read
+     * fresh each time, so a rename takes effect from the next beacon and the
+     * next handshake without restarting anything.
+     */
+    private fun ownName(): String? =
+        Protocol.normalizeDeviceName(_deviceNameOverride.value.ifBlank { _defaultDeviceName.value })
 
     /**
      * Dials a scanned or typed-in peer. Deliberately never writes trust by
@@ -518,8 +580,9 @@ class ClipLinkEngine(context: Context) {
             if (info.publicKey == _ownDeviceId.value) return "That's this device's own code."
             val candidates = addressCandidatesFor(info.publicKey, info.address)
             if (candidates.isEmpty()) {
-                return "${info.publicKey.take(12)}… has no address in its code. If it's on the " +
-                    "same network, keep this screen open and its beacon will pair automatically."
+                return "${displayNameOf(info.publicKey, info.name)} has no address in its code. " +
+                    "If it's on the same network, keep this screen open and its beacon will " +
+                    "pair automatically."
             }
             for (candidate in candidates) {
                 if (connectToAddress(candidate, Protocol.TCP_PORT)) {
@@ -572,14 +635,30 @@ class ClipLinkEngine(context: Context) {
         showToast(if (trimmed.isEmpty()) "Tailscale IP cleared." else "Tailscale IP saved.")
     }
 
+    /** Blank clears the override, and the phone's own name is used again. */
+    fun saveDeviceName(name: String) {
+        // Stored already capped, so the field shows exactly what peers will.
+        val normalized = Protocol.normalizeDeviceName(name).orEmpty()
+        deviceSettings.deviceNameOverride = normalized
+        _deviceNameOverride.value = normalized
+        showToast(
+            if (normalized.isEmpty()) {
+                "Using this phone's name, “${_defaultDeviceName.value}”."
+            } else {
+                "Device name saved."
+            },
+        )
+    }
+
     fun trustDevice(deviceId: String) {
         val beacon = beacons[deviceId]
-        trustStore.trust(deviceId, beacon?.senderIp)
+        trustStore.trust(deviceId, beacon?.senderIp, peerNames[deviceId])
         refreshDevices()
         scope.launch { beacon?.let { connectToAddress(it.senderIp, it.tcpPort) } }
     }
 
     fun untrustDevice(deviceId: String) {
+        val label = displayNameOf(deviceId, knownNameOf(deviceId)) // before the record goes
         trustStore.untrust(deviceId)
         refreshDevices()
         // Explicit confirmation matters: a just-untrusted device that is still
@@ -587,7 +666,7 @@ class ClipLinkEngine(context: Context) {
         // with a Trust button - so without this, Remove looks like it did
         // nothing at all.
         log("untrusted ${deviceId.take(12)}…")
-        showToast("Removed ${deviceId.take(12)}…")
+        showToast("Removed $label")
     }
 
     // ---- clipboard --------------------------------------------------------
@@ -734,27 +813,26 @@ class ClipLinkEngine(context: Context) {
             val beacon = beacons[id]
             val trustedEntry = trusted.firstOrNull { it.publicKey == id }
             // Every address this peer is reachable at, not just one: the LAN
-            // address it beaconed from, whatever it advertises for itself, and
-            // whatever we cached at pairing time can all differ, and a device
-            // card that shows only one of them hides why a dial is failing.
+            // address it beaconed from, the one its last connection came
+            // from, whatever it advertises for itself, and whatever we cached
+            // at pairing time can all differ, and a device card that shows
+            // only one of them hides why a dial is failing.
             val addresses = LinkedHashSet<String>().apply {
                 beacon?.senderIp?.takeIf { it.isNotEmpty() }?.let(::add)
+                connectionAddresses[id]?.takeIf { it.isNotEmpty() }?.let(::add)
                 beacon?.address?.takeIf { it.isNotEmpty() }?.let(::add)
                 trustedEntry?.address?.takeIf { it.isNotEmpty() }?.let(::add)
             }
             DeviceRow(
                 deviceId = id,
+                name = peerNames[id] ?: trustedEntry?.name,
                 trusted = trustedEntry != null,
                 connected = connected.contains(id),
                 addresses = addresses.toList(),
                 pairing = beacon?.pairing == true,
                 lastSeenAtMs = beaconSeenAt[id],
             )
-        }.sortedWith(
-            compareByDescending<DeviceRow> { it.connected }
-                .thenByDescending { it.trusted }
-                .thenByDescending { it.lastSeenAtMs ?: 0L },
-        )
+        }.sortedWith(DeviceRow.STABLE_ORDER)
     }
 
     fun localAddresses(): List<String> = try {

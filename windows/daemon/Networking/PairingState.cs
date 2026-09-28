@@ -39,6 +39,20 @@ public class PairingState
         get { lock (gate) { return pendingConn?.PeerDeviceId; } }
     }
 
+    // For "get_pending_pairing_info": the same peer id, plus the display
+    // name its handshake carried (null if none) and the address it came from.
+    public (string peerId, string? name, string? address)? PendingPeer
+    {
+        get
+        {
+            lock (gate)
+            {
+                if (pendingConn == null) return null;
+                return (pendingConn.PeerDeviceId, pendingConn.PeerDeviceName, pendingAddress);
+            }
+        }
+    }
+
     // Atomically hands over the pending connection (for accept) and clears
     // the slot - null if nothing was pending.
     public (PeerConnection conn, string? address)? TakePending()

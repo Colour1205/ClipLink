@@ -92,6 +92,9 @@ final class AppModel: ObservableObject {
             let engine = SyncEngine(config: config, identity: identity, secrets: KeychainSecretStore())
             self.engine = engine
             engine.delegate = self
+            // Queued ahead of enterForeground, so the first beacon and
+            // handshake already carry it.
+            engine.setSystemDeviceName(Self.systemDeviceName)
             snapshot.ownDeviceId = engine.ownId
             startupError = nil
             #if DEBUG
@@ -129,6 +132,13 @@ final class AppModel: ObservableObject {
 
     func name(for deviceId: String) -> String { snapshot.name(for: deviceId) }
 
+    /// The OS default device name - read here, on the main actor (it's
+    /// UIKit), and handed to the engine, which stores it for the Share
+    /// extension and background rounds. Without Apple's user-assigned-name
+    /// entitlement, iOS 16+ only says "iPhone" or "iPad": hence Me › Device
+    /// Name.
+    private static var systemDeviceName: String { UIDevice.current.name }
+
     // MARK: - Lifecycle
 
     func scenePhaseChanged(_ phase: ScenePhase) {
@@ -144,6 +154,8 @@ final class AppModel: ObservableObject {
         if startupError != nil { retryStartup() }
         isActive = true
         endBackgroundTask(backgroundTask)
+        // The user may have renamed the device in Settings meanwhile.
+        engine?.setSystemDeviceName(Self.systemDeviceName)
         engine?.enterForeground()
         // Pairing mode was switched off for the background: back on if the
         // pairing sheet is still up.
@@ -546,6 +558,13 @@ final class AppModel: ObservableObject {
     func clearPassphrase() {
         engine?.clearPassphrase()
         showToast("Passcode cleared.")
+    }
+
+    /// Me › Device Name. Empty goes back to the OS default.
+    func setDeviceName(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        engine?.setDeviceName(trimmed)
+        showToast(trimmed.isEmpty ? "Device name reset." : "Device name saved.")
     }
 
     func saveTailscaleIP(_ ip: String) {

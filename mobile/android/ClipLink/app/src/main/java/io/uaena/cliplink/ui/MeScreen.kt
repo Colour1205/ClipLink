@@ -35,6 +35,9 @@ import io.uaena.cliplink.engine.LogLine
 
 data class MeState(
     val ownDeviceId: String,
+    /** What the user typed as this device's name; empty means [defaultDeviceName]. */
+    val deviceNameOverride: String,
+    val defaultDeviceName: String,
     val hasPassphrase: Boolean,
     val tailscaleIp: String,
     val keepAlive: Boolean,
@@ -49,6 +52,7 @@ data class MeActions(
     val onSetPassphrase: (String) -> Unit,
     val onClearPassphrase: () -> Unit,
     val onSaveTailscaleIp: (String) -> Unit,
+    val onSaveDeviceName: (String) -> Unit,
     val onKeepAliveChange: (Boolean) -> Unit,
     val onAutoApplyChange: (Boolean) -> Unit,
     val onAutoCaptureChange: (Boolean) -> Unit,
@@ -66,6 +70,8 @@ fun MeScreen(
 ) {
     var passphrase by remember { mutableStateOf("") }
     var tailscale by remember(state.tailscaleIp) { mutableStateOf(state.tailscaleIp) }
+    var deviceName by remember(state.deviceNameOverride) { mutableStateOf(state.deviceNameOverride) }
+    val shownName = state.deviceNameOverride.ifBlank { state.defaultDeviceName }
 
     LazyColumn(
         contentPadding = PaddingValues(
@@ -91,6 +97,15 @@ fun MeScreen(
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
                     )
+                    if (shownName.isNotEmpty()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            shownName,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
                     Spacer(Modifier.height(8.dp))
                     Text(
                         state.ownDeviceId.take(44).ifEmpty { "Generating identity…" } +
@@ -109,6 +124,37 @@ fun MeScreen(
                     }
                     Spacer(Modifier.height(10.dp))
                     TextButton(onClick = actions.onCopyDeviceId) { Text("Copy device ID") }
+                }
+            }
+        }
+
+        item { SectionHeader("Device name") }
+        item {
+            Surface(
+                shape = RoundedCornerShape(22.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(Modifier.padding(18.dp)) {
+                    Text(
+                        "How this device appears on your other devices. Leave it empty to use " +
+                            "this phone's own name.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    OutlinedTextField(
+                        value = deviceName,
+                        onValueChange = { deviceName = it },
+                        label = { Text("Device name") },
+                        // Empty field = the phone's own name, so show which
+                        // one that is rather than leave the user guessing.
+                        placeholder = { Text(state.defaultDeviceName) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = { actions.onSaveDeviceName(deviceName) }) { Text("Save") }
                 }
             }
         }

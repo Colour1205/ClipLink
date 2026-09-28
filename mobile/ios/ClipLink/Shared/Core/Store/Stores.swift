@@ -70,14 +70,17 @@ final class StoreLock {
 
 /// A device this one has agreed to sync with, plus the last address it was
 /// reachable at (for reconnecting without a beacon - off-LAN, or on iOS where
-/// broadcast beacons may not be receivable at all).
+/// broadcast beacons may not be receivable at all) and the latest name it
+/// gave itself.
 public struct TrustedDevice: Equatable {
     public var publicKey: String
     public var address: String?
+    public var name: String?
 
-    public init(publicKey: String, address: String? = nil) {
+    public init(publicKey: String, address: String? = nil, name: String? = nil) {
         self.publicKey = publicKey
         self.address = address
+        self.name = name
     }
 }
 
@@ -120,7 +123,8 @@ public final class TrustStore {
         return raw.compactMap { obj in
             guard let key = obj["publicKey"] as? String, !key.isEmpty else { return nil }
             let address = (obj["address"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-            return TrustedDevice(publicKey: key, address: address)
+            let name = (obj["name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            return TrustedDevice(publicKey: key, address: address, name: name)
         }
     }
 
@@ -135,16 +139,41 @@ public final class TrustStore {
     }
 
     /// Upsert. A nil address never erases a cached one - back-filling an
-    /// address later is what makes reconnect-without-beacon work.
-    public func trust(_ publicKey: String, address: String? = nil) {
+    /// address later is what makes reconnect-without-beacon work. A nil name
+    /// likewise never erases a known one.
+    public func trust(_ publicKey: String, address: String? = nil, name: String? = nil) {
         let address = address.flatMap { $0.isEmpty ? nil : $0 }
+        let name = name.flatMap { $0.isEmpty ? nil : $0 }
         mutate {
             if let index = devices.firstIndex(where: { $0.publicKey == publicKey }) {
-                guard let address, devices[index].address != address else { return false }
-                devices[index].address = address
+                var changed = false
+                if let address, devices[index].address != address {
+                    devices[index].address = address
+                    changed = true
+                }
+                if let name, devices[index].name != name {
+                    devices[index].name = name
+                    changed = true
+                }
+                return changed
             } else {
-                devices.append(TrustedDevice(publicKey: publicKey, address: address))
+                devices.append(TrustedDevice(publicKey: publicKey, address: address, name: name))
             }
+            return true
+        }
+    }
+
+    /// Records the latest name a TRUSTED device gave itself (beacon or
+    /// handshake). Never adds trust, never touches the address, and an
+    /// unknown (nil/empty) name never erases a known one.
+    public func updateName(_ publicKey: String, name: String?) {
+        guard let name = name.flatMap({ $0.isEmpty ? nil : $0 }) else { return }
+        // Beacons arrive every 2 s: skip the lock and file check when
+        // nothing changed.
+        guard let current = device(publicKey), current.name != name else { return }
+        mutate {
+            guard let index = devices.firstIndex(where: { $0.publicKey == publicKey }), devices[index].name != name else { return false }
+            devices[index].name = name
             return true
         }
     }
@@ -171,6 +200,7 @@ public final class TrustStore {
         file.write(devices.map { device -> [String: Any] in
             var obj: [String: Any] = ["publicKey": device.publicKey]
             if let address = device.address { obj["address"] = address }
+            if let name = device.name { obj["name"] = name }
             return obj
         })
     }

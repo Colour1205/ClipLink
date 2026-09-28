@@ -54,10 +54,15 @@ public class PeerConnection
     // beacon's own auto-trust path already does.
     public bool NewlyTrustedViaPassphrase { get; }
 
+    // The display name the peer's handshake carried (already normalized -
+    // see DeviceNameStore.Normalize), or null if it didn't send one (an
+    // older build). Self-asserted, unlike PeerDeviceId: for display only.
+    public string? PeerDeviceName { get; }
+
     public event Action<string>? MessageReceived;
     public event Action? Disconnected;
 
-    private PeerConnection(TcpClient client, StreamReader reader, StreamWriter writer, byte[] sessionKey, string peerDeviceId, bool wasAlreadyTrusted, bool newlyTrustedViaPassphrase)
+    private PeerConnection(TcpClient client, StreamReader reader, StreamWriter writer, byte[] sessionKey, string peerDeviceId, bool wasAlreadyTrusted, bool newlyTrustedViaPassphrase, string? peerDeviceName)
     {
         this.client = client;
         this.reader = reader;
@@ -66,6 +71,7 @@ public class PeerConnection
         PeerDeviceId = peerDeviceId;
         WasAlreadyTrusted = wasAlreadyTrusted;
         NewlyTrustedViaPassphrase = newlyTrustedViaPassphrase;
+        PeerDeviceName = peerDeviceName;
     }
 
     // Performs the authenticated ECDH handshake described in HandshakeMessage.cs.
@@ -88,7 +94,11 @@ public class PeerConnection
     // independently runs this same check over the same connection; the
     // caller who gets back WasAlreadyTrusted=false is responsible for a
     // local accept/reject prompt before writing trust.
-    public static async Task<PeerConnection?> CreateAsync(TcpClient client, DeviceIdentity myIdentity, TrustStore trustStore, bool pairingModeOpen, PassphraseKeyStore passphraseKeyStore)
+    //
+    // myDeviceName is this device's display name, sent in the handshake's
+    // DeviceName (the caller reads it fresh, so a rename applies to the next
+    // connection).
+    public static async Task<PeerConnection?> CreateAsync(TcpClient client, DeviceIdentity myIdentity, TrustStore trustStore, bool pairingModeOpen, PassphraseKeyStore passphraseKeyStore, string? myDeviceName = null)
     {
         Stream stream = client.GetStream();
         var reader = new StreamReader(stream);
@@ -105,7 +115,8 @@ public class PeerConnection
             Convert.ToBase64String(myEphemeralPublicKey),
             myIdentity.GetPublicKey(),
             Convert.ToBase64String(mySignature),
-            myProof);
+            myProof,
+            DeviceNameStore.Normalize(myDeviceName));
         await writer.WriteLineAsync(JsonSerializer.Serialize(myHandshake));
 
         string? theirHandshakeJson = await reader.ReadLineAsync();
@@ -157,7 +168,7 @@ public class PeerConnection
 
         byte[] sessionKey = ecdh.DeriveKeyFromHash(theirEcdh.PublicKey, HashAlgorithmName.SHA256);
 
-        return new PeerConnection(client, reader, writer, sessionKey, theirHandshake.IdentityPublicKey, effectivelyTrusted, passphraseVerified);
+        return new PeerConnection(client, reader, writer, sessionKey, theirHandshake.IdentityPublicKey, effectivelyTrusted, passphraseVerified, DeviceNameStore.Normalize(theirHandshake.DeviceName));
     }
 
     public async Task Send(string message)

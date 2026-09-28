@@ -1,6 +1,9 @@
 package io.uaena.cliplink.store
 
 import android.content.Context
+import android.os.Build
+import android.provider.Settings
+import java.util.Locale
 
 /**
  * Small local preferences that aren't identity or trust.
@@ -15,8 +18,46 @@ import android.content.Context
  */
 class DeviceSettings(context: Context) {
 
-    private val prefs = context.applicationContext
+    private val appContext = context.applicationContext
+    private val prefs = appContext
         .getSharedPreferences("cliplink_device_settings", Context.MODE_PRIVATE)
+
+    /**
+     * The name typed on the Me screen. Empty means "use [systemDeviceName]" -
+     * kept that way rather than resolved and stored, so renaming the phone
+     * itself later still shows through to peers.
+     */
+    var deviceNameOverride: String
+        get() = prefs.getString(DEVICE_NAME_KEY, "") ?: ""
+        set(value) {
+            prefs.edit().putString(DEVICE_NAME_KEY, value.trim()).commit()
+        }
+
+    /**
+     * What the phone calls itself, with no permission needed: the name set
+     * under About phone where the platform exposes it, else manufacturer and
+     * model. The System "device_name" key is an OEM one, not SDK, and from S
+     * on the settings provider can refuse reads of non-SDK keys with a
+     * SecurityException - hence runCatching around both reads, not just the
+     * unusual one.
+     */
+    fun systemDeviceName(): String {
+        val resolver = appContext.contentResolver
+        runCatching { Settings.Global.getString(resolver, Settings.Global.DEVICE_NAME) }
+            .getOrNull()?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+        runCatching { Settings.System.getString(resolver, "device_name") }
+            .getOrNull()?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+
+        val manufacturer = Build.MANUFACTURER.orEmpty().trim()
+        val model = Build.MODEL.orEmpty().trim()
+        return when {
+            manufacturer.isEmpty() -> model
+            // "Pixel 8" needs "Google" in front; "SM-S918B" needs "Samsung";
+            // "OnePlus 9" already says who made it.
+            model.startsWith(manufacturer, ignoreCase = true) -> model
+            else -> "${manufacturer.replaceFirstChar { it.titlecase(Locale.ROOT) }} $model"
+        }.ifEmpty { "Android" }
+    }
 
     var tailscaleIp: String
         get() = prefs.getString(TAILSCALE_IP_KEY, "") ?: ""
@@ -61,6 +102,7 @@ class DeviceSettings(context: Context) {
         }
 
     private companion object {
+        const val DEVICE_NAME_KEY = "device_name"
         const val TAILSCALE_IP_KEY = "tailscale_ip"
         const val KEEP_ALIVE_KEY = "keep_alive"
         const val AUTO_APPLY_KEY = "auto_apply"

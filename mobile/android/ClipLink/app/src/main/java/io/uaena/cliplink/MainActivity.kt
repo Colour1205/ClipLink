@@ -75,6 +75,8 @@ class MainActivity : ComponentActivity() {
                 val pairingRequest by engine.pairingRequest.collectAsState()
                 val hasPassphrase by engine.hasPassphrase.collectAsState()
                 val tailscaleIp by engine.tailscaleIp.collectAsState()
+                val deviceNameOverride by engine.deviceNameOverride.collectAsState()
+                val defaultDeviceName by engine.defaultDeviceName.collectAsState()
                 val toast by engine.toast.collectAsState()
                 val log by engine.log.collectAsState()
 
@@ -90,6 +92,11 @@ class MainActivity : ComponentActivity() {
                         connectedCount = connectedCount,
                         discovering = discovering,
                         ownDeviceId = ownDeviceId,
+                        deviceNameOverride = deviceNameOverride,
+                        defaultDeviceName = defaultDeviceName,
+                        // Recomputed on every recomposition, and the two name
+                        // flows collected above are what recompose it after a
+                        // rename - so the QR code never shows a stale name.
                         pairingPayload = engine.pairingPayload(),
                         pairingRequest = pairingRequest,
                         hasPassphrase = hasPassphrase,
@@ -131,6 +138,7 @@ class MainActivity : ComponentActivity() {
                                 engine.showToast("Passcode cleared.")
                             },
                             onSaveTailscaleIp = engine::saveTailscaleIp,
+                            onSaveDeviceName = engine::saveDeviceName,
                             onKeepAliveChange = { enabled ->
                                 keepAlive = enabled
                                 engine.deviceSettings.keepAlive = enabled

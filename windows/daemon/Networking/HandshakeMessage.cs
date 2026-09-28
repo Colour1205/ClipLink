@@ -14,4 +14,9 @@ namespace ClipboardDaemon.Networking;
 // pairing over a direct connection (e.g. Tailscale, via Pair by Address)
 // the same way they already auto-trust from a LAN beacon — no beacon
 // needed, since this rides along on the handshake itself instead.
-public record HandshakeMessage(string EphemeralPublicKey, string IdentityPublicKey, string Signature, string? PassphraseProof = null);
+//
+// DeviceName is optional too - the sender's display name (see
+// Identity/DeviceNameStore.cs), trimmed and capped at 64 characters. Absent
+// (an older build), null or empty all mean "unknown"; the default keeps
+// older JSON deserializing, and older builds ignore the extra key.
+public record HandshakeMessage(string EphemeralPublicKey, string IdentityPublicKey, string Signature, string? PassphraseProof = null, string? DeviceName = null);

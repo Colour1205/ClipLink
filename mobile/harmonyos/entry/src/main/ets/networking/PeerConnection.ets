@@ -16,6 +16,7 @@ import { common } from '@kit.AbilityKit';
 import { DeviceIdentity, verifyRawSignature } from '../identity/DeviceIdentity';
 import { TrustStore } from '../identity/TrustStore';
 import { PassphraseKeyStore } from '../identity/PassphraseKeyStore';
+import { normalizeDeviceName } from '../identity/DeviceName';
 import * as AesGcm from '../crypto/AesGcm';
 
 const base64Helper = new util.Base64Helper();
@@ -32,6 +33,23 @@ interface HandshakeMessage {
   // they already auto-trust from a LAN beacon - no beacon needed, since
   // this rides along on the handshake itself instead.
   PassphraseProof?: string;
+  // Optional - the sender's display name (see DeviceName.ets), sent whenever
+  // it's known. Older builds neither send nor read it.
+  DeviceName?: string;
+}
+
+// The handshake is the one plaintext line this side writes, and DeviceName is
+// the first thing in it that can be non-ASCII. Escaping every non-ASCII UTF-16
+// unit as \uXXXX (what Windows' System.Text.Json writes) keeps the line pure
+// ASCII, so it can't depend on how the socket layer encodes a string; every
+// peer's JSON parser reads the escapes back as the same text.
+function asciiJson(json: string): string {
+  let out = '';
+  for (let i = 0; i < json.length; i++) {
+    const code = json.charCodeAt(i);
+    out += code < 0x80 ? json.charAt(i) : `\\u${code.toString(16).padStart(4, '0')}`;
+  }
+  return out;
 }
 
 // What the other side did right after a completed handshake - see
@@ -327,13 +345,17 @@ export class PeerConnection {
   // peer before treating the connection as normal, same as the LAN beacon's
   // own auto-trust path already does.
   public readonly newlyTrustedViaPassphrase: boolean;
+  // What the peer's handshake says it's called, or null if it sent no
+  // (usable) DeviceName - e.g. an older build.
+  public readonly peerName: string | null;
 
-  private constructor(channel: TcpLineChannel, sessionKey: Uint8Array, peerDeviceId: string, wasAlreadyTrusted: boolean, newlyTrustedViaPassphrase: boolean) {
+  private constructor(channel: TcpLineChannel, sessionKey: Uint8Array, peerDeviceId: string, wasAlreadyTrusted: boolean, newlyTrustedViaPassphrase: boolean, peerName: string | null) {
     this.channel = channel;
     this.sessionKey = sessionKey;
     this.peerDeviceId = peerDeviceId;
     this.wasAlreadyTrusted = wasAlreadyTrusted;
     this.newlyTrustedViaPassphrase = newlyTrustedViaPassphrase;
+    this.peerName = peerName;
   }
 
   // pairingModeOpen: true only while the local Pairing screen is open (see
@@ -351,10 +373,13 @@ export class PeerConnection {
   // wasAlreadyTrusted=false is responsible for a local accept/reject prompt
   // before writing trust.
   //
+  // ownName: this device's display name to send as DeviceName, or null to
+  // leave it out.
+  //
   // Returns null (never throws for a bad/malformed peer, or an untrusted
   // one that's neither pairing-mode-eligible nor passphrase-verified) on
   // any handshake failure - same contract as PeerConnection.cs's CreateAsync.
-  static async create(client: TcpLike, myIdentity: DeviceIdentity, trustStore: TrustStore, context: common.UIAbilityContext, pairingModeOpen: boolean, passphraseKeyStore: PassphraseKeyStore, report?: HandshakeReport): Promise<PeerConnection | null> {
+  static async create(client: TcpLike, myIdentity: DeviceIdentity, trustStore: TrustStore, context: common.UIAbilityContext, pairingModeOpen: boolean, passphraseKeyStore: PassphraseKeyStore, ownName: string | null, report?: HandshakeReport): Promise<PeerConnection | null> {
     const channel = new TcpLineChannel(client);
 
     try {
@@ -372,8 +397,9 @@ export class PeerConnection {
         IdentityPublicKey: myIdentityPublicKey,
         Signature: base64Helper.encodeToStringSync(mySignature),
         PassphraseProof: myProof,
+        DeviceName: ownName !== null ? (normalizeDeviceName(ownName) ?? undefined) : undefined,
       };
-      await channel.writeLine(JSON.stringify(myHandshake));
+      await channel.writeLine(asciiJson(JSON.stringify(myHandshake)));
 
       const theirLine = await channel.readLineWithin(HANDSHAKE_TIMEOUT_MS);
       if (theirLine === null) {
@@ -421,7 +447,10 @@ export class PeerConnection {
       // no secretPrepend/secretAppend - that's just SHA256(rawSharedSecret).
       const sessionKey = await sha256(sharedSecret.data);
 
-      return new PeerConnection(channel, sessionKey, theirHandshake.IdentityPublicKey, effectivelyTrusted, passphraseVerified);
+      // Absent, null, empty or not a string: unknown.
+      const sentName: string | undefined = theirHandshake.DeviceName;
+      const theirName: string | null = typeof sentName === 'string' ? normalizeDeviceName(sentName) : null;
+      return new PeerConnection(channel, sessionKey, theirHandshake.IdentityPublicKey, effectivelyTrusted, passphraseVerified, theirName);
     } catch (e) {
       return null;
     }

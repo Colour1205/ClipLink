@@ -15,6 +15,10 @@ const DEVICES_KEY = 'trusted_devices';
 export interface TrustedDevice {
   publicKey: string;
   address?: string;
+  // The peer's own display name, latest seen in its handshake or beacon.
+  // Absent in records written before names existed, or for a peer that
+  // never sent one.
+  name?: string;
 }
 
 export class TrustStore {
@@ -45,15 +49,32 @@ export class TrustStore {
     await prefs.flush();
   }
 
-  async trust(context: common.UIAbilityContext, publicKey: string, address?: string): Promise<void> {
+  // name only ever replaces a stored name with a newer non-empty one - an
+  // address-only update (no name) keeps whatever name is already stored.
+  async trust(context: common.UIAbilityContext, publicKey: string, address?: string, name?: string): Promise<void> {
     const devices = await this.loadAll(context);
     const existing = devices.find(d => d.publicKey === publicKey);
+    const knownName: string | undefined = name !== undefined && name.length > 0 ? name : undefined;
     if (existing) {
       existing.address = address ?? existing.address;
+      existing.name = knownName ?? existing.name;
     } else {
-      devices.push({ publicKey, address });
+      devices.push({ publicKey, address, name: knownName });
     }
     await this.saveAll(context, devices);
+  }
+
+  // Name-only update for a device that's already trusted: never adds a
+  // record and never touches the address. Resolves true only when something
+  // changed, so a caller (e.g. every 2s beacon) can skip needless refreshes.
+  async rememberName(context: common.UIAbilityContext, publicKey: string, name: string): Promise<boolean> {
+    if (name.length === 0) return false;
+    const devices = await this.loadAll(context);
+    const existing = devices.find(d => d.publicKey === publicKey);
+    if (existing === undefined || existing.name === name) return false;
+    existing.name = name;
+    await this.saveAll(context, devices);
+    return true;
   }
 
   async untrust(context: common.UIAbilityContext, publicKey: string): Promise<void> {
