@@ -151,7 +151,7 @@
 		7AF5643E3068C549000EB0BC /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
-				BuildIndependentTargetsInParallel = 1;
+				BuildIndependentTargetsInParallel = YES;
 				LastSwiftUpdateCheck = 2630;
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
@@ -348,6 +348,7 @@
 				CODE_SIGN_ENTITLEMENTS = ClipLink.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 57Y96G68FJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "ClipLink-Info.plist";
@@ -389,6 +390,7 @@
 				CODE_SIGN_ENTITLEMENTS = ClipLink.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 57Y96G68FJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "ClipLink-Info.plist";
@@ -429,6 +431,7 @@
 				CODE_SIGN_ENTITLEMENTS = ClipLinkShare.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 57Y96G68FJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "ClipLinkShare-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = ClipLink;
@@ -459,6 +462,7 @@
 				CODE_SIGN_ENTITLEMENTS = ClipLinkShare.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 57Y96G68FJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "ClipLinkShare-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = ClipLink;
