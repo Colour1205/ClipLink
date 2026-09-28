@@ -46,6 +46,8 @@ class PeerConnection private constructor(
     private val writer: BufferedWriter,
     private val sessionKey: ByteArray,
     val peerDeviceId: String,
+    /** What the peer's handshake says it's called - null from builds that don't send one. */
+    val peerName: String?,
     /**
      * False means this peer was not in the trust store when the handshake
      * ran, and the connection exists only because pairing mode was open. The
@@ -191,6 +193,9 @@ class PeerConnection private constructor(
          * accept/reject prompt. A verifying passphrase proof is a second,
          * independent way in, exactly as the LAN beacon's passive auto-trust
          * already is.
+         *
+         * [ownName] is this device's display name as it should go out in the
+         * handshake, or null to leave the field off.
          */
         suspend fun create(
             socket: Socket,
@@ -198,9 +203,10 @@ class PeerConnection private constructor(
             trustStore: TrustStore,
             passphraseKeyStore: PassphraseKeyStore,
             pairingModeOpen: Boolean,
+            ownName: String?,
         ): PeerConnection? = withContext(Dispatchers.IO) {
             val connection = try {
-                handshake(socket, identity, trustStore, passphraseKeyStore, pairingModeOpen)
+                handshake(socket, identity, trustStore, passphraseKeyStore, pairingModeOpen, ownName)
             } catch (e: Exception) {
                 null
             }
@@ -224,6 +230,7 @@ class PeerConnection private constructor(
             trustStore: TrustStore,
             passphraseKeyStore: PassphraseKeyStore,
             pairingModeOpen: Boolean,
+            ownName: String?,
         ): PeerConnection? {
             socket.soTimeout = HANDSHAKE_TIMEOUT_MS
             socket.tcpNoDelay = true
@@ -245,6 +252,7 @@ class PeerConnection private constructor(
                 passphraseProof = myKey?.let {
                     passphraseKeyStore.computeProof(it, myIdentityPublicKey)
                 },
+                deviceName = ownName,
             )
             writer.write(mine.toJson())
             writer.write("\n")
@@ -302,6 +310,7 @@ class PeerConnection private constructor(
                 writer = writer,
                 sessionKey = sessionKey,
                 peerDeviceId = theirs.identityPublicKey,
+                peerName = theirs.deviceName,
                 wasAlreadyTrusted = effectivelyTrusted,
                 newlyTrustedViaPassphrase = passphraseVerified,
             )

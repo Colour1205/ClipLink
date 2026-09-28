@@ -24,6 +24,7 @@ final class EngineIntegrationTests: XCTestCase {
         var receivedEntries: [(ClipboardEntry, URL?)] { lock.lock(); defer { lock.unlock() }; return received }
         var items: [SyncedItem] { lock.lock(); defer { lock.unlock() }; return snapshot.items }
         var pairingRequest: PairingRequest? { lock.lock(); defer { lock.unlock() }; return snapshot.pairingRequest }
+        var devices: [DeviceRow] { lock.lock(); defer { lock.unlock() }; return snapshot.devices }
     }
 
     struct Node {
@@ -147,6 +148,8 @@ final class EngineIntegrationTests: XCTestCase {
 
     func testManualPairingNeedsAcceptOnBothSides() throws {
         let (a, b) = makePair()
+        a.engine.setDeviceName("Alpha")
+        b.engine.setDeviceName("Bravo")
         a.engine.enterForeground()
         b.engine.enterForeground()
         a.engine.setPairingOpen(true)
@@ -157,14 +160,49 @@ final class EngineIntegrationTests: XCTestCase {
         wait("both prompted") { a.recorder.pairingRequest != nil && b.recorder.pairingRequest != nil }
         XCTAssertEqual(a.recorder.pairingRequest?.deviceId, b.engine.ownId)
         XCTAssertEqual(b.recorder.pairingRequest?.deviceId, a.engine.ownId)
+        XCTAssertEqual(a.recorder.pairingRequest?.name, "Bravo", "the prompt can name the peer (handshake DeviceName)")
+        XCTAssertEqual(b.recorder.pairingRequest?.name, "Alpha")
         XCTAssertEqual(a.recorder.connectedCount, 0, "nothing flows before Accept")
 
         a.engine.acceptPairing()
         b.engine.acceptPairing()
         wait("connected") { a.recorder.connectedCount == 1 && b.recorder.connectedCount == 1 }
+        XCTAssertEqual(TrustStore(directory: a.dir).device(b.engine.ownId)?.name, "Bravo", "stored with the trust record")
 
         b.engine.sendText("paired!")
         wait("A received") { a.recorder.receivedEntries.contains { $0.0.content == "paired!" } }
+    }
+
+    func testDeviceNamesTravelInBeaconsAndHandshakes() throws {
+        let (a, b) = makePair()
+        a.engine.setSystemDeviceName("iPhone")
+        b.engine.setDeviceName("  Colour's PC  ")
+        setPasscode(a, "pw")
+        setPasscode(b, "pw")
+        a.engine.enterForeground()
+        b.engine.enterForeground()
+        wait("connected") { a.recorder.connectedCount == 1 && b.recorder.connectedCount == 1 }
+
+        func name(_ node: Node, of other: Node) -> String? {
+            node.recorder.devices.first { $0.deviceId == other.engine.ownId }?.name
+        }
+        wait("A shows B's name") { name(a, of: b) == "Colour's PC" }
+        wait("B shows A's OS default name") { name(b, of: a) == "iPhone" }
+        wait("A stored it") { TrustStore(directory: a.dir).device(b.engine.ownId)?.name == "Colour's PC" }
+
+        // A rename reaches the peer with the next beacon - no reconnect.
+        b.engine.setDeviceName("Studio PC")
+        wait("A sees the rename") { name(a, of: b) == "Studio PC" }
+        wait("A stored the rename") { TrustStore(directory: a.dir).device(b.engine.ownId)?.name == "Studio PC" }
+
+        // A local nickname still wins; clearing the setting falls back to the OS name.
+        a.engine.setNickname("My PC", for: b.engine.ownId)
+        wait("nickname wins") { name(a, of: b) == "My PC" }
+        a.engine.setDeviceName("Desk iPhone")
+        wait("B sees A's setting") { name(b, of: a) == "Desk iPhone" }
+        a.engine.setDeviceName("")
+        wait("B sees A's OS name again") { name(b, of: a) == "iPhone" }
+        XCTAssertEqual(a.recorder.connectedCount, 1, "renames never drop the link")
     }
 
     func testUntrustedPeerIsRefusedWithoutPairingOrPasscode() throws {

@@ -3,7 +3,11 @@ namespace ClipboardDaemon.Identity;
 // Address is the peer's last-known reachable address off-LAN (e.g. a
 // Tailscale IP), learned at pairing time and used as a fallback when LAN
 // broadcast discovery can't find this device directly.
-public record TrustedDevice(string PublicKey, string? Address = null);
+//
+// Name is the peer's own display name, as last carried by its handshake or
+// beacon (null until one has) - see UpdateName. Optional, so a trust store
+// written before names existed still loads.
+public record TrustedDevice(string PublicKey, string? Address = null, string? Name = null);
 
 public class TrustStore
 {
@@ -47,11 +51,31 @@ public class TrustStore
         lock (gate) { return trustedDevices.ContainsKey(key); }
     }
 
-    public void Trust(string publicKey, string? address = null)
+    // Upserts. address is written exactly as given - a null one CLEARS a
+    // stale address (ConnectToPeer relies on that) - but name is merged: a
+    // null/blank name keeps whatever name is already stored, so an
+    // address-only call never erases a known name.
+    public void Trust(string publicKey, string? address = null, string? name = null)
     {
         lock (gate)
         {
-            trustedDevices[publicKey] = new TrustedDevice(publicKey, address);
+            trustedDevices.TryGetValue(publicKey, out var existing);
+            trustedDevices[publicKey] = new TrustedDevice(publicKey, address, DeviceNameStore.Normalize(name) ?? existing?.Name);
+            saveTrustStore();
+        }
+    }
+
+    // Records the latest name a trusted peer's handshake or beacon carried,
+    // leaving its address alone. A no-op for an untrusted id, an unknown
+    // (null/blank) name or an unchanged one - cheap enough for every beacon.
+    public void UpdateName(string publicKey, string? name)
+    {
+        string? normalized = DeviceNameStore.Normalize(name);
+        if (normalized == null) return;
+        lock (gate)
+        {
+            if (!trustedDevices.TryGetValue(publicKey, out var existing) || existing.Name == normalized) return;
+            trustedDevices[publicKey] = existing with { Name = normalized };
             saveTrustStore();
         }
     }

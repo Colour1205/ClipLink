@@ -131,7 +131,7 @@ struct DevicesView: View {
                 }
                 .tint(.red)
                 Button {
-                    renaming = DevicesRenameTarget(deviceId: row.deviceId, current: model.snapshot.nicknames[row.deviceId] ?? "")
+                    renaming = renameTarget(for: row)
                 } label: {
                     Label("Rename", systemImage: "pencil")
                 }
@@ -149,7 +149,7 @@ struct DevicesView: View {
         .contextMenu {
             if row.trusted {
                 Button {
-                    renaming = DevicesRenameTarget(deviceId: row.deviceId, current: model.snapshot.nicknames[row.deviceId] ?? "")
+                    renaming = renameTarget(for: row)
                 } label: {
                     Label("Rename", systemImage: "pencil")
                 }
@@ -197,6 +197,14 @@ struct DevicesView: View {
         Haptics.success(settings.haptics)
         model.trust(row)
         model.showToast("Trusted \(model.name(for: row.deviceId)). It syncs once it trusts this \(ThisDeviceNoun.current) too.")
+    }
+
+    private func renameTarget(for row: DeviceRow) -> DevicesRenameTarget {
+        DevicesRenameTarget(
+            deviceId: row.deviceId,
+            current: model.snapshot.nicknames[row.deviceId] ?? "",
+            fallback: model.snapshot.deviceNames[row.deviceId] ?? DeviceLabel.short(row.deviceId)
+        )
     }
 }
 
@@ -461,6 +469,9 @@ struct DevicesRenameTarget: Identifiable {
     var id: String { deviceId }
     let deviceId: String
     let current: String
+    /// What the row shows without a nickname: the device's own name, else
+    /// its short label.
+    let fallback: String
 }
 
 /// iOS 15 alerts can't host text fields, so renaming is a small sheet.
@@ -482,9 +493,9 @@ private struct DevicesRenameSheet: View {
         NavigationView {
             Form {
                 Section(
-                    footer: Text("Only this \(ThisDeviceNoun.current) uses this name. Leave it empty to show \(DeviceLabel.short(target.deviceId)).")
+                    footer: Text("Only this \(ThisDeviceNoun.current) uses this name. Leave it empty to show \(target.fallback).")
                 ) {
-                    TextField(DeviceLabel.short(target.deviceId), text: $name)
+                    TextField(target.fallback, text: $name)
                         .focused($focused)
                         .textInputAutocapitalization(.words)
                         .disableAutocorrection(true)

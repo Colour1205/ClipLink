@@ -116,6 +116,12 @@ public final class SyncEngine {
     var cachedProof: String?
     var tailscaleIP = ""
     var nicknames: [String: String] = [:]
+    /// The user's "Device name" setting; "" means use `systemDeviceName`.
+    var deviceNameOverride = ""
+    /// The OS default name. Only the app can read it (UIKit, main actor): it
+    /// stores it here, in the shared settings file, for the Share extension
+    /// and background rounds.
+    var systemDeviceName = ""
 
     // Sync & files
     var incoming: [String: IncomingTransfer] = [:]
@@ -154,6 +160,8 @@ public final class SyncEngine {
         let settings = settingsFile.read() as? [String: Any] ?? [:]
         tailscaleIP = settings["tailscale_ip"] as? String ?? ""
         nicknames = settings["nicknames"] as? [String: String] ?? [:]
+        deviceNameOverride = settings["device_name"] as? String ?? ""
+        systemDeviceName = settings["system_device_name"] as? String ?? ""
         passphraseKey = secrets.data(for: Self.passphraseSecretKey)
         cachedProof = passphraseKey.map { PassphraseAuth.proof(key: $0, deviceId: ownId) }
         observeExternalChanges()
@@ -374,6 +382,8 @@ public final class SyncEngine {
         let settings = settingsFile.read() as? [String: Any] ?? [:]
         tailscaleIP = settings["tailscale_ip"] as? String ?? tailscaleIP
         nicknames = settings["nicknames"] as? [String: String] ?? nicknames
+        deviceNameOverride = settings["device_name"] as? String ?? deviceNameOverride
+        systemDeviceName = settings["system_device_name"] as? String ?? systemDeviceName
         passphraseKey = secrets.data(for: Self.passphraseSecretKey)
         cachedProof = passphraseKey.map { PassphraseAuth.proof(key: $0, deviceId: ownId) }
         schedulePublish()
@@ -468,7 +478,7 @@ public final class SyncEngine {
                 return
             }
             let id = request.link.peerDeviceId
-            trust.trust(id, address: request.address)
+            trust.trust(id, address: request.address, name: request.link.peerName ?? peerName(for: id))
             log("paired: \(DeviceLabel.short(id))")
             register(request.link, acceptedByUser: true)
             notice("Paired.")
@@ -503,7 +513,7 @@ public final class SyncEngine {
     public func trustDevice(_ deviceId: String) {
         queue.async { [self] in
             let address = addressCandidates(for: deviceId).first
-            trust.trust(deviceId, address: address)
+            trust.trust(deviceId, address: address, name: sightings[deviceId]?.name)
             log("trusted \(DeviceLabel.short(deviceId))")
             schedulePublish()
             if let address, links[deviceId] == nil {
@@ -533,6 +543,38 @@ public final class SyncEngine {
             saveSettings()
             schedulePublish()
         }
+    }
+
+    /// The user's "Device name" setting: what peers see this device as.
+    /// Empty (or blank) goes back to the OS default. Peers pick it up from
+    /// the next beacon or handshake.
+    public func setDeviceName(_ name: String) {
+        queue.async { [self] in
+            let cleaned = DeviceName.clean(name) ?? ""
+            guard cleaned != deviceNameOverride else { return }
+            deviceNameOverride = cleaned
+            saveSettings()
+            log(cleaned.isEmpty ? "device name reset to default" : "device name set")
+            schedulePublish()
+        }
+    }
+
+    /// The OS default name, from the app (UIKit, on the main actor). Stored
+    /// with the other settings so the Share extension and background rounds
+    /// use it without touching UIKit.
+    public func setSystemDeviceName(_ name: String) {
+        queue.async { [self] in
+            let cleaned = DeviceName.clean(name) ?? ""
+            guard cleaned != systemDeviceName else { return }
+            systemDeviceName = cleaned
+            saveSettings()
+            schedulePublish()
+        }
+    }
+
+    /// The name on the wire: the user's setting, else the OS default.
+    var ownDeviceName: String? {
+        DeviceName.clean(deviceNameOverride) ?? DeviceName.clean(systemDeviceName)
     }
 
     /// Derives the passcode key (PBKDF2, 210,000 rounds - off the engine queue)
@@ -583,7 +625,12 @@ public final class SyncEngine {
     }
 
     func saveSettings() {
-        settingsFile.write(["tailscale_ip": tailscaleIP, "nicknames": nicknames])
+        settingsFile.write([
+            "tailscale_ip": tailscaleIP,
+            "nicknames": nicknames,
+            "device_name": deviceNameOverride,
+            "system_device_name": systemDeviceName,
+        ])
     }
 
     // MARK: - History API
@@ -652,7 +699,13 @@ public final class SyncEngine {
     }
 
     func displayName(for deviceId: String) -> String {
-        nicknames[deviceId] ?? DeviceLabel.short(deviceId)
+        nicknames[deviceId] ?? peerName(for: deviceId) ?? DeviceLabel.short(deviceId)
+    }
+
+    /// The latest name a peer gave itself: heard this session (beacon or
+    /// handshake), else remembered in the trust store.
+    func peerName(for deviceId: String) -> String? {
+        sightings[deviceId]?.name ?? trust.device(deviceId)?.name
     }
 
     public var pairingPayloadAddress: String? {
@@ -670,17 +723,26 @@ public final class SyncEngine {
         s.network = status
         s.log = logLines
         s.pairingOpen = pairingOpen
-        s.pairingRequest = pending.map { PairingRequest(deviceId: $0.link.peerDeviceId, address: $0.address) }
+        s.pairingRequest = pending.map { PairingRequest(deviceId: $0.link.peerDeviceId, address: $0.address, name: $0.link.peerName) }
         s.hasPassphrase = passphraseKey != nil
         s.tailscaleIP = tailscaleIP
         s.localAddresses = NetworkInterfaces.displayAddresses()
         // Includes our LAN address when there is no Tailscale IP: without an
         // Address, HarmonyOS refuses to dial a scanned code and Android has
         // nothing to dial either, since neither can hear our beacons.
-        s.pairingPayload = PairingInfo(publicKey: ownId, address: pairingPayloadAddress).jsonString()
+        s.pairingPayload = PairingInfo(publicKey: ownId, address: pairingPayloadAddress, name: ownDeviceName).jsonString()
         s.transfers = incoming.mapValues { TransferProgress(fileName: $0.fileName, received: $0.received, total: $0.total) }
         s.sweeping = sweeping
         s.nicknames = nicknames
+        var names: [String: String] = [:]
+        for device in trust.all { names[device.publicKey] = device.name }
+        for (id, sighting) in sightings where sighting.name != nil { names[id] = sighting.name }
+        // A pairing prompt names its peer even after the sighting ages out.
+        if let pending, names[pending.link.peerDeviceId] == nil { names[pending.link.peerDeviceId] = pending.link.peerName }
+        s.deviceNames = names
+        s.deviceName = ownDeviceName ?? ""
+        s.deviceNameOverride = deviceNameOverride
+        s.systemDeviceName = systemDeviceName
         return s
     }
 
@@ -710,13 +772,19 @@ public final class SyncEngine {
         let rows = ids.map { id -> DeviceRow in
             let sighting = sightings[id]
             let trusted = trust.device(id)
+            // The LAN address it was last heard from (beacon sender) or
+            // reached at (a link's remote end), then where we last reached it
+            // and its own off-LAN (Tailscale) address. Older addresses from
+            // the sighting stay dial candidates but aren't shown.
+            let lastHeard = sighting?.addresses.max { $0.value < $1.value }?.key
             var addresses: [String] = []
-            for a in addressCandidates(for: id) + [trusted?.address, sighting?.advertisedAddress].compactMap({ $0 }) where !addresses.contains(a) {
+            for a in [lastHeard, trusted?.address, sighting?.advertisedAddress].compactMap({ $0 }) where !a.isEmpty && !addresses.contains(a) {
                 addresses.append(a)
             }
             let lastSeen = [sighting?.lastSeen, links[id]?.connectedAt].compactMap { $0 }.max()
             return DeviceRow(
                 deviceId: id,
+                name: nicknames[id] ?? peerName(for: id),
                 trusted: trusted != nil,
                 connected: links[id] != nil,
                 addresses: addresses,
@@ -725,11 +793,9 @@ public final class SyncEngine {
                 nearby: links[id] != nil || (sighting.map { now.timeIntervalSince($0.lastSeen) < 30 } ?? false)
             )
         }
-        return rows.sorted {
-            if $0.connected != $1.connected { return $0.connected }
-            if $0.trusted != $1.trusted { return $0.trusted }
-            return ($0.lastSeen ?? .distantPast) > ($1.lastSeen ?? .distantPast)
-        }
+        // Stable: sorting by connection state and last-seen time made a row
+        // jump to the top on every beacon or new connection.
+        return rows.sorted(by: DeviceRow.displayOrder)
     }
 }
 
@@ -743,6 +809,9 @@ struct Sighting {
     var advertisedAddress: String?
     var pairing = false
     var pairingSeen = Date.distantPast
+    /// The latest name it gave itself (beacon or handshake); a message
+    /// without one never clears it.
+    var name: String?
 }
 
 struct Backoff {

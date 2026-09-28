@@ -25,6 +25,9 @@ const ACCENT_THEME_KEY = 'accent_theme';
 const LAST_SEEN_CLIP_COUNT_KEY = 'last_seen_clip_count';
 const BOTTOM_GLOW_KEY = 'bottom_glow';
 const CARD_TRANSPARENCY_KEY = 'card_transparency';
+// The user's own name for this device (see DeviceName.ets); '' means use
+// the system's.
+const DEVICE_NAME_KEY = 'device_name';
 
 export class DeviceSettings {
   private async getPrefs(context: common.UIAbilityContext): Promise<preferences.Preferences> {
@@ -110,6 +113,19 @@ export class DeviceSettings {
   async setLastSeenClipCount(context: common.UIAbilityContext, count: number): Promise<void> {
     const prefs = await this.getPrefs(context);
     prefs.putSync(LAST_SEEN_CLIP_COUNT_KEY, count);
+    await prefs.flush();
+  }
+
+  // Synchronous for the same reason as getAccentThemeSync: the first beacon
+  // should already carry the chosen name, not the system's.
+  getDeviceNameSync(context: common.UIAbilityContext): string {
+    const prefs = preferences.getPreferencesSync(context, { name: PREFERENCES_NAME });
+    return prefs.getSync(DEVICE_NAME_KEY, '') as string;
+  }
+
+  async setDeviceName(context: common.UIAbilityContext, name: string): Promise<void> {
+    const prefs = await this.getPrefs(context);
+    prefs.putSync(DEVICE_NAME_KEY, name.trim());
     await prefs.flush();
   }
 

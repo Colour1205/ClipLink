@@ -240,12 +240,16 @@ public struct HandshakeMessage: Equatable {
     public var identityPublicKey: String
     public var signature: String
     public var passphraseProof: String?
+    /// The sender's display name (`DeviceName`, optional - older builds
+    /// don't send it). Not covered by the signature, like the proof.
+    public var deviceName: String?
 
-    public init(ephemeralPublicKey: String, identityPublicKey: String, signature: String, passphraseProof: String?) {
+    public init(ephemeralPublicKey: String, identityPublicKey: String, signature: String, passphraseProof: String?, deviceName: String? = nil) {
         self.ephemeralPublicKey = ephemeralPublicKey
         self.identityPublicKey = identityPublicKey
         self.signature = signature
         self.passphraseProof = passphraseProof
+        self.deviceName = deviceName
     }
 
     public func jsonString() -> String {
@@ -255,6 +259,7 @@ public struct HandshakeMessage: Equatable {
             "Signature": signature,
         ]
         if let passphraseProof { obj["PassphraseProof"] = passphraseProof }
+        if let name = DeviceName.clean(deviceName) { obj["DeviceName"] = name }
         return WireJSON.string(obj)
     }
 
@@ -265,26 +270,36 @@ public struct HandshakeMessage: Equatable {
               let signature = WireJSON.str(obj, "Signature"), !signature.isEmpty
         else { return nil }
         let proof = WireJSON.str(obj, "PassphraseProof").flatMap { $0.isEmpty ? nil : $0 }
-        return HandshakeMessage(ephemeralPublicKey: ephemeral, identityPublicKey: identity, signature: signature, passphraseProof: proof)
+        return HandshakeMessage(
+            ephemeralPublicKey: ephemeral,
+            identityPublicKey: identity,
+            signature: signature,
+            passphraseProof: proof,
+            deviceName: DeviceName.clean(WireJSON.str(obj, "DeviceName"))
+        )
     }
 }
 
 // MARK: - Pairing payload
 
-/// What a pairing QR code / "copy pairing info" carries: `{PublicKey, Address}`.
+/// What a pairing QR code / "copy pairing info" carries: `{PublicKey, Address}`,
+/// plus an optional `Name` (the device's display name).
 /// Windows serializes a null Address as `"Address":null`; Android omits it.
 public struct PairingInfo: Equatable {
     public var publicKey: String
     public var address: String?
+    public var name: String?
 
-    public init(publicKey: String, address: String?) {
+    public init(publicKey: String, address: String?, name: String? = nil) {
         self.publicKey = publicKey
         self.address = address
+        self.name = name
     }
 
     public func jsonString() -> String {
         var obj: [String: Any] = ["PublicKey": publicKey]
         if let address, !address.isEmpty { obj["Address"] = address }
+        if let name = DeviceName.clean(name) { obj["Name"] = name }
         return WireJSON.string(obj)
     }
 
@@ -297,6 +312,10 @@ public struct PairingInfo: Equatable {
               let key = WireJSON.str(obj, "PublicKey"), !key.isEmpty
         else { return nil }
         let address = WireJSON.str(obj, "Address")?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return PairingInfo(publicKey: key, address: (address?.isEmpty ?? true) ? nil : address)
+        return PairingInfo(
+            publicKey: key,
+            address: (address?.isEmpty ?? true) ? nil : address,
+            name: DeviceName.clean(WireJSON.str(obj, "Name"))
+        )
     }
 }

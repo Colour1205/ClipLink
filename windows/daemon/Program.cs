@@ -445,6 +445,10 @@ class Program
     // was true) is parked as the pending candidate instead, for the tray's
     // accept_pairing/reject_pairing IPC commands to resolve. Never
     // auto-trusted just because a connection formed on its own.
+    //
+    // Every connection path (ConnectToPeer, AcceptConnection, PairByAddress)
+    // ends up here, so this is also where a trusted peer's handshake name is
+    // recorded (a pending candidate's is recorded on accept_pairing).
     private static void HandleNewConnection(
         PeerConnection conn,
         string? address,
@@ -461,7 +465,7 @@ class Program
             if (conn.NewlyTrustedViaPassphrase)
             {
                 Console.WriteLine($"Auto-pairing {conn.PeerDeviceId} — matching passphrase proof in handshake");
-                trustStore.Trust(conn.PeerDeviceId, address);
+                trustStore.Trust(conn.PeerDeviceId, address, conn.PeerDeviceName);
             }
             else if (address != null)
             {
@@ -474,7 +478,11 @@ class Program
                 // address at all (an old bug - it always passed null),
                 // instead of leaving it permanently stuck with no address
                 // to reconnect off-LAN with.
-                trustStore.Trust(conn.PeerDeviceId, address);
+                trustStore.Trust(conn.PeerDeviceId, address, conn.PeerDeviceName);
+            }
+            else
+            {
+                trustStore.UpdateName(conn.PeerDeviceId, conn.PeerDeviceName);
             }
             RegisterConnection(conn, connectionsByDeviceId, clipboardSync, historyAccess, trustStore, fileStore, fileTransferState);
             return;
@@ -498,6 +506,7 @@ class Program
         DeviceIdentity myIdentity,
         PairingState pairingState,
         PassphraseKeyStore passphraseKeyStore,
+        DeviceNameStore deviceName,
         ConcurrentDictionary<string, PeerConnection> connectionsByDeviceId,
         ClipboardSync clipboardSync,
         HistoryAccess historyAccess,
@@ -519,7 +528,7 @@ class Program
             // reconnect loop's Task.WhenAll - so no other peer was retried -
             // and kept this peer reserved in connectingTo, blocking beacon
             // dials to it as well.
-            conn = await PeerConnection.CreateAsync(client, myIdentity, trustStore, pairingState.ModeOpen, passphraseKeyStore)
+            conn = await PeerConnection.CreateAsync(client, myIdentity, trustStore, pairingState.ModeOpen, passphraseKeyStore, deviceName.Current)
                 .WaitAsync(HandshakeTimeout);
         }
         catch
@@ -547,9 +556,10 @@ class Program
             //
             // Trust is decided by CreateAsync for the identity that actually
             // answered, so it's safe to treat this as a connection to THAT
-            // device. The stale entry keeps its trust but loses the address,
-            // so it's never dialled here again (it's re-learned if that
-            // device really does come back).
+            // device. The stale entry keeps its trust (and its name - Trust()
+            // only ever merges names) but loses the address, so it's never
+            // dialled here again (it's re-learned if that device really does
+            // come back).
             Console.WriteLine($"[conn] {address} answered as {conn.PeerDeviceId[..Math.Min(12, conn.PeerDeviceId.Length)]}..., not {peerDeviceId[..Math.Min(12, peerDeviceId.Length)]}... - clearing that stale address");
             trustStore.Trust(peerDeviceId, null);
         }
@@ -569,6 +579,7 @@ class Program
         DeviceIdentity myIdentity,
         PairingState pairingState,
         PassphraseKeyStore passphraseKeyStore,
+        DeviceNameStore deviceName,
         ConcurrentDictionary<string, PeerConnection> connectionsByDeviceId,
         ClipboardSync clipboardSync,
         HistoryAccess historyAccess,
@@ -587,7 +598,7 @@ class Program
             // reconnect loop below), only ever be reconnected TO.
             remoteAddress = (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString();
 
-            var conn = await PeerConnection.CreateAsync(client, myIdentity, trustStore, pairingState.ModeOpen, passphraseKeyStore)
+            var conn = await PeerConnection.CreateAsync(client, myIdentity, trustStore, pairingState.ModeOpen, passphraseKeyStore, deviceName.Current)
                 .WaitAsync(HandshakeTimeout);
             if (conn == null)
             {
@@ -622,6 +633,7 @@ class Program
         DeviceIdentity myIdentity,
         PairingState pairingState,
         PassphraseKeyStore passphraseKeyStore,
+        DeviceNameStore deviceName,
         ConcurrentDictionary<string, PeerConnection> connectionsByDeviceId,
         ClipboardSync clipboardSync,
         HistoryAccess historyAccess,
@@ -635,7 +647,7 @@ class Program
             await client.ConnectAsync(address, port);
             EnableKeepAlive(client);
             // Same reason as ConnectToPeer's timeout.
-            var conn = await PeerConnection.CreateAsync(client, myIdentity, trustStore, pairingState.ModeOpen, passphraseKeyStore)
+            var conn = await PeerConnection.CreateAsync(client, myIdentity, trustStore, pairingState.ModeOpen, passphraseKeyStore, deviceName.Current)
                 .WaitAsync(HandshakeTimeout);
             if (conn == null)
             {
@@ -651,6 +663,79 @@ class Program
             return false; // not reachable right now
         }
     }
+
+    // The latest beacon heard from another device, trusted or not. Memory
+    // only: it's what list_devices shows for a device's LAN address, and the
+    // only place an untrusted device's name is kept (a trusted one's is also
+    // written to the trust store). Name keeps the last known one when a later
+    // beacon carries none.
+    private record SeenPeer(string? Name, string LanAddress, string? AdvertisedAddress, bool PairingOpen, DateTime LastSeenUtc);
+
+    // An untrusted device drops off list_devices once it's been this long
+    // without a beacon (they come every 2s); trusted ones are always listed.
+    private static readonly TimeSpan DiscoveredListingWindow = TimeSpan.FromSeconds(30);
+
+    // Beacons are unauthenticated UDP, so anyone on the LAN can make up
+    // device ids. Past this many remembered devices, untrusted ones that have
+    // gone quiet are forgotten, and a new untrusted one isn't recorded until
+    // there's room again - rather than growing without bound.
+    private const int MaxSeenPeers = 256;
+
+    // Records one beacon in seenPeers, keeping the last known name when this
+    // beacon carries none.
+    private static void RememberBeacon(ConcurrentDictionary<string, SeenPeer> seenPeers, TrustStore trustStore, string deviceId, SeenPeer beacon)
+    {
+        if (!seenPeers.ContainsKey(deviceId) && seenPeers.Count >= MaxSeenPeers && !trustStore.IsTrusted(deviceId))
+        {
+            DateTime cutoff = DateTime.UtcNow - DiscoveredListingWindow;
+            foreach (var (id, seen) in seenPeers)
+            {
+                if (seen.LastSeenUtc < cutoff && !trustStore.IsTrusted(id)) seenPeers.TryRemove(id, out _);
+            }
+            if (seenPeers.Count >= MaxSeenPeers) return;
+        }
+        seenPeers.AddOrUpdate(deviceId, beacon, (_, previous) => beacon with { Name = beacon.Name ?? previous.Name });
+    }
+
+    // Backs the "list_devices" IPC command - see DeviceListing for the
+    // shape and the (deliberately stable) order.
+    private static List<DeviceListing> ListDevices(
+        TrustStore trustStore,
+        ConcurrentDictionary<string, PeerConnection> connectionsByDeviceId,
+        ConcurrentDictionary<string, SeenPeer> seenPeers)
+    {
+        var rows = new List<DeviceListing>();
+        var trusted = trustStore.GetAllTrustedDevices().ToDictionary(device => device.PublicKey);
+        DateTime now = DateTime.UtcNow;
+        foreach (var device in trusted.Values)
+        {
+            seenPeers.TryGetValue(device.PublicKey, out var seen);
+            bool recent = seen != null && now - seen.LastSeenUtc <= DiscoveredListingWindow;
+            rows.Add(new DeviceListing(
+                device.PublicKey,
+                device.Name ?? seen?.Name,
+                Trusted: true,
+                Connected: connectionsByDeviceId.ContainsKey(device.PublicKey),
+                PairingOpen: recent && seen!.PairingOpen,
+                DistinctAddresses(seen?.LanAddress, seen?.AdvertisedAddress, device.Address)));
+        }
+        foreach (var (id, seen) in seenPeers)
+        {
+            if (trusted.ContainsKey(id) || now - seen.LastSeenUtc > DiscoveredListingWindow) continue;
+            rows.Add(new DeviceListing(id, seen.Name, Trusted: false, Connected: false, seen.PairingOpen,
+                DistinctAddresses(seen.LanAddress, seen.AdvertisedAddress)));
+        }
+        return rows
+            .OrderBy(row => row.Trusted ? 0 : 1)
+            .ThenBy(row => row.Name == null ? 1 : 0)
+            .ThenBy(row => row.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(row => row.PublicKey, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private static List<string> DistinctAddresses(params string?[] candidates) =>
+        candidates.Where(address => !string.IsNullOrWhiteSpace(address)).Select(address => address!).Distinct().ToList();
+
     [STAThread]
     static async Task Main(String[] args)
     {
@@ -663,6 +748,7 @@ class Program
         var historyAccess = new HistoryAccess(label, fileStore);
         TrustStore trustStore = new TrustStore(label);
         var passphraseKeyStore = new PassphraseKeyStore(label);
+        var deviceName = new DeviceNameStore(label);
         var fileTransferState = new FileTransferState();
         var pairingState = new PairingState();
         // Constructed here (rather than down by clipboardSync.ClipboardChanged's
@@ -672,6 +758,7 @@ class Program
         // any lambda that captures it, even though this one won't run until later.
         var clipboardSync = new ClipboardSync(fileStore);
         Console.WriteLine($"Device ID (public key): {identity.GetPublicKey()}");
+        Console.WriteLine($"Device name: {deviceName.Current}");
 
         if (trustedKeyToAdd != null)
         {
@@ -699,6 +786,8 @@ class Program
         // async flows. See RegisterConnection's orphan-closing fix for what
         // a resulting duplicate connection actually causes.
         ConcurrentDictionary<string, byte> connectingTo = new ConcurrentDictionary<string, byte>();
+        // Latest beacon per other device - see SeenPeer.
+        ConcurrentDictionary<string, SeenPeer> seenPeers = new ConcurrentDictionary<string, SeenPeer>();
 
         // local IPC for the tray app (QR pairing, passcode setup, etc.)
         var ipcServer = new IpcServer(label);
@@ -710,8 +799,20 @@ class Program
             }
             else if (request.Command == "get_pairing_info")
             {
-                var pairingInfo = new PairingInfo(identity.GetPublicKey(), TailscaleHelper.GetOwnTailscaleIp());
+                var pairingInfo = new PairingInfo(identity.GetPublicKey(), TailscaleHelper.GetOwnTailscaleIp(), deviceName.Current);
                 return new IpcResponse(true, JsonSerializer.Serialize(pairingInfo));
+            }
+            else if (request.Command == "get_device_name")
+            {
+                // The name in effect: the user's override, else the computer name.
+                return new IpcResponse(true, deviceName.Current);
+            }
+            else if (request.Command == "set_device_name")
+            {
+                // Blank (or no payload) clears the override, back to the
+                // computer name. Used from the next beacon and the next
+                // handshake - live connections keep the name they opened with.
+                return new IpcResponse(true, deviceName.SetOverride(request.Payload));
             }
             else if (request.Command == "has_passphrase")
             {
@@ -735,7 +836,7 @@ class Program
 
                 if (pairingInfo != null && !string.IsNullOrWhiteSpace(pairingInfo.PublicKey))
                 {
-                    trustStore.Trust(pairingInfo.PublicKey, pairingInfo.Address);
+                    trustStore.Trust(pairingInfo.PublicKey, pairingInfo.Address, pairingInfo.Name);
                 }
                 else
                 {
@@ -749,7 +850,17 @@ class Program
             }
             else if (request.Command == "list_trusted")
             {
+                // {PublicKey, Address, Name} per device - Name added
+                // alongside, so readers of the old shape are unaffected.
                 return new IpcResponse(true, JsonSerializer.Serialize(trustStore.GetAllTrustedDevices().ToList()));
+            }
+            else if (request.Command == "list_devices")
+            {
+                // The Devices list in one call: names, addresses, trusted and
+                // connected state, in a stable display order (see DeviceListing).
+                // list_connections/list_trusted keep their old shapes for
+                // older trays.
+                return new IpcResponse(true, JsonSerializer.Serialize(ListDevices(trustStore, connectionsByDeviceId, seenPeers)));
             }
             else if (request.Command == "untrust_device" && request.Payload != null)
             {
@@ -785,6 +896,21 @@ class Program
                 // pending.
                 return new IpcResponse(true, pairingState.PendingPeerId ?? "");
             }
+            else if (request.Command == "get_pending_pairing_info")
+            {
+                // Same poll with the name for the prompt: a PendingPairingInfo
+                // JSON object, or "" when nothing is pending. get_pending_pairing
+                // above keeps returning the bare id for existing callers.
+                var pending = pairingState.PendingPeer;
+                if (pending == null)
+                {
+                    return new IpcResponse(true, "");
+                }
+                string pendingId = pending.Value.peerId;
+                // Handshake name first; an older peer's may only be in its beacon.
+                string? pendingName = pending.Value.name ?? (seenPeers.TryGetValue(pendingId, out var seen) ? seen.Name : null);
+                return new IpcResponse(true, JsonSerializer.Serialize(new PendingPairingInfo(pendingId, pendingName, pending.Value.address)));
+            }
             else if (request.Command == "accept_pairing")
             {
                 var taken = pairingState.TakePending();
@@ -792,7 +918,9 @@ class Program
                 {
                     return new IpcResponse(false, "nothing pending");
                 }
-                trustStore.Trust(taken.Value.conn.PeerDeviceId, taken.Value.address);
+                string takenId = taken.Value.conn.PeerDeviceId;
+                string? takenName = taken.Value.conn.PeerDeviceName ?? (seenPeers.TryGetValue(takenId, out var seen) ? seen.Name : null);
+                trustStore.Trust(takenId, taken.Value.address, takenName);
                 RegisterConnection(taken.Value.conn, connectionsByDeviceId, clipboardSync, historyAccess, trustStore, fileStore, fileTransferState);
                 return new IpcResponse(true, "paired");
             }
@@ -821,7 +949,7 @@ class Program
                     }
                 }
                 catch (JsonException) { /* not JSON - treat the raw input as a bare address */ }
-                _ = PairByAddress(address, int.Parse(port), identity, pairingState, passphraseKeyStore, connectionsByDeviceId, clipboardSync, historyAccess, trustStore, fileStore, fileTransferState);
+                _ = PairByAddress(address, int.Parse(port), identity, pairingState, passphraseKeyStore, deviceName, connectionsByDeviceId, clipboardSync, historyAccess, trustStore, fileStore, fileTransferState);
                 return new IpcResponse(true, "connecting");
             }
             else
@@ -941,7 +1069,7 @@ class Program
                 // but over Tailscale (no beacons) every pairing and reconnect
                 // failed. It also meant one slow handshake blocked every other
                 // incoming connection until it finished.
-                _ = Task.Run(() => AcceptConnection(client, identity, pairingState, passphraseKeyStore, connectionsByDeviceId, clipboardSync, historyAccess, trustStore, fileStore, fileTransferState));
+                _ = Task.Run(() => AcceptConnection(client, identity, pairingState, passphraseKeyStore, deviceName, connectionsByDeviceId, clipboardSync, historyAccess, trustStore, fileStore, fileTransferState));
             }
 
         });
@@ -951,12 +1079,21 @@ class Program
 
         Discovery discovery = new Discovery();
 
-        discovery.PeerDiscovered += async (other_device_id, sender, other_port, proof, peerAddress, otherPairingOpen) =>
+        discovery.PeerDiscovered += async (other_device_id, sender, other_port, proof, peerAddress, otherPairingOpen, otherName) =>
         {
             // This handler is async void: an exception escaping it doesn't
             // just end the handler, it crashes the whole daemon.
             try
             {
+                // Remember every other device's latest beacon (our own loops
+                // back on localhost) - its name and LAN address for the
+                // Devices list, whether or not it's trusted.
+                if (other_device_id != identity.GetPublicKey())
+                {
+                    RememberBeacon(seenPeers, trustStore, other_device_id,
+                        new SeenPeer(otherName, sender.ToString(), peerAddress, otherPairingOpen, DateTime.UtcNow));
+                }
+
                 // auto-trust: if this device wasn't already trusted, but it proved
                 // knowledge of the same passphrase we have configured, trust it now —
                 // an alternative to manual QR/key pairing for "these are all my own devices".
@@ -967,10 +1104,14 @@ class Program
                     && PassphraseAuth.VerifyProof(passphraseKeyStore.GetKey()!, other_device_id, proof))
                 {
                     Console.WriteLine($"Auto-trusting {other_device_id} — proved knowledge of shared passphrase");
-                    trustStore.Trust(other_device_id, peerAddress);
+                    trustStore.Trust(other_device_id, peerAddress, otherName);
                 }
 
                 bool isTrusted = trustStore.IsTrusted(other_device_id);
+                if (isTrusted)
+                {
+                    trustStore.UpdateName(other_device_id, otherName); // no-op unless it changed
+                }
 
                 // connect only when the other device's public key is "smaller" than this device's public key (to avoid duplicate connections)
                 // connect only if the other device is in the trust store
@@ -986,7 +1127,7 @@ class Program
                     Console.WriteLine($"Discovered peer {other_device_id} at {other_port}");
                     try
                     {
-                        await ConnectToPeer(other_device_id, sender.ToString(), other_port, identity, pairingState, passphraseKeyStore, connectionsByDeviceId, clipboardSync, historyAccess, trustStore, fileStore, fileTransferState);
+                        await ConnectToPeer(other_device_id, sender.ToString(), other_port, identity, pairingState, passphraseKeyStore, deviceName, connectionsByDeviceId, clipboardSync, historyAccess, trustStore, fileStore, fileTransferState);
                     }
                     catch (Exception)
                     {
@@ -1010,7 +1151,7 @@ class Program
                     && pairingState.PendingPeerId == null)
                 {
                     Console.WriteLine($"Discovered pairing candidate {other_device_id} at {other_port}");
-                    await PairByAddress(sender.ToString(), other_port, identity, pairingState, passphraseKeyStore, connectionsByDeviceId, clipboardSync, historyAccess, trustStore, fileStore, fileTransferState);
+                    await PairByAddress(sender.ToString(), other_port, identity, pairingState, passphraseKeyStore, deviceName, connectionsByDeviceId, clipboardSync, historyAccess, trustStore, fileStore, fileTransferState);
                 }
             }
             catch (Exception ex)
@@ -1039,7 +1180,7 @@ class Program
                             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
                             try
                             {
-                                await ConnectToPeer(device.PublicKey, device.Address!, int.Parse(port), identity, pairingState, passphraseKeyStore, connectionsByDeviceId, clipboardSync, historyAccess, trustStore, fileStore, fileTransferState, cts.Token);
+                                await ConnectToPeer(device.PublicKey, device.Address!, int.Parse(port), identity, pairingState, passphraseKeyStore, deviceName, connectionsByDeviceId, clipboardSync, historyAccess, trustStore, fileStore, fileTransferState, cts.Token);
                             }
                             catch (Exception)
                             {
@@ -1068,6 +1209,7 @@ class Program
                 ? PassphraseAuth.ComputeProof(passphraseKeyStore.GetKey()!, identity.GetPublicKey())
                 : null,
             ownTailscaleAddress,
-            () => pairingState.ModeOpen);
+            () => pairingState.ModeOpen,
+            () => deviceName.Current);
     }
 }

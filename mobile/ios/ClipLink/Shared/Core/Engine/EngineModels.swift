@@ -21,11 +21,21 @@ public struct EngineSnapshot: Equatable {
     public var sweeping = false
     /// Local names the user gave trusted devices (never sent anywhere).
     public var nicknames: [String: String] = [:]
+    /// The names peers give themselves (beacons, handshakes, trust store).
+    public var deviceNames: [String: String] = [:]
+    /// The name this device goes by on the wire ("" when it has none).
+    public var deviceName = ""
+    /// The user's "Device name" setting ("" = use `systemDeviceName`).
+    public var deviceNameOverride = ""
+    /// The OS default name, as the app last stored it.
+    public var systemDeviceName = ""
 
     public init() {}
 
+    /// A local nickname, else the name the device gives itself, else a
+    /// short label derived from its id.
     public func name(for deviceId: String) -> String {
-        nicknames[deviceId] ?? DeviceLabel.short(deviceId)
+        nicknames[deviceId] ?? deviceNames[deviceId] ?? DeviceLabel.short(deviceId)
     }
 }
 
@@ -105,9 +115,14 @@ public struct SyncedItem: Identifiable, Equatable {
 public struct DeviceRow: Identifiable, Equatable {
     public var id: String { deviceId }
     public let deviceId: String
+    /// What the row is titled: the local nickname, else the name the device
+    /// gives itself; nil when neither is known.
+    public let name: String?
     public let trusted: Bool
     public let connected: Bool
-    /// Every address this device is reachable at, LAN first.
+    /// Where this device is reachable: the LAN address it was last heard
+    /// from or reached at, then its stored and self-advertised (off-LAN)
+    /// addresses.
     public let addresses: [String]
     /// The peer's beacon says its own pairing screen is open right now.
     public let pairing: Bool
@@ -116,6 +131,26 @@ public struct DeviceRow: Identifiable, Equatable {
     public let nearby: Bool
 
     public var shortId: String { String(deviceId.prefix(12)) }
+
+    /// The one row order every platform uses: paired devices first, then by
+    /// name (case-insensitive; named rows before unnamed ones), then by id.
+    /// Deliberately never by last-seen time or connection state - a beacon
+    /// arriving or a link coming up must not move a row.
+    public static func displayOrder(_ a: DeviceRow, _ b: DeviceRow) -> Bool {
+        if a.trusted != b.trusted { return a.trusted }
+        switch (a.name, b.name) {
+        case let (.some(x), .some(y)):
+            let order = x.caseInsensitiveCompare(y)
+            if order != .orderedSame { return order == .orderedAscending }
+        case (.some, .none):
+            return true
+        case (.none, .some):
+            return false
+        case (.none, .none):
+            break
+        }
+        return DeviceOrder.isOrdinallyLess(a.deviceId, b.deviceId)
+    }
 }
 
 public struct LogLine: Identifiable, Equatable {
@@ -135,6 +170,8 @@ public struct LogLine: Identifiable, Equatable {
 public struct PairingRequest: Equatable {
     public let deviceId: String
     public let address: String?
+    /// The name its handshake gave; nil for older builds.
+    public let name: String?
 }
 
 /// How a manual (QR / typed) pairing dial ended. Mirrors the richest set, the
@@ -142,8 +179,9 @@ public struct PairingRequest: Equatable {
 public enum PairOutcome: Equatable {
     case ownCode
     case empty
-    case noAddress(key: String)
-    case searching(key: String)
+    /// `name` is the pairing code's optional `Name`.
+    case noAddress(key: String, name: String? = nil)
+    case searching(key: String, name: String? = nil)
     case connected(String)
     case passcode(String)
     case prompt(String)
@@ -158,10 +196,10 @@ public enum PairOutcome: Equatable {
         switch self {
         case .ownCode: return "That's this device's own code."
         case .empty: return "Enter a pairing code or address first."
-        case .noAddress(let key):
-            return "\(key.prefix(12))… has no address in its code. If it's on the same network, keep this screen open on both devices and it will pair automatically."
-        case .searching(let key):
-            return "Looking for \(key.prefix(12))… on this network — keep this screen open on both devices."
+        case .noAddress(let key, let name):
+            return "\(name ?? "\(key.prefix(12))…") has no address in its code. If it's on the same network, keep this screen open on both devices and it will pair automatically."
+        case .searching(let key, let name):
+            return "Looking for \(name ?? "\(key.prefix(12))…") on this network — keep this screen open on both devices."
         case .connected(let a): return "Already paired with \(a) - connected."
         case .passcode(let a): return "Paired with \(a) using your passcode."
         case .prompt(let a): return "Reached \(a) - accept the pairing prompt on both devices to finish."

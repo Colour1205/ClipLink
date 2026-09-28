@@ -175,9 +175,9 @@ extension SyncEngine {
             case .success(let link):
                 self.handleNewConnection(link, address: link.remoteAddress)
             case .failure(let failure):
-                if case .refused(let id) = failure {
+                if case .refused(let id, let name) = failure {
                     self.refusedAt[id] = Date()
-                    self.noteSighting(id, address: remote)
+                    self.noteSighting(id, address: remote, name: name)
                 }
             }
         }
@@ -188,7 +188,8 @@ extension SyncEngine {
             identity: identity,
             trusted: Set(trust.all.map(\.publicKey)),
             passphraseKey: passphraseKey,
-            pairingOpen: pairingOpen
+            pairingOpen: pairingOpen,
+            deviceName: ownDeviceName
         )
     }
 
@@ -227,14 +228,17 @@ extension SyncEngine {
         sighting.advertisedAddress = beacon.address
         sighting.pairing = beacon.pairing
         if beacon.pairing { sighting.pairingSeen = Date() }
+        // A beacon without a name (an older build) keeps the one we know.
+        if let name = beacon.name { sighting.name = name }
         sightings[id] = sighting
         capStrangerSightings()
+        trust.updateName(id, name: beacon.name)
         schedulePublish()
 
         if !trust.isTrusted(id), let key = passphraseKey, let proof = beacon.proof,
            PassphraseAuth.verifyProof(key: key, deviceId: id, proofBase64: proof) {
             log("auto-trusting \(DeviceLabel.short(id)) (shared passcode)")
-            trust.trust(id, address: beacon.address)
+            trust.trust(id, address: beacon.address, name: sighting.name)
         }
 
         guard links[id] == nil, !connectingTo.contains(id), DeviceOrder.shouldDial(peerId: id, ownId: ownId) else { return }
@@ -248,7 +252,7 @@ extension SyncEngine {
 
     func currentBeacon() -> Data {
         let address = tailscaleIP.isEmpty ? nil : tailscaleIP
-        return Data(Beacon.build(tcpPort: Int(config.listenPort), deviceId: ownId, proof: cachedProof, address: address, pairing: pairingOpen).utf8)
+        return Data(Beacon.build(tcpPort: Int(config.listenPort), deviceId: ownId, proof: cachedProof, address: address, pairing: pairingOpen, name: ownDeviceName).utf8)
     }
 
     func beaconTick() {
@@ -378,13 +382,16 @@ extension SyncEngine {
         }
     }
 
-    func noteSighting(_ id: String, address: String?) {
+    /// `name`: what the device's handshake called itself, if anything.
+    func noteSighting(_ id: String, address: String?, name: String? = nil) {
         guard id != ownId else { return }
         var sighting = sightings[id] ?? Sighting(lastSeen: Date())
         sighting.lastSeen = Date()
         if let address, Self.isPeerAddress(address) { sighting.addresses[address] = Date() }
+        if let name { sighting.name = name }
         sightings[id] = sighting
         capStrangerSightings()
+        trust.updateName(id, name: name)
         schedulePublish()
     }
 
@@ -566,9 +573,9 @@ extension SyncEngine {
                 case .localNetworkDenied:
                     self.setLocalNetwork(.denied)
                 case .notWanted(let theirs):
-                    self.noteSighting(theirs.identityPublicKey, address: host)
-                case .refused(let id):
-                    self.noteSighting(id, address: host)
+                    self.noteSighting(theirs.identityPublicKey, address: host, name: theirs.deviceName)
+                case .refused(let id, let name):
+                    self.noteSighting(id, address: host, name: name)
                 default:
                     break
                 }
@@ -657,10 +664,10 @@ extension SyncEngine {
                         self.handleNewConnection(link, address: host)
                     case .failure(.notWanted(let theirs)):
                         found += 1
-                        self.noteSighting(theirs.identityPublicKey, address: host)
-                    case .failure(.refused(let id)):
+                        self.noteSighting(theirs.identityPublicKey, address: host, name: theirs.deviceName)
+                    case .failure(.refused(let id, let name)):
                         found += 1
-                        self.noteSighting(id, address: host)
+                        self.noteSighting(id, address: host, name: name)
                     case .failure(.localNetworkDenied):
                         denied = true
                         self.setLocalNetwork(.denied)
@@ -688,7 +695,8 @@ extension SyncEngine {
     /// made it (inbound, beacon dial, reconnect, sweep, manual pairing).
     func handleNewConnection(_ link: PeerLink, address: String?) {
         let id = link.peerDeviceId
-        noteSighting(id, address: address)
+        // Also records a trusted peer's handshake name in the trust store.
+        noteSighting(id, address: address, name: link.peerName)
         guard running else {
             link.close()
             return
@@ -720,7 +728,7 @@ extension SyncEngine {
         // trust-store bookkeeping below.
         register(link, acceptedByUser: false)
         if link.newlyTrustedViaPassphrase {
-            trust.trust(id, address: address)
+            trust.trust(id, address: address, name: peerName(for: id))
             log("auto-paired via passcode: \(DeviceLabel.short(id))")
             notice("Paired with \(displayName(for: id)) using your passcode.")
         } else {
@@ -846,14 +854,14 @@ extension SyncEngine {
             var candidates = addressCandidates(for: key)
             if let a = info.address, !candidates.contains(a) { candidates.append(a) }
             if candidates.isEmpty {
-                guard config.enableSweeps, NetworkInterfaces.lan() != nil else { return completion(.noAddress(key: key)) }
+                guard config.enableSweeps, NetworkInterfaces.lan() != nil else { return completion(.noAddress(key: key, name: info.name)) }
                 // No address to dial: find it. If we're its dialer the sweep
                 // connects straight away; otherwise our pairing beacons make it
                 // dial us once its own Pairing screen is open.
                 pairingTargetKey = key
                 udpSweep(force: true)
                 tcpSweep(force: true, reason: "pairing target")
-                return completion(.searching(key: key))
+                return completion(.searching(key: key, name: info.name))
             }
             return dialForPairing(candidates, completion: completion)
         }

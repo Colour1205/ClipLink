@@ -1,3 +1,4 @@
+using System.Text.Json;
 using QRCoder;
 
 namespace ClipboardTray;
@@ -9,7 +10,7 @@ namespace ClipboardTray;
 // device only completes at all while both sides have their own version of
 // this window open, and even then only actually pairs once the user here
 // taps Accept on a live, signature-verified request (polled from the
-// daemon's PairingState - see get_pending_pairing/accept_pairing/
+// daemon's PairingState - see get_pending_pairing_info/accept_pairing/
 // reject_pairing in Program.cs). Scanning was never possible on Windows
 // (no camera API used here) - "Pair by Address" is the equivalent entry
 // point, taking either a bare address or the full pairing JSON another
@@ -25,7 +26,9 @@ public class PairingForm : Form
     private readonly Button rejectButton;
     private readonly TextBox myInfoBox;
     private readonly PictureBox qrPictureBox;
-    private string? lastPromptedPeerId;
+    // The prompt text currently shown, not just the peer id - so a name that
+    // only turns up a poll later (from the peer's beacon) still updates it.
+    private string? lastPromptText;
     // Same guard as ManageDevicesForm's - stops overlapping polls from
     // piling up if the daemon is slow or unreachable for a stretch.
     private bool isPolling = false;
@@ -89,7 +92,8 @@ public class PairingForm : Form
         {
             Text = "",
             Dock = DockStyle.Top,
-            Height = 40,
+            Height = 56, // room for a long device name to wrap
+            UseMnemonic = false, // a '&' in a device name is just a '&'
             Visible = false
         };
         acceptButton = new Button { Text = "Accept", Dock = DockStyle.Left, Width = 100, Visible = false };
@@ -186,24 +190,46 @@ public class PairingForm : Form
 
     private async Task PollPendingCore()
     {
-        var response = await ipcClient.Send(new IpcRequest("get_pending_pairing"));
-        string peerId = response?.Success == true ? (response.Data ?? "") : "";
+        var pending = await FetchPending();
 
-        if (peerId.Length == 0)
+        if (pending == null || string.IsNullOrEmpty(pending.PublicKey))
         {
-            lastPromptedPeerId = null;
+            lastPromptText = null;
             pendingLabel.Visible = false;
             acceptButton.Visible = false;
             rejectButton.Visible = false;
             return;
         }
 
-        if (peerId == lastPromptedPeerId) return; // already showing this one
-        lastPromptedPeerId = peerId;
-        pendingLabel.Text = $"Pairing request from: {peerId.Substring(0, Math.Min(20, peerId.Length))}...\nOnly accept if you expect this.";
+        string from = DeviceLabel.Of(pending.PublicKey, pending.Name);
+        if (!string.IsNullOrEmpty(pending.Address)) from += $" ({pending.Address})";
+        string promptText = $"Pairing request from: {from}\nOnly accept if you expect this.";
+        if (promptText == lastPromptText) return; // already showing this one
+        lastPromptText = promptText;
+        pendingLabel.Text = promptText;
         pendingLabel.Visible = true;
         acceptButton.Visible = true;
         rejectButton.Visible = true;
+    }
+
+    // The pending request with its name, or null when nothing is pending. A
+    // daemon still running from before device names doesn't know
+    // get_pending_pairing_info - fall back to its bare-id get_pending_pairing
+    // rather than never showing the request at all.
+    private async Task<PendingPairingInfo?> FetchPending()
+    {
+        var response = await ipcClient.Send(new IpcRequest("get_pending_pairing_info"));
+        if (response is { Success: false })
+        {
+            var legacy = await ipcClient.Send(new IpcRequest("get_pending_pairing"));
+            string peerId = legacy?.Success == true ? (legacy.Data ?? "") : "";
+            return peerId.Length > 0 ? new PendingPairingInfo(peerId, null, null) : null;
+        }
+
+        string json = response?.Success == true ? (response.Data ?? "") : "";
+        if (json.Length == 0) return null;
+        try { return JsonSerializer.Deserialize<PendingPairingInfo>(json); }
+        catch (JsonException) { return null; } // treated as nothing pending
     }
 
     private async Task OnAccept()
@@ -216,7 +242,7 @@ public class PairingForm : Form
         }
         finally
         {
-            lastPromptedPeerId = null;
+            lastPromptText = null;
             pendingLabel.Visible = false;
             acceptButton.Visible = false;
             rejectButton.Visible = false;
@@ -235,7 +261,7 @@ public class PairingForm : Form
         }
         finally
         {
-            lastPromptedPeerId = null;
+            lastPromptText = null;
             pendingLabel.Visible = false;
             acceptButton.Visible = false;
             rejectButton.Visible = false;

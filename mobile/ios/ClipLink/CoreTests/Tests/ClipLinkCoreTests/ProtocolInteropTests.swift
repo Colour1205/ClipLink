@@ -194,6 +194,39 @@ final class ProtocolInteropTests: XCTestCase {
     func testHandshakeOmitsProofWhenAbsent() {
         let json = HandshakeMessage(ephemeralPublicKey: "E", identityPublicKey: "I", signature: "S", passphraseProof: nil).jsonString()
         XCTAssertFalse(json.contains("PassphraseProof"))
+        XCTAssertFalse(json.contains("DeviceName"))
+    }
+
+    func testHandshakeDeviceNameIsOptionalAndCapped() {
+        let named = HandshakeMessage(ephemeralPublicKey: "E", identityPublicKey: "I", signature: "S", passphraseProof: nil, deviceName: "  Colour's iPhone  ")
+        XCTAssertEqual(WireJSON.object(named.jsonString())?["DeviceName"] as? String, "Colour's iPhone", "trimmed, plain JSON string")
+        XCTAssertEqual(HandshakeMessage.parse(named.jsonString())?.deviceName, "Colour's iPhone")
+        // Older builds, and Windows' record with DeviceName = null.
+        for json in [
+            #"{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S"}"#,
+            #"{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S","PassphraseProof":null,"DeviceName":null}"#,
+            #"{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S","DeviceName":"   "}"#,
+            #"{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S","DeviceName":42}"#,
+        ] {
+            let hs = HandshakeMessage.parse(json)
+            XCTAssertNotNil(hs, json)
+            XCTAssertNil(hs?.deviceName, json)
+        }
+        let long = String(repeating: "\u{E9}", count: 80)
+        let parsed = HandshakeMessage.parse(WireJSON.string(["EphemeralPublicKey": "E", "IdentityPublicKey": "I", "Signature": "S", "DeviceName": long]))
+        XCTAssertEqual(parsed?.deviceName, String(repeating: "\u{E9}", count: 64))
+        let sent = HandshakeMessage(ephemeralPublicKey: "E", identityPublicKey: "I", signature: "S", passphraseProof: nil, deviceName: long)
+        XCTAssertEqual(WireJSON.object(sent.jsonString())?["DeviceName"] as? String, String(repeating: "\u{E9}", count: 64))
+    }
+
+    func testPairingPayloadNameIsOptional() {
+        XCTAssertEqual(PairingInfo.parse(#"{"PublicKey":"KEY","Address":"100.64.0.2","Name":" Desk PC "}"#),
+                       PairingInfo(publicKey: "KEY", address: "100.64.0.2", name: "Desk PC"))
+        XCTAssertNil(PairingInfo.parse(#"{"PublicKey":"KEY","Address":null,"Name":null}"#)?.name)
+        XCTAssertNil(PairingInfo.parse(#"{"PublicKey":"KEY","Name":""}"#)?.name)
+        XCTAssertEqual(WireJSON.object(PairingInfo(publicKey: "KEY", address: nil, name: "iPad").jsonString())?["Name"] as? String, "iPad")
+        XCTAssertFalse(PairingInfo(publicKey: "KEY", address: "100.64.0.2").jsonString().contains("Name"))
+        XCTAssertFalse(PairingInfo(publicKey: "KEY", address: nil, name: "  ").jsonString().contains("Name"))
     }
 
     // MARK: beacon
@@ -209,8 +242,58 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertNil(Beacon.parse("garbage", senderIP: "x"))
         XCTAssertNil(Beacon.parse("notaport:KEY:-", senderIP: "x"))
         XCTAssertNil(Beacon.parse("49000::-", senderIP: "x"))
-        XCTAssertEqual(Beacon.build(tcpPort: 49000, deviceId: "K", proof: nil, address: "", pairing: false), "49000:K:-:-:-")
-        XCTAssertEqual(Beacon.build(tcpPort: 49000, deviceId: "K", proof: "P", address: "100.1.2.3", pairing: true), "49000:K:P:100.1.2.3:1")
+        XCTAssertNil(d.name, "five-field beacons (older builds) have no name")
+        // Senders always write all six fields, `-` for an unknown name.
+        XCTAssertEqual(Beacon.build(tcpPort: 49000, deviceId: "K", proof: nil, address: "", pairing: false), "49000:K:-:-:-:-")
+        XCTAssertEqual(Beacon.build(tcpPort: 49000, deviceId: "K", proof: "P", address: "100.1.2.3", pairing: true), "49000:K:P:100.1.2.3:1:-")
+    }
+
+    func testBeaconNameIsBase64InTheSixthField() {
+        let built = Beacon.build(tcpPort: 49000, deviceId: "K", proof: nil, address: nil, pairing: false, name: "  Colour's PC  ")
+        XCTAssertEqual(built, "49000:K:-:-:-:" + Data("Colour's PC".utf8).base64EncodedString(), "trimmed, then padded base64 of the UTF-8")
+        XCTAssertEqual(Beacon.parse(built, senderIP: "10.0.0.2")?.name, "Colour's PC")
+
+        // Non-ASCII round-trips, and base64 never adds a colon.
+        let fancy = "Zo\u{EB}'s iPad \u{1F30D}"
+        let b = Beacon.build(tcpPort: 49000, deviceId: "K", proof: "P", address: "100.1.2.3", pairing: true, name: fancy)
+        XCTAssertEqual(b.split(separator: ":", omittingEmptySubsequences: false).count, 6)
+        XCTAssertEqual(Beacon.parse(b, senderIP: "x"), Beacon(tcpPort: 49000, deviceId: "K", proof: "P", address: "100.1.2.3", pairing: true, name: fancy, senderIP: "x"))
+
+        // Capped at 64 before encoding.
+        let long = Beacon.build(tcpPort: 49000, deviceId: "K", proof: nil, address: nil, pairing: false, name: String(repeating: "n", count: 100))
+        XCTAssertEqual(Beacon.parse(long, senderIP: "x")?.name, String(repeating: "n", count: 64))
+        XCTAssertEqual(Beacon.build(tcpPort: 49000, deviceId: "K", proof: nil, address: nil, pairing: false, name: "   "), "49000:K:-:-:-:-")
+
+        // Absent, `-`, empty, bad base64, bad UTF-8 or blank: unknown - and
+        // the beacon itself still counts.
+        let badUTF8 = Data([0xFF, 0xFE, 0x41]).base64EncodedString()
+        let blank = Data("   ".utf8).base64EncodedString()
+        for tail in ["", ":-", ":", ":%%%", ":QUJD", ":QUJD\n", ":\(badUTF8)", ":\(blank)"] {
+            let parsed = Beacon.parse("49000:K:-:-:1" + tail, senderIP: "x")
+            XCTAssertNotNil(parsed, tail)
+            XCTAssertEqual(parsed?.pairing, true, tail)
+            if tail.hasPrefix(":QUJD") {
+                XCTAssertEqual(parsed?.name, "ABC")
+            } else {
+                XCTAssertNil(parsed?.name, tail)
+            }
+        }
+    }
+
+    func testNameEncodingMatchesTheOtherPlatformsByteForByte() {
+        // Golden values from the Windows daemon's Discovery.EncodeName; the
+        // Android and HarmonyOS encoders produce the same strings.
+        let colour = "Colour's PC: \u{1F3A7} \u{FC}n\u{EF}c\u{F6}d\u{E9}"
+        XCTAssertEqual(DeviceName.beaconField(colour), "Q29sb3VyJ3MgUEM6IPCfjqcgw7xuw69jw7Zkw6k=")
+        XCTAssertEqual(DeviceName.fromBeaconField("Q29sb3VyJ3MgUEM6IPCfjqcgw7xuw69jw7Zkw6k="), colour)
+        XCTAssertEqual(DeviceName.beaconField("\u{6211}\u{7684}\u{624B}\u{673A}"), "5oiR55qE5omL5py6")
+        // 64 Unicode scalars: 64 emoji rather than 32 (UTF-16 units)...
+        XCTAssertEqual(DeviceName.beaconField(String(repeating: "\u{1F600}", count: 70)), String(repeating: "8J+YgPCfmIDwn5iA", count: 21) + "8J+YgA==")
+        // ...and 64 scalars rather than 64 Characters.
+        XCTAssertEqual(DeviceName.beaconField(String(repeating: "e\u{301}", count: 40)), String(repeating: "ZcyB", count: 32))
+        // System.Text.Json escapes everything outside ASCII, and the apostrophe.
+        let hs = HandshakeMessage.parse(#"{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S","PassphraseProof":null,"DeviceName":"Colour\u0027s PC: \uD83C\uDFA7 \u00FCn\u00EFc\u00F6d\u00E9"}"#)
+        XCTAssertEqual(hs?.deviceName, colour)
     }
 
     // MARK: framing
@@ -279,6 +362,48 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertFalse(DeviceOrder.isOrdinallyLess("A", "A"))
         XCTAssertTrue(DeviceOrder.isOrdinallyLess("A", "AB"))
         XCTAssertTrue(DeviceOrder.isOrdinallyLess("+", "/"))
+    }
+
+    // MARK: device names & list order
+
+    func testTrustStoreKeepsNamesAndAddressesIndependent() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("trust-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = TrustStore(directory: dir)
+        store.trust("A", address: "192.168.1.5", name: "Desk PC")
+        store.trust("A", address: "192.168.1.6")
+        XCTAssertEqual(store.device("A"), TrustedDevice(publicKey: "A", address: "192.168.1.6", name: "Desk PC"), "an address update keeps the name")
+        store.updateName("A", name: nil)
+        store.updateName("A", name: "")
+        store.trust("A", address: nil, name: nil)
+        XCTAssertEqual(store.device("A")?.name, "Desk PC", "an unknown name never erases a known one")
+        store.clearAddress("A")
+        XCTAssertEqual(store.device("A"), TrustedDevice(publicKey: "A", address: nil, name: "Desk PC"), "clearing a stale address keeps the name")
+        store.updateName("A", name: "Studio PC")
+        XCTAssertNil(store.device("A")?.address, "a name update doesn't touch the address")
+        store.trust("A", address: "10.0.0.2")
+        store.updateName("Stranger", name: "Nope")
+        XCTAssertFalse(store.isTrusted("Stranger"), "a name never adds trust")
+        XCTAssertEqual(TrustStore(directory: dir).all, [TrustedDevice(publicKey: "A", address: "10.0.0.2", name: "Studio PC")], "persisted")
+    }
+
+    func testDeviceRowsSortByGroupThenNameThenIdOnly() {
+        func row(_ id: String, _ name: String?, trusted: Bool, connected: Bool = false, lastSeen: Date? = nil) -> DeviceRow {
+            DeviceRow(deviceId: id, name: name, trusted: trusted, connected: connected, addresses: [], pairing: false, lastSeen: lastSeen, nearby: connected)
+        }
+        let rows = [
+            row("id5", nil, trusted: false, lastSeen: Date()),
+            row("id4", "zebra", trusted: false),
+            row("id3", nil, trusted: true, connected: true, lastSeen: Date()),
+            row("id2", "Beta", trusted: true),
+            row("id1", "alpha", trusted: true, lastSeen: .distantPast),
+            row("id0", nil, trusted: true),
+            row("id9", "beta", trusted: true),
+        ]
+        let expected = ["id1", "id2", "id9", "id0", "id3", "id4", "id5"]
+        XCTAssertEqual(rows.sorted(by: DeviceRow.displayOrder).map(\.deviceId), expected,
+                       "paired first; named (case-insensitive) before unnamed; ties and unnamed by id; never by connection or last seen")
+        XCTAssertEqual(rows.reversed().sorted(by: DeviceRow.displayOrder).map(\.deviceId), expected, "insertion order doesn't matter")
     }
 }
 

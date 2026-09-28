@@ -8,8 +8,11 @@ namespace ClipboardTray;
 // projects and the shape is tiny enough that a shared library isn't worth it yet.
 public record IpcRequest(string Command, string? Payload = null);
 public record IpcResponse(bool Success, string? Data = null);
-public record PairingInfo(string PublicKey, string? Address = null);
-public record TrustedDevice(string PublicKey, string? Address = null);
+public record PairingInfo(string PublicKey, string? Address = null, string? Name = null);
+public record TrustedDevice(string PublicKey, string? Address = null, string? Name = null);
+// "list_devices" rows (already in display order) and "get_pending_pairing_info".
+public record DeviceListing(string PublicKey, string? Name, bool Trusted, bool Connected, bool PairingOpen, List<string> Addresses);
+public record PendingPairingInfo(string PublicKey, string? Name, string? Address);
 
 public class IpcClient
 {

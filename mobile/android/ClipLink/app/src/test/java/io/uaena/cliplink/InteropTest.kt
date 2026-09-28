@@ -7,9 +7,14 @@ import io.uaena.cliplink.core.Pbkdf2
 import io.uaena.cliplink.core.Signing
 import io.uaena.cliplink.core.fixedTimeEquals
 import io.uaena.cliplink.core.toHex
+import io.uaena.cliplink.engine.DeviceRow
 import io.uaena.cliplink.net.Discovery
 import io.uaena.cliplink.net.HandshakeMessage
 import io.uaena.cliplink.net.PairingInfo
+import io.uaena.cliplink.net.Protocol
+import io.uaena.cliplink.store.TrustedDevice
+import io.uaena.cliplink.store.withName
+import io.uaena.cliplink.store.withTrusted
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -328,6 +333,112 @@ class InteropTest {
         assertEquals(deviceId, beacon.deviceId)
     }
 
+    // ---- beacon name field ------------------------------------------------
+
+    @Test
+    fun `beacon parses the six field form with a name`() {
+        // "Colour's PC: 8 ✨" - a colon and a non-ASCII character, both of
+        // which only survive the colon split because the field is base64.
+        val beacon = Discovery.parse("49000:SOMEKEY:-:100.64.0.1:1:Q29sb3VyJ3MgUEM6IDgg4pyo", "192.168.1.5")
+        checkNotNull(beacon)
+        assertEquals("Colour's PC: 8 ✨", beacon.name)
+        // ...and the fields before it are unaffected.
+        assertEquals("100.64.0.1", beacon.address)
+        assertTrue(beacon.pairing)
+        assertEquals("192.168.1.5", beacon.senderIp)
+    }
+
+    @Test
+    fun `beacon without a usable name field still parses with no name`() {
+        // Five fields: every build from before names existed.
+        assertNull(checkNotNull(Discovery.parse("49000:SOMEKEY:-:-:-", "10.0.0.2")).name)
+        assertNull(checkNotNull(Discovery.parse("49000:SOMEKEY:-:-:1", "10.0.0.2")).name)
+        assertNull(checkNotNull(Discovery.parse("49000:SOMEKEY:-", "10.0.0.2")).name)
+        // Explicitly unknown, or empty.
+        assertNull(checkNotNull(Discovery.parse("49000:SOMEKEY:-:-:-:-", "10.0.0.2")).name)
+        assertNull(checkNotNull(Discovery.parse("49000:SOMEKEY:-:-:-:", "10.0.0.2")).name)
+    }
+
+    @Test
+    fun `beacon with a malformed name keeps the beacon and drops only the name`() {
+        // Not base64 at all.
+        val badBase64 = Discovery.parse("49000:SOMEKEY:PROOF:-:1:@@not base64@@", "10.0.0.2")
+        checkNotNull(badBase64)
+        assertNull(badBase64.name)
+        assertEquals("PROOF", badBase64.proof)
+        assertTrue(badBase64.pairing)
+        // Valid base64 of bytes that are not valid UTF-8 (FF FE FD).
+        val badUtf8 = Discovery.parse("49000:SOMEKEY:-:-:-://79", "10.0.0.2")
+        checkNotNull(badUtf8)
+        assertNull(badUtf8.name)
+        // Base64 of nothing but whitespace is no name either.
+        assertNull(checkNotNull(Discovery.parse("49000:SOMEKEY:-:-:-:ICAg", "10.0.0.2")).name)
+    }
+
+    @Test
+    fun `beacon build always writes six fields and round trips`() {
+        val named = Discovery.build(49000, "SOMEKEY", null, null, false, "Pixel 8")
+        // The pairing field is written as "-" rather than left off, so the
+        // name is always at index 5 for every receiver.
+        assertEquals("49000:SOMEKEY:-:-:-:UGl4ZWwgOA==", named)
+        assertEquals("Pixel 8", checkNotNull(Discovery.parse(named, "10.0.0.2")).name)
+
+        assertEquals("49000:SOMEKEY:P:100.64.0.1:1:-", Discovery.build(49000, "SOMEKEY", "P", "100.64.0.1", true, null))
+        assertEquals("49000:SOMEKEY:-:-:-:-", Discovery.build(49000, "SOMEKEY", null, null, false, "   "))
+
+        val unicode = "Colour's PC: 8 ✨"
+        assertEquals(
+            unicode,
+            Discovery.parse(Discovery.build(49000, "SOMEKEY", null, null, false, unicode), "")?.name,
+        )
+    }
+
+    @Test
+    fun `device names are trimmed and capped at 64 code points`() {
+        assertEquals("Pixel 8", Protocol.normalizeDeviceName("  Pixel 8 \n"))
+        assertNull(Protocol.normalizeDeviceName("   "))
+        assertNull(Protocol.normalizeDeviceName(""))
+        assertNull(Protocol.normalizeDeviceName(null))
+
+        assertEquals("a".repeat(64), Protocol.normalizeDeviceName("a".repeat(100)))
+        assertEquals("a".repeat(64), Protocol.normalizeDeviceName("a".repeat(64)))
+
+        // Counted in code points: 64 emoji are 128 UTF-16 units, and the cut
+        // must neither stop at 32 emoji nor split a surrogate pair.
+        val capped = checkNotNull(Protocol.normalizeDeviceName("😀".repeat(70)))
+        assertEquals(64, capped.codePointCount(0, capped.length))
+        assertEquals("😀".repeat(64), capped)
+
+        // Capped BEFORE encoding: what goes out decodes to at most 64.
+        val sent = Discovery.parse(Discovery.build(49000, "K", null, null, false, "b".repeat(80)), "")
+        assertEquals("b".repeat(64), sent?.name)
+    }
+
+    @Test
+    fun `beacon name field matches the other platforms byte for byte`() {
+        // Golden values from the Windows daemon's Discovery.EncodeName; the
+        // HarmonyOS and iOS encoders produce the same strings.
+        val colour = "Colour's PC: \uD83C\uDFA7 \u00FCn\u00EFc\u00F6d\u00E9"
+        assertEquals("Q29sb3VyJ3MgUEM6IPCfjqcgw7xuw69jw7Zkw6k=", Discovery.encodeName(colour))
+        assertEquals(colour, Discovery.decodeName("Q29sb3VyJ3MgUEM6IPCfjqcgw7xuw69jw7Zkw6k="))
+        assertEquals("5oiR55qE5omL5py6", Discovery.encodeName("\u6211\u7684\u624B\u673A"))
+        // 64 code points: 64 emoji rather than 32 (UTF-16 units)...
+        assertEquals("8J+YgPCfmIDwn5iA".repeat(21) + "8J+YgA==", Discovery.encodeName("\uD83D\uDE00".repeat(70)))
+        // ...and 64 code points rather than 64 visible characters.
+        assertEquals("ZcyB".repeat(32), Discovery.encodeName("e\u0301".repeat(40)))
+    }
+
+    @Test
+    fun `handshake and pairing code read the daemon's escaped names`() {
+        // System.Text.Json escapes everything outside ASCII, and the apostrophe.
+        val handshake = HandshakeMessage.parse(
+            """{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S","PassphraseProof":null,"DeviceName":"Colour\u0027s PC: \uD83C\uDFA7 \u00FCn\u00EFc\u00F6d\u00E9"}""",
+        )
+        assertEquals("Colour's PC: \uD83C\uDFA7 \u00FCn\u00EFc\u00F6d\u00E9", handshake?.deviceName)
+        val pairing = PairingInfo.parse("""{"PublicKey":"K","Address":null,"Name":"\u6211\u7684\u624B\u673A"}""")
+        assertEquals("\u6211\u7684\u624B\u673A", pairing?.name)
+    }
+
     // ---- JSON null fields -------------------------------------------------
 
     // System.Text.Json writes an unset `string?` as an explicit null, and
@@ -355,6 +466,113 @@ class InteropTest {
         checkNotNull(handshake)
         assertEquals("S", handshake.signature)
         assertNull(handshake.passphraseProof)
+    }
+
+    // ---- device names in the handshake and pairing code --------------------
+
+    @Test
+    fun `handshake carries a device name when there is one`() {
+        val handshake = HandshakeMessage.parse(
+            """{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S","DeviceName":"  Colour's PC  "}""",
+        )
+        checkNotNull(handshake)
+        assertEquals("Colour's PC", handshake.deviceName)
+    }
+
+    @Test
+    fun `handshake without a usable device name still parses`() {
+        // Absent: every build from before names existed.
+        val absent = HandshakeMessage.parse("""{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S"}""")
+        checkNotNull(absent)
+        assertNull(absent.deviceName)
+        // Null (System.Text.Json's unset string?), empty and blank.
+        for (value in listOf("null", "\"\"", "\"   \"")) {
+            val handshake = HandshakeMessage.parse(
+                """{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S","DeviceName":$value}""",
+            )
+            checkNotNull(handshake)
+            assertNull("DeviceName $value", handshake.deviceName)
+        }
+    }
+
+    @Test
+    fun `handshake writes DeviceName only when known and round trips it`() {
+        val named = HandshakeMessage("E", "I", "S", null, deviceName = "Pixel 8 ✨")
+        assertEquals("Pixel 8 ✨", JSONObject(named.toJson()).getString("DeviceName"))
+        assertEquals(named, HandshakeMessage.parse(named.toJson()))
+
+        // Left off entirely rather than written as null, like PassphraseProof.
+        val unnamed = HandshakeMessage("E", "I", "S", null)
+        assertFalse(JSONObject(unnamed.toJson()).has("DeviceName"))
+        assertNull(HandshakeMessage.parse(unnamed.toJson())?.deviceName)
+
+        // Capped on the way out too.
+        val long = HandshakeMessage("E", "I", "S", null, deviceName = "c".repeat(90))
+        assertEquals("c".repeat(64), HandshakeMessage.parse(long.toJson())?.deviceName)
+    }
+
+    @Test
+    fun `pairing info name is optional`() {
+        assertEquals("Pixel 8", PairingInfo.parse("""{"PublicKey":"K","Address":null,"Name":"Pixel 8"}""")?.name)
+        assertNull(PairingInfo.parse("""{"PublicKey":"K","Address":"100.64.0.1"}""")?.name)
+        assertNull(PairingInfo.parse("""{"PublicKey":"K","Name":null}""")?.name)
+
+        val info = PairingInfo("K", "100.64.0.1", "Pixel 8")
+        assertEquals(info, PairingInfo.parse(info.toJson()))
+        assertFalse(JSONObject(PairingInfo("K", null).toJson()).has("Name"))
+    }
+
+    // ---- trust record merges ------------------------------------------------
+
+    @Test
+    fun `trust updates never let an address erase a name or a name erase an address`() {
+        val start = listOf(TrustedDevice("A", "10.0.0.1", "Laptop"), TrustedDevice("B"))
+        // Address-only, as every call site from before names passes it.
+        assertEquals(TrustedDevice("A", "10.0.0.9", "Laptop"), start.withTrusted("A", "10.0.0.9", null)[0])
+        // Name only: the cached address stays.
+        assertEquals(TrustedDevice("A", "10.0.0.1", "Desk"), start.withTrusted("A", null, "Desk")[0])
+        // Nothing new known: nothing erased.
+        assertEquals(start, start.withTrusted("A", null, null))
+        assertEquals(start, start.withTrusted("A", null, "  "))
+        // A new device, with or without a name.
+        assertEquals(TrustedDevice("C", null, "Phone"), start.withTrusted("C", null, "Phone").last())
+        assertEquals(TrustedDevice("C", "10.0.0.3", null), start.withTrusted("C", "10.0.0.3", "").last())
+    }
+
+    @Test
+    fun `remembering a name only renames an already trusted device`() {
+        val start = listOf(TrustedDevice("A", "10.0.0.1", "Laptop"), TrustedDevice("B", "10.0.0.2"))
+        assertEquals(TrustedDevice("A", "10.0.0.1", "Desk"), start.withName("A", "Desk")?.get(0))
+        assertEquals(TrustedDevice("B", "10.0.0.2", "Tablet"), start.withName("B", "Tablet")?.get(1))
+        // Null means "nothing to write": same name, unknown name, or a stranger.
+        assertNull(start.withName("A", "Laptop"))
+        assertNull(start.withName("A", null))
+        assertNull(start.withName("A", ""))
+        assertNull(start.withName("Z", "Stranger"))
+    }
+
+    // ---- device list order --------------------------------------------------
+
+    @Test
+    fun `device rows sort trusted first then by name then by id`() {
+        fun row(id: String, name: String?, trusted: Boolean, connected: Boolean = false, seen: Long? = null) =
+            DeviceRow(id, name, trusted, connected, emptyList(), pairing = false, lastSeenAtMs = seen)
+
+        val rows = listOf(
+            row("id-9", null, trusted = false),
+            row("id-8", "zeta", trusted = false, connected = true, seen = 999),
+            row("id-7", "Alpha", trusted = false),
+            row("id-6", null, trusted = true, seen = 5),
+            row("id-5", null, trusted = true, connected = true),
+            row("id-4", "bravo", trusted = true),
+            row("id-3", "Bravo", trusted = true, seen = 1_000_000),
+            row("id-2", "alpha", trusted = true),
+        )
+        val expected = listOf("id-2", "id-3", "id-4", "id-5", "id-6", "id-7", "id-8", "id-9")
+        assertEquals(expected, rows.sortedWith(DeviceRow.STABLE_ORDER).map { it.deviceId })
+        // Any input order gives the same result - nothing depends on arrival.
+        assertEquals(expected, rows.reversed().sortedWith(DeviceRow.STABLE_ORDER).map { it.deviceId })
+        assertEquals(expected, rows.shuffled(java.util.Random(7)).sortedWith(DeviceRow.STABLE_ORDER).map { it.deviceId })
     }
 
     @Test

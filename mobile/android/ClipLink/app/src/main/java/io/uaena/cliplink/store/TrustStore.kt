@@ -8,6 +8,8 @@ import org.json.JSONObject
 data class TrustedDevice(
     val publicKey: String,
     val address: String? = null,
+    /** The latest display name it announced, or null if it never has. */
+    val name: String? = null,
 )
 
 /**
@@ -33,7 +35,8 @@ class TrustStore(context: Context) {
                 val publicKey = obj.optString("publicKey", "")
                 if (publicKey.isEmpty()) return@mapNotNull null
                 val address = obj.optString("address", "").takeIf { it.isNotEmpty() }
-                TrustedDevice(publicKey, address)
+                val name = obj.optString("name", "").takeIf { it.isNotEmpty() }
+                TrustedDevice(publicKey, address, name)
             }
         } catch (e: Exception) {
             // Corrupt value - regenerate rather than crash startup, the same
@@ -50,6 +53,7 @@ class TrustStore(context: Context) {
                 JSONObject().apply {
                     put("publicKey", device.publicKey)
                     device.address?.let { put("address", it) }
+                    device.name?.let { put("name", it) }
                 },
             )
         }
@@ -60,18 +64,26 @@ class TrustStore(context: Context) {
      * Upsert. An existing entry keeps its cached address when [address] is
      * null, so back-filling an address later never erases one - that
      * back-fill is what makes off-LAN reconnect work for a peer that was
-     * originally paired in the other direction.
+     * originally paired in the other direction. [name] merges the same way:
+     * null keeps whatever name is already stored.
      */
     @Synchronized
-    fun trust(publicKey: String, address: String? = null) {
-        val devices = all().toMutableList()
-        val index = devices.indexOfFirst { it.publicKey == publicKey }
-        if (index >= 0) {
-            devices[index] = devices[index].copy(address = address ?: devices[index].address)
-        } else {
-            devices.add(TrustedDevice(publicKey, address))
-        }
-        save(devices)
+    fun trust(publicKey: String, address: String? = null, name: String? = null) {
+        save(all().withTrusted(publicKey, address, name))
+    }
+
+    /**
+     * Records the latest name an ALREADY trusted device announced. Never
+     * adds a device - a name heard from a stranger is not a reason to trust
+     * it - never touches the address, and never replaces a known name with
+     * an unknown one. Writes only on an actual change, since this runs for
+     * every beacon. Returns whether anything changed.
+     */
+    @Synchronized
+    fun rememberName(publicKey: String, name: String?): Boolean {
+        val renamed = all().withName(publicKey, name) ?: return false
+        save(renamed)
+        return true
     }
 
     @Synchronized
@@ -84,4 +96,38 @@ class TrustStore(context: Context) {
     private companion object {
         const val DEVICES_KEY = "trusted_devices"
     }
+}
+
+/**
+ * [TrustStore.trust]'s merge, kept apart from SharedPreferences so the rules
+ * are unit-testable: a null [address] keeps the cached one and a null or
+ * blank [name] keeps the stored one, so an address update can never erase a
+ * name and a name update can never erase an address.
+ */
+internal fun List<TrustedDevice>.withTrusted(
+    publicKey: String,
+    address: String?,
+    name: String?,
+): List<TrustedDevice> {
+    val knownName = name?.takeIf { it.isNotBlank() }
+    val index = indexOfFirst { it.publicKey == publicKey }
+    if (index < 0) return this + TrustedDevice(publicKey, address, knownName)
+    return toMutableList().also {
+        it[index] = it[index].copy(
+            address = address ?: it[index].address,
+            name = knownName ?: it[index].name,
+        )
+    }
+}
+
+/**
+ * [TrustStore.rememberName]'s merge: the renamed list, or null when there is
+ * nothing to write - an unknown name, a device that isn't trusted, or the
+ * name it already has.
+ */
+internal fun List<TrustedDevice>.withName(publicKey: String, name: String?): List<TrustedDevice>? {
+    if (name.isNullOrBlank()) return null
+    val index = indexOfFirst { it.publicKey == publicKey }
+    if (index < 0 || this[index].name == name) return null
+    return toMutableList().also { it[index] = it[index].copy(name = name) }
 }

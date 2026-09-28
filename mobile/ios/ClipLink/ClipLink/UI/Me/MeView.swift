@@ -74,6 +74,17 @@ struct MeView: View {
                 .padding(.vertical, 6)
                 .accessibilityElement(children: .combine)
 
+                NavigationLink(destination: MeDeviceNameView()) {
+                    HStack(spacing: 12) {
+                        MeRowLabel(title: "Device Name", systemImage: "textformat", tint: .orange)
+                        Spacer(minLength: 8)
+                        Text(model.snapshot.deviceName.isEmpty ? "Not set" : model.snapshot.deviceName)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Device ID")
                         .font(.subheadline)

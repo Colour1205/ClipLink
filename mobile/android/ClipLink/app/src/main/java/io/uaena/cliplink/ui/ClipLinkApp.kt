@@ -56,6 +56,8 @@ data class AppState(
     val connectedCount: Int,
     val discovering: Boolean,
     val ownDeviceId: String,
+    val deviceNameOverride: String,
+    val defaultDeviceName: String,
     val pairingPayload: String,
     val pairingRequest: PairingRequest?,
     val hasPassphrase: Boolean,
@@ -228,6 +230,8 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
                     Screen.Me -> MeScreen(
                         state = MeState(
                             ownDeviceId = state.ownDeviceId,
+                            deviceNameOverride = state.deviceNameOverride,
+                            defaultDeviceName = state.defaultDeviceName,
                             hasPassphrase = state.hasPassphrase,
                             tailscaleIp = state.tailscaleIp,
                             keepAlive = state.keepAlive,
@@ -245,7 +249,7 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
 
             state.pairingRequest?.let { request ->
                 PairingPromptCard(
-                    deviceId = request.deviceId,
+                    title = request.title,
                     onAccept = actions.onAcceptPairing,
                     onReject = actions.onRejectPairing,
                     modifier = Modifier
