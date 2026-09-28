@@ -189,6 +189,8 @@ class SyncManager(
                     )
                     return
                 }
+                // False for anything deleted on this device too, so a
+                // deleted item is neither stored nor applied again.
                 val isNew = history.add(entry)
                 if (isNew) applyAndReport(entry)
             }
@@ -203,6 +205,8 @@ class SyncManager(
                 for (received in entries) {
                     // Skip just the bad entry, keep processing the rest of the batch.
                     val entry = verifiedAndTrusted(received) ?: continue
+                    // The peer still has everything deleted here - add()
+                    // refuses those, so they skip the clipboard as well.
                     if (history.add(entry)) applyAndReport(entry)
                 }
             }
@@ -346,6 +350,12 @@ class SyncManager(
      */
     fun tryFulfillPendingEntry(fileHash: String) {
         val entry = pendingEntries.remove(fileHash) ?: return
+        // Deleted while its bytes were still on the way: it must not land on
+        // the clipboard now, and the bytes that just arrived are nobody's.
+        if (history.isDeleted(entry)) {
+            history.releaseBlobIfUnused(fileHash)
+            return
+        }
         onEntryApplied?.invoke(entry)
     }
 

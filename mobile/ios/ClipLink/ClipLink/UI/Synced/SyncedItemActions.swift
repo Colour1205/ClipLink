@@ -168,6 +168,8 @@ struct SyncedItemActions {
 struct SyncedItemMenuItems: View {
     let item: SyncedItem
     let actions: SyncedItemActions
+    /// Asks first (see SyncedView): a deleted item doesn't come back.
+    let onDelete: () -> Void
 
     var body: some View {
         Button { actions.copy(item) } label: { Label("Copy", systemImage: "doc.on.doc") }
@@ -183,6 +185,6 @@ struct SyncedItemMenuItems: View {
             Button { actions.saveToFiles(item) } label: { Label("Save to Files", systemImage: "folder") }
         }
         Divider()
-        Button(role: .destructive) { actions.delete(item) } label: { Label("Delete", systemImage: "trash") }
+        Button(role: .destructive) { onDelete() } label: { Label("Delete", systemImage: "trash") }
     }
 }

@@ -11,6 +11,7 @@ public class HistoryAccess
     private List<ClipboardEntry> inMemoryHistory = new List<ClipboardEntry>();
     private string history_path;
     private readonly FileStore fileStore;
+    private readonly DeletedEntries deletedEntries;
     // Written from every connection's read loop plus the clipboard watcher.
     // Unlocked, two peers' history batches arriving together made two
     // saveHistory calls collide on the file; the IOException escaped the
@@ -19,9 +20,10 @@ public class HistoryAccess
     // also throw mid-enumeration.
     private readonly object gate = new();
 
-    public HistoryAccess(string label, FileStore fileStore)
+    public HistoryAccess(string label, FileStore fileStore, DeletedEntries deletedEntries)
     {
         this.fileStore = fileStore;
+        this.deletedEntries = deletedEntries;
         // build clipboard entry from file
         string app_data_dir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         history_path = Path.Combine(app_data_dir, "ClipboardDaemon", $"history{label}.json");
@@ -61,10 +63,49 @@ public class HistoryAccess
             {
                 return false; // duplicate entry
             }
+            // Program checks isEntryDeleted before applying an incoming entry;
+            // checked again here, under the lock, so one can't slip back in
+            // between that check and its deletion.
+            if (deletedEntries.Contains(entry.Key()))
+            {
+                return false;
+            }
             inMemoryHistory.Add(entry);
             TrimToLimit();
             saveHistory();
             return true;
+        }
+    }
+
+    // Whether the user deleted this entry here (see DeletedEntries) - if so,
+    // an incoming copy of it is ignored, not re-added or applied.
+    public Boolean isEntryDeleted(ClipboardEntry entry)
+    {
+        return deletedEntries.Contains(entry.Key());
+    }
+
+    // Deletes one entry, by its Key(), for good - local history only, never
+    // the clipboard or peers. Recorded as deleted first, so a peer re-sending
+    // it can't bring it back; recorded even if it's already gone from here
+    // (trimmed since the caller listed it), for the same reason. Returns the
+    // removed entry (normally one), or nothing if it wasn't in history.
+    public List<ClipboardEntry> removeFromHistory(string key)
+    {
+        lock (gate)
+        {
+            deletedEntries.Add(new[] { key });
+            var removed = inMemoryHistory.Where(e => e.Key() == key).ToList();
+            if (removed.Count == 0)
+            {
+                return removed;
+            }
+            inMemoryHistory.RemoveAll(e => e.Key() == key);
+            foreach (var entry in removed)
+            {
+                DeleteBlobIfUnused(entry);
+            }
+            saveHistory();
+            return removed;
         }
     }
 
@@ -77,22 +118,64 @@ public class HistoryAccess
         {
             var oldest = inMemoryHistory.OrderBy(e => e.Timestamp).First();
             inMemoryHistory.Remove(oldest);
+            DeleteBlobIfUnused(oldest);
+        }
+    }
 
-            if (oldest.Type == "file")
+    // Call after `removed` has left inMemoryHistory.
+    private void DeleteBlobIfUnused(ClipboardEntry removed)
+    {
+        string? hash = FileHashOf(removed);
+        if (hash != null)
+        {
+            DeleteFileIfUnused(hash);
+        }
+    }
+
+    // FileStore is keyed by content hash, so one blob backs every entry for
+    // the same file (copied twice, say) - it's only deleted once no entry
+    // left in history uses it. Also used when a file's bytes finish arriving
+    // after its entry was deleted. Under the lock, so an entry for the same
+    // file can't be added between the check and the delete. Returns whether
+    // it was deleted.
+    public Boolean DeleteFileIfUnused(string hash)
+    {
+        lock (gate)
+        {
+            if (inMemoryHistory.Any(e => string.Equals(FileHashOf(e), hash, StringComparison.OrdinalIgnoreCase)))
             {
-                try
-                {
-                    var payload = System.Text.Json.JsonSerializer.Deserialize<FilePayload>(oldest.Content);
-                    if (payload != null)
-                    {
-                        fileStore.Delete(payload.FileHash);
-                    }
-                }
-                catch (System.Text.Json.JsonException)
-                {
-                    // malformed descriptor — nothing coherent to clean up, just drop the record
-                }
+                return false;
             }
+            try
+            {
+                fileStore.Delete(hash);
+                return true;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Open right now - being streamed to a peer, or applied. Left
+                // behind rather than failing the history change.
+                Console.WriteLine($"Could not delete stored file {hash[..Math.Min(12, hash.Length)]}... ({ex.Message}) — leaving it.");
+                return false;
+            }
+        }
+    }
+
+    // The FileStore hash a file entry's descriptor points at; null for any
+    // other entry, or a malformed descriptor (nothing coherent to clean up).
+    public static string? FileHashOf(ClipboardEntry entry)
+    {
+        if (entry.Type != "file")
+        {
+            return null;
+        }
+        try
+        {
+            return System.Text.Json.JsonSerializer.Deserialize<FilePayload>(entry.Content)?.FileHash;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
         }
     }
 
@@ -105,13 +188,22 @@ public class HistoryAccess
             return true;
         }
     }
-    public Boolean clearHistory()
+    // "Clear synced history": every current entry is recorded as deleted
+    // first (so peers' history batches don't just refill it), then history
+    // and the file blobs it used are cleared. Returns what was removed.
+    public List<ClipboardEntry> clearHistory()
     {
         lock (gate)
         {
+            var removed = inMemoryHistory.ToList();
+            deletedEntries.Add(removed.Select(e => e.Key()));
             inMemoryHistory.Clear();
+            foreach (var entry in removed)
+            {
+                DeleteBlobIfUnused(entry);
+            }
             saveHistory();
-            return true;
+            return removed;
         }
     }
 

@@ -62,6 +62,12 @@ class Program
                 Console.WriteLine($"Received {entry.Type} message with invalid signature from peer (verified={SigningService.Verify(entry, entry.DeviceId)}, trusted={trustStore.IsTrusted(entry.DeviceId)}).");
                 return;
             }
+            if (historyAccess.isEntryDeleted(entry))
+            {
+                // deleted here earlier - neither back into history nor onto the clipboard
+                Console.WriteLine($"[clip] received {entry.Type} entry from {entry.DeviceId[..Math.Min(12, entry.DeviceId.Length)]}... - deleted here, ignoring");
+                return;
+            }
             Console.WriteLine($"[clip] received {entry.Type} entry from {entry.DeviceId[..Math.Min(12, entry.DeviceId.Length)]}... - applying");
 
             if (entry.Type == "file")
@@ -89,7 +95,11 @@ class Program
                     Console.WriteLine("Received message with invalid signature from peer.");
                     continue; // skip just this bad entry, keep processing the rest of the batch
                 }
-                if (historyAccess.addToHistory(entry)) // true only if genuinely new, not a duplicate
+                if (historyAccess.isEntryDeleted(entry))
+                {
+                    continue; // deleted here earlier - peers keep resending it in every batch
+                }
+                if (historyAccess.addToHistory(entry)) // true only if genuinely new, not a duplicate (or deleted)
                 {
                     if (entry.Type == "file")
                     {
@@ -107,7 +117,7 @@ class Program
         }
         else if (envelope.Type == "file_chunk")
         {
-            HandleFileChunk(envelope.Payload, fileStore, fileTransferState, clipboardSync);
+            HandleFileChunk(envelope.Payload, fileStore, fileTransferState, clipboardSync, historyAccess);
         }
         else if (envelope.Type == "file_request")
         {
@@ -192,7 +202,8 @@ class Program
         string payloadJson,
         FileStore fileStore,
         FileTransferState fileTransferState,
-        ClipboardSync clipboardSync)
+        ClipboardSync clipboardSync,
+        HistoryAccess historyAccess)
     {
         FileChunkMessage? chunk;
         try
@@ -254,7 +265,14 @@ class Program
 
         File.Move(tempPath, fileStore.GetPath(chunk.FileHash), overwrite: true);
         Console.WriteLine($"[file] received {chunk.FileHash[..12]}... - verified, saved");
-        TryFulfillPendingEntry(chunk.FileHash, fileTransferState, clipboardSync);
+        if (!TryFulfillPendingEntry(chunk.FileHash, fileTransferState, clipboardSync, historyAccess)
+            && historyAccess.DeleteFileIfUnused(chunk.FileHash))
+        {
+            // Its history item was deleted while these bytes were on their
+            // way (nothing waits to apply them, and nothing in history refers
+            // to them) - kept, they'd sit in FileStore forever.
+            Console.WriteLine($"[file] {chunk.FileHash[..12]}... is no longer in history - discarded");
+        }
     }
 
     // FileStore can gain a blob through more than one path — chunk-stream
@@ -264,12 +282,32 @@ class Program
     // testing — or, in principle, any other future path that populates
     // FileStore). Whichever way a hash becomes available, a pending entry
     // waiting on exactly that hash should get applied — not just when the
-    // chunk-reassembly path happens to be the one that completed it.
-    private static void TryFulfillPendingEntry(string fileHash, FileTransferState fileTransferState, ClipboardSync clipboardSync)
+    // chunk-reassembly path happens to be the one that completed it. Not if
+    // the user deleted that entry meanwhile - deleting never touches the
+    // clipboard (see ForgetPendingApplies, which this backs up if the bytes
+    // land mid-delete). Returns whether an entry was applied.
+    private static bool TryFulfillPendingEntry(string fileHash, FileTransferState fileTransferState, ClipboardSync clipboardSync, HistoryAccess historyAccess)
     {
-        if (fileTransferState.PendingEntries.TryRemove(fileHash, out var pendingEntry))
+        if (fileTransferState.PendingEntries.TryRemove(fileHash, out var pendingEntry) && !historyAccess.isEntryDeleted(pendingEntry))
         {
             clipboardSync.addToQueue(pendingEntry.Content, pendingEntry.Type);
+            return true;
+        }
+        return false;
+    }
+
+    // Deleting never touches the clipboard - so a deleted file entry whose
+    // bytes are still arriving mustn't be applied once they finish. Only
+    // drops a pending apply for that exact entry.
+    private static void ForgetPendingApplies(List<ClipboardEntry> removed, FileTransferState fileTransferState)
+    {
+        foreach (var entry in removed)
+        {
+            string? fileHash = HistoryAccess.FileHashOf(entry);
+            if (fileHash != null)
+            {
+                fileTransferState.PendingEntries.TryRemove(new KeyValuePair<string, ClipboardEntry>(fileHash, entry));
+            }
         }
     }
 
@@ -745,7 +783,7 @@ class Program
 
         var identity = new DeviceIdentity(label);
         var fileStore = new FileStore(label);
-        var historyAccess = new HistoryAccess(label, fileStore);
+        var historyAccess = new HistoryAccess(label, fileStore, new DeletedEntries(label));
         TrustStore trustStore = new TrustStore(label);
         var passphraseKeyStore = new PassphraseKeyStore(label);
         var deviceName = new DeviceNameStore(label);
@@ -952,6 +990,33 @@ class Program
                 _ = PairByAddress(address, int.Parse(port), identity, pairingState, passphraseKeyStore, deviceName, connectionsByDeviceId, clipboardSync, historyAccess, trustStore, fileStore, fileTransferState);
                 return new IpcResponse(true, "connecting");
             }
+            else if (request.Command == "get_history")
+            {
+                // Synced history for the GUI, newest first, each entry with
+                // the key delete_history_entry takes (see HistoryListing).
+                var rows = historyAccess.GetHistory()
+                    .OrderByDescending(entry => entry.Timestamp)
+                    .Select(entry => new HistoryListing(entry.Key(), entry.Content, entry.Type, entry.DeviceId, entry.Timestamp, entry.Signature))
+                    .ToList();
+                return new IpcResponse(true, JsonSerializer.Serialize(rows));
+            }
+            else if (request.Command == "delete_history_entry" && !string.IsNullOrEmpty(request.Payload))
+            {
+                // Payload: a get_history key. Local only - peers keep their
+                // copy, and the clipboard is left alone. Remembered as deleted
+                // either way, so a peer's next history batch can't restore it.
+                var removed = historyAccess.removeFromHistory(request.Payload);
+                ForgetPendingApplies(removed, fileTransferState);
+                return new IpcResponse(removed.Count > 0, removed.Count > 0 ? "deleted" : "not in history");
+            }
+            else if (request.Command == "clear_history")
+            {
+                // "Clear synced history" - every current entry is remembered as
+                // deleted, so it stays cleared when peers reconnect.
+                var removed = historyAccess.clearHistory();
+                ForgetPendingApplies(removed, fileTransferState);
+                return new IpcResponse(true, "cleared");
+            }
             else
             {
                 return new IpcResponse(false, "unknown command");
@@ -1010,7 +1075,7 @@ class Program
                         // waiting on from a peer (e.g. this device independently
                         // captured the same file another connected device just
                         // applied) — fulfill that now rather than leaving it stuck
-                        TryFulfillPendingEntry(payload.FileHash, fileTransferState, clipboardSync);
+                        TryFulfillPendingEntry(payload.FileHash, fileTransferState, clipboardSync, historyAccess);
                     }
                 }
             }

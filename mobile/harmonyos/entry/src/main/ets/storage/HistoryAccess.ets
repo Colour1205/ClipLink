@@ -10,6 +10,7 @@ import { common } from '@kit.AbilityKit';
 import { ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
 import { FileStore } from './FileStore';
 import { FilePayload } from './FilePayload';
+import { DeletedEntries, entryKey } from './DeletedEntries';
 
 const PREFERENCES_NAME = 'cliplink_history';
 const HISTORY_KEY = 'entries';
@@ -17,6 +18,7 @@ const MAX_HISTORY_ITEMS = 25;
 
 export class HistoryAccess {
   private fileStore: FileStore;
+  private deleted: DeletedEntries = new DeletedEntries();
   // Every read-modify-write of the history runs one at a time. Each yields
   // at getPreferences/flush, so an add that read the old list before a
   // clear wrote [] could write it back afterwards - resurrecting cleared
@@ -62,11 +64,21 @@ export class HistoryAccess {
       && canonicalTimestamp(a.Timestamp) === canonicalTimestamp(b.Timestamp) && a.Signature === b.Signature;
   }
 
+  // Deleted or cleared on this device (see DeletedEntries.ets).
+  isDeleted(context: common.UIAbilityContext, entry: ClipboardEntry): Promise<boolean> {
+    return this.deleted.contains(context, entryKey(entry));
+  }
+
   // Returns true only if the entry was genuinely new (not a duplicate) -
   // matches HistoryAccess.cs's addToHistory return contract, which callers
-  // rely on to decide whether to also apply/re-broadcast an entry.
+  // rely on to decide whether to also apply/re-broadcast an entry. A deleted
+  // entry counts as not new: checked in here too, not just by the caller, so
+  // one that passed that check just before its delete ran stays deleted.
   addToHistory(context: common.UIAbilityContext, entry: ClipboardEntry): Promise<boolean> {
     return this.serialized(async (): Promise<boolean> => {
+      if (await this.deleted.contains(context, entryKey(entry))) {
+        return false;
+      }
       const entries = await this.getHistory(context);
       if (entries.some(e => this.isSameEntry(e, entry))) {
         return false;
@@ -79,7 +91,8 @@ export class HistoryAccess {
   }
 
   // Oldest-first eviction once over the cap - also deletes the backing
-  // FileStore blob for evicted file-type entries, same as Windows. Compared
+  // FileStore blob for evicted file-type entries no remaining entry shares,
+  // same as Windows. Compared
   // in canonical form, which is fixed-width, so text order is time order.
   private async trimToLimit(entries: ClipboardEntry[]): Promise<void> {
     while (entries.length > MAX_HISTORY_ITEMS) {
@@ -90,26 +103,77 @@ export class HistoryAccess {
         }
       }
       const oldest = entries.splice(oldestIndex, 1)[0];
-      this.releaseBlob(oldest);
+      this.releaseBlobIfUnused(oldest, entries);
+    }
+  }
+
+  private fileHashOf(entry: ClipboardEntry): string | null {
+    if (entry.Type !== 'file') return null;
+    try {
+      return (JSON.parse(entry.Content) as FilePayload).FileHash;
+    } catch (e) {
+      return null; // malformed descriptor — nothing coherent to clean up
     }
   }
 
   private releaseBlob(entry: ClipboardEntry): void {
-    if (entry.Type !== 'file') return;
-    try {
-      const payload = JSON.parse(entry.Content) as FilePayload;
-      this.fileStore.delete(payload.FileHash);
-    } catch (e) {
-      // malformed descriptor — nothing coherent to clean up
+    const hash = this.fileHashOf(entry);
+    if (hash !== null) {
+      this.fileStore.delete(hash);
     }
+  }
+
+  // FileStore is keyed by content hash, so one blob backs every entry for
+  // the same file (copied twice, say) - it only goes once none of
+  // `remaining` points at it any more.
+  private releaseBlobIfUnused(entry: ClipboardEntry, remaining: ClipboardEntry[]): void {
+    const hash = this.fileHashOf(entry);
+    if (hash !== null && !remaining.some(e => this.fileHashOf(e) === hash)) {
+      this.fileStore.delete(hash);
+    }
+  }
+
+  // Removes one entry (by entryKey) from this device and tombstones it -
+  // the tombstone even when the entry is no longer in the capped history,
+  // so a peer that still has it can't send it back. Its file blob goes too
+  // unless an entry that stays still points at the same bytes.
+  deleteEntry(context: common.UIAbilityContext, key: string): Promise<void> {
+    return this.serialized(async (): Promise<void> => {
+      await this.deleted.add(context, [key]);
+      const entries = await this.getHistory(context);
+      const kept = entries.filter(e => entryKey(e) !== key);
+      if (kept.length === entries.length) return;
+      await this.saveHistory(context, kept);
+      for (const entry of entries) {
+        if (entryKey(entry) === key) {
+          this.releaseBlobIfUnused(entry, kept);
+        }
+      }
+    });
+  }
+
+  // For bytes that finished arriving after the entry waiting on them was
+  // deleted or cleared (see SyncManager.handleFileChunk): kept only if an
+  // entry still in history points at them, or they'd sit in FileStore for
+  // good.
+  deleteFileIfUnused(context: common.UIAbilityContext, hash: string): Promise<void> {
+    return this.serialized(async (): Promise<void> => {
+      const entries = await this.getHistory(context);
+      if (!entries.some(e => this.fileHashOf(e) === hash)) {
+        this.fileStore.delete(hash);
+      }
+    });
   }
 
   // Deletes only the blobs the cleared entries referenced, like Android's
   // HistoryStore.clear - not the whole files directory, which can hold a
-  // half-written .tmp an in-progress transfer still has open.
-  clearHistory(context: common.UIAbilityContext): Promise<void> {
+  // half-written .tmp an in-progress transfer still has open. Every cleared
+  // entry is tombstoned first, plus alsoDeletedKeys (entries the caller knows
+  // of that aren't in the capped history any more), so peers can't refill it.
+  clearHistory(context: common.UIAbilityContext, alsoDeletedKeys: string[]): Promise<void> {
     return this.serialized(async (): Promise<void> => {
       const entries = await this.getHistory(context);
+      await this.deleted.add(context, [...entries.map(e => entryKey(e)), ...alsoDeletedKeys]);
       for (const entry of entries) {
         this.releaseBlob(entry);
       }

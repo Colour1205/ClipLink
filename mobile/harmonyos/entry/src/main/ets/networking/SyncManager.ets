@@ -13,6 +13,7 @@ import { TrustStore } from '../identity/TrustStore';
 import { HistoryAccess } from '../storage/HistoryAccess';
 import { FileStore } from '../storage/FileStore';
 import { FilePayload } from '../storage/FilePayload';
+import { entryKey } from '../storage/DeletedEntries';
 import { ClipboardEntry, verifiedEntry } from '../crypto/Signing';
 import { applyEntryToClipboard, ApplyResult } from '../clipboard/ClipboardApply';
 
@@ -61,6 +62,9 @@ export class SyncManager {
   // Entries that arrived (and verified) before their bytes finished
   // streaming in, keyed by the file hash they're waiting on.
   private pendingEntries: Map<string, ClipboardEntry> = new Map();
+  // File hashes whose waiting entry was deleted or cleared before the bytes
+  // finished arriving - see handleFileChunk.
+  private abandonedHashes: Set<string> = new Set();
   // Guards against streaming the same file to the same peer twice at once
   // (key: `${peerDeviceId}:${fileHash}`) - broadcastEntry proactively
   // streams a freshly-captured file right after sending its entry, but the
@@ -106,17 +110,38 @@ export class SyncManager {
     this.autoApply = value;
   }
 
-  // pendingEntries is cleared too: otherwise a file whose bytes finish
-  // arriving after this would still fire entryAppliedCallback and the
-  // cleared item would pop back into the list. A peer's history_batch on
-  // its next reconnect can still re-add entries it has, same as Android.
   getHistory(): Promise<ClipboardEntry[]> {
     return this.history.getHistory(this.context);
   }
 
-  async clearHistory(): Promise<void> {
+  // pendingEntries is cleared too: otherwise a file whose bytes finish
+  // arriving after this would still fire entryAppliedCallback and the
+  // cleared item would pop back into the list. Everything cleared is
+  // tombstoned (listedKeys: what the UI still shows beyond the capped
+  // history), so a peer's history_batch on its next reconnect can't re-add
+  // it. Local only - peers aren't told and the clipboard isn't touched.
+  async clearHistory(listedKeys: string[]): Promise<void> {
+    const keys: string[] = listedKeys.slice();
+    this.pendingEntries.forEach((entry: ClipboardEntry, fileHash: string) => {
+      keys.push(entryKey(entry));
+      this.abandonedHashes.add(fileHash);
+    });
     this.pendingEntries.clear();
-    await this.history.clearHistory(this.context);
+    await this.history.clearHistory(this.context, keys);
+  }
+
+  // One item, by entryKey - same rules as clearHistory. A file entry still
+  // waiting for its bytes is dropped too, so their arrival can't re-list it.
+  async deleteEntry(key: string): Promise<void> {
+    const waiting: string[] = [];
+    this.pendingEntries.forEach((entry: ClipboardEntry, fileHash: string) => {
+      if (entryKey(entry) === key) waiting.push(fileHash);
+    });
+    for (const fileHash of waiting) {
+      this.pendingEntries.delete(fileHash);
+      this.abandonedHashes.add(fileHash);
+    }
+    await this.history.deleteEntry(this.context, key);
   }
 
   get connectionCount(): number {
@@ -252,6 +277,9 @@ export class SyncManager {
   // Bytes are still fetched and cached when autoApply is off (handleIncomingFileEntry
   // requests them regardless), so Share/Save work on the item later.
   private async applyFileEntry(entry: ClipboardEntry): Promise<void> {
+    // Deleted while its bytes were on their way - a relay of the same entry
+    // can have queued it again after deleteEntry dropped it.
+    if (await this.history.isDeleted(this.context, entry)) return;
     const result: ApplyResult = this.autoApply ? await applyEntryToClipboard(entry, this.fileStore) : 'skipped';
     this.entryAppliedCallback?.(entry, result, true);
   }
@@ -385,6 +413,12 @@ export class SyncManager {
     }
 
     fs.renameSync(tempPath, this.fileStore.getPath(chunk.FileHash));
+    // Its item was deleted or cleared while these bytes were on their way,
+    // and nothing is waiting on them now: kept, they'd be an orphan.
+    if (this.abandonedHashes.delete(chunk.FileHash) && !this.pendingEntries.has(chunk.FileHash)) {
+      await this.history.deleteFileIfUnused(this.context, chunk.FileHash);
+      return;
+    }
     await this.tryFulfillPendingEntry(chunk.FileHash);
   }
 
@@ -429,6 +463,8 @@ export class SyncManager {
         this.logCallback?.(`dropped ${received.Type} entry from ${received.DeviceId.slice(0, 12)}... - failed signature/trust check`);
         return;
       }
+      // Deleted here before - neither re-listed nor put on the clipboard.
+      if (await this.history.isDeleted(this.context, entry)) return;
       await this.applyAndReport(entry);
       await this.history.addToHistory(this.context, entry);
     } else if (envelope.Type === 'history_batch') {
@@ -443,6 +479,9 @@ export class SyncManager {
         const entry = await this.verifiedAndTrusted(received);
         if (entry === null) {
           continue; // skip just this bad entry, keep processing the rest of the batch
+        }
+        if (await this.history.isDeleted(this.context, entry)) {
+          continue; // deleted here - a peer still having it doesn't bring it back
         }
         const isNew = await this.history.addToHistory(this.context, entry);
         if (isNew) {

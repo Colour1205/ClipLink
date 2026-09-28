@@ -354,6 +354,36 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertTrue(store.entries.contains { $0.content == "40" }, "merged the other process's write instead of overwriting it")
     }
 
+    func testDeletedStoreKeysBySignatureCapsAndPersists() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("deleted-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        func entry(_ i: Int) -> ClipboardEntry {
+            ClipboardEntry(content: "\(i)", type: "text", deviceId: "d", timestamp: "2026-09-28T10:00:00.0000001Z", signature: "sig\(i)")
+        }
+        // Every platform keys the same way: the signature as stored, else
+        // DeviceId|Type|Timestamp|sha256(Content) for an unsigned entry.
+        XCTAssertEqual(DeletedStore.key(of: entry(7)), "sig7")
+        let unsigned = ClipboardEntry(content: "hi", type: "text", deviceId: "d", timestamp: "2026-09-28T10:00:00.0000001Z")
+        XCTAssertEqual(DeletedStore.key(of: unsigned),
+                       "d|text|2026-09-28T10:00:00.0000001Z|8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4")
+
+        let store = DeletedStore(directory: dir)
+        XCTAssertFalse(store.contains(entry(0)))
+        store.add((0..<DeletedStore.cap).map(entry))
+        store.add([entry(0)]) // deleted again: now the newest
+        store.add([entry(DeletedStore.cap)]) // one over the cap: the oldest goes
+        XCTAssertEqual(store.count, DeletedStore.cap)
+        XCTAssertTrue(store.contains(entry(0)))
+        XCTAssertFalse(store.contains(entry(1)))
+        XCTAssertTrue(store.contains(entry(DeletedStore.cap)))
+
+        // Persisted, and shared with the other process (the Share extension).
+        let other = DeletedStore(directory: dir)
+        XCTAssertEqual(other.removingDeleted([entry(1), entry(2), unsigned]).map(\.content), ["1", "hi"])
+        other.add([unsigned])
+        XCTAssertTrue(store.contains(unsigned), "picked up the other process's write")
+    }
+
     func testTieBreakerIsOrdinal() {
         // Ordinal: uppercase sorts before lowercase. A culture-aware compare
         // puts 'k' before 'Q' and makes both sides (or neither) dial.

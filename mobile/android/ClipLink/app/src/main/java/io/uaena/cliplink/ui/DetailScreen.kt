@@ -21,17 +21,22 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -51,6 +56,7 @@ fun DetailScreen(
     modifier: Modifier = Modifier,
 ) {
     val style = typeStyleOf(item)
+    var menuOpen by remember { mutableStateOf(false) }
 
     Column(
         modifier
@@ -63,7 +69,7 @@ fun DetailScreen(
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(start = 4.dp, end = 16.dp, top = 8.dp),
+                .padding(start = 4.dp, end = 4.dp, top = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onBack) {
@@ -77,6 +83,24 @@ fun DetailScreen(
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            // A menu rather than a bare bin icon: the delete is immediate and
+            // has no undo, so it gets the same labelled "Delete" item as the
+            // long-press menu on the card.
+            Box {
+                IconButton(onClick = { menuOpen = true }) {
+                    Icon(Icons.Outlined.MoreVert, contentDescription = "More options")
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Delete") },
+                        leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
+                        onClick = {
+                            menuOpen = false
+                            onDelete()
+                        },
+                    )
+                }
+            }
         }
 
         Column(
@@ -188,10 +212,6 @@ fun DetailScreen(
                 Icon(Icons.Outlined.Share, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text("Share")
-            }
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = onDelete) {
-                Icon(Icons.Outlined.DeleteOutline, contentDescription = "Delete")
             }
         }
     }

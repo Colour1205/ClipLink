@@ -28,6 +28,9 @@ sealed interface Capture {
         override fun equals(other: Any?) = this === other
         override fun hashCode() = System.identityHashCode(this)
     }
+
+    /** A clip this app put there itself - already synced, so nothing to send. */
+    data object Ours : Capture
 }
 
 /**
@@ -49,13 +52,24 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
     private val manager =
         context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
 
+    private val prefs = context.applicationContext
+        .getSharedPreferences("cliplink_clipboard", Context.MODE_PRIVATE)
+
     /**
      * Hash of whatever this device last put on, or took off, the clipboard.
      * Without it, applying a received entry immediately looks like a fresh
      * local copy and gets broadcast straight back to the peer that sent it.
+     *
+     * Persisted, because the clipboard outlives this process: after the OS
+     * kills the app, the capture on the next launch would otherwise take the
+     * item it last sent - one the user may have deleted from the history
+     * since - for a fresh copy, and sync it all over again.
      */
-    var lastKnownHash: String? = null
-        private set
+    var lastKnownHash: String? = prefs.getString(LAST_HASH_KEY, null)
+        private set(value) {
+            field = value
+            prefs.edit().putString(LAST_HASH_KEY, value).apply()
+        }
 
     fun addListener(listener: () -> Unit) {
         manager.addPrimaryClipChangedListener(listener)
@@ -67,6 +81,18 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
 
     /** Null when the clipboard is empty, unreadable (backgrounded), or holds nothing we handle. */
     fun capture(): Capture? {
+        // A clip this app wrote - a received item it applied, or one copied
+        // from the history - is already synced. The hash check alone misses
+        // it for an image (re-encoded below, it no longer hashes to what
+        // arrived) and after a restart, and a deleted item would then come
+        // straight back as a new one. The label is read without the content.
+        val description = try {
+            manager.primaryClipDescription
+        } catch (e: SecurityException) {
+            null
+        }
+        if (description?.label?.toString() == CLIP_LABEL) return Capture.Ours
+
         val clip = try {
             manager.primaryClip
         } catch (e: SecurityException) {
@@ -137,7 +163,7 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
             when (entry.type) {
                 ClipboardEntry.TYPE_TEXT -> {
                     lastKnownHash = FileStore.hashOf(entry.content.toByteArray(Charsets.UTF_8))
-                    manager.setPrimaryClip(ClipData.newPlainText("ClipLink", entry.content))
+                    manager.setPrimaryClip(ClipData.newPlainText(CLIP_LABEL, entry.content))
                     true
                 }
 
@@ -194,7 +220,7 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
     private fun uriClip(sourceFile: File, displayName: String, mimeType: String): ClipData {
         val uri = contentUriFor(sourceFile, displayName)
         return ClipData(
-            ClipDescription("ClipLink", arrayOf(mimeType)),
+            ClipDescription(CLIP_LABEL, arrayOf(mimeType)),
             ClipData.Item(uri),
         )
     }
@@ -203,6 +229,10 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
         name.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(120).ifEmpty { "file" }
 
     companion object {
+        /** What every clip this app writes is labelled - see [capture]. */
+        const val CLIP_LABEL = "ClipLink"
+        private const val LAST_HASH_KEY = "last_known_hash"
+
         fun guessMimeType(fileName: String): String = when (fileName.substringAfterLast('.', "").lowercase()) {
             "png" -> "image/png"
             "jpg", "jpeg" -> "image/jpeg"

@@ -12,8 +12,13 @@ struct SyncedView: View {
     /// to the other column (iOS 15 tears the link down with its row).
     @State private var detailID = ""
     @State private var detailActive = false
+    /// A card's Delete, waiting for the same confirmation the detail screen
+    /// asks for: a deleted item stays deleted (peers don't send it back).
+    /// Asked here, not on the card: the dialog must outlive the context menu.
+    @State private var deleting: SyncedItem?
 
     private var items: [SyncedItem] { model.snapshot.items }
+    private var actions: SyncedItemActions { SyncedItemActions(model: model, haptics: settings.haptics) }
 
     var body: some View {
         NavigationView {
@@ -39,6 +44,22 @@ struct SyncedView: View {
                     EmptyView()
                 }
             )
+            .confirmationDialog(
+                "Delete this item?",
+                isPresented: Binding(
+                    get: { deleting != nil },
+                    set: { if !$0 { deleting = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: deleting
+            ) { item in
+                Button("Delete", role: .destructive) {
+                    actions.delete(item)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { _ in
+                Text("It's removed from this device only. Paired devices keep their own copies, but won't send it back.")
+            }
         }
         .navigationViewStyle(.stack)
     }
@@ -71,7 +92,7 @@ struct SyncedView: View {
     private func column(_ columnItems: [SyncedItem]) -> some View {
         LazyVStack(spacing: Theme.cardSpacing) {
             ForEach(columnItems) { item in
-                SyncedCard(item: item, compact: true) { open(item) }
+                SyncedCard(item: item, compact: true, onOpen: { open(item) }, onDelete: { deleting = item })
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)
@@ -80,7 +101,7 @@ struct SyncedView: View {
     private var list: some View {
         LazyVStack(spacing: Theme.cardSpacing) {
             ForEach(items) { item in
-                SyncedCard(item: item, compact: false) { open(item) }
+                SyncedCard(item: item, compact: false, onOpen: { open(item) }, onDelete: { deleting = item })
             }
         }
     }

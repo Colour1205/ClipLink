@@ -146,6 +146,59 @@ final class EngineIntegrationTests: XCTestCase {
         XCTAssertEqual(b.recorder.items.first?.entry.content, "third")
     }
 
+    /// Drops `node`'s links and brings it back up, so each side sends its
+    /// history_batch again.
+    private func reconnect(_ node: Node, to other: Node) {
+        let down = expectation(description: "backgrounded")
+        node.engine.enterBackground(grace: 0) { down.fulfill() }
+        wait(for: [down], timeout: 10)
+        wait("link dropped") { other.recorder.connectedCount == 0 }
+        node.engine.enterForeground()
+        wait("reconnected", timeout: 30) { node.recorder.connectedCount == 1 && other.recorder.connectedCount == 1 }
+    }
+
+    /// Delete and Clear are local, but they stick: the peer still has the
+    /// items and resends its whole history on every connect.
+    func testDeletedAndClearedItemsDontComeBackFromHistoryBatches() throws {
+        let (a, b) = makePair()
+        setPasscode(a, "pw")
+        setPasscode(b, "pw")
+        a.engine.enterForeground()
+        a.engine.sendText("keep")
+        Thread.sleep(forTimeInterval: 0.05)
+        a.engine.sendText("delete me")
+        wait("A has history") { a.recorder.items.count == 2 }
+
+        b.engine.enterForeground()
+        wait("connected") { a.recorder.connectedCount == 1 && b.recorder.connectedCount == 1 }
+        wait("B caught up") { b.recorder.items.count == 2 }
+        wait("B applied the newest") { b.recorder.receivedEntries.count == 1 }
+
+        // Delete one on B: gone locally, A untouched, nothing new on B's clipboard.
+        let doomed = try XCTUnwrap(b.recorder.items.first { $0.entry.content == "delete me" })
+        b.engine.deleteItem(id: doomed.id)
+        wait("B deleted it") { b.recorder.items.map(\.entry.content) == ["keep"] }
+        XCTAssertTrue(DeletedStore(directory: b.dir).contains(doomed.entry), "tombstone persisted")
+
+        // A resends both in its history_batch; "after delete" follows on the
+        // same link, so once it's here the batch has been handled.
+        reconnect(b, to: a)
+        a.engine.sendText("after delete")
+        wait("B got the new item") { b.recorder.items.contains { $0.entry.content == "after delete" } }
+        XCTAssertEqual(b.recorder.items.map(\.entry.content), ["after delete", "keep"], "the deleted item stays deleted")
+        XCTAssertFalse(b.recorder.receivedEntries.dropFirst().contains { $0.0.content == "delete me" }, "never re-applied")
+        wait("A kept everything (deleting is local only)") { a.recorder.items.count == 3 }
+
+        // Clear everything on B, then the same again.
+        b.engine.clearHistory()
+        wait("B cleared") { b.recorder.items.isEmpty }
+        reconnect(b, to: a)
+        a.engine.sendText("after clear")
+        wait("B got the newest item") { b.recorder.items.contains { $0.entry.content == "after clear" } }
+        XCTAssertEqual(b.recorder.items.map(\.entry.content), ["after clear"], "nothing cleared came back")
+        wait("A kept everything") { a.recorder.items.count == 4 }
+    }
+
     func testManualPairingNeedsAcceptOnBothSides() throws {
         let (a, b) = makePair()
         a.engine.setDeviceName("Alpha")

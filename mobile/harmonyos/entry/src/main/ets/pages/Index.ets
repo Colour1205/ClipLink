@@ -40,6 +40,7 @@ import { DeviceSettings } from '../identity/DeviceSettings';
 import { effectiveDeviceName, getLocalDeviceName, normalizeDeviceName } from '../identity/DeviceName';
 import { FileStore } from '../storage/FileStore';
 import { FilePayload } from '../storage/FilePayload';
+import { entryKey } from '../storage/DeletedEntries';
 import { Discovery, PeerBeacon } from '../networking/Discovery';
 import { TcpServer, connectTcp } from '../networking/TcpTransport';
 import { HandshakeReport, PeerConnection, PeerVerdict, TcpSocketAdapter, TcpSocketConnectionAdapter } from '../networking/PeerConnection';
@@ -157,7 +158,9 @@ interface SyncedItem {
   // source within the same minute would then collide on the same key,
   // and ArkUI would reuse the stale rendered node instead of updating its
   // text - the list visually "gets stuck" showing the first copy forever
-  // even though new entries keep arriving and applying correctly.
+  // even though new entries keep arriving and applying correctly. It is
+  // entryKey(entry) - the Signature, for every signed entry - which is also
+  // what Delete tombstones (see DeletedEntries.ets).
   id: string;
   type: string;
   preview: string;
@@ -1266,7 +1269,7 @@ struct Index {
   private confirmClearHistory(): void {
     this.getUIContext().showAlertDialog({
       title: 'Clear synced history?',
-      message: 'Removes every synced item and any files saved for them from this device. Paired devices keep their own copies, and may send them back when they next reconnect.',
+      message: 'Removes every synced item and any files saved for them from this device. Paired devices keep their own copies, but won\'t send these back.',
       primaryButton: { value: 'Cancel', action: () => {} },
       secondaryButton: { value: 'Clear', fontColor: $r('sys.color.warning'), action: () => { void this.clearSyncedHistory(); } },
     });
@@ -1280,9 +1283,34 @@ struct Index {
     this.selectedItemId = '';
     // Emptied before the await, so an item that arrives while the clear is
     // running (and is saved after it) stays listed instead of being wiped.
+    // The list can hold more than the capped history, so what it showed is
+    // tombstoned too.
+    const listedKeys: string[] = this.syncedItems.map((i: SyncedItem) => i.id);
     this.syncedItems = [];
-    await this.syncManager?.clearHistory();
+    await this.syncManager?.clearHistory(listedKeys);
     promptAction.showToast({ message: 'History cleared.' });
+  }
+
+  // Asked first, like Clear synced history - Delete also sits in the
+  // preview's title bar, where a stray tap is easy.
+  private confirmDeleteItem(item: SyncedItem): void {
+    this.getUIContext().showAlertDialog({
+      title: 'Delete this item?',
+      message: 'Removes it, and any file saved for it, from this device. Paired devices keep their own copies, but won\'t send this one back.',
+      primaryButton: { value: 'Cancel', action: () => {} },
+      secondaryButton: { value: 'Delete', fontColor: $r('sys.color.warning'), action: () => { void this.deleteItem(item); } },
+    });
+  }
+
+  // This device only: never the clipboard, never the peers.
+  private async deleteItem(item: SyncedItem): Promise<void> {
+    await this.syncManager?.deleteEntry(item.id);
+    const previewOpen: boolean = this.syncedNavStack.size() > 1 && this.selectedItemId === item.id;
+    this.syncedItems = this.syncedItems.filter((i: SyncedItem) => i.id !== item.id);
+    if (previewOpen) {
+      this.closeItemDetail();
+    }
+    promptAction.showToast({ message: 'Item deleted.' });
   }
 
   async saveTailscaleIp(): Promise<void> {
@@ -2070,7 +2098,7 @@ struct Index {
 
   private syncedItemFor(entry: ClipboardEntry, fromPeer: boolean): SyncedItem {
     return {
-      id: entry.Signature ?? `${entry.DeviceId}:${entry.Timestamp}`,
+      id: entryKey(entry),
       type: entry.Type,
       preview: previewFor(entry),
       content: entry.Content,
@@ -2325,6 +2353,8 @@ struct Index {
           MenuItem({ content: 'Save file', startIcon: $r('app.media.ic_menu_save_file') }).onClick(() => { tapHaptic(); void this.saveFileToDocuments(item); })
         }
       }
+      // Every type, last. Removes the item from this device only.
+      MenuItem({ content: 'Delete', startIcon: $r('app.media.ic_menu_delete') }).onClick(() => { tapHaptic(); this.confirmDeleteItem(item); })
     }
   }
 
@@ -2908,15 +2938,22 @@ struct Index {
 
   // Item preview: Copy for text, Share for images/files, and Open (left of
   // Share) for files - the same split itemActionMenu's long-press menu
-  // uses. Open is files-only because openFileWithSystem hands the system a
-  // stored file; an 'image' item is only base64 in memory. copyItemContent
-  // is deliberately text-only (copying an image's raw base64, or a file's
-  // JSON descriptor, as literal text was a real, already-fixed bug). No
-  // Delete here by request: it's a much easier accidental tap from a
-  // full-bleed preview than from the long-press menu it already lives in.
+  // uses - then Delete, last, for every type. Open is files-only because
+  // openFileWithSystem hands the system a stored file; an 'image' item is
+  // only base64 in memory. copyItemContent is deliberately text-only
+  // (copying an image's raw base64, or a file's JSON descriptor, as literal
+  // text was a real, already-fixed bug). Delete is an easy stray tap on a
+  // full-bleed preview, which is why confirmDeleteItem asks first.
   private detailTitleBar(itemId: string): HdsNavigationTitleBarOptions {
     const item: SyncedItem | undefined = this.syncedItems.find(i => i.id === itemId);
     if (item === undefined) return this.hdsTitleBar('', false, []);
+    const deleteButton: HdsNavigationMenuItemOptions = {
+      content: {
+        label: 'Delete',
+        icon: $r('sys.symbol.trash'),
+        action: () => { tapHaptic(); this.confirmDeleteItem(item); },
+      },
+    };
     if (item.type === 'text') {
       return this.hdsTitleBar('', false, [{
         content: {
@@ -2924,7 +2961,7 @@ struct Index {
           icon: $r('sys.symbol.rectangle_on_rectangle'),
           action: () => { tapHaptic(); this.copyItemContent(item); },
         },
-      }]);
+      }, deleteButton]);
     }
     const share: HdsNavigationMenuItemOptions = {
       content: {
@@ -2940,9 +2977,9 @@ struct Index {
           icon: $r('sys.symbol.arrow_right_up_and_square'),
           action: () => { tapHaptic(); void this.openFileWithSystem(item); },
         },
-      }, share]);
+      }, share, deleteButton]);
     }
-    return this.hdsTitleBar('', false, [share]);
+    return this.hdsTitleBar('', false, [share, deleteButton]);
   }
 
   // Wraps the list and the item-detail view as two NavDestinations on their

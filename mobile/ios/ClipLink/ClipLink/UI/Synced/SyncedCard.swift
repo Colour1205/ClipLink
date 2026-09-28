@@ -8,6 +8,8 @@ struct SyncedCard: View {
     let item: SyncedItem
     let compact: Bool
     let onOpen: () -> Void
+    /// Delete, confirmed by the Synced tab (like the detail screen's).
+    let onDelete: () -> Void
 
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
@@ -39,13 +41,13 @@ struct SyncedCard: View {
         }
         .buttonStyle(SyncedCardButtonStyle())
         .contentShape(.contextMenuPreview, shape)
-        .contextMenu { SyncedItemMenuItems(item: item, actions: actions) }
+        .contextMenu { SyncedItemMenuItems(item: item, actions: actions, onDelete: onDelete) }
         .onDrag { actions.dragProvider(for: item) }
         .accessibilityLabel(SyncedItemActions.accessibilitySummary(item, transfers: model.snapshot.transfers))
         .accessibilityHint("Shows details.")
         .accessibilityAction(named: "Copy") { actions.copy(item) }
         .accessibilityAction(named: "Share") { actions.share(item) }
-        .accessibilityAction(named: "Delete") { actions.delete(item) }
+        .accessibilityAction(named: "Delete") { onDelete() }
     }
 
     // MARK: - Body per kind
