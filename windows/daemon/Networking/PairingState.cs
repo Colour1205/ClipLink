@@ -1,9 +1,9 @@
 namespace ClipboardDaemon.Networking;
 
-// Coordinates the tray-driven "pairing mode" gate and the single pending
+// Coordinates the app-driven "pairing mode" gate and the single pending
 // pairing candidate connection, shared between the threads that create
 // connections (TCP accept loop, discovery beacon handler, pair-by-address)
-// and the IPC handler thread the tray uses to toggle pairing mode and
+// and whichever thread the app uses to toggle pairing mode and
 // accept/reject a candidate. Mirrors HarmonyOS's Index.ets
 // pairingOpen/pendingPairingConn.
 public class PairingState
@@ -12,7 +12,7 @@ public class PairingState
     private PeerConnection? pendingConn;
     private string? pendingAddress;
 
-    // Written by the IPC "set_pairing_mode" handler, read by every
+    // Written by ClipLinkEngine.SetPairingMode, read by every
     // connection-creation path (TCP accept, beacon dial, pair-by-address)
     // and by the beacon sender itself - volatile since those are different
     // threads and this needs to be visible immediately, not eventually.
@@ -33,13 +33,13 @@ public class PairingState
         }
     }
 
-    // For the tray's polling "get_pending_pairing" IPC command.
+    // The pending candidate's id, or null.
     public string? PendingPeerId
     {
         get { lock (gate) { return pendingConn?.PeerDeviceId; } }
     }
 
-    // For "get_pending_pairing_info": the same peer id, plus the display
+    // For GetPendingPairing: the same peer id, plus the display
     // name its handshake carried (null if none) and the address it came from.
     public (string peerId, string? name, string? address)? PendingPeer
     {

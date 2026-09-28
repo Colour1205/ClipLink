@@ -63,7 +63,7 @@ public class HistoryAccess
             {
                 return false; // duplicate entry
             }
-            // Program checks isEntryDeleted before applying an incoming entry;
+            // The engine checks isEntryDeleted before applying an incoming entry;
             // checked again here, under the lock, so one can't slip back in
             // between that check and its deletion.
             if (deletedEntries.Contains(entry.Key()))

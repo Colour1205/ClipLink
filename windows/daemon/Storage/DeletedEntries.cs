@@ -18,7 +18,7 @@ public class DeletedEntries
     private readonly string deleted_path;
     private readonly List<DeletedEntry> entries = new List<DeletedEntry>(); // oldest first
     private readonly HashSet<string> keys = new HashSet<string>();
-    // Checked from every connection's read loop, written from IPC - same
+    // Checked from every connection's read loop, written from the app - same
     // reason as HistoryAccess's lock.
     private readonly object gate = new();
 

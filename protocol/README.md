@@ -1,6 +1,6 @@
 # protocol/
 
-Platform-agnostic wire format definitions, shared by every client (Windows daemon, iOS/Android/HarmonyOS apps).
+Platform-agnostic wire format definitions, shared by every client (the Windows app, iOS/Android/HarmonyOS apps).
 
 Kept here — outside any single platform folder — so all clients generate their message types from the same source of truth instead of hand-rolling matching structs per platform.
 

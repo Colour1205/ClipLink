@@ -14,7 +14,7 @@ public class TrustStore
     private Dictionary<string, TrustedDevice> trustedDevices = new Dictionary<string, TrustedDevice>();
     private string truststore_path;
     // Every connection path (TCP accept, beacon handler, off-LAN reconnect
-    // loop, IPC) reads and writes this from its own thread. Unlocked, two
+    // loop, the app) reads and writes this from its own thread. Unlocked, two
     // writes at once collided on the file ("being used by another process"),
     // and a write during the reconnect loop's enumeration threw
     // "collection was modified" - each killing whatever loop it hit.

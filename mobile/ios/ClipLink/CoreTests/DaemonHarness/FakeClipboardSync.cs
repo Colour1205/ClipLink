@@ -81,6 +81,9 @@ public class ClipboardSync
         }
     }
 
+    // The engine stopping. Watch() ends with stdin; the test kills the process.
+    public void Stop() { }
+
     public void addToQueue(string content, string type = "text") => setContent(content, type);
 
     public void setContent(string content, string type = "text")

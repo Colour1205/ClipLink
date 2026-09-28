@@ -6,7 +6,7 @@ namespace ClipboardDaemon.Identity;
 // This device's display name - what other devices show in their device
 // lists and pairing prompts instead of a raw key. Carried in the LAN
 // beacon's 6th field and the handshake's DeviceName (see docs/protocol.md).
-// The user's override (the "set_device_name" IPC command) wins; with none
+// The user's override (ClipLinkEngine.SetDeviceName) wins; with none
 // set it's the computer's own name. Callers read Current fresh for every
 // beacon and handshake, so a rename takes effect on the next one without a
 // restart.

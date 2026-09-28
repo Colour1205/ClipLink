@@ -17,9 +17,10 @@ public class ClipboardSync
 
     BlockingCollection<(string content, string type, int attempts)> _pendingSets = new BlockingCollection<(string content, string type, int attempts)>();
     private string? _lastKnownHash;
+    private volatile bool _stopRequested;
 
     // sourceFilePath is only ever set for type == "file" — it's the local path
-    // to read the actual bytes from when streaming to peers. Program.cs uses
+    // to read the actual bytes from when streaming to peers. ClipLinkEngine uses
     // it; nothing else in this class needs it once the event has fired.
     public event Action<(string content, string type, string? sourceFilePath)>? ClipboardChanged;
 
@@ -39,6 +40,16 @@ public class ClipboardSync
         timer.Interval = 500;
         timer.Tick += (s, e) =>
         {
+            if (_stopRequested)
+            {
+                // Only this thread's message loop - never Application.Exit(),
+                // which ends every thread's (the app's UI thread's too, if it
+                // runs one).
+                timer.Stop();
+                timer.Dispose();
+                System.Windows.Forms.Application.ExitThread();
+                return;
+            }
                         long curr_sequence_num = GetClipboardSequenceNumber();
             if (curr_sequence_num != last_sequence_num)
             {
@@ -176,6 +187,13 @@ public class ClipboardSync
         }
     }
 
+    // Ends Watch() (from any thread): its loop exits on the next tick, and
+    // nothing queued after that is applied. The engine stopping.
+    public void Stop()
+    {
+        _stopRequested = true;
+    }
+
     public void addToQueue(string content, string type = "text")
     {
         _pendingSets.Add((content, type, 0));
@@ -195,7 +213,7 @@ public class ClipboardSync
             // Saved as a real file too, and put on the clipboard both ways (see
             // SetImageAndFile) - a bitmap alone pasted into Word or Paint but
             // not into an Explorer folder, which only accepts files.
-            string destPath = GetNonCollidingPath(ReceivedFilesDir(), $"ClipLink image {DateTime.Now:yyyy-MM-dd HHmmss}{ImageExtension(imageBytes)}");
+            string destPath = GetNonCollidingPath(ReceivedFilesDir(), $"ClipLink image {DateTime.Now:yyyy-MM-dd HHmmss}{ImageFiles.Extension(imageBytes)}");
             File.WriteAllBytes(destPath, imageBytes);
             SetImageAndFile(imageBytes, destPath);
         }
@@ -211,7 +229,9 @@ public class ClipboardSync
                 return;
             }
 
-            string destPath = GetNonCollidingPath(ReceivedFilesDir(), payload.FileName);
+            // The sender's name for it, but only as a name: joined on as it
+            // came, a rooted or "..\" one put the file anywhere.
+            string destPath = GetNonCollidingPath(ReceivedFilesDir(), FileNames.Safe(payload.FileName, "file"));
             File.Copy(fileStore.GetPath(payload.FileHash), destPath);
             _lastKnownHash = ComputeHash(System.Text.Encoding.UTF8.GetBytes(payload.FileHash)); // suppress our own echo of this apply
 
@@ -268,7 +288,7 @@ public class ClipboardSync
         {
             image = System.Drawing.Image.FromStream(new MemoryStream(imageBytes));
             data.SetImage(image);
-            if (ImageExtension(imageBytes) == ".png")
+            if (ImageFiles.Extension(imageBytes) == ".png")
             {
                 data.SetData("PNG", new MemoryStream(imageBytes));
             }
@@ -286,18 +306,6 @@ public class ClipboardSync
         {
             image?.Dispose();
         }
-    }
-
-    // From the file's magic bytes - phones send PNG or JPEG, sometimes others.
-    private static string ImageExtension(byte[] bytes)
-    {
-        bool StartsWith(params byte[] magic) => bytes.Length >= magic.Length && bytes.AsSpan(0, magic.Length).SequenceEqual(magic);
-        if (StartsWith(0x89, 0x50, 0x4E, 0x47)) return ".png";
-        if (StartsWith(0xFF, 0xD8, 0xFF)) return ".jpg";
-        if (StartsWith(0x47, 0x49, 0x46, 0x38)) return ".gif";
-        if (StartsWith(0x42, 0x4D)) return ".bmp";
-        if (bytes.Length >= 12 && StartsWith(0x52, 0x49, 0x46, 0x46) && bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50) return ".webp";
-        return ".png";
     }
 
     // If "photo.jpg" already exists, try "photo (1).jpg", "photo (2).jpg", etc.

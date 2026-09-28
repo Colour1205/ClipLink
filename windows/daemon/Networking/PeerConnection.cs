@@ -12,7 +12,7 @@ public class PeerConnection
     // Sent (encrypted, like anything else on this channel) as a heartbeat
     // and filtered out in Listen() before reaching MessageReceived - normal
     // message handling never sees these. TCP keepalive alone (see
-    // Program.cs's EnableKeepAlive) isn't enough by itself to catch a
+    // ClipLinkEngine's EnableKeepAlive) isn't enough by itself to catch a
     // silently dead peer in reasonable time - depending on OS/network
     // conditions it can still take much longer than feels "live". This
     // application-level ping/watchdog is what actually makes a connection
@@ -80,7 +80,7 @@ public class PeerConnection
     // handshake fails or the signature doesn't verify — callers should just
     // close the socket and move on.
     //
-    // pairingModeOpen: true only while the local tray's pairing dialog is
+    // pairingModeOpen: true only while the local app's pairing screen is
     // open (mirrors HarmonyOS's Index.ets pairingOpen) — a live, explicit
     // "I'm expecting to pair right now" signal. Without it, an untrusted
     // peer is refused exactly as before (same early-bail, no wasted

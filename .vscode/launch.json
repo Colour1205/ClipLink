@@ -2,13 +2,13 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "C#: ClipboardDaemon Debug",
+            "name": "C#: ClipLink (Windows app) Debug",
             "type": "coreclr",
             "request": "launch",
-            "preLaunchTask": "build-daemon",
-            "program": "${workspaceFolder}/windows/daemon/bin/Debug/net8.0-windows/ClipboardDaemon.dll",
+            "preLaunchTask": "build-cliplink",
+            "program": "${workspaceFolder}/windows/ClipLink/bin/Debug/net10.0-windows/win-x64/ClipLink.dll",
             "args": [],
-            "cwd": "${workspaceFolder}/windows/daemon",
+            "cwd": "${workspaceFolder}/windows/ClipLink",
             "console": "internalConsole",
             "stopAtEntry": false
         }
