@@ -48,10 +48,11 @@ public struct EngineConfig {
     public var extraBeaconTargets: [String] = []
     public var maxLineBytes = 192 * 1024 * 1024
     /// For short-lived senders (the Share extension): ignore incoming history
-    /// batches and file bytes - they would only cost memory the extension
-    /// doesn't have - while still sending, streaming our own files, and
-    /// answering file requests. Use a small `maxLineBytes` with it; oversized
-    /// lines are skipped without being buffered.
+    /// batches and file bytes, and never ask for any - they would only cost
+    /// memory the extension doesn't have - while still sending, streaming
+    /// our own files, and answering file requests. Use a small
+    /// `maxLineBytes` with it; oversized lines are skipped without being
+    /// buffered.
     public var sendOnly = false
     /// Mirrors every log line (e.g. to os.Logger).
     public var logSink: ((String) -> Void)?

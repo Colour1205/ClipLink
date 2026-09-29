@@ -160,16 +160,22 @@ class SyncManager(
      * this then proactively streams them rather than waiting to be asked,
      * matching the daemon's own ClipboardChanged handling.
      */
-    suspend fun broadcastEntry(entry: ClipboardEntry) {
-        val json = Protocol.envelope(Protocol.TYPE_ENTRY, entry.toJson().toString())
-        connections.values.forEach { conn ->
-            scope.launch { runCatching { conn.send(json) } }
-        }
-        history.add(entry)
+    suspend fun broadcastEntry(entry: ClipboardEntry) = broadcastEntries(listOf(entry))
 
-        if (entry.type == ClipboardEntry.TYPE_FILE) {
-            val payload = FilePayload.parse(entry.content) ?: return
-            if (!fileStore.exists(payload.fileHash)) return
+    /** [broadcastEntry] for several at once, recorded in one go - see [HistoryStore.addAll]. */
+    suspend fun broadcastEntries(entries: List<ClipboardEntry>) {
+        for (entry in entries) {
+            val json = Protocol.envelope(Protocol.TYPE_ENTRY, entry.toJson().toString())
+            connections.values.forEach { conn ->
+                scope.launch { runCatching { conn.send(json) } }
+            }
+        }
+        history.addAll(entries)
+
+        for (entry in entries) {
+            if (entry.type != ClipboardEntry.TYPE_FILE) continue
+            val payload = FilePayload.parse(entry.content) ?: continue
+            if (!fileStore.exists(payload.fileHash)) continue
             connections.values.forEach { conn ->
                 scope.launch { streamFileToPeer(conn, fileStore.path(payload.fileHash), payload.fileHash) }
             }
@@ -221,6 +227,9 @@ class SyncManager(
                 }
             }
 
+            // Every FileHash below has passed FileStore.isValidHash - the
+            // parsers refuse anything else - so a peer can only ever name a
+            // blob in the FileStore, never a path to one of this app's files.
             Protocol.TYPE_FILE_CHUNK -> handleFileChunk(envelope.payload)
 
             Protocol.TYPE_FILE_REQUEST -> {

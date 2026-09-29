@@ -9,8 +9,8 @@ using ClipboardDaemon.Engine;
 namespace ClipLink;
 
 // This PC (name, device ID and fingerprint, Tailscale address), the
-// passcode, starting at sign-in, clearing the synced history, About - and
-// Quit, the only way to end ClipLink.
+// passcode, starting at sign-in, "Share to ClipLink" in File Explorer,
+// clearing the synced history, About - and Quit, the only way to end ClipLink.
 public partial class SettingsPage : Page
 {
     private readonly EngineHost host = App.Host;
@@ -24,8 +24,18 @@ public partial class SettingsPage : Page
         DeviceNameBox.PlaceholderText = ComputerName();
         AboutCard.Description = $"Version {App.Version}. Syncs your clipboard between your devices, directly - no cloud."
             + (App.Options.IsDefaultLabel ? "" : $" Test copy \"{App.Options.Label}\" on port {App.Options.Port}.");
-        Loaded += (_, _) => Refresh();
+        // (On Windows 11 both are under Show more options.)
+        ShareMenuCard.Description = "Right-click files and choose Share to ClipLink or Send to > ClipLink"
+            + (IsWindows11 ? " (under Show more options)" : "") + " to send them to your devices.";
+        Loaded += (_, _) =>
+        {
+            Refresh();
+            App.Instance.ExplorerShareMenuChanged += UpdateShareMenuToggle;
+        };
+        Unloaded += (_, _) => App.Instance.ExplorerShareMenuChanged -= UpdateShareMenuToggle;
     }
+
+    private static bool IsWindows11 => Environment.OSVersion.Version.Build >= 22000;
 
     // Each time the page is shown: things can change behind its back (a
     // rename can't, but Tailscale coming up, or the sign-in entry being
@@ -54,6 +64,7 @@ public partial class SettingsPage : Page
         {
             loadingToggle = false;
         }
+        UpdateShareMenuToggle();
     }
 
     private static string ComputerName()
@@ -235,6 +246,34 @@ public partial class SettingsPage : Page
             loadingToggle = true;
             SignInToggle.IsChecked = !on;
             loadingToggle = false;
+        }
+    }
+
+    private void UpdateShareMenuToggle()
+    {
+        loadingToggle = true;
+        ShareMenuToggle.IsChecked = App.Instance.ExplorerShareMenuOn;
+        loadingToggle = false;
+    }
+
+    private void ShareMenuToggle_Changed(object sender, RoutedEventArgs e)
+    {
+        if (loadingToggle) return;
+        bool on = ShareMenuToggle.IsChecked == true;
+        try
+        {
+            App.Instance.SetExplorerShareMenu(on);
+            if (on)
+            {
+                App.MainAppWindow.Toast("Added to File Explorer", "Right-click files and choose Share to ClipLink"
+                    + (IsWindows11 ? " - it's under Show more options." : "."));
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[shell] couldn't change Share to ClipLink: {ex.Message}");
+            App.MainAppWindow.ToastError("Couldn't change that", ex.Message);
+            UpdateShareMenuToggle();
         }
     }
 

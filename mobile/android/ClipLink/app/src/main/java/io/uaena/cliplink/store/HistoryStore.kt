@@ -48,11 +48,27 @@ class HistoryStore(
      * mid-delete can't slip in between the check and the removal.
      */
     @Synchronized
-    fun add(entry: ClipboardEntry): Boolean {
-        val entries = all().withAdded(entry, deleted::contains)?.toMutableList() ?: return false
-        trim(entries)
-        save(entries)
-        return true
+    fun add(entry: ClipboardEntry): Boolean = addAll(listOf(entry)) > 0
+
+    /**
+     * [add] for several entries at once - the files of one share. Trimmed
+     * once, after they are all in: trimming after each would release the
+     * blob of an evicted older entry that a later one of these shares
+     * (the same file shared again), before that later one is recorded.
+     * Returns how many were new.
+     */
+    @Synchronized
+    fun addAll(entries: List<ClipboardEntry>): Int {
+        var history = all()
+        var added = 0
+        for (entry in entries) {
+            history = history.withAdded(entry, deleted::contains)?.also { added++ } ?: continue
+        }
+        if (added == 0) return 0
+        val trimmed = history.toMutableList()
+        trim(trimmed)
+        save(trimmed)
+        return added
     }
 
     /**
@@ -106,8 +122,10 @@ class HistoryStore(
         entry.blobToRelease(remaining)?.let(fileStore::delete)
     }
 
-    private companion object {
-        const val HISTORY_KEY = "entries"
+    companion object {
+        private const val HISTORY_KEY = "entries"
+
+        /** How many items the history keeps - the newest win. */
         const val MAX_ITEMS = 25
     }
 }

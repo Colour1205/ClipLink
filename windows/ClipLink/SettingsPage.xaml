@@ -90,6 +90,12 @@
                                          AutomationProperties.Name="Start ClipLink when I sign in"
                                          Checked="SignInToggle_Changed" Unchecked="SignInToggle_Changed" />
                     </local:SettingsCard>
+                    <local:SettingsCard x:Name="ShareMenuCard" Icon="Share24" Header="Show 'Share to ClipLink' in File Explorer" NarrowWidth="480">
+                        <ui:ToggleSwitch x:Name="ShareMenuToggle"
+                                         OnContent="On" OffContent="Off" LabelPosition="Left"
+                                         AutomationProperties.Name="Show Share to ClipLink in File Explorer"
+                                         Checked="ShareMenuToggle_Changed" Unchecked="ShareMenuToggle_Changed" />
+                    </local:SettingsCard>
 
                     <!-- Synced history -->
                     <TextBlock Text="Synced history" Style="{StaticResource SectionHeaderText}" />

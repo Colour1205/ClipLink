@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text.RegularExpressions;
 using ClipboardDaemon.Engine;
 
@@ -6,8 +7,12 @@ namespace ClipLink;
 // The command line. Normal use is none at all, or --background (how the
 // sign-in entry starts it: tray icon only, no window).
 //   --background            start hidden in the tray
-//   --share <path>...       hand files to ClipLink (Explorer's "Share",
-//                           batch 7 - logged and ignored for now)
+//   --share <path>...       share these files (File Explorer's "Share to
+//                           ClipLink" and Send To > ClipLink run this): the
+//                           running ClipLink does it, or this one starts -
+//                           in the tray - and does
+//   --unregister            take "Share to ClipLink" out of File Explorer
+//                           (and turn its setting off), then exit
 // The rest run a second, separate ClipLink next to the real one, for
 // testing: its own data (label), ports, and nothing that reaches the
 // network or the clipboard - so no Windows Firewall prompt either.
@@ -21,7 +26,10 @@ namespace ClipLink;
 public sealed record AppOptions
 {
     public bool Background { get; init; }
+    // Absolute (resolved against this process's working folder), so the
+    // running copy can use them.
     public IReadOnlyList<string>? SharePaths { get; init; }
+    public bool Unregister { get; init; }
     public string Label { get; init; } = ClipLinkEngine.DefaultLabel;
     public int Port { get; init; } = ClipLinkEngine.DefaultPort;
     public int DiscoveryPort { get; init; } = ClipLinkEngine.DefaultPort;
@@ -63,8 +71,11 @@ public sealed record AppOptions
                     break;
                 case "--share":
                     // Everything after it is a path.
-                    options = options with { SharePaths = args[(i + 1)..] };
+                    options = options with { SharePaths = args[(i + 1)..].Select(FullPath).ToList() };
                     i = args.Length;
+                    break;
+                case "--unregister":
+                    options = options with { Unregister = true };
                     break;
                 case "--label":
                     string? label = Value();
@@ -107,8 +118,21 @@ public sealed record AppOptions
         return options;
     }
 
+    private static string FullPath(string path)
+    {
+        try
+        {
+            return Path.GetFullPath(path);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return path; // not a path at all - it's reported as not found
+        }
+    }
+
     // The options that pick which ClipLink this is (everything but
-    // --background and --share), to start the same one again at sign-in.
+    // --background, --share and --unregister), to start the same one again
+    // at sign-in - and from File Explorer's "Share to ClipLink".
     public string IdentityArguments()
     {
         var parts = new List<string>();

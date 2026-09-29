@@ -40,6 +40,8 @@ import { DeviceSettings } from '../identity/DeviceSettings';
 import { deviceFingerprint, effectiveDeviceName, getLocalDeviceName, normalizeDeviceName, shortDeviceId } from '../identity/DeviceName';
 import { FileStore } from '../storage/FileStore';
 import { FilePayload } from '../storage/FilePayload';
+import { safeFileName } from '../storage/FileNames';
+import { SHARED_IN_EVENT, SharedIn, takePendingShares } from '../share/ShareIntake';
 import { entryKey } from '../storage/DeletedEntries';
 import { Discovery, PeerBeacon } from '../networking/Discovery';
 import { TcpServer, connectTcp } from '../networking/TcpTransport';
@@ -304,12 +306,32 @@ function previewFor(entry: ClipboardEntry): string {
   } else if (entry.Type === 'file') {
     try {
       const payload = JSON.parse(entry.Content) as FilePayload;
-      return payload.FileName;
+      return safeFileName(payload.FileName, 'File');
     } catch (e) {
       return 'File';
     }
   }
   return entry.Content;
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+// The toast after a share to ClipLink (Index's syncShared): what went out
+// and to how many devices, then anything that was skipped and why.
+function shareOutcomeMessage(files: number, texts: number, tooLarge: number, folders: number, unreadable: number,
+  own: number, connected: number): string {
+  const parts: string[] = [];
+  if (files + texts > 0) {
+    const what: string = files === 0 ? 'text' : (texts === 0 ? plural(files, 'file') : `${plural(files, 'file')} and text`);
+    parts.push(connected > 0 ? `Shared ${what} to ${connected} device(s).` : `Added ${what} — no devices connected yet.`);
+  }
+  if (tooLarge > 0) parts.push(`${plural(tooLarge, 'file')} over 1 GB skipped.`);
+  if (folders > 0) parts.push(`${plural(folders, 'folder')} skipped — only files can be shared.`);
+  if (unreadable > 0) parts.push(`Couldn't add ${plural(unreadable, 'item')}.`);
+  if (own > 0) parts.push(own === 1 && parts.length === 0 ? 'That is already in ClipLink.' : `${plural(own, 'item')} already in ClipLink.`);
+  return parts.length > 0 ? parts.join(' ') : 'Nothing to share.';
 }
 
 // Full-text view for the synced-item long-press menu's "Select text" option.
@@ -486,6 +508,12 @@ struct Index {
   };
   private syncManager: SyncManager | null = null;
   private fileStore: FileStore | null = null;
+  // "Share to ClipLink" (see drainPendingShares): true while a batch is
+  // being synced, and the eventHub listener EntryAbility's shares wake.
+  private sharesDraining: boolean = false;
+  private onSharedIn = (): void => {
+    void this.drainPendingShares();
+  };
   private connectingTo: Set<string> = new Set();
   private offLanReconnectTimerId: number = -1;
   // Real Navigation/NavDestination stacks, one per tab that needs its own
@@ -609,6 +637,10 @@ struct Index {
       this.connectedCount = count;
     });
     this.syncManager = syncManager;
+    // Shares arriving from now on; one that came before this page existed
+    // (a cold start from the share panel) is drained once ownDeviceId is
+    // known, below.
+    context.eventHub.on(SHARED_IN_EVENT, this.onSharedIn);
 
     this.tcpServer.onConnection((conn: socket.TCPSocketConnection) => {
       const identity = new DeviceIdentity();
@@ -660,6 +692,7 @@ struct Index {
       netLog(`ownDeviceId=${id}`);
       this.refreshPairingPayload();
       void this.loadHistoryIntoList();
+      void this.drainPendingShares();
       // Same helper the foreground restart uses, and its failure is
       // surfaced rather than swallowed - a bind failure here means no
       // peer is ever discovered, which previously looked like "sync just
@@ -789,6 +822,7 @@ struct Index {
   aboutToDisappear(): void {
     this.mainWindow?.off('avoidAreaChange', this.onAvoidAreaChange);
     this.mainWindow?.off('windowSizeChange', this.onWindowSizeChange);
+    (getContext(this) as common.UIAbilityContext).eventHub.off(SHARED_IN_EVENT, this.onSharedIn);
     this.watcher.stopListening();
     void this.discovery.stop();
     this.tcpServer.stop();
@@ -1703,9 +1737,6 @@ struct Index {
       return;
     }
 
-    const identity = new DeviceIdentity();
-    const myDeviceId = await identity.getPublicKeyBase64();
-
     // "file" is different from text/image: the signed entry only ever
     // carries a small FilePayload descriptor (see storage/FilePayload.ets),
     // never the bytes themselves - those get cached into FileStore first
@@ -1728,24 +1759,115 @@ struct Index {
           fs.closeSync(file);
         }
       }
-      const payload: FilePayload = { FileName: change.fileName ?? 'file', FileHash: change.hash, FileSize: bytes.byteLength };
+      const payload: FilePayload = { FileName: safeFileName(change.fileName, 'file'), FileHash: change.hash, FileSize: bytes.byteLength };
       entryContent = JSON.stringify(payload);
     }
 
-    const entry = await signEntry(identity, entryContent, change.type, myDeviceId);
+    await this.recordLocalEntry(change.type, entryContent);
+
+    const count = this.syncManager?.connectionCount ?? 0;
+    promptAction.showToast({
+      message: count > 0 ? `Synced ${change.type} to ${count} device(s).` : `Captured ${change.type} — no devices connected yet.`,
+    });
+  }
+
+  // Something this device originated - a PasteButton read, or something
+  // shared to ClipLink: signed, sent to every connected peer, recorded, and
+  // listed. A file's bytes must already be in FileStore under its hash.
+  private async recordLocalEntry(type: string, content: string): Promise<void> {
+    const identity = new DeviceIdentity();
+    const myDeviceId = await identity.getPublicKeyBase64();
+    const entry = await signEntry(identity, content, type, myDeviceId);
     await this.syncManager?.broadcastEntry(entry);
 
     // broadcastEntry only sends to peers and records history - it never
     // touches syncedItems, which is what onEntryApplied (received-entry
     // path) populates. Without this, the device that actually captured
     // and sent something never saw it in its own Synced list at all -
-    // only the receiving peer did.
-    this.syncedItems = [this.syncedItemFor(entry, false), ...this.syncedItems].slice(0, 50);
+    // only the receiving peer did. Any copy of the same item is dropped
+    // first: a share synced while loadHistoryIntoList runs can already be
+    // in the list, and a repeated ForEach key breaks the list.
+    const item: SyncedItem = this.syncedItemFor(entry, false);
+    this.syncedItems = [item, ...this.syncedItems.filter((i: SyncedItem) => i.id !== item.id)].slice(0, 50);
+  }
 
+  // "Share to ClipLink": syncs what EntryAbility queued from the system
+  // share panel (see share/ShareIntake.ets) exactly like a copy on this
+  // device - files as 'file' entries, text as 'text' - without touching
+  // this device's clipboard. Needs SyncManager, FileStore and ownDeviceId,
+  // so it waits for all three: called when EntryAbility emits
+  // SHARED_IN_EVENT, and once from aboutToAppear when they're ready. One
+  // drain at a time; shares that land meanwhile are picked up by its loop.
+  private async drainPendingShares(): Promise<void> {
+    if (this.sharesDraining || this.syncManager === null || this.fileStore === null || this.ownDeviceId.length === 0) {
+      return;
+    }
+    this.sharesDraining = true;
+    try {
+      let batch: SharedIn[] = takePendingShares();
+      while (batch.length > 0) {
+        await this.syncShared(batch);
+        batch = takePendingShares();
+      }
+    } finally {
+      this.sharesDraining = false;
+    }
+  }
+
+  private async syncShared(batch: SharedIn[]): Promise<void> {
+    const fileStore = this.fileStore;
+    if (fileStore === null) return;
+    let files = 0;
+    let texts = 0;
+    let tooLarge = 0;
+    let folders = 0;
+    let unreadable = 0;
+    let own = 0;
+    for (const shared of batch) {
+      try {
+        if (shared.kind === 'text' && shared.text !== undefined) {
+          await this.recordLocalEntry('text', shared.text);
+          texts++;
+        } else if (shared.kind === 'file' && shared.path !== undefined) {
+          // The cache copy moves into FileStore (hashed in chunks, never
+          // held in memory whole), where file_request and the proactive
+          // stream in broadcastEntry find it.
+          const size: number = fs.statSync(shared.path).size;
+          const hash: string = await fileStore.importFile(shared.path);
+          const payload: FilePayload = { FileName: shared.fileName ?? 'file', FileHash: hash, FileSize: size };
+          await this.recordLocalEntry('file', JSON.stringify(payload));
+          files++;
+        } else if (shared.reason === 'too-large') {
+          tooLarge++;
+        } else if (shared.reason === 'folder') {
+          folders++;
+        } else if (shared.reason === 'own') {
+          own++;
+        } else {
+          unreadable++;
+        }
+      } catch (e) {
+        netLog(`share: could not sync a ${shared.kind}: ${JSON.stringify(e)}`);
+        unreadable++;
+        if (shared.path !== undefined) {
+          try {
+            fs.unlinkSync(shared.path);
+          } catch (removeErr) {
+            // moved into FileStore already, or never there
+          }
+        }
+      }
+    }
+    netLog(`share: files=${files} texts=${texts} tooLarge=${tooLarge} folders=${folders} unreadable=${unreadable} own=${own}`);
     const count = this.syncManager?.connectionCount ?? 0;
     promptAction.showToast({
-      message: count > 0 ? `Synced ${change.type} to ${count} device(s).` : `Captured ${change.type} — no devices connected yet.`,
+      message: shareOutcomeMessage(files, texts, tooLarge, folders, unreadable, own, count),
+      duration: 3000,
     });
+    // Show where it went, unless that would pull the user out of pairing.
+    if (files + texts > 0 && !this.pairingOpen) {
+      this.currentTabIndex = 0;
+    }
   }
 
   async runSelfTest() {
@@ -1829,13 +1951,14 @@ struct Index {
       return;
     }
     const uri: string = fileUri.getUriFromPath(fileStore.getPath(payload.FileHash));
-    const mime: string = mimeTypeForFileName(payload.FileName);
+    const fileName: string = safeFileName(payload.FileName, 'file');
+    const mime: string = mimeTypeForFileName(fileName);
 
     if (canIUse('SystemCapability.FileManagement.FilePreview.Core')) {
       try {
         const previewable: boolean = await filePreview.canPreview(context, uri);
         if (previewable) {
-          await filePreview.openPreview(context, { title: payload.FileName, uri: uri, mimeType: mime });
+          await filePreview.openPreview(context, { title: fileName, uri: uri, mimeType: mime });
           return;
         }
       } catch (e) {
@@ -1854,7 +1977,7 @@ struct Index {
     } catch (e) {
       const err = e as BusinessError;
       if (err.code === 16000019 || err.code === 16000001) {
-        promptAction.showToast({ message: `No app on this device can open ${payload.FileName}.` });
+        promptAction.showToast({ message: `No app on this device can open ${fileName}.` });
       } else {
         promptAction.showToast({ message: `Could not open file (${err.code}).` });
       }
@@ -1953,7 +2076,7 @@ struct Index {
       }
       const context = getContext(this) as common.UIAbilityContext;
       const documentPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
-      const uris: Array<string> = await documentPicker.save({ newFileNames: [payload.FileName] });
+      const uris: Array<string> = await documentPicker.save({ newFileNames: [safeFileName(payload.FileName, 'file')] });
       if (uris.length === 0) return; // user canceled the picker
 
       const srcFile = fs.openSync(fileStore.getPath(payload.FileHash), fs.OpenMode.READ_ONLY);
@@ -2049,15 +2172,16 @@ struct Index {
         const fileStore = this.fileStore;
         if (fileStore === null || !fileStore.exists(payload.FileHash)) return null;
         const uri = fileUri.getUriFromPath(fileStore.getPath(payload.FileHash));
-        if (isImageFileName(payload.FileName)) {
+        const fileName: string = safeFileName(payload.FileName, 'file');
+        if (isImageFileName(fileName)) {
           const image = new unifiedDataChannel.Image();
           image.imageUri = uri;
-          image.details = { name: payload.FileName };
+          image.details = { name: fileName };
           return new unifiedDataChannel.UnifiedData(image);
         }
         const file = new unifiedDataChannel.File();
         file.uri = uri;
-        file.details = { name: payload.FileName };
+        file.details = { name: fileName };
         return new unifiedDataChannel.UnifiedData(file);
       } catch (e) {
         return null;

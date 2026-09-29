@@ -9,9 +9,11 @@ any more.
 - `Engine/ClipLinkEngine*.cs` — the node. `Start(label, port)` loads the stores
   from `%APPDATA%\ClipboardDaemon` (files suffixed with the label; the app uses
   `"default"`) and starts everything; `Stop()` ends it. Typed methods for the
-  UI (`ClipLinkEngine.Api.cs`) and events (`HistoryChanged`, `DevicesChanged`,
-  `PairingRequested`, `PairingResolved`, `StatusChanged`), raised in order on
-  a background thread — a UI marshals them to its own thread.
+  UI (`ClipLinkEngine.Api.cs` — including `ShareFilesAsync`, File Explorer's
+  "Share to ClipLink": files sent like copied ones, without the clipboard)
+  and events (`HistoryChanged`, `DevicesChanged`, `PairingRequested`,
+  `PairingResolved`, `StatusChanged`), raised in order on a background
+  thread — a UI marshals them to its own thread.
 - `Engine/EngineModels.cs` — what the API hands out (`DeviceListing`,
   `HistoryItem`, `PendingPairing`, `PairOutcome`, `EngineStatus`, ...).
 - `Engine/DeviceLabel.cs` — how to show a device's name safely, and its
@@ -20,6 +22,8 @@ any more.
   log file (`%LOCALAPPDATA%\ClipLink\logs\cliplink.log`).
 - `Clipboard/`, `Identity/`, `Networking/`, `Storage/`, `Crypto/` — the pieces
   the engine wires together (see `docs/protocol.md` for the wire format).
+  `Storage/LocalFiles.cs` is the per-file check and payload (name, size,
+  streamed SHA-256, 1 GB cap) shared by copied files and shared ones.
 
 Build: `dotnet build -c Debug` here. The iOS interop tests compile these same
 sources for macOS (`mobile/ios/ClipLink/CoreTests/DaemonHarness`), patching a

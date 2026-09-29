@@ -42,6 +42,30 @@ it to ship it). Run it from anywhere; nothing is installed.
   starting it with `--background` (tray icon only). If the value points at
   another `ClipLink.exe` (moved, or another build), each start points it at
   the running one, keeping its arguments.
+- **Share to ClipLink** from File Explorer: right-click one or more files and
+  choose **Share to ClipLink**, or **Send to > ClipLink**. **On Windows 11
+  both are under "Show more options"** (or Shift+right-click / Shift+F10) —
+  the new top-level menu only takes packaged apps. Each file goes to your
+  devices exactly like a copied file (a file entry in Synced, streamed to
+  them; images stay files), without touching this PC's clipboard; folders
+  and files over 1 GB are skipped. ClipLink says what it shared in its
+  window, or as a notification from the tray icon. If ClipLink isn't
+  running, sharing starts it (in the tray). As with copies, Synced keeps
+  the latest 25 items on every device, so a device that connects after a
+  bigger share only gets the latest 25 of it.
+  - How: a per-user verb `HKCU\Software\Classes\*\shell\ClipLink.Share`
+    (`MultiSelectModel=Player`: shown for up to 100 selected files; Explorer
+    starts one `ClipLink.exe --share "<file>"` per file, which hand their
+    file to the running copy — files arriving within ~400 ms are shared as
+    one batch) and a shortcut `%APPDATA%\Microsoft\Windows\SendTo\ClipLink.lnk`
+    (`ClipLink.exe --share` with every selected file, up to Windows'
+    ~32,000-character command line — about 280 files). No admin rights.
+  - Settings > **Show 'Share to ClipLink' in File Explorer** (on by default)
+    turns both on or off. While it's on, every start re-creates them if
+    they're missing or point at another `ClipLink.exe`, so moving the exe
+    fixes itself — but **before deleting ClipLink.exe, run
+    `ClipLink.exe --unregister`** (or turn the setting off), or the menu
+    entries stay behind pointing at nothing.
 - Data: `%APPDATA%\ClipboardDaemon` — the same files the old daemon used, so
   an existing identity, trusted devices and history carry over:
   `identitydefault.key`, `truststoredefault.json`, `historydefault.json`,
@@ -70,7 +94,8 @@ it to ship it). Run it from anywhere; nothing is installed.
 | Option | |
 |---|---|
 | `--background` | Start hidden in the tray (how the sign-in entry starts it). |
-| `--share <path>...` | For Explorer's "Share" (next batch) — handed to the running copy, logged and ignored for now. |
+| `--share <path>...` | Share these files (what File Explorer's "Share to ClipLink" and Send To run; everything after it is a path). Handed to the running copy, or — if none is running — this one starts in the tray and shares them. |
+| `--unregister` | Remove "Share to ClipLink" and Send To > ClipLink from File Explorer, turn that setting off (a running copy is told), and exit. No window. |
 
 For testing, a second, separate ClipLink can run next to the real one —
 it touches none of the real one's data, and with `--loopback-only` and
@@ -86,7 +111,10 @@ firewall prompt):
 | `--theme light\|dark` | A fixed theme instead of following Windows. |
 
 For example `ClipLink.exe --label test --port 49321 --loopback-only --no-clipboard`.
-A test copy never turns on the sign-in entry by itself. Afterwards, delete
+A test copy never turns on the sign-in entry or "Share to ClipLink" by
+itself; turned on in its Settings, it gets its own ("Share to ClipLink
+(test)", `SendTo\ClipLink (test).lnk`, starting it with the same options), never
+the real ones — remove them with `ClipLink.exe --label test --unregister`. Afterwards, delete
 its `%APPDATA%\ClipboardDaemon\*test*` files (and `filestoretest` folder),
 `%LOCALAPPDATA%\ClipLink\settings-test.json`,
 `%LOCALAPPDATA%\ClipLink\logs\cliplink-test*.log` and (files it opened)

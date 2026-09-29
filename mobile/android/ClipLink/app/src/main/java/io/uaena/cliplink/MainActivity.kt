@@ -4,9 +4,8 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
-import android.content.Context
+import android.content.ComponentName
 import android.content.Intent
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -52,7 +51,11 @@ class MainActivity : ComponentActivity() {
 
     private val pickFileLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument(),
-    ) { uri -> uri?.let { engine.shareIn(null, it) } }
+    ) { uri ->
+        // The same path as the share sheet (see ShareReceiverActivity): a
+        // picked photo is synced as the file it is, streamed, size-capped.
+        uri?.let { engine.shareIn(null, listOf(it)) { outcome -> engine.showToast(outcome.message) } }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -61,7 +64,6 @@ class MainActivity : ComponentActivity() {
         engine.start()
         requestPermissions()
         if (engine.deviceSettings.keepAlive) ClipLinkService.start(this)
-        handleShareIntent(intent)
 
         setContent {
             val dynamicColor = remember { mutableStateOf(engine.deviceSettings.dynamicColor) }
@@ -189,11 +191,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        handleShareIntent(intent)
-    }
-
     override fun onResume() {
         super.onResume()
         // Foregrounding is the other moment besides a cold start that deserves
@@ -214,25 +211,6 @@ class MainActivity : ComponentActivity() {
         if (wanted.isNotEmpty()) {
             permissionLauncher.launch(wanted.toTypedArray())
         }
-    }
-
-    /** Handles ACTION_SEND - the way to push something without opening the app first. */
-    private fun handleShareIntent(intent: Intent?) {
-        if (intent?.action != Intent.ACTION_SEND) return
-        // The typed getParcelableExtra overload is API 33+, and minSdk here is
-        // 31 - calling it unconditionally is a NoSuchMethodError on Android 12
-        // the first time anything is shared in.
-        @Suppress("DEPRECATION")
-        val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-        } else {
-            intent.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
-        }
-        val text = intent.getStringExtra(Intent.EXTRA_TEXT)
-        if (uri == null && text.isNullOrEmpty()) return
-        engine.shareIn(text, uri)
-        // Cleared so a configuration change doesn't re-send the same item.
-        intent.action = null
     }
 
     private fun shareItem(item: SyncedItem) {
@@ -272,7 +250,13 @@ class MainActivity : ComponentActivity() {
 
             else -> return
         }
-        startActivity(Intent.createChooser(send, "Share"))
+        // ClipLink is a share target itself; offering it here would only
+        // sync the item straight back as a new one.
+        val chooser = Intent.createChooser(send, "Share").putExtra(
+            Intent.EXTRA_EXCLUDE_COMPONENTS,
+            arrayOf(ComponentName(this, ShareReceiverActivity::class.java)),
+        )
+        startActivity(chooser)
     }
 
     private fun copyPlainText(text: String) {

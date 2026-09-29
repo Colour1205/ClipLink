@@ -45,8 +45,12 @@ app therefore offers three honest paths instead:
 - automatic capture when ClipLink comes to the foreground (Me → *Send my
   clipboard when I open ClipLink*),
 - the paste button on the Synced screen,
-- a share-sheet target, so anything can be pushed from any app without
-  switching to ClipLink first.
+- a share-sheet target ("ClipLink" in any app's Share menu), so anything can
+  be pushed from any app without switching to ClipLink first. Text arrives as
+  text; files - one or many, photos included - arrive as files, up to 1 GB
+  each and 25 per share (the history's size). `ShareReceiverActivity` copies
+  them into app storage while it still holds the read grant, toasts the
+  result and finishes; ClipLink itself never opens.
 
 Writing to the clipboard is unrestricted, so *receiving* works normally.
 

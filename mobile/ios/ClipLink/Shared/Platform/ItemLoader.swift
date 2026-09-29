@@ -12,6 +12,19 @@ enum Capture {
     case file(URL, name: String)
 }
 
+/// What one "Share → ClipLink" hands over (see `ItemLoader.shareCaptures`).
+struct SharedItems {
+    /// In the order shared.
+    var captures: [Capture] = []
+    /// Files over the 1 GB every platform syncs at most, by name - never copied.
+    var tooLarge: [String] = []
+    var folders = 0
+    /// Items there was no reading at all.
+    var unreadable = 0
+    /// Items past the limit, never read.
+    var skipped = 0
+}
+
 /// Turns item providers (the system Paste control, drag & drop, the Share
 /// extension, the photo picker) into a `Capture`. Shared by the app and the
 /// extension, so it stays free of app-only API.
@@ -44,6 +57,126 @@ enum ItemLoader {
             }
         }
         return nil
+    }
+
+    /// Everything one "Share → ClipLink" hands over, synced the way every
+    /// platform syncs a share: each item the system passes as a FILE (from
+    /// Files, Photos, Mail...) goes as that file - its own bytes and name,
+    /// an image file included; an image with no file behind it (a screenshot
+    /// being marked up, a picture held by a web view) as an inline image,
+    /// like a copy; and text or a link only when nothing else came with it -
+    /// the caption or page link an app attaches to what it shares isn't the
+    /// thing being shared. At most `limit` items are read: the history holds
+    /// no more, and the first ones would be evicted - their bytes deleted -
+    /// before a peer could fetch them. Cancelling the task stops it after
+    /// the item being read.
+    static func shareCaptures(from providers: [NSItemProvider], limit: Int) async -> SharedItems {
+        var items = SharedItems()
+        var text: Capture?
+        for provider in providers {
+            if Task.isCancelled { break }
+            guard items.captures.count < limit else {
+                items.skipped += 1
+                continue
+            }
+            let file = await sharedFile(from: provider)
+            switch file {
+            case .copied(let url, let name):
+                items.captures.append(.file(url, name: name))
+            case .tooLarge(let name):
+                items.tooLarge.append(name)
+            case .folder:
+                items.folders += 1
+            case .unreadable:
+                items.unreadable += 1
+            case .notAFile:
+                let loaded = await capture(from: [provider])
+                switch loaded {
+                case .some(.text):
+                    if text == nil { text = loaded }
+                case .some(let other):
+                    items.captures.append(other)
+                case .none:
+                    items.unreadable += 1
+                }
+            }
+        }
+        if items.captures.isEmpty, let text { items.captures = [text] }
+        return items
+    }
+
+    private enum SharedFile {
+        case copied(URL, name: String)
+        case tooLarge(String)
+        case folder
+        case unreadable
+        /// Nothing on disk behind it: text, a web link, an image in memory.
+        case notAFile
+    }
+
+    /// The provider's own file, when it hands one over, copied now under its
+    /// own name. `loadItem` gives the file itself (a file URL) for anything
+    /// that is one - a photo from Photos too - and the object or bytes for
+    /// anything that isn't.
+    private static func sharedFile(from provider: NSItemProvider) async -> SharedFile {
+        let types = provider.registeredTypeIdentifiers.compactMap(UTType.init)
+        // A picture's own type first, not a bundle or preview listed with it.
+        guard let type = types.first(where: { $0.conforms(to: .image) })
+                ?? types.first(where: { $0.conforms(to: .data) || $0.conforms(to: .content) })
+        else { return .notAFile }
+        let result: SharedFile? = await withCheckedContinuation { c in
+            provider.loadItem(forTypeIdentifier: type.identifier, options: nil) { item, _ in
+                // Copied inside the handler: the URL needn't outlive it.
+                guard let url = item as? URL, url.isFileURL else { return c.resume(returning: .notAFile) }
+                c.resume(returning: Self.copySharedFile(url, suggestedName: provider.suggestedName))
+            }
+        }
+        if let result { return result }
+        // It is a file, just not one this process may open directly: the
+        // provider's own copy then.
+        guard let (url, name) = await loadFile(provider, type: type) else { return .unreadable }
+        return .copied(url, name: name)
+    }
+
+    /// Nil when the copy itself failed. Folders (and packages) aren't synced
+    /// on any platform, and nothing over 1 GB is copied at all.
+    private static func copySharedFile(_ url: URL, suggestedName: String?) -> SharedFile? {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let name = sharedFileName(url, suggested: suggestedName)
+        let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+        if values?.isDirectory == true { return .folder }
+        if let size = values?.fileSize, Int64(size) > Wire.maxFileBytes { return .tooLarge(name) }
+        let temp = tempURL(named: name)
+        guard (try? FileManager.default.copyItem(at: url, to: temp)) != nil else {
+            discardTemp(temp)
+            return nil
+        }
+        return .copied(temp, name: name)
+    }
+
+    /// A shared file goes out under its own name - its extension always
+    /// matches the bytes - unless the provider suggests a bare name of its
+    /// own: the name on disk isn't always the one the user knows (Photos
+    /// keeps an edited photo as "FullSizeRender.jpg").
+    private static func sharedFileName(_ url: URL, suggested: String?) -> String {
+        let own = url.lastPathComponent
+        guard let suggested = suggested?.trimmingCharacters(in: .whitespacesAndNewlines), !suggested.isEmpty,
+              (suggested as NSString).pathExtension.isEmpty, !url.pathExtension.isEmpty
+        else { return own }
+        return suggested + "." + url.pathExtension
+    }
+
+    /// Removes a capture's temporary copy (see `tempURL`), if it has one.
+    static func discard(_ capture: Capture) {
+        guard case .file(let url, _) = capture else { return }
+        discardTemp(url)
+    }
+
+    static func discardTemp(_ url: URL) {
+        let dir = url.deletingLastPathComponent()
+        guard dir.lastPathComponent.hasPrefix("capture-") else { return }
+        try? FileManager.default.removeItem(at: dir)
     }
 
     static func copiedFile(_ url: URL) -> Capture? {
@@ -163,14 +296,29 @@ enum ItemLoader {
     /// A small upright preview decoded at reduced size where the format
     /// allows it - cheap on memory, unlike UIImage(data:) on the full image.
     static func thumbnail(ofImageData data: Data, maxPixelSize: Int) -> UIImage? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                  kCGImageSourceCreateThumbnailFromImageAlways: true,
-                  kCGImageSourceCreateThumbnailWithTransform: true,
-                  kCGImageSourceShouldCacheImmediately: true,
-                  kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
-              ] as CFDictionary)
-        else { return nil }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return thumbnail(of: source, maxPixelSize: maxPixelSize)
+    }
+
+    /// The same for an image FILE - nil for a picture so big that decoding
+    /// it, even scaled down, could take more memory than the Share
+    /// extension has.
+    static func thumbnail(ofImageFileAt url: URL, maxPixelSize: Int) -> UIImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(source) > 0 else { return nil }
+        let (width, height, _) = geometry(of: source)
+        guard width > 0, height > 0, width * height <= maxPreviewPixels else { return nil }
+        return thumbnail(of: source, maxPixelSize: maxPixelSize)
+    }
+
+    static let maxPreviewPixels = 24_000_000
+
+    private static func thumbnail(of source: CGImageSource, maxPixelSize: Int) -> UIImage? {
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+        ] as CFDictionary) else { return nil }
         return UIImage(cgImage: image)
     }
 

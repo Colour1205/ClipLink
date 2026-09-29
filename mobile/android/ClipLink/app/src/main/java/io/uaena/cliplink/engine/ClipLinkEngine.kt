@@ -17,12 +17,15 @@ import io.uaena.cliplink.net.PairingInfo
 import io.uaena.cliplink.net.PeerConnection
 import io.uaena.cliplink.net.Protocol
 import io.uaena.cliplink.net.SyncManager
+import io.uaena.cliplink.share.ShareIntake
+import io.uaena.cliplink.share.ShareOutcome
 import io.uaena.cliplink.store.DeletedStore
 import io.uaena.cliplink.store.DeviceSettings
 import io.uaena.cliplink.store.FileStore
 import io.uaena.cliplink.store.HistoryStore
 import io.uaena.cliplink.store.PassphraseKeyStore
 import io.uaena.cliplink.store.TrustStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -31,12 +34,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
@@ -66,6 +71,7 @@ class ClipLinkEngine(context: Context) {
     val fileStore = FileStore(appContext)
     private val historyStore = HistoryStore(appContext, fileStore, DeletedStore(appContext))
     val clipboard = ClipboardBridge(appContext, fileStore)
+    val shareIntake = ShareIntake(appContext, fileStore)
 
     private val identity = DeviceIdentity()
     private val discovery = Discovery()
@@ -768,28 +774,92 @@ class ClipLinkEngine(context: Context) {
         }
     }
 
-    /** The share-sheet path: push something from another app without switching to this one. */
-    fun shareIn(text: String?, uri: Uri?) {
-        scope.launch {
-            when {
-                uri != null -> {
-                    val bytes = withContext(Dispatchers.IO) { clipboard.readBytes(uri) }
-                    if (bytes == null) {
-                        showToast("Couldn't read that file.")
-                        return@launch
-                    }
-                    val mime = clipboard.mimeTypeOf(uri) ?: ""
-                    if (mime.startsWith("image/")) {
-                        broadcastImage(bytes)
-                    } else {
-                        broadcastFile(clipboard.displayName(uri), bytes)
-                    }
-                }
-
-                !text.isNullOrEmpty() -> broadcastText(text)
-                else -> showToast("Nothing to share.")
-            }
+    /**
+     * Syncs what another app shared into ClipLink, or a file picked on the
+     * Synced tab, exactly like something copied here: each file becomes a
+     * "file" entry whose bytes wait in the FileStore for peers to ask for,
+     * text a "text" entry. Nothing goes on this phone's own clipboard, and an
+     * image stays the file it was - receivers preview image files anyway -
+     * rather than being re-encoded as an inline PNG.
+     *
+     * [text] only counts when there are no [uris]: next to files it is a
+     * caption, not the thing being shared.
+     *
+     * Runs on the engine's scope rather than the caller's, so a rotation or a
+     * Back press can't abandon a copy halfway through. The caller should
+     * still stay alive until [onDone] (called on the main thread): the read
+     * grant for a shared URI only lasts as long as it does, and although
+     * every URI is opened up front (see [ShareIntake.copyAll]), a visible
+     * activity is also what keeps the process running a long copy.
+     */
+    fun shareIn(text: String?, uris: List<Uri>, onDone: (ShareOutcome) -> Unit): Job = scope.launch {
+        // Always answered: the share screen stays up, invisible, until it is.
+        val outcome = try {
+            share(text, uris)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log("share failed: ${e.message}")
+            ShareOutcome(failed = true)
         }
+        withContext(Dispatchers.Main) { onDone(outcome) }
+    }
+
+    private suspend fun share(text: String?, uris: List<Uri>): ShareOutcome {
+        val taken = uris.take(ShareIntake.MAX_FILES)
+        val copies = withContext(Dispatchers.IO) { shareIntake.copyAll(taken) }
+        val stored = copies.filterIsInstance<ShareIntake.Copy.Stored>()
+        val sharedText = text?.takeIf { uris.isEmpty() && it.isNotEmpty() }
+        val outcome = ShareOutcome(
+            files = stored.map { it.name },
+            text = sharedText != null,
+            unreadable = copies.count { it is ShareIntake.Copy.Unreadable },
+            tooLarge = copies.filterIsInstance<ShareIntake.Copy.TooLarge>().map { it.name },
+            skipped = uris.size - taken.size,
+        )
+        if (stored.isEmpty() && sharedText == null) return outcome
+
+        // A cold start via the share sheet gets here while start() may still
+        // be creating the identity key - an entry signed before then would
+        // carry an empty device id.
+        val ownId = withTimeoutOrNull(READY_TIMEOUT_MS) { _ownDeviceId.first { it.isNotEmpty() } }
+        if (ownId == null) {
+            stored.forEach { historyStore.releaseBlobIfUnused(it.hash) }
+            return ShareOutcome(failed = true)
+        }
+        val entries = mutableListOf<ClipboardEntry>()
+        try {
+            if (sharedText != null) entries += signDistinct(sharedText, ClipboardEntry.TYPE_TEXT, ownId, null)
+            for (file in stored) {
+                val payload = FilePayload(file.name, file.hash, file.size).toJson()
+                entries += signDistinct(payload, ClipboardEntry.TYPE_FILE, ownId, entries.lastOrNull())
+            }
+        } catch (e: Exception) {
+            // The keystore refused to sign: no entry will ever point at these
+            // copies, so nothing else would ever delete them.
+            stored.forEach { historyStore.releaseBlobIfUnused(it.hash) }
+            throw e
+        }
+        // Deliberately not noted as lastKnownHash: that tracks the clipboard,
+        // and a share never touches it.
+        syncManager.broadcastEntries(entries)
+        stored.forEach { syncManager.tryFulfillPendingEntry(it.hash) }
+        refreshItems()
+        log("shared ${entries.size} item(s) to ${syncManager.connectionCount} peer(s)")
+        return outcome.copy(connected = syncManager.connectionCount)
+    }
+
+    /**
+     * Signs, then signs again in the rare case the clock hasn't moved since
+     * [previous]: the Synced list keys its rows by device, timestamp and type,
+     * so two entries of one share must never share a timestamp.
+     */
+    private fun signDistinct(content: String, type: String, ownId: String, previous: ClipboardEntry?): ClipboardEntry {
+        var entry = Signing.sign(identity, content, type, ownId)
+        while (previous != null && entry.timestamp == previous.timestamp) {
+            entry = Signing.sign(identity, content, type, ownId)
+        }
+        return entry
     }
 
     private suspend fun broadcastText(text: String, quiet: Boolean = false) {
@@ -971,6 +1041,7 @@ class ClipLinkEngine(context: Context) {
         const val MAX_LOG_LINES = 60
         const val RECONNECT_INTERVAL_MS = 30_000L
         const val CONNECT_TIMEOUT_MS = 3_000
+        const val READY_TIMEOUT_MS = 15_000L
         val LOG_TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
     }
 }

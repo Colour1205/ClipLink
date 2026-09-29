@@ -108,8 +108,17 @@ the app, unless you copied something else meanwhile.
 
 **Share extension.** Runs the same engine over the same App Group storage and
 Keychain identity, so it *is* this iPhone on the network. It sends
-immediately; devices it can't reach get the item from history on the next
-connection.
+immediately; devices it can't reach get the items from history on the next
+connection. It takes text, a link, or files of any kind, several at once (it is
+offered for up to 50 and sends the first 25 - all the history holds - saying
+how many it left out). As on the other platforms, whatever the system hands
+over as a file - from Files, Photos, Mail - is synced as that file, with its
+own bytes and name (a photo arrives as `IMG_0001.HEIC`, say); only an image
+with no file behind it (a screenshot being marked up) goes inline as a
+picture, and text or a link only when nothing else came with it. Files over
+1 GB and folders are left out, and nothing goes on this device's clipboard.
+"Open in ClipLink" from Files sends the file as a file too. The extension's
+node is a sender only: it never takes, or asks for, file bytes.
 
 **Deleting.** Delete (a card's menu or the item screen; both ask first)
 and *Me › Clear Synced History* are local: nothing goes on the wire, the clipboard is left
