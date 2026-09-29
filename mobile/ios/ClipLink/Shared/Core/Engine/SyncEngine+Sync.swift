@@ -138,6 +138,10 @@ extension SyncEngine {
     /// Ask peers for a blob we're missing. Rate-limited per hash so every
     /// history batch doesn't re-ask for the same thing.
     func requestFile(_ wireHash: String, from targets: [PeerLink]) {
+        // A sender only drops file bytes (see handleMessage): asking would
+        // just have the peer stream the whole file for nothing. The app
+        // fetches what's missing on its own next connection.
+        guard !config.sendOnly else { return }
         let key = FileStore.key(wireHash)
         guard incoming[key] == nil, !verifying.contains(key), !targets.isEmpty else { return }
         if let last = requestedAt[key], Date().timeIntervalSince(last) < 10 { return }

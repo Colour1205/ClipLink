@@ -90,3 +90,18 @@ before any real app-building starts.
    - **ArkTS gotcha hit and fixed**: `arkts-no-structural-typing` — a `socket.TCPSocket` (outbound) and `socket.TCPSocketConnection` (inbound) can't be passed where a shape-matching interface is expected, unlike normal TypeScript; needed explicit adapter classes (`TcpSocketAdapter`/`TcpSocketConnectionAdapter` in `PeerConnection.ets`) that formally `implements` the shared interface, even though both underlying types already had the exact right methods.
 9. **Foreground-only lifecycle wiring** — sync triggers on app open/foreground, per the architecture doc; minimal UI (pairing screen, connected/trusted devices, maybe a history view).
 10. **File transfer** (chunking, `FileStore`-equivalent) — deliberately last, since it's the most complex piece and everything before it needs to be solid first.
+
+## Share to ClipLink
+
+ClipLink appears in the system share panel (Gallery, Files, a browser's Share...). `entry/src/main/module.json5` gives `EntryAbility` a second skill (`ohos.want.action.sendData`, `general.object` + `general.file`, up to 50 files). No permission is needed.
+
+- `share/ShareIntake.ets`: `EntryAbility` passes the Want from `onCreate` (cold start) or `onNewWant` (already running; singleton) to `intakeShare`. It reads the Want with `systemShare.getSharedData`, falling back to `want.uri` / `ability.params.stream` when that fails with 1003703001. Each file is copied into `cacheDir/share_in/` with `fs.copy` straight away, while the sender's URI grant still holds. Copies are capped at 1 GB, the same limit as Windows. The size (and whether it's a folder) is checked on the granted URI before copying where `fs.open` can open it, and otherwise the copy is cancelled from its progress listener once the file is known to be over the cap. A share with nothing usable in it still gets a toast. The results are queued in AppStorage under `pendingShares`, and the `sharedIn` event goes out on the eventHub.
+- `pages/Index.ets` (`drainPendingShares`) syncs the queue once `SyncManager`, `FileStore` and the device id are ready. That happens on the event, and once at startup for a cold start. Each shared item is synced like a copy on this device:
+  - A file is moved into `FileStore` with `FileStore.importFile` (a chunked SHA-256, then a move), and becomes a `file` entry.
+  - Text or a link becomes a `text` entry.
+  - Nothing is written to this device's clipboard.
+  - A toast reports the result, and the Synced tab is shown.
+- URIs that `fs.copy` would resolve inside ClipLink's own sandbox are refused: ClipLink's own bundle name, no authority at all (`file:///data/...`), a `file://docs/` path outside `/storage`, or a `..` path segment (checked after undoing `%` escapes). Otherwise a sender, or any app that starts the exported `EntryAbility` with a crafted Want, could get ClipLink's private files sent to its peers. Folders are skipped, as on Windows.
+- Not an extension ability: ExtensionAbilities run in their own process, and the peer connections live in the main one, which only runs in the foreground on a phone anyway.
+
+**Peer-supplied hashes and names**: a `FileHash` from a peer (file entry, `file_request`, `file_chunk`) becomes a path only if it is 64 hex digits (`FileStore.isValidFileHash`, enforced in `FileStore` itself as well as in `SyncManager` and `HistoryAccess`). Otherwise a peer could read, overwrite or delete sandbox files through `../`. File names from peers or senders go through `storage/FileNames.ets` (`safeFileName`, which mirrors Windows' `FileNames.Safe`) before they are shown, offered to the save picker or sent.

@@ -6,7 +6,7 @@ namespace ClipboardDaemon.Storage;
 
 public class HistoryAccess
 {
-    private const int MaxHistoryItems = 25;
+    public const int MaxHistoryItems = 25;
 
     private List<ClipboardEntry> inMemoryHistory = new List<ClipboardEntry>();
     private string history_path;
@@ -153,8 +153,9 @@ public class HistoryAccess
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                // Open right now - being streamed to a peer, or applied. Left
-                // behind rather than failing the history change.
+                // Open right now - being streamed to a peer (StreamFileToPeer
+                // deletes it once it's done), or applied. Left behind rather
+                // than failing the history change.
                 Console.WriteLine($"Could not delete stored file {hash[..Math.Min(12, hash.Length)]}... ({ex.Message}) — leaving it.");
                 return false;
             }

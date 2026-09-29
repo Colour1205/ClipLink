@@ -15,4 +15,14 @@
         <item name="android:enforceNavigationBarContrast">false</item>
         <item name="android:enforceStatusBarContrast">false</item>
     </style>
+
+    <!-- ShareReceiverActivity: no window of its own to speak of. The app it
+         was shared from stays in view underneath; Compose only draws a small
+         progress card if a copy takes a while. No open/close animation, so
+         a quick share doesn't even flicker. -->
+    <style name="Theme.ClipLink.Share" parent="@android:style/Theme.Translucent.NoTitleBar">
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
 </resources>

@@ -12,6 +12,7 @@ import androidx.core.content.FileProvider
 import io.uaena.cliplink.core.B64
 import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.net.FilePayload
+import io.uaena.cliplink.store.FileNames
 import io.uaena.cliplink.store.FileStore
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -42,8 +43,8 @@ sealed interface Capture {
  * simply doesn't fire for other apps' copies. That is a platform constraint,
  * not a missing feature: the Windows daemon's silent background capture has
  * no Android equivalent. The app therefore offers two honest paths instead -
- * capture on foreground/paste, and a share-sheet target (see the SEND intent
- * filters in the manifest) for pushing from any other app.
+ * capture on foreground/paste, and a share-sheet target (see
+ * ShareReceiverActivity) for pushing from any other app.
  *
  * WRITING is unrestricted, so received items land on the clipboard normally.
  */
@@ -123,25 +124,21 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
         null
     }
 
-    fun displayName(uri: Uri): String {
+    /**
+     * The provider's name for [uri], made safe (see [FileNames.safe]) - it is
+     * another app's claim, and it goes on the wire as the FileName.
+     */
+    private fun displayName(uri: Uri): String {
         runCatching {
             context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
                 val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                 if (index >= 0 && cursor.moveToFirst()) {
-                    cursor.getString(index)?.takeIf { it.isNotEmpty() }?.let { return it }
+                    cursor.getString(index)?.takeIf { it.isNotEmpty() }?.let { return FileNames.safe(it, "file") }
                 }
             }
         }
-        return uri.lastPathSegment?.substringAfterLast('/') ?: "file"
+        return FileNames.safe(uri.lastPathSegment, "file")
     }
-
-    fun readBytes(uri: Uri): ByteArray? = try {
-        context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-    } catch (e: Exception) {
-        null
-    }
-
-    fun mimeTypeOf(uri: Uri): String? = context.contentResolver.getType(uri)
 
     /**
      * Re-encodes to PNG. The other two platforms exchange images as base64
@@ -208,13 +205,17 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
      * Copies the blob to a human-named file first. A blob is stored under its
      * hash, and handing another app `a3f9…` as a filename is useless in a
      * share sheet or a Downloads folder.
+     *
+     * [displayName] is usually a peer's FileName, so it is only ever used
+     * through [FileNames.safe]: a received ".." or "../../shared_prefs/x"
+     * must name a file inside sharedDir, never sharedDir or its parents.
      */
     fun contentUriFor(sourceFile: File, displayName: String): Uri {
-        val target = File(fileStore.sharedDir, sanitize(displayName))
+        val target = File(fileStore.sharedDir, FileNames.safe(displayName, "file"))
         if (!target.exists() || target.length() != sourceFile.length()) {
             sourceFile.copyTo(target, overwrite = true)
         }
-        return FileProvider.getUriForFile(context, "${context.packageName}.files", target)
+        return FileProvider.getUriForFile(context, fileProviderAuthority(context), target)
     }
 
     private fun uriClip(sourceFile: File, displayName: String, mimeType: String): ClipData {
@@ -225,13 +226,13 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
         )
     }
 
-    private fun sanitize(name: String): String =
-        name.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(120).ifEmpty { "file" }
-
     companion object {
         /** What every clip this app writes is labelled - see [capture]. */
         const val CLIP_LABEL = "ClipLink"
         private const val LAST_HASH_KEY = "last_known_hash"
+
+        /** The FileProvider's authority, as the manifest declares it: `${applicationId}.files`. */
+        fun fileProviderAuthority(context: Context): String = "${context.packageName}.files"
 
         fun guessMimeType(fileName: String): String = when (fileName.substringAfterLast('.', "").lowercase()) {
             "png" -> "image/png"

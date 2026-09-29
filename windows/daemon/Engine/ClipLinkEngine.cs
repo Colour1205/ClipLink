@@ -544,7 +544,18 @@ public sealed partial class ClipLinkEngine : IDisposable
     private void OnLocalClipboardChanged((string content, string type, string? sourceFilePath) content)
     {
         Console.WriteLine($"[clip] detected local {content.type} change ({content.content.Length} chars/bytes-base64) - {connectionsByDeviceId.Count} peer(s) connected");
-        var entry = new ClipboardEntry(content.content, content.type, ownId, DateTime.UtcNow);
+        PublishLocal(content.content, content.type, content.sourceFilePath, "copied");
+    }
+
+    // Something new from this PC - copied here, or shared with "Share to
+    // ClipLink" (ShareFilesAsync; how says which, for the log): signed, sent
+    // to every connected device and added to history. For a file, content
+    // is its FilePayload and sourceFilePath where its bytes are: they're
+    // cached in the FileStore and streamed to those devices (the others ask
+    // for them when they connect and get the entry in the history batch).
+    private void PublishLocal(string content, string type, string? sourceFilePath, string how)
+    {
+        var entry = new ClipboardEntry(content, type, ownId, DateTime.UtcNow);
         var signedEntry = SigningService.Sign(entry, identity);
         var envelope = new Envelope("entry", JsonSerializer.Serialize(signedEntry));
         var json = JsonSerializer.Serialize(envelope);
@@ -555,7 +566,7 @@ public sealed partial class ClipLinkEngine : IDisposable
             {
                 if (t.IsFaulted)
                 {
-                    Console.WriteLine($"[clip] failed sending {content.type} entry to {peerShort}...: {t.Exception?.GetBaseException().Message}");
+                    Console.WriteLine($"[clip] failed sending {type} entry to {peerShort}...: {t.Exception?.GetBaseException().Message}");
                 }
             }, TaskContinuationOptions.OnlyOnFaulted);
         }
@@ -564,23 +575,23 @@ public sealed partial class ClipLinkEngine : IDisposable
             NotifyHistoryChanged();
         }
 
-        if (content.type == "file" && content.sourceFilePath != null)
+        if (type == "file" && sourceFilePath != null)
         {
             FilePayload? payload = null;
-            try { payload = JsonSerializer.Deserialize<FilePayload>(content.content); }
+            try { payload = JsonSerializer.Deserialize<FilePayload>(content); }
             catch (JsonException) { }
 
             if (payload != null)
             {
-                Console.WriteLine($"[file] copied: {payload.FileName} ({payload.FileSize} bytes, {payload.FileHash[..12]}...) - {connectionsByDeviceId.Count} peer(s) connected");
+                Console.WriteLine($"[file] {how}: {payload.FileName} ({payload.FileSize} bytes, {payload.FileHash[..12]}...) - {connectionsByDeviceId.Count} peer(s) connected");
                 if (!fileStore.Exists(payload.FileHash))
                 {
                     try
                     {
-                        File.Copy(content.sourceFilePath, fileStore.GetPath(payload.FileHash), overwrite: true);
+                        fileStore.CopyIn(sourceFilePath, payload.FileHash);
                         NotifyHistoryChanged(); // its bytes are here now
                     }
-                    catch (IOException ex)
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                     {
                         Console.WriteLine($"Could not cache file locally ({ex.Message}) — won't be able to stream it to peers.");
                     }

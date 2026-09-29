@@ -322,6 +322,15 @@ public sealed partial class ClipLinkEngine
         finally
         {
             fileTransferState.StreamingInFlight.TryRemove(key, out _);
+            // Its entry may have left history while this was sending - one
+            // of more files than history keeps, shared or copied at once, or
+            // deleted - and its blob, open here, couldn't be deleted then.
+            // Left, it'd sit in FileStore for good; once nothing is sending
+            // it, it can go.
+            if (!fileTransferState.StreamingInFlight.Keys.Any(other => other.EndsWith(":" + fileHash, StringComparison.OrdinalIgnoreCase)))
+            {
+                historyAccess.DeleteFileIfUnused(fileHash);
+            }
         }
     }
 
