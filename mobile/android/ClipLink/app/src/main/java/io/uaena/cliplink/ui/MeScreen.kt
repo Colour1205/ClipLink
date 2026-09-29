@@ -124,6 +124,13 @@ fun MeScreen(
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
                     )
+                    if (state.ownDeviceId.isNotEmpty()) {
+                        Text(
+                            "Pairing prompts on your other devices show this ID — check that it matches.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
                     if (state.localAddresses.isNotEmpty()) {
                         Spacer(Modifier.height(10.dp))
                         Text(

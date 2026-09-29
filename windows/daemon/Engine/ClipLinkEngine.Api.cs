@@ -120,7 +120,8 @@ public sealed partial class ClipLinkEngine
     // address its latest beacon carried (its advertised off-LAN one, else
     // the LAN address it came from). Not its beacon's name: beacons are
     // unauthenticated, so that name is only shown (see SeenPeer) until the
-    // device's first handshake stores its name. One-sided: it
+    // first connection with the device that proves its session stores the
+    // name from its handshake (RememberProvenName). One-sided: it
     // connects once that device trusts this PC too (paired or same passcode
     // there). False for a blank id or this device's own; true, changing
     // nothing, if it's already trusted.
@@ -220,10 +221,11 @@ public sealed partial class ClipLinkEngine
         return new PendingPairing(pendingId, pendingName, pending.Value.address);
     }
 
-    // Accepts the pending request: trusts the device (with its address and
-    // its handshake's name - never a beacon's, which is unauthenticated and
-    // only shown) and starts syncing over the connection it's waiting on - once
-    // the other device accepts too. False if nothing is pending. Both happen
+    // Accepts the pending request: trusts the device (with its address, not
+    // yet a name - its handshake's is stored once this connection proves its
+    // session, see RememberProvenName; a beacon's never is) and starts
+    // syncing over the connection it's waiting on - once the other device
+    // accepts too. False if nothing is pending. Both happen
     // just after this returns, off the caller's thread - DevicesChanged
     // reports them. ("accept_pairing")
     public bool AcceptPairing()
@@ -251,12 +253,12 @@ public sealed partial class ClipLinkEngine
         {
             try
             {
-                trustStore.Trust(takenId, address, conn.PeerDeviceName);
+                trustStore.Trust(takenId, address);
                 RegisterConnection(conn);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[pair] couldn't finish pairing with {takenId[..Math.Min(12, takenId.Length)]}...: {ex.GetType().Name}: {ex.Message}");
+                Console.WriteLine($"[pair] couldn't finish pairing with {DeviceLabel.ShortId(takenId)}: {ex.GetType().Name}: {ex.Message}");
                 conn.Close();
             }
         });

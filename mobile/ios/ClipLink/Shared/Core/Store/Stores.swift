@@ -164,10 +164,11 @@ public final class TrustStore {
         }
     }
 
-    /// Records the latest name a TRUSTED device gave itself in a handshake -
-    /// never a beacon's, which is unauthenticated UDP. Never adds trust,
-    /// never touches the address, and an unknown (nil/empty) name never
-    /// erases a known one.
+    /// Records the latest name a TRUSTED device gave itself in a handshake,
+    /// once that connection has decrypted a line (the handshake signature
+    /// doesn't cover the name) - never a beacon's, which is unauthenticated
+    /// UDP. Never adds trust, never touches the address, and an unknown
+    /// (nil/empty) name never erases a known one.
     public func updateName(_ publicKey: String, name: String?) {
         guard let name = name.flatMap({ $0.isEmpty ? nil : $0 }) else { return }
         // Every connection calls this: skip the lock and file check when

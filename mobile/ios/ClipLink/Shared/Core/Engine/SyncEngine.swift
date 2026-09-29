@@ -482,8 +482,9 @@ public final class SyncEngine {
                 return
             }
             let id = request.link.peerDeviceId
-            // The handshake's name only: the sighting's may be a beacon's.
-            trust.trust(id, address: request.address, name: request.link.peerName)
+            // Nameless for now: register stores the handshake's name once
+            // this link decrypts a line (the sighting's may be a beacon's).
+            trust.trust(id, address: request.address)
             log("paired: \(DeviceLabel.short(id))")
             register(request.link, acceptedByUser: true)
             notice("Paired.")
@@ -514,8 +515,8 @@ public final class SyncEngine {
 
     /// The Devices tab's "Trust" on a discovered device: trusts it here and
     /// dials it, ignoring the tie-breaker (like Android/HarmonyOS). The other
-    /// side still decides for itself. Its name is stored once a handshake
-    /// completes; until then the beacon's is shown but not stored.
+    /// side still decides for itself. Its name is stored once a connection to
+    /// it decrypts a line; until then the beacon's is shown but not stored.
     public func trustDevice(_ deviceId: String) {
         queue.async { [self] in
             let address = addressCandidates(for: deviceId).first
@@ -726,10 +727,11 @@ public final class SyncEngine {
         nicknames[deviceId] ?? peerName(for: deviceId) ?? DeviceLabel.short(deviceId)
     }
 
-    /// The name a peer gave itself: the one stored from its handshake or
-    /// pairing, else - for a stranger, or a paired device with none stored
-    /// yet - the latest heard this session (beacon or handshake line), which
-    /// a beacon can change but never overrides a stored one.
+    /// The name a peer gave itself: the one stored from the handshake of a
+    /// connection that decrypted a line, else - for a stranger, or a paired
+    /// device with none stored yet - the latest heard this session (beacon or
+    /// handshake line), which a beacon can change but never overrides a
+    /// stored one.
     func peerName(for deviceId: String) -> String? {
         trust.device(deviceId)?.name ?? sightings[deviceId]?.name
     }
@@ -836,7 +838,9 @@ struct Sighting {
     var pairing = false
     var pairingSeen = Date.distantPast
     /// The latest name it gave itself (beacon or handshake); a message
-    /// without one never clears it. Memory only, for display.
+    /// without one never clears it, but a connection that closes without
+    /// decrypting a line takes its handshake's name with it (linkClosed).
+    /// Memory only, for display.
     var name: String?
 }
 
@@ -886,8 +890,8 @@ final class IncomingTransfer {
 }
 
 /// Human labels for device IDs. Every P-256 SPKI starts with the same 36
-/// base64 characters, so the "first 12 characters" other platforms print are
-/// identical for every device; a hash fingerprint actually tells them apart.
+/// base64 characters, so a prefix can't tell devices apart; every platform
+/// shows this hash fingerprint instead (docs/protocol.md, Fingerprint).
 public enum DeviceLabel {
     public static func fingerprint(_ deviceId: String) -> String {
         let digest = SHA256.hash(data: Data(deviceId.utf8))

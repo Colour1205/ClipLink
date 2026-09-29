@@ -37,10 +37,10 @@ import { DeviceIdentity } from '../identity/DeviceIdentity';
 import { TrustStore, TrustedDevice } from '../identity/TrustStore';
 import { PassphraseKeyStore } from '../identity/PassphraseKeyStore';
 import { DeviceSettings } from '../identity/DeviceSettings';
-import { effectiveDeviceName, getLocalDeviceName, normalizeDeviceName } from '../identity/DeviceName';
+import { deviceFingerprint, effectiveDeviceName, getLocalDeviceName, normalizeDeviceName, shortDeviceId } from '../identity/DeviceName';
 import { FileStore } from '../storage/FileStore';
 import { FilePayload } from '../storage/FilePayload';
-import { entryKey, sha256Hex } from '../storage/DeletedEntries';
+import { entryKey } from '../storage/DeletedEntries';
 import { Discovery, PeerBeacon } from '../networking/Discovery';
 import { TcpServer, connectTcp } from '../networking/TcpTransport';
 import { HandshakeReport, PeerConnection, PeerVerdict, TcpSocketAdapter, TcpSocketConnectionAdapter } from '../networking/PeerConnection';
@@ -125,15 +125,8 @@ interface DeviceRow {
   connected: boolean;
 }
 
-// How a device without a known name is shown - same on every platform: the
-// first 4 bytes of SHA-256 over the id, as "XXXX·XXXX". Not the id's first
-// characters - every P-256 SPKI starts with the same base64 prefix, so those
-// read "MFkwEwYHKoZI…" for every device and can't tell a spoofed name apart.
-function shortDeviceId(deviceId: string): string {
-  const hex: string = sha256Hex(deviceId).slice(0, 8).toUpperCase();
-  return `${hex.slice(0, 4)}·${hex.slice(4)}`;
-}
-
+// A device without a known name is titled "Device XXXX·XXXX" - see
+// shortDeviceId in DeviceName.ets.
 function deviceRowTitle(row: DeviceRow): string {
   return row.name !== null ? row.name : shortDeviceId(row.deviceId);
 }
@@ -865,14 +858,27 @@ struct Index {
     this.trustedDevices = await this.trustStore.getAllTrustedDevices(context);
   }
 
-  // Keeps a trusted device's stored name current from its authenticated
-  // handshake, so the Devices list still names it once it's off the LAN.
-  // Never given a beacon's name - anyone on the LAN can send one. Checked
-  // against the in-memory list first, so an unchanged name writes nothing.
-  private async maybeRememberPeerName(deviceId: string, name: string | null): Promise<void> {
+  // Keeps a trusted device's stored name current from its handshake, so the
+  // Devices list still names it once it's off the LAN - but only once this
+  // connection's first envelope has decrypted (see
+  // PeerConnection.onSessionProven): the handshake's signature doesn't
+  // cover the name, so a replayed handshake could claim any. Every trusted
+  // connection goes through here, freshly paired or passcode-trusted ones
+  // included - their trust records are written without a name. Never given
+  // a beacon's name - anyone on the LAN can send one.
+  private rememberNameOnceProven(conn: PeerConnection): void {
+    const name: string | null = conn.peerName;
     if (name === null) return;
+    conn.onSessionProven(() => { void this.maybeRememberPeerName(conn.peerDeviceId, name); });
+  }
+
+  // Checked against the in-memory list first, so an unchanged name writes
+  // nothing. A device missing from that list still reaches rememberName,
+  // which only ever updates an existing record: a passcode auto-trust's
+  // record can be stored before the list is re-read.
+  private async maybeRememberPeerName(deviceId: string, name: string): Promise<void> {
     const known: TrustedDevice | undefined = this.trustedDevices.find((d: TrustedDevice) => d.publicKey === deviceId);
-    if (known === undefined || known.name === name) return;
+    if (known !== undefined && known.name === name) return;
     const context = getContext(this) as common.UIAbilityContext;
     if (await this.trustStore.rememberName(context, deviceId, name)) {
       await this.refreshTrustedDevices();
@@ -896,13 +902,14 @@ struct Index {
   }
 
   // The Accept/Reject prompt's text. The name is whatever the other device
-  // chose to call itself, so it could claim to be one of yours; its short id
-  // and address are shown under it, on lines of their own that a name can't
-  // fake (a sanitised name holds no line breaks - see normalizeDeviceName).
+  // chose to call itself, so it could claim to be one of yours; its
+  // fingerprint (what its own Me screen shows) and address are shown under
+  // it, on lines of their own that a name can't fake (a sanitised name
+  // holds no line breaks - see normalizeDeviceName).
   private pairingRequestMessage(deviceId: string, name: string | null, address: string | null): string {
     const claimed: string | null = this.peerName(deviceId, name);
     const who: string = claimed !== null ? `"${claimed}"` : 'A device';
-    let text: string = `${who} wants to pair with this device.\nID: ${shortDeviceId(deviceId)}`;
+    let text: string = `${who} wants to pair with this device.\nID: ${deviceFingerprint(deviceId)}`;
     if (address !== null && address.length > 0) text += `\nAddress: ${address}`;
     return `${text}\n\nOnly accept if you expect this - your Pairing screen being open is what let this request reach you at all.`;
   }
@@ -974,7 +981,7 @@ struct Index {
   // true - see PeerConnection.create) gets an explicit local accept/reject
   // prompt instead, never auto-registered.
   private handleNewConnection(peerConn: PeerConnection, address: string | null): void {
-    netLog(`handleNewConnection: peer=${peerConn.peerDeviceId.slice(0, 16)}... address=${address ?? 'null'} wasAlreadyTrusted=${peerConn.wasAlreadyTrusted} newlyTrustedViaPassphrase=${peerConn.newlyTrustedViaPassphrase}`);
+    netLog(`handleNewConnection: peer=${deviceFingerprint(peerConn.peerDeviceId)} address=${address ?? 'null'} wasAlreadyTrusted=${peerConn.wasAlreadyTrusted} newlyTrustedViaPassphrase=${peerConn.newlyTrustedViaPassphrase}`);
     if (peerConn.wasAlreadyTrusted) {
       // Registered FIRST, before any trust-store write or activity-log
       // append. Those are conveniences; starting the connection's read
@@ -983,6 +990,9 @@ struct Index {
       // unregistered and unlistened, isConnected() stayed false, and the
       // peer redialled every 2s forever while no clipboard data moved.
       this.syncManager?.registerConnection(peerConn);
+      // Its handshake's name waits for the first envelope - see
+      // rememberNameOnceProven. The trust() calls below never carry it.
+      this.rememberNameOnceProven(peerConn);
       if (peerConn.newlyTrustedViaPassphrase) {
         // The handshake itself carried a matching passphrase proof - same
         // auto-trust the LAN beacon already does passively, just over a
@@ -990,8 +1000,8 @@ struct Index {
         // Address over Tailscale). Persist it so future reconnects don't
         // need the passphrase proof again.
         const context = getContext(this) as common.UIAbilityContext;
-        void this.trustStore.trust(context, peerConn.peerDeviceId, address ?? undefined, peerConn.peerName ?? undefined).then(() => { void this.refreshTrustedDevices(); });
-        this.log(`auto-paired via passcode: ${peerConn.peerDeviceId.slice(0, 12)}...`);
+        void this.trustStore.trust(context, peerConn.peerDeviceId, address ?? undefined).then(() => { void this.refreshTrustedDevices(); });
+        this.log(`auto-paired via passcode: ${shortDeviceId(peerConn.peerDeviceId)}`);
       } else {
         if (address !== null) {
           // Already trusted, but now we know a real address for this peer
@@ -1002,14 +1012,10 @@ struct Index {
           // when the accept loop didn't capture an address at all (an old
           // bug - it always passed null), instead of leaving it permanently
           // stuck with no address to reconnect off-LAN with.
-          // Its handshake's name rides along; trust() never erases a
-          // stored name when this one is unknown.
           const context = getContext(this) as common.UIAbilityContext;
-          void this.trustStore.trust(context, peerConn.peerDeviceId, address, peerConn.peerName ?? undefined).then(() => { void this.refreshTrustedDevices(); });
-        } else if (peerConn.peerName !== null) {
-          void this.maybeRememberPeerName(peerConn.peerDeviceId, peerConn.peerName);
+          void this.trustStore.trust(context, peerConn.peerDeviceId, address).then(() => { void this.refreshTrustedDevices(); });
         }
-        this.log(`connected: ${peerConn.peerDeviceId.slice(0, 12)}...`);
+        this.log(`connected: ${shortDeviceId(peerConn.peerDeviceId)}`);
       }
       return;
     }
@@ -1046,13 +1052,16 @@ struct Index {
     }
     const context = getContext(this) as common.UIAbilityContext;
     const address = this.pendingPairingAddress.length > 0 ? this.pendingPairingAddress : undefined;
-    await this.trustStore.trust(context, conn.peerDeviceId, address, conn.peerName ?? undefined);
+    // Without the name the prompt showed - it's stored once this
+    // connection's first envelope decrypts (see rememberNameOnceProven).
+    await this.trustStore.trust(context, conn.peerDeviceId, address);
     await this.refreshTrustedDevices();
     this.pendingPairingConn = null;
     this.pendingPairingPeerId = '';
     this.pendingPairingAddress = '';
-    this.log(`paired: ${conn.peerDeviceId.slice(0, 12)}...`);
     this.syncManager?.registerConnection(conn);
+    this.rememberNameOnceProven(conn);
+    this.log(`paired: ${shortDeviceId(conn.peerDeviceId)}`);
     promptAction.showToast({ message: 'Paired.' });
   }
 
@@ -1071,7 +1080,7 @@ struct Index {
       const conn = await PeerConnection.create(new TcpSocketAdapter(client), identity, this.trustStore, context, this.pairingOpen, this.passphraseKeyStore, this.ownDeviceName());
       if (conn === null) {
         client.close().catch(() => { /* already closed - fine */ });
-        this.log(`connect failed: ${beacon.deviceId.slice(0, 12)}...`);
+        this.log(`connect failed: ${shortDeviceId(beacon.deviceId)}`);
         return;
       }
       this.handleNewConnection(conn, beacon.senderIp);
@@ -1100,34 +1109,34 @@ struct Index {
     }
     const context = getContext(this) as common.UIAbilityContext;
     const devices = await this.trustStore.getTrustedDevicesWithAddress(context);
-    netLog(`reconnectOffLanPeers: ownId=${this.ownDeviceId.slice(0, 16)}... ${devices.length} trusted-with-address device(s)`);
+    netLog(`reconnectOffLanPeers: ownId=${deviceFingerprint(this.ownDeviceId)} ${devices.length} trusted-with-address device(s)`);
     for (const device of devices) {
-      const shortId = device.publicKey.slice(0, 16);
+      const shortId = deviceFingerprint(device.publicKey);
       if (device.publicKey === this.ownDeviceId) continue;
       if (this.syncManager?.isConnected(device.publicKey)) {
-        netLog(`  ${shortId}...: already connected, skipping`);
+        netLog(`  ${shortId}: already connected, skipping`);
         continue;
       }
       if (this.connectingTo.has(device.publicKey)) {
-        netLog(`  ${shortId}...: already attempting, skipping`);
+        netLog(`  ${shortId}: already attempting, skipping`);
         continue;
       }
       // Same tie-breaker as maybeAutoConnect - only the smaller-key side
       // initiates, so both sides don't simultaneously dial each other.
       if (device.publicKey >= this.ownDeviceId) {
-        netLog(`  ${shortId}...: peer key >= ours, expecting THEM to reconnect to us instead`);
+        netLog(`  ${shortId}: peer key >= ours, expecting THEM to reconnect to us instead`);
         continue;
       }
       if (device.address === undefined || device.address === null || device.address.length === 0) {
-        netLog(`  ${shortId}...: no cached address, can't dial - needs one more successful connection to backfill`);
+        netLog(`  ${shortId}: no cached address, can't dial - needs one more successful connection to backfill`);
         continue;
       }
 
-      netLog(`  ${shortId}...: dialing ${device.address}:${TCP_PORT}`);
+      netLog(`  ${shortId}: dialing ${device.address}:${TCP_PORT}`);
       this.connectingTo.add(device.publicKey);
       try {
         const outcome = await this.connectToAddress(device.address, TCP_PORT);
-        netLog(`  ${shortId}...: dial ${outcome}`);
+        netLog(`  ${shortId}: dial ${outcome}`);
       } finally {
         this.connectingTo.delete(device.publicKey);
       }
@@ -1174,7 +1183,7 @@ struct Index {
           return 'refused';
         }
       }
-      netLog(`connectToAddress ${address}:${port}: handshake succeeded, peer=${conn.peerDeviceId.slice(0, 16)}... wasAlreadyTrusted=${conn.wasAlreadyTrusted}`);
+      netLog(`connectToAddress ${address}:${port}: handshake succeeded, peer=${deviceFingerprint(conn.peerDeviceId)} wasAlreadyTrusted=${conn.wasAlreadyTrusted}`);
       this.handleNewConnection(conn, address);
       if (!conn.wasAlreadyTrusted) {
         // handleNewConnection drops a second candidate while another
@@ -1195,8 +1204,9 @@ struct Index {
   // Trusting a freshly-discovered device also immediately attempts to
   // connect to it (rather than waiting for its next beacon) - feels more
   // responsive when the user just tapped Trust specifically to connect.
-  // No name is stored from the beacon (it's unsigned) - the handshake that
-  // follows stores the device's own, via handleNewConnection.
+  // No name is stored from the beacon (it's unsigned) - the connection that
+  // follows stores the device's own, once its first envelope decrypts (see
+  // rememberNameOnceProven).
   async trustAndConnect(beacon: PeerBeacon): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
     await this.trustStore.trust(context, beacon.deviceId, beacon.senderIp);
@@ -1215,7 +1225,7 @@ struct Index {
     // reappears as "discovered" with a Trust button instead of "trusted"
     // with Remove) - without this, tapping Remove on a device that's still
     // on the LAN looks like it silently did nothing.
-    this.log(`untrusted ${deviceId.slice(0, 12)}...`);
+    this.log(`untrusted ${shortDeviceId(deviceId)}`);
     promptAction.showToast({ message: `Removed ${label}` });
   }
 
@@ -1479,9 +1489,10 @@ struct Index {
     if (key === null) return;
     const verified = await this.passphraseKeyStore.verifyProof(key, beacon.deviceId, beacon.proof);
     if (!verified) return;
-    this.log(`auto-trusting ${beacon.deviceId.slice(0, 12)}... (shared passcode)`);
+    this.log(`auto-trusting ${shortDeviceId(beacon.deviceId)} (shared passcode)`);
     // The proof covers the device id only, not the name beside it - that
-    // waits for the handshake (see TrustedDevice.name).
+    // waits for a connection's first decrypted envelope (see
+    // TrustedDevice.name).
     await this.trustStore.trust(context, beacon.deviceId, beacon.address ?? undefined);
     await this.refreshTrustedDevices();
   }
@@ -2153,7 +2164,7 @@ struct Index {
       row.connected = this.syncManager?.isConnected(b.deviceId) ?? false;
       // A beacon is unsigned, so its name is only a fallback: it names an
       // untrusted device, or a trusted one with no stored name yet - never
-      // overriding what the trust store got from a handshake or pairing.
+      // overriding what the trust store got from a proven handshake.
       if (b.name !== null && row.name === null) row.name = b.name;
       // senderIp is where the packet really came from (the LAN address, so
       // it goes first); b.address is what the peer advertises for itself
@@ -3909,6 +3920,22 @@ struct Index {
                 .fontColor($r('sys.color.font_primary'))
                 .copyOption(CopyOptions.LocalDevice)
                 .wordBreak(WordBreak.BREAK_ALL)
+              // What another device's pairing prompt shows for this one -
+              // the ID above starts the same for every device, so it's no
+              // use for comparing.
+              if (this.ownDeviceId.length > 0) {
+                Text($r('app.string.device_fingerprint_label'))
+                  .fontSize(12)
+                  .fontColor($r('sys.color.font_secondary'))
+                  .margin({ top: 6 })
+                Text(deviceFingerprint(this.ownDeviceId))
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor($r('sys.color.font_primary'))
+                Text($r('app.string.device_fingerprint_hint'))
+                  .fontSize(12)
+                  .fontColor($r('sys.color.font_secondary'))
+              }
               if (this.localAddresses.length > 0) {
                 Text(this.localAddresses.join('  •  '))
                   .fontSize(12)

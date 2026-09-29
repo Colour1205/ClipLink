@@ -124,11 +124,19 @@ see until you set *Me › Device Name*. The app reads the OS name on the main
 actor and stores it, with that setting, in the App Group - the Share extension
 and background rounds send the same name without touching UIKit.
 Beacons are unauthenticated, so a name heard in one is only kept in memory and
-shown for nearby devices (and for a paired one with no stored name yet); only
-a completed handshake or an accepted pairing stores a name, so a paired
+shown for nearby devices (and for a paired one with no stored name yet). The
+handshake's signature doesn't cover its name either, so a name from a handshake
+is stored - for a paired, passcode-paired or just-accepted device alike - only
+once that connection decrypts its first line (normally the peer's history
+batch, a round trip later), which a replayed handshake never can: one key
+covers both directions, so one of our own lines sent back ends the connection
+instead of counting. A paired
 device's rename shows once it reconnects. Every name a peer sends loses control,
-bidi and zero-width characters (`DeviceName.sanitize`), and a pairing request
-shows the requester's id fingerprint beside its name.
+bidi and zero-width characters (`DeviceName.sanitize`). Every id starts with
+the same key header, so devices are told apart by a fingerprint, the first 4
+bytes of the SHA-256 of the id ("Device AB12·CD34", the same on every
+platform): a pairing request shows it beside the requester's name, to compare
+with *Me › Fingerprint* on that device.
 
 **Files.** Hashes go out UPPERCASE: Windows' echo suppression compares
 uppercase hex, and a lowercase hash makes it re-broadcast your file. Blobs are

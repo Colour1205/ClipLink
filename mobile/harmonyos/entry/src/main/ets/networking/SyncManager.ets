@@ -10,6 +10,7 @@ import { PeerConnection } from './PeerConnection';
 import { FileChunkMessage } from './FileChunkMessage';
 import { FileRequestMessage } from './FileRequestMessage';
 import { TrustStore } from '../identity/TrustStore';
+import { shortDeviceId } from '../identity/DeviceName';
 import { HistoryAccess } from '../storage/HistoryAccess';
 import { FileStore } from '../storage/FileStore';
 import { FilePayload } from '../storage/FilePayload';
@@ -173,7 +174,7 @@ export class SyncManager {
       if (this.connections.get(conn.peerDeviceId) !== conn) return;
       this.connections.delete(conn.peerDeviceId);
       this.connectionsChangedCallback?.(this.connections.size);
-      this.logCallback?.(`peer disconnected: ${conn.peerDeviceId.slice(0, 20)}...`);
+      this.logCallback?.(`peer disconnected: ${shortDeviceId(conn.peerDeviceId)}`);
     });
     conn.listen();
     void this.sendHistoryBatch(conn);
@@ -460,7 +461,7 @@ export class SyncManager {
         // actually happens. type/deviceId included since this is the
         // first concrete data point telling us whether it's even getting
         // this far.
-        this.logCallback?.(`dropped ${received.Type} entry from ${received.DeviceId.slice(0, 12)}... - failed signature/trust check`);
+        this.logCallback?.(`dropped ${received.Type} entry from ${shortDeviceId(received.DeviceId)} - failed signature/trust check`);
         return;
       }
       // Deleted here before - neither re-listed nor put on the clipboard.

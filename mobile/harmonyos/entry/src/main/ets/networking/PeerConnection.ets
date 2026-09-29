@@ -16,7 +16,7 @@ import { common } from '@kit.AbilityKit';
 import { DeviceIdentity, verifyRawSignature } from '../identity/DeviceIdentity';
 import { TrustStore } from '../identity/TrustStore';
 import { PassphraseKeyStore } from '../identity/PassphraseKeyStore';
-import { normalizeDeviceName } from '../identity/DeviceName';
+import { deviceFingerprint, normalizeDeviceName } from '../identity/DeviceName';
 import * as AesGcm from '../crypto/AesGcm';
 
 const base64Helper = new util.Base64Helper();
@@ -324,6 +324,10 @@ const PING_SENTINEL = '__ping__';
 const HEARTBEAT_INTERVAL_MS = 3000;
 const HEARTBEAT_TIMEOUT_MS = 9000;
 
+// An envelope's first 16 base64 characters are exactly its 12-byte nonce
+// (see AesGcm.ets's packing) - what sentNonces keys on.
+const NONCE_BASE64_LENGTH = 16;
+
 export class PeerConnection {
   private messageCallback: ((message: string) => void) | null = null;
   private disconnectedCallback: (() => void) | null = null;
@@ -346,8 +350,18 @@ export class PeerConnection {
   // own auto-trust path already does.
   public readonly newlyTrustedViaPassphrase: boolean;
   // What the peer's handshake says it's called, or null if it sent no
-  // (usable) DeviceName - e.g. an older build.
+  // (usable) DeviceName - e.g. an older build. Fine to show right away, but
+  // not to store until onSessionProven.
   public readonly peerName: string | null;
+  // Set by the first line that decrypts - see onSessionProven.
+  private sessionProven: boolean = false;
+  private sessionProvenCallback: (() => void) | null = null;
+  // The nonce of every envelope this side sends until the session is
+  // proven, then null. Both directions share one key with no AAD, so an
+  // envelope of ours echoed back would decrypt too - a replayed handshake's
+  // sender could "prove" the session with this side's own history batch or
+  // ping. listenLoop refuses such a line instead.
+  private sentNonces: Set<string> | null = new Set<string>();
 
   private constructor(channel: TcpLineChannel, sessionKey: Uint8Array, peerDeviceId: string, wasAlreadyTrusted: boolean, newlyTrustedViaPassphrase: boolean, peerName: string | null) {
     this.channel = channel;
@@ -458,6 +472,7 @@ export class PeerConnection {
 
   async send(message: string): Promise<void> {
     const encrypted = await AesGcm.encrypt(this.sessionKey, message);
+    if (this.sentNonces !== null) this.sentNonces.add(encrypted.slice(0, NONCE_BASE64_LENGTH));
     await this.channel.writeLine(encrypted);
   }
 
@@ -467,6 +482,18 @@ export class PeerConnection {
 
   onDisconnected(callback: () => void): void {
     this.disconnectedCallback = callback;
+  }
+
+  // Called once, when the first envelope on this connection (data or
+  // heartbeat) decrypts with the session key - right away if one already
+  // has. The handshake's signature covers only the ephemeral key, so a
+  // captured handshake can be replayed with any DeviceName; only the real
+  // peer can then produce a line that decrypts (one of this side's own
+  // echoed back doesn't count - see sentNonces). Whatever the handshake
+  // claims that gets written to disk (its name) waits for this.
+  onSessionProven(callback: () => void): void {
+    this.sessionProvenCallback = callback;
+    if (this.sessionProven) callback();
   }
 
   // Call BEFORE listen(), after dialling someone to pair. Both sides send
@@ -503,22 +530,42 @@ export class PeerConnection {
       while (true) {
         const line = await this.channel.readLine();
         if (line === null) break;
+        // Checked before decrypting: an echo of this side's own envelope
+        // would decrypt (see sentNonces), and must neither prove the
+        // session nor count as activity for the heartbeat watchdog.
+        if (this.sentNonces !== null && this.sentNonces.has(line.slice(0, NONCE_BASE64_LENGTH))) {
+          throw new Error('reflected line');
+        }
         const decrypted = await AesGcm.decrypt(this.sessionKey, line);
         this.lastActivityAt = Date.now();
+        if (!this.sessionProven) this.markSessionProven();
         if (decrypted === PING_SENTINEL) continue; // heartbeat only, not real data
         this.messageCallback?.(decrypted);
       }
     } catch (e) {
-      // abrupt disconnect, or a corrupt/forged line that failed to decrypt
+      // abrupt disconnect, a corrupt/forged line that failed to decrypt,
+      // or an unproven session's own envelope echoed back
       failed = true;
     } finally {
-      // idleMs over HEARTBEAT_TIMEOUT_MS means this side's own watchdog
-      // closed the link; a small idleMs means the peer (or a superseding
-      // connection, see SyncManager.registerConnection) closed it.
-      hilog.info(0x0001, 'ClipLinkNet', '%{public}s',
-        `conn closed: peer=${this.peerDeviceId.slice(0, 16)}... idleMs=${Date.now() - this.lastActivityAt} failed=${failed}`);
+      const idleMs: number = Date.now() - this.lastActivityAt;
       this.stopHeartbeat();
       this.disconnectedCallback?.();
+      // Logged after the teardown, so logging can never stop it. idleMs
+      // over HEARTBEAT_TIMEOUT_MS means this side's own watchdog closed the
+      // link; a small idleMs means the peer (or a superseding connection,
+      // see SyncManager.registerConnection) closed it.
+      hilog.info(0x0001, 'ClipLinkNet', '%{public}s',
+        `conn closed: peer=${deviceFingerprint(this.peerDeviceId)} idleMs=${idleMs} failed=${failed}`);
+    }
+  }
+
+  private markSessionProven(): void {
+    this.sessionProven = true;
+    this.sentNonces = null; // the peer holds the key - nothing left to tell apart
+    try {
+      this.sessionProvenCallback?.();
+    } catch (e) {
+      // a listener's failure must never end the read loop
     }
   }
 

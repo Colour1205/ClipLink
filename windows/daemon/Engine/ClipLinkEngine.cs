@@ -84,10 +84,11 @@ public sealed partial class ClipLinkEngine : IDisposable
     // only: it's what GetDevices shows for a device's LAN address, and the
     // only place a beacon's name is ever kept. Beacons are unauthenticated
     // (anyone on the LAN can send one under any device id), so that name is
-    // never written to the trust store - only a handshake's or a pairing
-    // payload's is - and it's shown for an untrusted device, or a trusted
-    // one with no stored name yet. Name keeps the last known one when a
-    // later beacon carries none.
+    // never written to the trust store - only a pairing payload's is, or a
+    // handshake's once its connection proves itself (RememberProvenName) -
+    // and it's shown for an untrusted device, or a trusted one with no
+    // stored name yet (nor a live connection's). Name keeps the last known
+    // one when a later beacon carries none.
     private record SeenPeer(string? Name, string LanAddress, string? AdvertisedAddress, bool PairingOpen, DateTime LastSeenUtc);
 
     // Set once by Start, before anything can use them.
@@ -194,6 +195,7 @@ public sealed partial class ClipLinkEngine : IDisposable
             ownId = identity.GetPublicKey();
             storesLoaded = true;
             Console.WriteLine($"Device ID (public key): {ownId}");
+            Console.WriteLine($"Device fingerprint: {DeviceLabel.Fingerprint(ownId)}");
             Console.WriteLine($"Device name: {deviceName.Current}");
             // Copies opened from Synced last time (see GetFileToOpen) - all
             // but the ones the user has edited.
@@ -421,8 +423,8 @@ public sealed partial class ClipLinkEngine : IDisposable
                 && PassphraseAuth.VerifyProof(passphraseKey, other_device_id, proof))
             {
                 Console.WriteLine($"Auto-trusting {other_device_id} — proved knowledge of shared passphrase");
-                // Not the beacon's name: the handshake that follows
-                // stores this device's name.
+                // Not the beacon's name: the connection that follows stores
+                // its handshake's name once it proves its session.
                 trustStore.Trust(other_device_id, peerAddress);
             }
 
@@ -558,12 +560,12 @@ public sealed partial class ClipLinkEngine : IDisposable
         var json = JsonSerializer.Serialize(envelope);
         foreach (var conn in connectionsByDeviceId.Values)
         {
-            string peerShort = conn.PeerDeviceId[..Math.Min(12, conn.PeerDeviceId.Length)];
+            string peerShort = DeviceLabel.ShortId(conn.PeerDeviceId);
             _ = conn.Send(json).ContinueWith(t =>
             {
                 if (t.IsFaulted)
                 {
-                    Console.WriteLine($"[clip] failed sending {content.type} entry to {peerShort}...: {t.Exception?.GetBaseException().Message}");
+                    Console.WriteLine($"[clip] failed sending {content.type} entry to {peerShort}: {t.Exception?.GetBaseException().Message}");
                 }
             }, TaskContinuationOptions.OnlyOnFaulted);
         }

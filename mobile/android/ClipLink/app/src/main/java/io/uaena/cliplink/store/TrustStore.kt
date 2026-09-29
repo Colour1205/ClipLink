@@ -10,8 +10,9 @@ data class TrustedDevice(
     val publicKey: String,
     val address: String? = null,
     /**
-     * The latest display name it sent in a handshake or pairing, or null if
-     * it never has. Never a name heard in a beacon - see engine/PeerNames.kt.
+     * The latest display name it sent in a handshake whose session then
+     * proved itself, or null if none has yet. Never a name heard in a beacon
+     * - see engine/PeerNames.kt.
      */
     val name: String? = null,
 )
@@ -81,12 +82,13 @@ class TrustStore(context: Context) {
 
     /**
      * Records the latest name an ALREADY trusted device sent in its
-     * authenticated handshake - never one from a beacon, which anyone on the
-     * network can forge. Never adds a device - a name heard from a stranger
-     * is not a reason to trust it - never touches the address, and never
-     * replaces a known name with an unknown one. Writes only on an actual
-     * change, since this runs for every connection. Returns whether anything
-     * changed.
+     * handshake, once that connection's first envelope has decrypted - never
+     * one from a beacon, which anyone on the network can forge, nor from a
+     * handshake alone, which can be replayed. Never adds a device - a name
+     * heard from a stranger is not a reason to trust it - never touches the
+     * address, and never replaces a known name with an unknown one. Writes
+     * only on an actual change, since this runs for every connection.
+     * Returns whether anything changed.
      */
     @Synchronized
     fun rememberName(publicKey: String, name: String?): Boolean {

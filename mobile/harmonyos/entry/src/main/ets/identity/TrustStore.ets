@@ -16,10 +16,13 @@ const DEVICES_KEY = 'trusted_devices';
 export interface TrustedDevice {
   publicKey: string;
   address?: string;
-  // The peer's own display name, latest seen in its authenticated handshake
-  // or at pairing - never from a beacon, which anyone on the LAN can forge
-  // (beacon names stay in memory, see Index.ets's deviceRows). Absent in
-  // records written before names existed, or for a peer that never sent one.
+  // The peer's own display name, the latest its handshake sent - written
+  // only once that connection's first envelope decrypted (see
+  // PeerConnection.onSessionProven), since the handshake's signature
+  // doesn't cover the name. Never from a beacon, which anyone on the LAN
+  // can forge (beacon names stay in memory, see Index.ets's deviceRows).
+  // Absent in records written before names existed, for a peer that never
+  // sent one, or until a paired peer's first connection proves itself.
   name?: string;
 }
 
@@ -57,25 +60,25 @@ export class TrustStore {
     await prefs.flush();
   }
 
-  // name only ever replaces a stored name with a newer non-empty one - an
-  // address-only update (no name) keeps whatever name is already stored.
-  async trust(context: common.UIAbilityContext, publicKey: string, address?: string, name?: string): Promise<void> {
+  // Adds the record, or updates its address - never its name, which only
+  // rememberName writes (see TrustedDevice.name). No address keeps the
+  // stored one.
+  async trust(context: common.UIAbilityContext, publicKey: string, address?: string): Promise<void> {
     const devices = await this.loadAll(context);
     const existing = devices.find(d => d.publicKey === publicKey);
-    const knownName: string | undefined = name !== undefined && name.length > 0 ? name : undefined;
     if (existing) {
       existing.address = address ?? existing.address;
-      existing.name = knownName ?? existing.name;
     } else {
-      devices.push({ publicKey, address, name: knownName });
+      devices.push({ publicKey, address });
     }
     await this.saveAll(context, devices);
   }
 
   // Name-only update for a device that's already trusted: never adds a
   // record and never touches the address. Resolves true only when something
-  // changed, so a caller can skip needless refreshes. Only for a name from
-  // the authenticated handshake - never a beacon's (see TrustedDevice.name).
+  // changed, so a caller can skip needless refreshes. Only for a handshake's
+  // name, once its connection has decrypted an envelope - never a beacon's
+  // (see TrustedDevice.name).
   async rememberName(context: common.UIAbilityContext, publicKey: string, name: string): Promise<boolean> {
     if (name.length === 0) return false;
     const devices = await this.loadAll(context);

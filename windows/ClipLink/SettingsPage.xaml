@@ -43,9 +43,14 @@
                             <ui:Button Content="Save" Margin="8,0,0,0" MinWidth="72" Click="SaveName_Click" />
                         </StackPanel>
                     </local:SettingsCard>
-                    <local:SettingsCard x:Name="DeviceIdCard" Icon="Fingerprint24" Header="Device ID" NarrowWidth="420">
+                    <local:SettingsCard x:Name="DeviceIdCard" Icon="Key24" Header="Device ID" NarrowWidth="420">
                         <ui:Button Content="Copy" Icon="{ui:SymbolIcon Copy24}" MinWidth="88"
                                    AutomationProperties.Name="Copy device ID" Click="CopyId_Click" />
+                    </local:SettingsCard>
+                    <!-- The short form of the device ID that pairing prompts show -->
+                    <local:SettingsCard Icon="Fingerprint24" Header="Device fingerprint" NarrowWidth="420"
+                                        Description="Your other devices show this in a pairing request from this PC. Check it matches before accepting there.">
+                        <TextBlock x:Name="FingerprintText" Style="{StaticResource BodyStrongText}" VerticalAlignment="Center" />
                     </local:SettingsCard>
                     <local:SettingsCard x:Name="TailscaleCard" Icon="Globe24" Header="Tailscale address" NarrowWidth="420"
                                         Visibility="Collapsed">

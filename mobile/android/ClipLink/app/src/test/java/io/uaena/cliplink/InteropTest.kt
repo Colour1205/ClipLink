@@ -13,6 +13,7 @@ import io.uaena.cliplink.engine.displayNameOf
 import io.uaena.cliplink.engine.fingerprintOf
 import io.uaena.cliplink.engine.shortIdOf
 import io.uaena.cliplink.net.Discovery
+import io.uaena.cliplink.net.EchoGuard
 import io.uaena.cliplink.net.HandshakeMessage
 import io.uaena.cliplink.net.PairingInfo
 import io.uaena.cliplink.net.Protocol
@@ -587,13 +588,11 @@ class InteropTest {
     // ---- beacon names never reach the trust store ---------------------------
 
     @Test
-    fun `a beacon name is shown but never persisted`() {
+    fun `a beacon name is only ever a display label`() {
         val names = PeerNames()
         names.heardInBeacon("A", "Laptop")
         names.heardInBeacon("A", "Laptop") // the same name again
         names.heardInBeacon("A", "Evil twin") // and a different one
-        // Unauthenticated, so nothing to write - however often it repeats or changes.
-        assertNull(names.persistable("A"))
         // Shown for a device that isn't trusted, or is but has no stored name...
         assertEquals("Evil twin", names.display("A", null))
         // ...but never over a trusted device's stored name.
@@ -602,20 +601,94 @@ class InteropTest {
     }
 
     @Test
-    fun `only a handshake name is persisted and a beacon can't displace it`() {
+    fun `a handshake name is shown ahead of a beacon's and a beacon can't displace it`() {
         val names = PeerNames()
         names.heardInBeacon("A", "From a beacon")
         names.heardInHandshake("A", "Pixel 8")
-        assertEquals("Pixel 8", names.persistable("A"))
         assertEquals("Pixel 8", names.display("A", null))
 
-        // A later beacon claiming another name changes neither.
+        // A later beacon claiming another name doesn't change it.
         names.heardInBeacon("A", "Spoofed")
-        assertEquals("Pixel 8", names.persistable("A"))
         assertEquals("Pixel 8", names.display("A", null))
         // Nor does an older build's nameless handshake blank it out.
         names.heardInHandshake("A", null)
-        assertEquals("Pixel 8", names.persistable("A"))
+        assertEquals("Pixel 8", names.display("A", null))
+    }
+
+    // ---- handshake names wait for a proven session --------------------------
+
+    @Test
+    fun `a handshake name is stored only once its session is proven`() {
+        val names = PeerNames()
+        // Accepting a pairing, or trusting by passcode, stores the device
+        // without a name: the handshake's is only shown, from memory.
+        names.heardInHandshake("A", "Pixel 8")
+        var stored = emptyList<TrustedDevice>().withTrusted("A", "10.0.0.1", null)
+        assertEquals(TrustedDevice("A", "10.0.0.1"), stored.single())
+        assertEquals("Pixel 8", names.display("A", stored.single().name))
+
+        // That connection's first decrypted envelope stores its name...
+        stored = stored.withName("A", "Pixel 8") ?: error("a proven name should be stored")
+        assertEquals(TrustedDevice("A", "10.0.0.1", "Pixel 8"), stored.single())
+        // ...which a replayed handshake, never proven, can't displace on screen...
+        names.heardInHandshake("A", "Evil twin")
+        assertEquals("Pixel 8", names.display("A", stored.single().name))
+        // ...and a later connection's address back-fill keeps.
+        assertEquals(TrustedDevice("A", "10.0.0.9", "Pixel 8"), stored.withTrusted("A", "10.0.0.9", null).single())
+
+        // A proof that lands before the passcode path has stored the device
+        // writes nothing - a name never adds a device - which is why the
+        // engine looks at isSessionProven again right after that write.
+        assertNull(emptyList<TrustedDevice>().withName("B", "Tablet"))
+    }
+
+    @Test
+    fun `an unproven connection's handshake name goes with it`() {
+        val names = PeerNames()
+        names.heardInBeacon("A", "Laptop")
+        // A replayed handshake's name is shown while its connection lives...
+        names.heardInHandshake("A", "Evil twin")
+        assertEquals("Evil twin", names.display("A", null))
+        // ...and once that ends unproven, the beacon's is back.
+        assertTrue(names.forgetHandshake("A", "Evil twin"))
+        assertEquals("Laptop", names.display("A", null))
+
+        // It takes only its own name, never a newer handshake's.
+        names.heardInHandshake("A", "Evil twin")
+        names.heardInHandshake("A", "Pixel 8")
+        assertFalse(names.forgetHandshake("A", "Evil twin"))
+        assertEquals("Pixel 8", names.display("A", null))
+        // And a nameless handshake has nothing to take back.
+        assertFalse(names.forgetHandshake("A", null))
+        assertEquals("Pixel 8", names.display("A", null))
+    }
+
+    @Test
+    fun `our own line echoed back is caught by its nonce`() {
+        val random = java.security.SecureRandom()
+        val base64 = java.util.Base64.getEncoder()
+        // What AesGcm writes: base64 of nonce(12) || tag(16) || ciphertext.
+        fun line(nonce: ByteArray = ByteArray(12).also(random::nextBytes)): String =
+            base64.encodeToString(nonce + ByteArray(16 + 40).also(random::nextBytes))
+
+        val nonce = ByteArray(12).also(random::nextBytes)
+        val ours = line(nonce)
+        // 12 bytes are exactly the first 16 characters - what the guard keys on.
+        assertEquals(base64.encodeToString(nonce), ours.take(16))
+
+        val guard = EchoGuard()
+        guard.sent(ours) // say, the history batch
+        guard.sent(line()) // and a heartbeat
+        // The key is the same both ways, so this would decrypt - but it's ours.
+        assertTrue(guard.isEcho(ours))
+        // The peer's own lines carry their own nonces.
+        assertFalse(guard.isEcho(line()))
+        assertFalse(guard.isEcho(ours.take(10)))
+        assertFalse(guard.isEcho(""))
+
+        // Once the session is proven nothing is held.
+        guard.clear()
+        assertFalse(guard.isEcho(ours))
     }
 
     // ---- how an id is shown -------------------------------------------------

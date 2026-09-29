@@ -26,6 +26,7 @@ import java.security.MessageDigest
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.X509EncodedKeySpec
 import javax.crypto.KeyAgreement
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -67,9 +68,24 @@ class PeerConnection private constructor(
     private val lastActivityAt = AtomicLong(System.currentTimeMillis())
     private val closed = AtomicBoolean(false)
     private val disconnectFired = AtomicBoolean(false)
+    private val sessionProven = AtomicBoolean(false)
+    private val echoGuard = EchoGuard()
 
     var onMessage: ((String) -> Unit)? = null
     var onDisconnected: (() -> Unit)? = null
+
+    /**
+     * Fires once, on the read loop, the first time a line decrypts with the
+     * session key - a message or a heartbeat - that isn't one of our own
+     * coming back (see [EchoGuard]). Only that proves the peer holds the
+     * identity it claimed: the handshake signature covers just the ephemeral
+     * key, so a recorded handshake replays under any DeviceName, but a
+     * replayer can never produce a line that decrypts. Keep it quick.
+     */
+    var onSessionProven: (() -> Unit)? = null
+
+    /** Whether [onSessionProven] has fired - for a caller whose own setup may have lost the race. */
+    val isSessionProven: Boolean get() = sessionProven.get()
 
     val remoteAddress: String? get() = socket.inetAddress?.hostAddress
 
@@ -83,6 +99,8 @@ class PeerConnection private constructor(
 
     suspend fun send(message: String) = withContext(Dispatchers.IO) {
         val encrypted = AesGcm.encrypt(sessionKey, message)
+        // Before the write, so its echo can't arrive ahead of it.
+        if (!sessionProven.get()) echoGuard.sent(encrypted)
         writeLine(encrypted)
     }
 
@@ -108,15 +126,23 @@ class PeerConnection private constructor(
             while (true) {
                 val line = reader.readLine() ?: break
                 if (line.isEmpty()) continue
+                // Only this loop sets sessionProven, so it can't flip in between.
+                if (!sessionProven.get() && echoGuard.isEcho(line)) error("our own line came back")
                 val decrypted = AesGcm.decrypt(sessionKey, line)
                 lastActivityAt.set(System.currentTimeMillis())
+                // Before the ping check: a heartbeat proves the key just as well.
+                if (sessionProven.compareAndSet(false, true)) {
+                    echoGuard.clear()
+                    onSessionProven?.invoke()
+                }
                 if (decrypted == PING_SENTINEL) continue // heartbeat, never real data
                 onMessage?.invoke(decrypted)
             }
         } catch (e: Exception) {
             // Clean close, abrupt disconnect, or a corrupt/forged line that
-            // failed to decrypt. All three end the connection, same as the
-            // single catch-all on the other two platforms.
+            // failed to decrypt - or one of our own echoed back. All of them
+            // end the connection, same as the single catch-all on the other
+            // two platforms.
         } finally {
             finish()
         }
@@ -259,6 +285,11 @@ class PeerConnection private constructor(
             writer.flush()
 
             val theirs = HandshakeMessage.parse(reader.readLine() ?: return null) ?: return null
+            // Our own handshake sent back - never a real peer. Two of our own
+            // connections cross-wired that way derive one key, so each would
+            // take the other's lines as proof, out of sight of the per-link
+            // EchoGuard - and our own passcode proof would even vouch for it.
+            if (theirs.identityPublicKey == myIdentityPublicKey) return null
 
             val alreadyTrusted = trustStore.isTrusted(theirs.identityPublicKey)
             val passphraseVerified = !alreadyTrusted && myKey != null &&
@@ -315,5 +346,33 @@ class PeerConnection private constructor(
                 newlyTrustedViaPassphrase = passphraseVerified,
             )
         }
+    }
+}
+
+/**
+ * Spots our own lines coming back before a session is proven. The session
+ * key is one hash of the ECDH secret, the same both ways, so a line we sent
+ * decrypts just as well when it's echoed to us - and a replayer, which can't
+ * make a line of its own, could pass for proven by echoing ours (the history
+ * batch and heartbeats go out unprompted). Kept by nonce: a line is base64 of
+ * `nonce(12) || tag(16) || ciphertext`, and 12 bytes are exactly its first 16
+ * characters. A plain class so it can be tested off-device.
+ */
+internal class EchoGuard {
+    private val sentNonces: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    fun sent(line: String) {
+        sentNonces.add(nonceOf(line))
+    }
+
+    fun isEcho(line: String): Boolean = nonceOf(line) in sentNonces
+
+    /** Once the session is proven there's nothing left to guard. */
+    fun clear() = sentNonces.clear()
+
+    private fun nonceOf(line: String) = line.take(NONCE_BASE64_LENGTH)
+
+    private companion object {
+        const val NONCE_BASE64_LENGTH = 16
     }
 }

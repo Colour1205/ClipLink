@@ -1,3 +1,5 @@
+import CryptoKit
+import Network
 import XCTest
 @testable import ClipLinkCore
 
@@ -270,7 +272,9 @@ final class EngineIntegrationTests: XCTestCase {
         a.engine.acceptPairing()
         b.engine.acceptPairing()
         wait("connected") { a.recorder.connectedCount == 1 && b.recorder.connectedCount == 1 }
-        XCTAssertEqual(TrustStore(directory: a.dir).device(b.engine.ownId)?.name, "Bravo", "stored with the trust record")
+        // Accept trusts it nameless; the name follows once the link decrypts
+        // B's first line (its history batch).
+        wait("stored with the trust record") { TrustStore(directory: a.dir).device(b.engine.ownId)?.name == "Bravo" }
 
         b.engine.sendText("paired!")
         wait("A received") { a.recorder.receivedEntries.contains { $0.0.content == "paired!" } }
@@ -292,6 +296,7 @@ final class EngineIntegrationTests: XCTestCase {
         wait("A shows B's name") { name(a, of: b) == "Colour's PC" }
         wait("B shows A's OS default name") { name(b, of: a) == "iPhone" }
         wait("A stored it") { TrustStore(directory: a.dir).device(b.engine.ownId)?.name == "Colour's PC" }
+        wait("B stored it") { TrustStore(directory: b.dir).device(a.engine.ownId)?.name == "iPhone" }
 
         // A rename goes out in the very next beacon, but beacons are
         // unauthenticated: it's heard, yet a paired device keeps the name its
@@ -311,7 +316,8 @@ final class EngineIntegrationTests: XCTestCase {
         XCTAssertEqual(TrustStore(directory: a.dir).device(b.engine.ownId)?.name, "Colour's PC", "nor is it stored")
         XCTAssertEqual(a.recorder.connectedCount, 1, "renames never drop the link")
 
-        // The next handshake carries the new names, and stores them.
+        // The next handshake carries the new names, stored once the new link
+        // decrypts its first line.
         reconnect(b, to: a)
         wait("A shows B's new name") { name(a, of: b) == "Studio PC" }
         wait("B shows A's new name") { name(b, of: a) == "Desk iPhone" }
@@ -370,7 +376,7 @@ final class EngineIntegrationTests: XCTestCase {
         let proof = PassphraseAuth.proof(key: PassphraseAuth.deriveKey(passphrase: "pw"), deviceId: laptop)
         hear(laptop, "Travel Mac", proof: proof)
         XCTAssertTrue(a.engine.queue.sync { a.engine.trust.isTrusted(laptop) }, "auto-trusted by the proof")
-        XCTAssertNil(stored(laptop), "nameless until its handshake")
+        XCTAssertNil(stored(laptop), "nameless until a connection to it decrypts a line")
         XCTAssertEqual(shown(laptop), ["Travel Mac", "Travel Mac"])
         let paired = stamp()
         hear(laptop, "Other Mac", proof: proof)
@@ -378,6 +384,141 @@ final class EngineIntegrationTests: XCTestCase {
         XCTAssertNil(stored(laptop))
         XCTAssertEqual(stamp(), paired, "no disk write for a beacon name")
         XCTAssertEqual(stored(desk), "Desk PC")
+    }
+
+    /// The handshake signature covers only the ephemeral key, so a captured
+    /// handshake from a paired device can be replayed with any DeviceName -
+    /// but the replayer can never produce a line under the session key. The
+    /// name is shown for that connection at once and stored only once the
+    /// connection decrypts a line. Passcode pairing trusts it nameless.
+    func testHandshakeNameIsStoredOnlyOnceTheLinkDecryptsALine() throws {
+        let (a, _) = makePair()
+        setPasscode(a, "pw")
+        a.engine.enterForeground()
+        wait("A listening") { a.engine.queue.sync { a.engine.status.listening } }
+
+        let peer = SoftwareIdentity()
+        let peerId = peer.publicKeyBase64
+        let passcode = PassphraseAuth.deriveKey(passphrase: "pw")
+        func stored() -> String? { TrustStore(directory: a.dir).device(peerId)?.name }
+        func shown() -> String? { a.engine.queue.sync { a.engine.buildSnapshot().deviceNames[peerId] } }
+        func connect(as name: String) throws -> PeerLink {
+            let link = try handshake(with: a, as: peer, named: name, passcode: passcode)
+            wait("A registered \(name)") { a.recorder.connectedCount == 1 }
+            return link
+        }
+        func hangUp(_ link: PeerLink) {
+            link.close()
+            wait("A dropped it") { a.recorder.connectedCount == 0 }
+        }
+
+        // First contact, by passcode, on a link that never sends a line - all
+        // a replayed handshake can do: trusted and shown by name, none stored.
+        let silent = try connect(as: "Evil PC")
+        XCTAssertTrue(TrustStore(directory: a.dir).isTrusted(peerId), "auto-paired by the passcode")
+        XCTAssertEqual(shown(), "Evil PC", "shown for the connection at once")
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertNil(stored(), "never stored without a decrypted line")
+        hangUp(silent)
+        XCTAssertNil(stored())
+        XCTAssertNil(shown(), "nor shown once that connection is gone")
+
+        // The real device: its first line (the history batch every peer sends
+        // at once) proves it holds the session key, and the name is stored.
+        let real = try connect(as: "Desk PC")
+        real.goLive()
+        real.send(Envelope(type: Wire.MessageType.historyBatch, payload: "[]").jsonString())
+        wait("stored once the link decrypted a line") { stored() == "Desk PC" }
+        XCTAssertEqual(shown(), "Desk PC")
+        hangUp(real)
+
+        // A replay against the stored name: never shown over it, never stored.
+        let replayed = try connect(as: "Evil PC")
+        XCTAssertEqual(shown(), "Desk PC", "a stored name wins over an unproven one")
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertEqual(stored(), "Desk PC")
+        hangUp(replayed)
+    }
+
+    /// One key covers both directions, so a replayer that can't make a line
+    /// can still send A's own lines back: the history batch at once, then
+    /// every ping. An echo proves nothing - A drops the link at the first
+    /// one, stores and keeps no name from it, and a working link to the same
+    /// device stays.
+    func testEchoedLinesNeverProveAReplayedHandshake() throws {
+        let (a, _) = makePair()
+        setPasscode(a, "pw")
+        a.engine.enterForeground()
+        wait("A listening") { a.engine.queue.sync { a.engine.status.listening } }
+
+        let peer = SoftwareIdentity()
+        let peerId = peer.publicKeyBase64
+        let passcode = PassphraseAuth.deriveKey(passphrase: "pw")
+        func stored() -> String? { TrustStore(directory: a.dir).device(peerId)?.name }
+        func shown() -> String? { a.engine.queue.sync { a.engine.buildSnapshot().deviceNames[peerId] } }
+        func heard() -> String? { a.engine.queue.sync { a.engine.sightings[peerId]?.name } }
+        func live() -> PeerLink? { a.engine.queue.sync { a.engine.links[peerId] } }
+        /// A handshake line `peer` really sent, as a replayer holds it: the
+        /// ephemeral key's private half long gone, the name edited.
+        func replay(as name: String) throws -> Reflector {
+            let ephemeral = P256.KeyAgreement.PrivateKey().publicKey.derRepresentation
+            let signature = try peer.sign(ephemeral)
+            let line = HandshakeMessage(
+                ephemeralPublicKey: ephemeral.base64EncodedString(),
+                identityPublicKey: peerId,
+                signature: signature.base64EncodedString(),
+                passphraseProof: PassphraseAuth.proof(key: passcode, deviceId: peerId),
+                deviceName: name
+            ).jsonString()
+            return Reflector(port: a.engine.config.listenPort, handshake: line)
+        }
+
+        // First contact, trusted by the passcode proof the line carries.
+        let first = try replay(as: "Evil PC")
+        wait("A dropped the echoing link") { first.closed }
+        wait("A let its name go") { heard() == nil }
+        XCTAssertGreaterThan(first.echoed, 0, "dropped for an echo")
+        XCTAssertNil(live())
+        XCTAssertNil(stored(), "an echo proves nothing")
+        XCTAssertNil(shown())
+        first.close()
+
+        // The real device: A decrypts its first line, stores its name, and
+        // has a working link to it.
+        let real = try handshake(with: a, as: peer, named: "Desk PC", passcode: passcode)
+        real.goLive()
+        real.send(Envelope(type: Wire.MessageType.historyBatch, payload: "[]").jsonString())
+        wait("stored once the link decrypted a line") { stored() == "Desk PC" }
+        let working = try XCTUnwrap(live())
+        XCTAssertTrue(working.hasReceivedSessionLine)
+
+        // A replay while it's up: dropped at its first echo, and the working
+        // link is never replaced.
+        let second = try replay(as: "Evil PC")
+        wait("A dropped the echoing link") { second.closed }
+        wait("A let its name go") { heard() == nil }
+        XCTAssertGreaterThan(second.echoed, 0, "dropped for an echo")
+        XCTAssertTrue(live() === working, "the working link stays")
+        XCTAssertFalse(real.isClosed)
+        XCTAssertEqual(stored(), "Desk PC")
+        XCTAssertEqual(shown(), "Desk PC")
+        second.close()
+        real.close()
+    }
+
+    /// Completes a handshake with `node` as `peer`, calling itself `name`. This
+    /// side of the link stays held - it sends nothing - until it goes live.
+    private func handshake(with node: Node, as peer: SoftwareIdentity, named name: String, passcode: Data) throws -> PeerLink {
+        let context = HandshakeContext(identity: peer, trusted: [node.engine.ownId], passphraseKey: passcode, pairingOpen: false, deviceName: name)
+        let done = expectation(description: "handshake as \(name)")
+        var link: PeerLink?
+        PeerLink.dial(host: "127.0.0.1", port: node.engine.config.listenPort, context: context, connectTimeout: 3,
+                      maxLineBytes: 1 << 20, deliveryQueue: .main, gate: { _ in true }) { result in
+            if case .success(let l) = result { link = l } else { XCTFail("handshake as \(name): \(result)") }
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 10)
+        return try XCTUnwrap(link)
     }
 
     func testUntrustedPeerIsRefusedWithoutPairingOrPasscode() throws {
@@ -473,5 +614,64 @@ final class EngineIntegrationTests: XCTestCase {
         wait("peer got it live") { peer.recorder.receivedEntries.contains { $0.0.content == "shared while the app is open" } }
         wait("app lists it") { app.recorder.items.contains { $0.entry.content == "shared while the app is open" } }
         ext.shutdown()
+    }
+}
+
+/// A replayer's socket: writes a handshake line, then sends back every line
+/// it's sent after the acceptor's handshake - all it can do with lines under
+/// a key it doesn't hold.
+private final class Reflector {
+    private let connection: NWConnection
+    private let queue = DispatchQueue(label: "test.reflector")
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var sawHandshake = false
+    private var echoCount = 0
+    private var ended = false
+
+    var echoed: Int { lock.lock(); defer { lock.unlock() }; return echoCount }
+    /// The far side hung up.
+    var closed: Bool { lock.lock(); defer { lock.unlock() }; return ended }
+
+    init(port: UInt16, handshake: String) {
+        connection = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .ready:
+                self.connection.send(content: Data((handshake + "\n").utf8), completion: .contentProcessed { _ in })
+                self.receive()
+            case .failed, .cancelled:
+                self.markEnded()
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
+    }
+
+    func close() { connection.cancel() }
+
+    private func receive() {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 16) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            if let data { self.buffer.append(data) }
+            while let newline = self.buffer.firstIndex(of: 0x0A) {
+                let next = self.buffer.index(after: newline)
+                let line = Data(self.buffer[..<next])
+                self.buffer = Data(self.buffer[next...])
+                if self.sawHandshake {
+                    self.lock.lock(); self.echoCount += 1; self.lock.unlock()
+                    self.connection.send(content: line, completion: .contentProcessed { _ in })
+                } else {
+                    self.sawHandshake = true
+                }
+            }
+            if isComplete || error != nil { self.markEnded() } else { self.receive() }
+        }
+    }
+
+    private func markEnded() {
+        lock.lock(); ended = true; lock.unlock()
     }
 }

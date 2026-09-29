@@ -8,9 +8,9 @@ using ClipboardDaemon.Engine;
 
 namespace ClipLink;
 
-// This PC (name, device ID, Tailscale address), the passcode, starting at
-// sign-in, clearing the synced history, About - and Quit, the only way to
-// end ClipLink.
+// This PC (name, device ID and fingerprint, Tailscale address), the
+// passcode, starting at sign-in, clearing the synced history, About - and
+// Quit, the only way to end ClipLink.
 public partial class SettingsPage : Page
 {
     private readonly EngineHost host = App.Host;
@@ -36,6 +36,7 @@ public partial class SettingsPage : Page
         string id = host.Engine.DeviceId;
         DeviceIdCard.Description = id.Length > 40 ? id[..40] + "…" : id;
         DeviceIdCard.ToolTip = new ToolTip { Content = new TextBlock { Text = id, TextWrapping = TextWrapping.Wrap, MaxWidth = 360 } };
+        FingerprintText.Text = DeviceLabel.Fingerprint(id);
         UpdateTailscale(host.Engine.TailscaleAddress);
         _ = RefreshTailscaleAsync();
         UpdatePasscode();

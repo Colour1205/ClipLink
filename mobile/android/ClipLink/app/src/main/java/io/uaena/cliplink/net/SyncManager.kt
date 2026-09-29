@@ -3,6 +3,7 @@ package io.uaena.cliplink.net
 import io.uaena.cliplink.core.B64
 import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.core.Signing
+import io.uaena.cliplink.engine.shortIdOf
 import io.uaena.cliplink.store.FileStore
 import io.uaena.cliplink.store.HistoryStore
 import io.uaena.cliplink.store.TrustStore
@@ -52,6 +53,12 @@ class SyncManager(
     var onLog: ((String) -> Unit)? = null
     var onConnectionsChanged: ((Int) -> Unit)? = null
 
+    /** A registered connection's first envelope decrypted - see [PeerConnection.onSessionProven]. */
+    var onSessionProven: ((PeerConnection) -> Unit)? = null
+
+    /** A registered connection ended - the live one for its peer or a stale one. */
+    var onConnectionClosed: ((PeerConnection) -> Unit)? = null
+
     val connectionCount: Int get() = connections.size
 
     fun connectedDeviceIds(): Set<String> = connections.keys.toSet()
@@ -70,7 +77,10 @@ class SyncManager(
      */
     fun registerConnection(conn: PeerConnection) {
         conn.onMessage = { message -> scope.launch { handleMessage(message, conn) } }
+        // Off the read loop - what comes of it is a trust-store write.
+        conn.onSessionProven = { scope.launch(Dispatchers.IO) { onSessionProven?.invoke(conn) } }
         conn.onDisconnected = {
+            onConnectionClosed?.invoke(conn)
             // Evict only if the map still points at THIS connection. Removing
             // by device id alone meant a stale link's teardown deleted the
             // newer live connection that had replaced it - after which
@@ -80,7 +90,7 @@ class SyncManager(
             // other end's churn keeps the loop alive.
             if (connections.remove(conn.peerDeviceId, conn)) {
                 onConnectionsChanged?.invoke(connections.size)
-                onLog?.invoke("peer disconnected: ${conn.peerDeviceId.take(12)}…")
+                onLog?.invoke("peer disconnected: ${shortIdOf(conn.peerDeviceId)}")
             }
         }
         conn.listen()
@@ -184,7 +194,7 @@ class SyncManager(
                 val received = parseEntry(envelope.payload) ?: return
                 val entry = verifiedAndTrusted(received) ?: run {
                     onLog?.invoke(
-                        "dropped ${received.type} entry from ${received.deviceId.take(12)}… " +
+                        "dropped ${received.type} entry from ${shortIdOf(received.deviceId)} " +
                             "- failed signature/trust check",
                     )
                     return

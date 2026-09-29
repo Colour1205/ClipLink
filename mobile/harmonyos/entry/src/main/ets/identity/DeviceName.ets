@@ -7,6 +7,7 @@
 import { common } from '@kit.AbilityKit';
 import { deviceInfo, settings } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { sha256Hex } from '../storage/DeletedEntries';
 
 // Same cap on every platform, counted in Unicode code points (not UTF-16
 // units, so an emoji is one character), applied after trimming.
@@ -69,4 +70,30 @@ export function normalizeDeviceName(name: string): string | null {
 export function effectiveDeviceName(override: string, systemName: string): string | null {
   const own: string | null = normalizeDeviceName(override);
   return own !== null ? own : normalizeDeviceName(systemName);
+}
+
+/**
+ * A device id's fingerprint, "XXXX·XXXX": the first 4 bytes of SHA-256 over
+ * the id's UTF-8, as uppercase hex - byte for byte what iOS
+ * (DeviceLabel.fingerprint) and Android (fingerprintOf) show. Not the id's
+ * first characters: every P-256 SPKI starts with the same 36 base64
+ * characters, so those read "MFkwEwYHKoZI…" for every device.
+ *
+ * Never throws: it labels log lines in connection setup and teardown
+ * (PeerConnection's listenLoop, Index's handleNewConnection), where a throw
+ * would leave a link registered-but-dead or never registered.
+ */
+export function deviceFingerprint(deviceId: string): string {
+  let hex: string;
+  try {
+    hex = sha256Hex(deviceId).slice(0, 8).toUpperCase();
+  } catch (e) {
+    return '????·????'; // the crypto framework itself failed
+  }
+  return `${hex.slice(0, 4)}·${hex.slice(4)}`;
+}
+
+/** How a device without a known name is shown, and logged: "Device XXXX·XXXX", same on every platform. */
+export function shortDeviceId(deviceId: string): string {
+  return `Device ${deviceFingerprint(deviceId)}`;
 }

@@ -44,6 +44,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.engine.SyncedItem
+import io.uaena.cliplink.engine.shortIdOf
 
 @Composable
 fun DetailScreen(
@@ -191,7 +192,7 @@ fun DetailScreen(
 
             Spacer(Modifier.height(20.dp))
             Text(
-                if (item.isOwn) "Sent from this device" else "From ${item.entry.deviceId.take(16)}…",
+                if (item.isOwn) "Sent from this device" else "From ${shortIdOf(item.entry.deviceId)}",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

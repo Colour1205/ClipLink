@@ -37,10 +37,10 @@ public sealed partial class ClipLinkEngine
             if (historyAccess.isEntryDeleted(entry))
             {
                 // deleted here earlier - neither back into history nor onto the clipboard
-                Console.WriteLine($"[clip] received {entry.Type} entry from {entry.DeviceId[..Math.Min(12, entry.DeviceId.Length)]}... - deleted here, ignoring");
+                Console.WriteLine($"[clip] received {entry.Type} entry from {DeviceLabel.ShortId(entry.DeviceId)} - deleted here, ignoring");
                 return;
             }
-            Console.WriteLine($"[clip] received {entry.Type} entry from {entry.DeviceId[..Math.Min(12, entry.DeviceId.Length)]}... - applying");
+            Console.WriteLine($"[clip] received {entry.Type} entry from {DeviceLabel.ShortId(entry.DeviceId)} - applying");
 
             if (entry.Type == "file")
             {
@@ -160,12 +160,12 @@ public sealed partial class ClipLinkEngine
 
         if (fileStore.Exists(request.FileHash))
         {
-            Console.WriteLine($"[file] {requestingConn.PeerDeviceId[..Math.Min(12, requestingConn.PeerDeviceId.Length)]}... requested {request.FileHash[..12]}... - we have it, streaming");
+            Console.WriteLine($"[file] {DeviceLabel.ShortId(requestingConn.PeerDeviceId)} requested {request.FileHash[..12]}... - we have it, streaming");
             _ = StreamFileToPeer(requestingConn, fileStore.GetPath(request.FileHash), request.FileHash);
         }
         else
         {
-            Console.WriteLine($"[file] {requestingConn.PeerDeviceId[..Math.Min(12, requestingConn.PeerDeviceId.Length)]}... requested {request.FileHash[..12]}... - don't have it, ignoring");
+            Console.WriteLine($"[file] {DeviceLabel.ShortId(requestingConn.PeerDeviceId)} requested {request.FileHash[..12]}... - don't have it, ignoring");
         }
         // if we don't have it either, just don't respond — the requester
         // already broadcast to everyone else too; someone else might have it
@@ -293,8 +293,8 @@ public sealed partial class ClipLinkEngine
             return;
         }
         const int chunkSize = 256 * 1024;
-        string shortPeer = conn.PeerDeviceId[..Math.Min(12, conn.PeerDeviceId.Length)];
-        Console.WriteLine($"[file] sending {fileHash[..12]}... to {shortPeer}...");
+        string shortPeer = DeviceLabel.ShortId(conn.PeerDeviceId);
+        Console.WriteLine($"[file] sending {fileHash[..12]}... to {shortPeer}");
         try
         {
             using var stream = File.OpenRead(filePath);
@@ -310,14 +310,14 @@ public sealed partial class ClipLinkEngine
                 await conn.Send(JsonSerializer.Serialize(envelope));
                 chunkIndex++;
             }
-            Console.WriteLine($"[file] finished sending {fileHash[..12]}... to {shortPeer}... ({chunkIndex} chunks)");
+            Console.WriteLine($"[file] finished sending {fileHash[..12]}... to {shortPeer} ({chunkIndex} chunks)");
         }
         catch (Exception ex)
         {
             // peer disconnected mid-transfer, or the source file became
             // unreadable — nothing further to do about it, but worth logging
             // since this used to fail completely silently
-            Console.WriteLine($"[file] sending {fileHash[..12]}... to {shortPeer}... failed: {ex.Message}");
+            Console.WriteLine($"[file] sending {fileHash[..12]}... to {shortPeer} failed: {ex.Message}");
         }
         finally
         {
@@ -358,7 +358,7 @@ public sealed partial class ClipLinkEngine
     {
         connectionsByDeviceId.TryGetValue(conn.PeerDeviceId, out var previous);
         connectionsByDeviceId[conn.PeerDeviceId] = conn;
-        Console.WriteLine($"[conn] connected: {conn.PeerDeviceId[..Math.Min(12, conn.PeerDeviceId.Length)]}... ({connectionsByDeviceId.Count} total)");
+        Console.WriteLine($"[conn] connected: {DeviceLabel.ShortId(conn.PeerDeviceId)} ({connectionsByDeviceId.Count} total)");
         try
         {
             SendHistoryBatch(conn);
@@ -369,7 +369,7 @@ public sealed partial class ClipLinkEngine
             // in the map, and without its Disconnected handler and Listen()
             // below it would sit there dead but "connected" forever, and
             // nothing would ever redial this peer.
-            Console.WriteLine($"[conn] couldn't send history to {conn.PeerDeviceId[..Math.Min(12, conn.PeerDeviceId.Length)]}...: {ex.Message}");
+            Console.WriteLine($"[conn] couldn't send history to {DeviceLabel.ShortId(conn.PeerDeviceId)}: {ex.Message}");
         }
         conn.MessageReceived += msg =>
         {
@@ -384,9 +384,11 @@ public sealed partial class ClipLinkEngine
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[conn] error handling a message from {conn.PeerDeviceId[..Math.Min(12, conn.PeerDeviceId.Length)]}... (connection kept): {ex.GetType().Name}: {ex.Message}");
+                Console.WriteLine($"[conn] error handling a message from {DeviceLabel.ShortId(conn.PeerDeviceId)} (connection kept): {ex.GetType().Name}: {ex.Message}");
             }
         };
+        // Its handshake's name is stored only now, and off the read loop.
+        conn.SessionProven += () => _ = Task.Run(() => RememberProvenName(conn));
         conn.Disconnected += () =>
         {
             // Identity-checked removal, NOT TryRemove(key). When both ends
@@ -402,12 +404,12 @@ public sealed partial class ClipLinkEngine
                 new KeyValuePair<string, PeerConnection>(conn.PeerDeviceId, conn));
             if (removed)
             {
-                Console.WriteLine($"[conn] disconnected: {conn.PeerDeviceId[..Math.Min(12, conn.PeerDeviceId.Length)]}... ({connectionsByDeviceId.Count} total)");
+                Console.WriteLine($"[conn] disconnected: {DeviceLabel.ShortId(conn.PeerDeviceId)} ({connectionsByDeviceId.Count} total)");
                 NotifyDevicesChanged();
             }
             else
             {
-                Console.WriteLine($"[conn] stale link closed for {conn.PeerDeviceId[..Math.Min(12, conn.PeerDeviceId.Length)]}...; live connection kept ({connectionsByDeviceId.Count} total)");
+                Console.WriteLine($"[conn] stale link closed for {DeviceLabel.ShortId(conn.PeerDeviceId)}; live connection kept ({connectionsByDeviceId.Count} total)");
             }
         };
         _ = conn.Listen();
@@ -455,9 +457,10 @@ public sealed partial class ClipLinkEngine
     // for AcceptPairing/RejectPairing to resolve. Never auto-trusted just
     // because a connection formed on its own.
     //
-    // Every connection path (ConnectToPeer, AcceptConnection, PairByAddress)
-    // ends up here, so this is also where a trusted peer's handshake name is
-    // recorded (a pending candidate's is recorded on AcceptPairing).
+    // Nothing here stores the handshake's name, though every connection path
+    // (ConnectToPeer, AcceptConnection, PairByAddress) ends up here: a
+    // replayed handshake gets this far too. It's stored once the connection
+    // proves its session - see RememberProvenName.
     private PairOutcome HandleNewConnection(PeerConnection conn, string? address)
     {
         if (stopping.IsCancellationRequested)
@@ -477,7 +480,10 @@ public sealed partial class ClipLinkEngine
             if (conn.NewlyTrustedViaPassphrase)
             {
                 Console.WriteLine($"Auto-pairing {conn.PeerDeviceId} — matching passphrase proof in handshake");
-                trustStore.Trust(conn.PeerDeviceId, address, conn.PeerDeviceName);
+                // Without its name: the proof vouches for the id, not for the
+                // name beside it. Listen() hasn't started yet, so this record
+                // exists before anything can prove the session.
+                trustStore.Trust(conn.PeerDeviceId, address);
             }
             else if (address != null)
             {
@@ -489,12 +495,8 @@ public sealed partial class ClipLinkEngine
                 // written back when the accept loop didn't capture an
                 // address at all (an old bug - it always passed null),
                 // instead of leaving it permanently stuck with no address
-                // to reconnect off-LAN with.
-                trustStore.Trust(conn.PeerDeviceId, address, conn.PeerDeviceName);
-            }
-            else
-            {
-                trustStore.UpdateName(conn.PeerDeviceId, conn.PeerDeviceName);
+                // to reconnect off-LAN with. (Trust() keeps the stored name.)
+                trustStore.Trust(conn.PeerDeviceId, address);
             }
             RegisterConnection(conn);
             return conn.NewlyTrustedViaPassphrase ? PairOutcome.PairedByPasscode : PairOutcome.Connected;
@@ -511,7 +513,7 @@ public sealed partial class ClipLinkEngine
             pairingState.TakePending()?.conn.Close();
             return PairOutcome.NotRunning;
         }
-        Console.WriteLine($"[pair] pairing request from {conn.PeerDeviceId[..Math.Min(12, conn.PeerDeviceId.Length)]}... ({address ?? "unknown address"}) - waiting for Accept/Reject");
+        Console.WriteLine($"[pair] pairing request from {DeviceLabel.ShortId(conn.PeerDeviceId)} ({address ?? "unknown address"}) - waiting for Accept/Reject");
         Raise(PairingRequested, new PendingPairing(conn.PeerDeviceId, NameOfCandidate(conn), address), nameof(PairingRequested));
         return PairOutcome.Pending;
     }
@@ -519,6 +521,31 @@ public sealed partial class ClipLinkEngine
     // Handshake name first; an older peer's may only be in its beacon.
     private string? NameOfCandidate(PeerConnection conn) =>
         conn.PeerDeviceName ?? (seenPeers.TryGetValue(conn.PeerDeviceId, out var seen) ? seen.Name : null);
+
+    // Stores conn's handshake name once its session is proven - the first
+    // line from the peer decrypted, and wasn't one of ours echoed back
+    // (PeerConnection.SessionProven) - and never before: the handshake
+    // signature covers only the ephemeral key, so a captured handshake of a
+    // trusted device replays under any DeviceName, but a replayer can't send
+    // a line of its own that decrypts. This picks up a trusted
+    // peer's rename, and fills in the name a new pairing (accepted, or by
+    // passcode) was stored without. The first line is normally the peer's
+    // history batch, sent as soon as it registers the connection - else its
+    // first heartbeat. Never adds a device (UpdateName skips untrusted ids).
+    private void RememberProvenName(PeerConnection conn)
+    {
+        try
+        {
+            if (trustStore.UpdateName(conn.PeerDeviceId, conn.PeerDeviceName))
+            {
+                NotifyDevicesChanged();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[conn] couldn't store the name of {DeviceLabel.ShortId(conn.PeerDeviceId)}: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
 
     // Dials out to a peer at a known address and wires it up exactly the same
     // way regardless of how that address was found — LAN discovery or a
@@ -573,7 +600,7 @@ public sealed partial class ClipLinkEngine
             // only ever merges names) but loses the address, so it's never
             // dialled here again (it's re-learned if that device really does
             // come back).
-            Console.WriteLine($"[conn] {address} answered as {conn.PeerDeviceId[..Math.Min(12, conn.PeerDeviceId.Length)]}..., not {peerDeviceId[..Math.Min(12, peerDeviceId.Length)]}... - clearing that stale address");
+            Console.WriteLine($"[conn] {address} answered as {DeviceLabel.ShortId(conn.PeerDeviceId)}, not {DeviceLabel.ShortId(peerDeviceId)} - clearing that stale address");
             trustStore.Trust(peerDeviceId, null);
         }
 
@@ -688,12 +715,15 @@ public sealed partial class ClipLinkEngine
         foreach (var device in trusted.Values)
         {
             seenPeers.TryGetValue(device.PublicKey, out var seen);
+            connectionsByDeviceId.TryGetValue(device.PublicKey, out var conn);
             bool recent = seen != null && now - seen.LastSeenUtc <= DiscoveredListingWindow;
             rows.Add(new DeviceListing(
                 device.PublicKey,
-                device.Name ?? seen?.Name,
+                // The live connection's handshake name only until a stored
+                // one exists (e.g. just paired, session not yet proven).
+                device.Name ?? conn?.PeerDeviceName ?? seen?.Name,
                 Trusted: true,
-                Connected: connectionsByDeviceId.ContainsKey(device.PublicKey),
+                Connected: conn != null,
                 PairingOpen: recent && seen!.PairingOpen,
                 DistinctAddresses(seen?.LanAddress, seen?.AdvertisedAddress, device.Address)));
         }

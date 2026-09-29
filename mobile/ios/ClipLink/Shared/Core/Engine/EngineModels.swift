@@ -131,7 +131,7 @@ public struct DeviceRow: Identifiable, Equatable {
     /// Recently heard from (beacon, probe or connection) - within ~30s.
     public let nearby: Bool
 
-    public var shortId: String { String(deviceId.prefix(12)) }
+    public var shortId: String { DeviceLabel.short(deviceId) }
 
     /// The one row order every platform uses: paired devices first, then by
     /// name (case-insensitive; named rows before unnamed ones), then by id.
@@ -198,9 +198,9 @@ public enum PairOutcome: Equatable {
         case .ownCode: return "That's this device's own code."
         case .empty: return "Enter a pairing code or address first."
         case .noAddress(let key, let name):
-            return "\(name ?? "\(key.prefix(12))…") has no address in its code. If it's on the same network, keep this screen open on both devices and it will pair automatically."
+            return "\(name ?? DeviceLabel.short(key)) has no address in its code. If it's on the same network, keep this screen open on both devices and it will pair automatically."
         case .searching(let key, let name):
-            return "Looking for \(name ?? "\(key.prefix(12))…") on this network — keep this screen open on both devices."
+            return "Looking for \(name ?? DeviceLabel.short(key)) on this network — keep this screen open on both devices."
         case .connected(let a): return "Already paired with \(a) - connected."
         case .passcode(let a): return "Paired with \(a) using your passcode."
         case .prompt(let a): return "Reached \(a) - accept the pairing prompt on both devices to finish."

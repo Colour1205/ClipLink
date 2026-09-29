@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using ClipboardDaemon.Identity;
 using ClipboardDaemon.Crypto;
+using ClipboardDaemon.Engine;
 
 namespace ClipboardDaemon.Networking;
 
@@ -56,11 +57,35 @@ public class PeerConnection
 
     // The display name the peer's handshake carried (already normalized -
     // see DeviceNameStore.Normalize), or null if it didn't send one (an
-    // older build). Self-asserted, unlike PeerDeviceId: for display only.
+    // older build). Self-asserted, unlike PeerDeviceId, and not covered by
+    // the handshake's signature: shown right away, but only stored once
+    // SessionProven fires.
     public string? PeerDeviceName { get; }
 
     public event Action<string>? MessageReceived;
     public event Action? Disconnected;
+
+    // Raised once, on the read loop, the first time a line from the peer
+    // decrypts with the session key - a message or a heartbeat - and isn't
+    // one of this side's own lines echoed back. Only that proves the peer
+    // holds the identity it claimed: the handshake signature covers just the
+    // ephemeral key, so a captured handshake can be replayed under any
+    // DeviceName, but a replayer can't derive the key, so the only lines it
+    // has that decrypt are the ones this side sent it (see sentNonces).
+    // Handlers must be quick (the read loop waits for them) and mustn't
+    // throw.
+    public event Action? SessionProven;
+    private bool sessionProven; // only Listen's read loop touches it
+
+    // The nonces of the lines this side sent before the session was proven.
+    // One key serves both directions, so a replayer could otherwise echo
+    // this side's own history batch or heartbeat back and have it decrypt;
+    // Decrypt refuses those, which ends the connection like a forged line.
+    // A genuine peer's random nonces never match, and changing an echoed
+    // line's nonce breaks its tag. Dropped once the session is proven, so it
+    // only grows until then (or until the heartbeat times the link out).
+    private HashSet<string>? sentNonces = new();
+    private readonly object sentNoncesGate = new(); // Send runs off the read loop
 
     private PeerConnection(TcpClient client, StreamReader reader, StreamWriter writer, byte[] sessionKey, string peerDeviceId, bool wasAlreadyTrusted, bool newlyTrustedViaPassphrase, string? peerDeviceName)
     {
@@ -196,6 +221,13 @@ public class PeerConnection
                 if (line == null) break; // peer closed cleanly
                 lastActivityAt = DateTime.UtcNow;
                 string decrypted = Decrypt(line);
+                if (!sessionProven)
+                {
+                    // Before the ping check: a heartbeat proves the key just as well.
+                    sessionProven = true;
+                    lock (sentNoncesGate) sentNonces = null;
+                    SessionProven?.Invoke();
+                }
                 if (decrypted == PingSentinel) continue; // heartbeat only, not real data
                 MessageReceived?.Invoke(decrypted);
             }
@@ -205,7 +237,7 @@ public class PeerConnection
             // Abrupt disconnect, or a corrupt/forged line that failed to
             // decrypt. Logged so a connection that ends for a reason other
             // than the peer going away doesn't just silently vanish.
-            Console.WriteLine($"[conn] read loop for {PeerDeviceId[..Math.Min(12, PeerDeviceId.Length)]}... ended: {ex.GetType().Name}: {ex.Message}");
+            Console.WriteLine($"[conn] read loop for {DeviceLabel.ShortId(PeerDeviceId)} ended: {ex.GetType().Name}: {ex.Message}");
         }
         finally
         {
@@ -251,6 +283,7 @@ public class PeerConnection
     private string Encrypt(string plaintext)
     {
         byte[] nonce = RandomNumberGenerator.GetBytes(NonceSize);
+        lock (sentNoncesGate) sentNonces?.Add(Convert.ToBase64String(nonce));
         byte[] plainBytes = Encoding.UTF8.GetBytes(plaintext);
         byte[] cipherBytes = new byte[plainBytes.Length];
         byte[] tag = new byte[TagSize];
@@ -272,6 +305,13 @@ public class PeerConnection
         byte[] tag = packed[NonceSize..(NonceSize + TagSize)];
         byte[] cipherBytes = packed[(NonceSize + TagSize)..];
         byte[] plainBytes = new byte[cipherBytes.Length];
+        lock (sentNoncesGate)
+        {
+            if (sentNonces != null && sentNonces.Contains(Convert.ToBase64String(nonce)))
+            {
+                throw new CryptographicException("reflected line - one of ours, echoed back"); // caught in Listen()
+            }
+        }
 
         using var aesGcm = new AesGcm(sessionKey, TagSize);
         aesGcm.Decrypt(nonce, cipherBytes, tag, plainBytes); // throws if tampered — caught in Listen()

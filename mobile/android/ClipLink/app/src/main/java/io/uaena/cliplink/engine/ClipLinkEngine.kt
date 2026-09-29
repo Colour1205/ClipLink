@@ -83,7 +83,7 @@ class ClipLinkEngine(context: Context) {
     private val beacons = ConcurrentHashMap<String, Discovery.Beacon>()
     private val beaconSeenAt = ConcurrentHashMap<String, Long>()
 
-    /** Names heard this session, by beacon or handshake. Only handshake names ever reach disk. */
+    /** Names heard this session, by beacon or handshake - memory only, see [rememberProvenName]. */
     private val peerNames = PeerNames()
 
     /** The remote address of each peer's most recent connection, for the Devices tab. */
@@ -209,6 +209,8 @@ class ClipLinkEngine(context: Context) {
         }
         syncManager.onLog = { message -> log(message) }
         syncManager.onEntryApplied = { entry -> onEntryReceived(entry) }
+        syncManager.onSessionProven = { conn -> rememberProvenName(conn) }
+        syncManager.onConnectionClosed = { conn -> forgetUnprovenName(conn) }
     }
 
     /**
@@ -326,11 +328,11 @@ class ClipLinkEngine(context: Context) {
         if (trustStore.isTrusted(beacon.deviceId)) return
         val key = withContext(Dispatchers.IO) { passphraseKeyStore.key() } ?: return
         if (!passphraseKeyStore.verifyProof(key, beacon.deviceId, proof)) return
-        log("auto-trusting ${beacon.deviceId.take(12)}… (shared passcode)")
-        // Not the beacon's name - the proof vouches for the device id, not
-        // for whatever label rode along with it. The handshake that follows
-        // stores the real one.
-        trustStore.trust(beacon.deviceId, beacon.address, peerNames.persistable(beacon.deviceId))
+        log("auto-trusting ${shortIdOf(beacon.deviceId)} (shared passcode)")
+        // No name - the proof vouches for the device id, not for whatever
+        // label rode along with it. The connection that follows stores its
+        // handshake's name once it proves its session (rememberProvenName).
+        trustStore.trust(beacon.deviceId, beacon.address)
         refreshDevices()
     }
 
@@ -456,12 +458,14 @@ class ClipLinkEngine(context: Context) {
      * the three paths made it (incoming TCP, beacon dial, manual address).
      */
     private fun handleNewConnection(conn: PeerConnection, address: String?) {
+        // Shown right away, but stored only once proven - see rememberProvenName.
         peerNames.heardInHandshake(conn.peerDeviceId, conn.peerName)
         if (!conn.wasAlreadyTrusted) {
             if (_pairingRequest.value != null) {
                 // Already prompting for a different candidate. Don't juggle
                 // two - whoever came second just doesn't pair this round.
                 conn.close()
+                forgetUnprovenName(conn)
                 return
             }
             pendingPairingConnection = conn
@@ -483,21 +487,46 @@ class ClipLinkEngine(context: Context) {
 
         (conn.remoteAddress ?: address)?.let { connectionAddresses[conn.peerDeviceId] = it }
         if (conn.newlyTrustedViaPassphrase) {
-            trustStore.trust(conn.peerDeviceId, address, peerNames.persistable(conn.peerDeviceId))
-            log("auto-paired via passcode: ${conn.peerDeviceId.take(12)}…")
+            trustStore.trust(conn.peerDeviceId, address)
+            // The read loop is already running, so the session may have been
+            // proven before this record existed to take the name.
+            if (conn.isSessionProven) rememberProvenName(conn)
+            log("auto-paired via passcode: ${shortIdOf(conn.peerDeviceId)}")
         } else {
             // Already trusted, but we may have just learned a real address -
             // back-fill it. This is what repairs a trust record written before
             // the accept path captured addresses at all, which would otherwise
             // be permanently stuck with nothing to dial off-LAN.
             if (address != null) trustStore.trust(conn.peerDeviceId, address)
-            log("connected: ${conn.peerDeviceId.take(12)}…")
+            log("connected: ${shortIdOf(conn.peerDeviceId)}")
         }
-        // After the trust writes, so the record exists: this is what picks up
-        // a trusted peer that has been renamed since we last heard from it.
-        // The handshake's name, never a beacon's - see PeerNames.
-        trustStore.rememberName(conn.peerDeviceId, conn.peerName)
         refreshDevices()
+    }
+
+    /**
+     * Stores [conn]'s handshake name once its session is proven - its first
+     * envelope decrypted - and never before. The handshake signature covers
+     * only the ephemeral key, so a recorded handshake of a trusted device
+     * replays with any DeviceName, but a replayer never gets this far - not
+     * even by echoing our own lines (PeerConnection's EchoGuard). This
+     * connection's own name, not PeerNames' latest, which may be from a
+     * handshake that proved nothing. It's what picks up a trusted peer that
+     * has been renamed since we last heard from it, and fills in the name a
+     * new pairing was stored without. Never adds a device.
+     */
+    private fun rememberProvenName(conn: PeerConnection) {
+        if (trustStore.rememberName(conn.peerDeviceId, conn.peerName)) refreshDevices()
+    }
+
+    /**
+     * The other half of [rememberProvenName]: a connection that ends - or is
+     * turned away - without proving its session takes its handshake's name
+     * off the screen with it. Otherwise a replayed handshake would leave its
+     * name on a device that has none stored, ahead of anything its beacons say.
+     */
+    private fun forgetUnprovenName(conn: PeerConnection) {
+        if (conn.isSessionProven) return
+        if (peerNames.forgetHandshake(conn.peerDeviceId, conn.peerName)) refreshDevices()
     }
 
     fun acceptPairing() {
@@ -505,17 +534,21 @@ class ClipLinkEngine(context: Context) {
         val request = _pairingRequest.value
         pendingPairingConnection = null
         _pairingRequest.value = null
-        // The prompt may have shown a beacon name; only the handshake's is kept.
-        trustStore.trust(conn.peerDeviceId, request?.address, peerNames.persistable(conn.peerDeviceId))
+        // No name yet, whatever the prompt showed: this connection's is
+        // stored once its session is proven (rememberProvenName).
+        trustStore.trust(conn.peerDeviceId, request?.address)
         conn.remoteAddress?.let { connectionAddresses[conn.peerDeviceId] = it }
-        log("paired: ${conn.peerDeviceId.take(12)}…")
+        log("paired: ${shortIdOf(conn.peerDeviceId)}")
         syncManager.registerConnection(conn)
         refreshDevices()
         showToast("Paired.")
     }
 
     fun rejectPairing() {
-        pendingPairingConnection?.close()
+        pendingPairingConnection?.let { conn ->
+            conn.close()
+            forgetUnprovenName(conn) // never listened, so never proven
+        }
         pendingPairingConnection = null
         _pairingRequest.value = null
     }
@@ -695,7 +728,8 @@ class ClipLinkEngine(context: Context) {
 
     fun trustDevice(deviceId: String) {
         val beacon = beacons[deviceId]
-        trustStore.trust(deviceId, beacon?.senderIp, peerNames.persistable(deviceId))
+        // Nameless until a connection to it proves its session.
+        trustStore.trust(deviceId, beacon?.senderIp)
         refreshDevices()
         scope.launch { beacon?.let { connectToAddress(it.senderIp, it.tcpPort) } }
     }
@@ -708,7 +742,7 @@ class ClipLinkEngine(context: Context) {
         // beaconing doesn't vanish from the list, it reappears as "discovered"
         // with a Trust button - so without this, Remove looks like it did
         // nothing at all.
-        log("untrusted ${deviceId.take(12)}…")
+        log("untrusted ${shortIdOf(deviceId)}")
         showToast("Removed $label")
     }
 
@@ -810,7 +844,7 @@ class ClipLinkEngine(context: Context) {
 
     private fun onEntryReceived(entry: ClipboardEntry) {
         refreshItems()
-        log("received ${entry.type} from ${entry.deviceId.take(12)}…")
+        log("received ${entry.type} from ${shortIdOf(entry.deviceId)}")
         if (deviceSettings.autoApply) {
             if (clipboard.apply(entry)) showToast("Copied ${entry.type} from a paired device.")
         }

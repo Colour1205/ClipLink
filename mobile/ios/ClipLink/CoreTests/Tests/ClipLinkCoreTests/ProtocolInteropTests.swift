@@ -445,6 +445,20 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertEqual(TrustStore(directory: dir).all, [TrustedDevice(publicKey: "A", address: "10.0.0.2", name: "Studio PC")], "persisted")
     }
 
+    /// Every P-256 SPKI starts with the same 36 base64 characters, so ids are
+    /// shown by the first 4 bytes of SHA-256 of their UTF-8 - byte for byte
+    /// what the other ports show.
+    func testDeviceFingerprintIsTheSameEverywhere() {
+        XCTAssertEqual(DeviceLabel.fingerprint("abc"), "BA78·16BF")
+        XCTAssertEqual(DeviceLabel.short("abc"), "Device BA78·16BF")
+        let row = DeviceRow(deviceId: "abc", name: nil, trusted: false, connected: false, addresses: [], pairing: false, lastSeen: nil, nearby: false)
+        XCTAssertEqual(row.shortId, "Device BA78·16BF")
+        let a = SoftwareIdentity().publicKeyBase64
+        let b = SoftwareIdentity().publicKeyBase64
+        XCTAssertEqual(a.prefix(36), b.prefix(36), "why a prefix can't tell devices apart")
+        XCTAssertNotEqual(DeviceLabel.fingerprint(a), DeviceLabel.fingerprint(b))
+    }
+
     func testDeviceRowsSortByGroupThenNameThenIdOnly() {
         func row(_ id: String, _ name: String?, trusted: Bool, connected: Bool = false, lastSeen: Date? = nil) -> DeviceRow {
             DeviceRow(deviceId: id, name: name, trusted: trusted, connected: connected, addresses: [], pairing: false, lastSeen: lastSeen, nearby: connected)
