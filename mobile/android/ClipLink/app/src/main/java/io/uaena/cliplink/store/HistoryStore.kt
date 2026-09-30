@@ -101,6 +101,23 @@ class HistoryStore(
         if (all().none { it.usesBlob(fileHash) }) fileStore.delete(fileHash)
     }
 
+    /**
+     * Startup housekeeping, before any peer connects: deletes the blobs no
+     * entry points at (see [FileStore.sweepUnreferenced]), and gives a 0-byte
+     * file entry received before this build could store one its empty blob -
+     * it would otherwise say "Transferring…" for good. Returns how many
+     * blobs were deleted.
+     */
+    @Synchronized
+    fun tidyBlobs(): Int {
+        val files = all().mapNotNull { entry ->
+            if (entry.type == ClipboardEntry.TYPE_FILE) FilePayload.parse(entry.content) else null
+        }
+        val swept = fileStore.sweepUnreferenced(files.mapTo(HashSet()) { it.fileHash })
+        files.filter { it.isEmptyFile }.forEach { fileStore.storeEmpty(it.fileHash) }
+        return swept
+    }
+
     private fun trim(entries: MutableList<ClipboardEntry>) {
         while (entries.size > MAX_ITEMS) {
             // Timestamps are .NET round-trip format, which is fixed-width and

@@ -178,7 +178,10 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
                 label = "screen",
             ) { screen ->
                 when (screen) {
-                    Screen.Detail -> detail?.let { item ->
+                    Screen.Detail -> detail?.let { opened ->
+                        // The live copy: a file that finishes arriving while
+                        // it's open is shown as arrived - its picture too.
+                        val item = state.items.firstOrNull { it.id == opened.id } ?: opened
                         DetailScreen(
                             item = item,
                             contentPadding = padding,

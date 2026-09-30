@@ -181,6 +181,8 @@ class ClipLinkEngine(context: Context) {
         started = true
 
         scope.launch {
+            // Before the TCP server starts, so no transfer is under way yet.
+            tidyFileStore()
             withContext(Dispatchers.IO) { identity.ensureKey() }
             val id = withContext(Dispatchers.IO) { identity.publicKeyBase64() }
             _ownDeviceId.value = id
@@ -251,6 +253,20 @@ class ClipLinkEngine(context: Context) {
             reconnectJob?.cancel()
             releaseMulticastLock()
             started = false
+        }
+    }
+
+    /**
+     * Deletes the stored files no item refers to any more - see
+     * [HistoryStore.tidyBlobs]. Never stops the start: at worst they wait for
+     * the next one.
+     */
+    private suspend fun tidyFileStore() = withContext(Dispatchers.IO) {
+        try {
+            val swept = historyStore.tidyBlobs()
+            if (swept > 0) log("deleted $swept file(s) no item refers to")
+        } catch (e: Exception) {
+            log("couldn't tidy stored files: ${e.message}")
         }
     }
 
@@ -947,11 +963,16 @@ class ClipLinkEngine(context: Context) {
             // .NET round-trip format sorts chronologically once canonicalised.
             .sortedByDescending { DotNetTimestamp.canonical(it.timestamp) }
             .map { entry ->
+                val file = if (entry.type == ClipboardEntry.TYPE_FILE) {
+                    FilePayload.parse(entry.content)?.let { fileStore.path(it.fileHash) }?.takeIf { it.exists() }
+                } else {
+                    null
+                }
                 SyncedItem(
                     entry = entry,
                     isOwn = entry.deviceId == own,
-                    fileAvailable = entry.type != ClipboardEntry.TYPE_FILE ||
-                        FilePayload.parse(entry.content)?.let { fileStore.exists(it.fileHash) } == true,
+                    fileAvailable = entry.type != ClipboardEntry.TYPE_FILE || file != null,
+                    file = file,
                 )
             }
     }

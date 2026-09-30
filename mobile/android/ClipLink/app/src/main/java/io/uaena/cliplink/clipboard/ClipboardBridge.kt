@@ -115,9 +115,13 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
     private fun readUri(uri: Uri): Capture? = try {
         val mime = context.contentResolver.getType(uri) ?: ""
         val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        // An image that doesn't decode - an empty file, an SVG - goes as the
+        // file it is: an image entry can't hold it, and receivers show one
+        // that doesn't decode as broken.
+        val png = if (bytes != null && mime.startsWith("image/")) toPng(bytes) else null
         when {
             bytes == null -> null
-            mime.startsWith("image/") -> Capture.Image(toPng(bytes))
+            png != null -> Capture.Image(png)
             else -> Capture.Payload(displayName(uri), bytes)
         }
     } catch (e: Exception) {
@@ -145,10 +149,11 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
      * PNG regardless of what was copied, so a JPEG straight off the clipboard
      * would arrive as bytes the receiver labels PNG and can still decode - but
      * would then re-hash differently on every hop. Normalising here keeps the
-     * echo-suppression hash stable across devices.
+     * echo-suppression hash stable across devices. Null when [bytes] don't
+     * decode as an image at all.
      */
-    private fun toPng(bytes: ByteArray): ByteArray {
-        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return bytes
+    private fun toPng(bytes: ByteArray): ByteArray? {
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
         val out = ByteArrayOutputStream()
         bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
         return out.toByteArray()

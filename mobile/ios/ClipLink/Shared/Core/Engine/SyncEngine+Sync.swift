@@ -101,19 +101,26 @@ extension SyncEngine {
             return
         }
         let key = FileStore.key(payload.fileHash)
-        if files.exists(payload.fileHash) {
-            if apply { deliverToApp(entry, fileURL: files.url(for: payload.fileHash)) }
-            return
-        }
-        // An empty file never streams (the sender has no chunks to send), but
-        // its bytes are known: materialise it rather than wait forever.
-        if payload.fileSize == 0, key == ContentHash.sha256Hex(Data()) {
-            try? files.write(Data(), hash: key)
+        if files.exists(payload.fileHash) || materialiseEmptyFile(payload) {
             if apply { deliverToApp(entry, fileURL: files.url(for: key)) }
             return
         }
         pendingFiles[key] = PendingFile(entry: entry, apply: apply || (pendingFiles[key]?.apply ?? false))
         requestFile(payload.fileHash, from: Array(links.values))
+    }
+
+    /// SHA-256 of nothing, lowercase like every FileStore key.
+    static let emptyFileKey = ContentHash.sha256Hex(Data())
+
+    /// An empty file (size 0, the hash of nothing - either case) needs no
+    /// transfer: its bytes are known, so it is written here and never asked
+    /// for - asking could wait forever on a sender with no chunks to send.
+    /// False for any other file.
+    func materialiseEmptyFile(_ payload: FilePayload) -> Bool {
+        let key = FileStore.key(payload.fileHash)
+        guard payload.fileSize == 0, key == Self.emptyFileKey else { return false }
+        if !files.exists(key) { try? files.write(Data(), hash: key) }
+        return files.exists(key)
     }
 
     func deliverToApp(_ entry: ClipboardEntry, fileURL: URL?) {
@@ -155,7 +162,8 @@ extension SyncEngine {
     /// ever re-requests, so without this a lost file stays lost.
     func requestMissingBlobs(from link: PeerLink) {
         for entry in history.entries where entry.type == Wire.EntryType.file {
-            guard let payload = FilePayload.parse(entry.content), !files.exists(payload.fileHash) else { continue }
+            guard let payload = FilePayload.parse(entry.content), !files.exists(payload.fileHash),
+                  !materialiseEmptyFile(payload) else { continue }
             let key = FileStore.key(payload.fileHash)
             if pendingFiles[key] == nil { pendingFiles[key] = PendingFile(entry: entry, apply: false) }
             requestedAt[key] = nil
@@ -364,12 +372,13 @@ extension SyncEngine {
     /// Stores the file, sends its signed descriptor, then streams the bytes to
     /// every connected peer. Hashes are sent UPPERCASE: Windows echo-suppresses
     /// an applied file by comparing uppercase hashes, so a lowercase one makes
-    /// it re-broadcast our file back to everyone.
+    /// it re-broadcast our file back to everyone. An empty file goes like any
+    /// other (size 0, the hash of nothing): receivers write it themselves.
     public func sendFile(at url: URL, name: String, moveIntoStore: Bool, completion: ((SendResult) -> Void)? = nil) {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? -1
-            guard size > 0 else {
-                return finish(completion, .failed(size == 0 ? "Empty files can't be synced." : "Couldn't read that file."))
+            guard size >= 0 else {
+                return finish(completion, .failed("Couldn't read that file."))
             }
             guard size <= Wire.maxFileBytes else {
                 return finish(completion, .failed("That file is larger than 1 GB."))

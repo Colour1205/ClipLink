@@ -294,8 +294,14 @@ class TcpLineChannel {
     await current;
   }
 
+  // Never throws - listenLoop's teardown calls it before telling SyncManager
+  // the link is gone.
   close(): void {
-    this.client.close().catch(() => { /* already closed - fine */ });
+    try {
+      this.client.close().catch(() => { /* already closed - fine */ });
+    } catch (e) {
+      // already closed - fine
+    }
   }
 }
 
@@ -430,6 +436,14 @@ export class PeerConnection {
       if (!theirHandshake.EphemeralPublicKey || !theirHandshake.IdentityPublicKey || !theirHandshake.Signature) {
         return null;
       }
+      // Our own handshake sent back - never a real peer, whichever side
+      // dialled. Two of our own connections cross-wired that way derive one
+      // key, so each would take the other's lines as proof, out of sight of
+      // the per-link sentNonces - and our own passcode proof would even
+      // vouch for it. Same check as Android's PeerConnection.handshake.
+      if (theirHandshake.IdentityPublicKey === myIdentityPublicKey) {
+        return null;
+      }
 
       const alreadyTrusted = await trustStore.isTrusted(context, theirHandshake.IdentityPublicKey);
       let passphraseVerified = false;
@@ -548,7 +562,11 @@ export class PeerConnection {
       failed = true;
     } finally {
       const idleMs: number = Date.now() - this.lastActivityAt;
-      this.stopHeartbeat();
+      // Stops the heartbeat and closes the socket: a loop that ended on a
+      // reflected or undecryptable line would otherwise leave the peer an
+      // open, silent connection. Closing one that's already closed is
+      // harmless (see TcpLineChannel.close).
+      this.close();
       this.disconnectedCallback?.();
       // Logged after the teardown, so logging can never stop it. idleMs
       // over HEARTBEAT_TIMEOUT_MS means this side's own watchdog closed the

@@ -115,7 +115,8 @@ final class ClipboardService {
         let declinedEndsIt = Self.readsAsk
         if pasteboard.hasImages {
             let (read, png) = await imagePNG()
-            if let png { return .image(png: png) }
+            // An empty .png file copied in Files goes as that (empty) file.
+            if let png, !png.isEmpty { return .image(png: png) }
             if !read, declinedEndsIt { return declined() }
         }
         if pasteboard.hasStrings {

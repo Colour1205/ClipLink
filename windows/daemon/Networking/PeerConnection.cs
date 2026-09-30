@@ -123,7 +123,11 @@ public class PeerConnection
     // myDeviceName is this device's display name, sent in the handshake's
     // DeviceName (the caller reads it fresh, so a rename applies to the next
     // connection).
-    public static async Task<PeerConnection?> CreateAsync(TcpClient client, DeviceIdentity myIdentity, TrustStore trustStore, bool pairingModeOpen, PassphraseKeyStore passphraseKeyStore, string? myDeviceName = null)
+    //
+    // A handshake carrying this device's own identity is always refused
+    // (null); answeredAsSelf, if given, is called first, so a caller that
+    // dialled an address can tell "that's this device" from a refusal.
+    public static async Task<PeerConnection?> CreateAsync(TcpClient client, DeviceIdentity myIdentity, TrustStore trustStore, bool pairingModeOpen, PassphraseKeyStore passphraseKeyStore, string? myDeviceName = null, Action? answeredAsSelf = null)
     {
         Stream stream = client.GetStream();
         var reader = new StreamReader(stream);
@@ -133,12 +137,13 @@ public class PeerConnection
         byte[] myEphemeralPublicKey = ecdh.PublicKey.ExportSubjectPublicKeyInfo();
         byte[] mySignature = myIdentity.SignData(myEphemeralPublicKey);
 
+        string myIdentityPublicKey = myIdentity.GetPublicKey();
         byte[]? myKey = passphraseKeyStore.GetKey();
-        string? myProof = myKey != null ? PassphraseAuth.ComputeProof(myKey, myIdentity.GetPublicKey()) : null;
+        string? myProof = myKey != null ? PassphraseAuth.ComputeProof(myKey, myIdentityPublicKey) : null;
 
         var myHandshake = new HandshakeMessage(
             Convert.ToBase64String(myEphemeralPublicKey),
-            myIdentity.GetPublicKey(),
+            myIdentityPublicKey,
             Convert.ToBase64String(mySignature),
             myProof,
             DeviceNameStore.Normalize(myDeviceName));
@@ -154,6 +159,18 @@ public class PeerConnection
         }
         catch (JsonException) { return null; }
         if (theirHandshake == null) return null;
+
+        // Our own handshake sent back - never a real peer (this device's own
+        // address, or something relaying our dial into our own listener).
+        // Two of our own connections cross-wired that way derive one session
+        // key, so each would take the other's lines as proof, out of sight of
+        // the per-connection sentNonces check - and our own passcode proof
+        // would even vouch for our own id. So before anything else.
+        if (theirHandshake.IdentityPublicKey == myIdentityPublicKey)
+        {
+            answeredAsSelf?.Invoke();
+            return null;
+        }
 
         bool alreadyTrusted = trustStore.IsTrusted(theirHandshake.IdentityPublicKey);
         bool passphraseVerified = false;
@@ -182,6 +199,14 @@ public class PeerConnection
             verifyEcdsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(theirHandshake.IdentityPublicKey), out _);
         }
         catch (CryptographicException) { return null; }
+
+        // Our own key written some other way (Base64 with a space in it, say)
+        // is still us - the check above compares the text.
+        if (Convert.ToBase64String(verifyEcdsa.ExportSubjectPublicKeyInfo()) == myIdentityPublicKey)
+        {
+            answeredAsSelf?.Invoke();
+            return null;
+        }
 
         if (!verifyEcdsa.VerifyData(theirEphemeralPublicKeyBytes, theirSignature, HashAlgorithmName.SHA256))
         {

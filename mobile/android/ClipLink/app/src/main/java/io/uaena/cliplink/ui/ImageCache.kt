@@ -1,10 +1,19 @@
 package io.uaena.cliplink.ui
 
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import android.util.LruCache
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import io.uaena.cliplink.core.B64
+import io.uaena.cliplink.engine.SyncedItem
+import io.uaena.cliplink.store.ImageFiles
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -32,15 +41,51 @@ object ImageCache {
         return decoded
     }
 
+    /**
+     * Where [fromFile] runs for a list: a screenful of photos decodes two at
+     * a time rather than all at once, so memory stays at a couple of decodes.
+     */
+    val fileDecoding: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(2)
+
+    /** What [fromFile] has already decoded, without touching the disk - for a first frame with no flash. */
+    fun cached(file: File, maxDimension: Int): ImageBitmap? = cache.get(fileKey(file, maxDimension))
+
+    /**
+     * An image file, at most [maxDimension] on its longer side and the right
+     * way up: ImageDecoder rather than BitmapFactory, because a phone's photo
+     * is usually stored sideways with an EXIF rotation, which only it
+     * applies. Null for anything it can't decode. Blocking - off the main
+     * thread.
+     */
     fun fromFile(file: File, maxDimension: Int): ImageBitmap? {
-        val cacheKey = "${file.absolutePath}@$maxDimension"
+        val cacheKey = fileKey(file, maxDimension)
         cache.get(cacheKey)?.let { return it }
         if (!file.exists()) return null
-        val decoded = decode({ options -> BitmapFactory.decodeFile(file.absolutePath, options) }, maxDimension)
-            ?: return null
+        val decoded = try {
+            ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, info, _ ->
+                val longest = maxOf(info.size.width, info.size.height)
+                if (longest > maxDimension) {
+                    // Decoded straight to this size - never whole first.
+                    val scale = maxDimension.toDouble() / longest
+                    decoder.setTargetSize(
+                        (info.size.width * scale).toInt().coerceAtLeast(1),
+                        (info.size.height * scale).toInt().coerceAtLeast(1),
+                    )
+                }
+                // Heap memory, like every other bitmap here, so the budget
+                // below is what it really costs.
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            }.asImageBitmap()
+        } catch (e: Throwable) {
+            // Not an image after all, a truncated one - or, as in decode(),
+            // an OutOfMemoryError.
+            null
+        } ?: return null
         cache.put(cacheKey, decoded)
         return decoded
     }
+
+    private fun fileKey(file: File, maxDimension: Int) = "${file.absolutePath}@$maxDimension"
 
     /**
      * Two passes: the first measures without allocating, the second decodes
@@ -70,4 +115,26 @@ object ImageCache {
     }
 
     private const val BUDGET_BYTES = 24 * 1024 * 1024
+}
+
+/**
+ * The picture of an image file entry - a photo shared in from a phone, say -
+ * once its bytes are here, at most [maxDimension] on its longer side and
+ * decoded off the main thread. Null until then, and for a file that isn't an
+ * image or doesn't decode: the caller shows its file card instead.
+ */
+@Composable
+fun rememberFileThumbnail(item: SyncedItem, maxDimension: Int): ImageBitmap? {
+    val file = item.file
+    val name = item.filePayload?.fileName
+    val thumbnail by produceState(file?.let { ImageCache.cached(it, maxDimension) }, file, maxDimension) {
+        if (file == null) {
+            value = null
+            return@produceState
+        }
+        value = withContext(ImageCache.fileDecoding) {
+            if (ImageFiles.looksLikeImage(name, file)) ImageCache.fromFile(file, maxDimension) else null
+        }
+    }
+    return thumbnail
 }

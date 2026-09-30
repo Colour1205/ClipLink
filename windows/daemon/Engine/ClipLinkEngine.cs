@@ -197,6 +197,20 @@ public sealed partial class ClipLinkEngine : IDisposable
             Console.WriteLine($"Device ID (public key): {ownId}");
             Console.WriteLine($"Device fingerprint: {DeviceLabel.Fingerprint(ownId)}");
             Console.WriteLine($"Device name: {deviceName.Current}");
+            if (trustStore.IsTrusted(ownId))
+            {
+                // Trusted by an older build (its own beacon, looped back) -
+                // nothing trusts this device itself now.
+                try
+                {
+                    trustStore.Untrust(ownId);
+                    Console.WriteLine("[engine] this device was in its own trust store - removed");
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    Console.WriteLine($"[engine] couldn't remove this device from its own trust store: {ex.Message}");
+                }
+            }
             // Copies opened from Synced last time (see GetFileToOpen) - all
             // but the ones the user has edited.
             DeleteOpenCopies(OpenCopiesRoot());
@@ -287,6 +301,11 @@ public sealed partial class ClipLinkEngine : IDisposable
         }
         tcpListener = listener;
         SetStatus(new EngineStatus(EngineState.Running, null));
+
+        // Only now that this copy has the port - a copy already running for
+        // the same label (which Faulted this one) could be mid-transfer in
+        // the same FileStore - and before anything below starts a transfer.
+        TidyFileStore();
 
         CancellationToken token = stopping.Token;
         StartClipboardWatcher();

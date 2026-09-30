@@ -3,6 +3,7 @@ package io.uaena.cliplink.engine
 import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.core.toHex
 import io.uaena.cliplink.net.FilePayload
+import java.io.File
 import java.security.MessageDigest
 import java.time.Instant
 import java.time.ZoneId
@@ -13,6 +14,8 @@ data class SyncedItem(
     val entry: ClipboardEntry,
     val isOwn: Boolean,
     val fileAvailable: Boolean,
+    /** Where a file entry's bytes are once they're here - null until then, and for every other type. */
+    val file: File? = null,
 ) {
     val id: String get() = entry.key
     val type: String get() = entry.type

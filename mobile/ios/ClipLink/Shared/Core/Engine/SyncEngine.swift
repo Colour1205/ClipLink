@@ -520,6 +520,8 @@ public final class SyncEngine {
     /// it decrypts a line; until then the beacon's is shown but not stored.
     public func trustDevice(_ deviceId: String) {
         queue.async { [self] in
+            // Never this device itself (PeerLink refuses our own handshake too).
+            guard deviceId != ownId else { return }
             let address = addressCandidates(for: deviceId).first
             trust.trust(deviceId, address: address)
             log("trusted \(DeviceLabel.short(deviceId))")

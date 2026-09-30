@@ -615,11 +615,18 @@ struct Index {
     syncManager.onEntryApplied((entry: ClipboardEntry, result: ApplyResult, fromPeer: boolean) => {
       netLog(`entry received: type=${entry.Type} result=${result}`);
       if (result === 'applied') this.noteOwnClipboardWrite();
-      this.syncedItems = [this.syncedItemFor(entry, fromPeer), ...this.syncedItems].slice(0, 50);
+      // An entry can be reported again - sent twice, or a file listed from
+      // history before its bytes arrived - so any copy already listed goes
+      // first: a repeated ForEach key breaks the list.
+      const item: SyncedItem = this.syncedItemFor(entry, fromPeer);
+      this.syncedItems = [item, ...this.syncedItems.filter((i: SyncedItem) => i.id !== item.id)].slice(0, 50);
     });
     syncManager.onLog((message: string) => {
       this.log(message);
     });
+    // Blobs an earlier run left with nothing pointing at them. Safe to run
+    // alongside anything else - see FileStore.deleteUnreferenced.
+    void syncManager.deleteUnreferencedFiles();
     // The connections Map lives inside SyncManager and isn't itself
     // reactive - without this the Devices tab's connected-device count
     // never updated after the first render even though the underlying
@@ -1749,15 +1756,12 @@ struct Index {
         promptAction.showToast({ message: 'File store not ready yet — try again.' });
         return;
       }
-      const bytes = base64Helper.decodeSync(change.content);
-      const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-      if (!fileStore.exists(change.hash)) {
-        const file = fs.openSync(fileStore.getPath(change.hash), fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
-        try {
-          fs.writeSync(file.fd, ab);
-        } finally {
-          fs.closeSync(file);
-        }
+      // An empty file's content is '' (see ClipboardWatcher) - stored as
+      // an empty blob all the same, so its entry is an ordinary one.
+      const bytes = change.content.length > 0 ? base64Helper.decodeSync(change.content) : new Uint8Array(0);
+      if (!fileStore.exists(change.hash) && !fileStore.write(change.hash, bytes)) {
+        this.log('could not store the pasted file');
+        return;
       }
       const payload: FilePayload = { FileName: safeFileName(change.fileName, 'file'), FileHash: change.hash, FileSize: bytes.byteLength };
       entryContent = JSON.stringify(payload);
@@ -2109,18 +2113,30 @@ struct Index {
   // Returns a file:// URI ArkUI's Image can load directly (same
   // fileUri.getUriFromPath pattern shareItem/saveFileToDocuments already
   // use), or null if this isn't an image file, or its bytes haven't
-  // finished downloading yet (nothing to preview until they have).
+  // finished downloading yet (nothing to preview until they have). An empty
+  // file is never a picture, whatever its name: it opens with the system.
   private imagePreviewUri(item: SyncedItem): string | null {
     if (item.type !== 'file') return null;
     try {
       const payload = JSON.parse(item.content) as FilePayload;
-      if (!isImageFileName(payload.FileName)) return null;
+      // The name as it's shown and saved (see dragDataFor), so the preview
+      // agrees with the extension the user sees.
+      if (!isImageFileName(safeFileName(payload.FileName, 'file')) || payload.FileSize === 0) return null;
       const fileStore = this.fileStore;
       if (fileStore === null || !fileStore.exists(payload.FileHash)) return null;
       return fileUri.getUriFromPath(fileStore.getPath(payload.FileHash));
     } catch (e) {
       return null;
     }
+  }
+
+  // The Synced list's ForEach key: the item's id (see SyncedItem.id), marked
+  // once an image file's bytes are here to preview. A same-keyed card is
+  // reused as it was, so a file listed before its bytes arrived (from
+  // history, while a peer's history batch was still fetching them) would
+  // otherwise keep its plain chip after they did.
+  private syncedItemKey(item: SyncedItem): string {
+    return this.imagePreviewUri(item) !== null ? `${item.id}#preview` : item.id;
   }
 
   // 'image' entries only exist as in-memory base64 (see itemDetailView) -
@@ -2571,6 +2587,9 @@ struct Index {
   // the item has an image, otherwise a solid colored tile with a glyph.
   // Shared by the list card and (at a larger size) nothing else, so the
   // size is a parameter rather than a second near-duplicate builder.
+  // Thumbnails decode at the size they're shown (autoResize, off by
+  // default): a received image file can be a 50 MP photo, and a list of
+  // them decoded whole would hold hundreds of MB.
   @Builder
   typeChip(item: SyncedItem, size: number) {
     if (item.type === 'image') {
@@ -2579,12 +2598,14 @@ struct Index {
         .height(size)
         .borderRadius(size / 3.2)
         .objectFit(ImageFit.Cover)
+        .autoResize(true)
     } else if (this.imagePreviewUri(item) !== null) {
       Image(this.imagePreviewUri(item) as string)
         .width(size)
         .height(size)
         .borderRadius(size / 3.2)
         .objectFit(ImageFit.Cover)
+        .autoResize(true)
     } else {
       Stack() {
         // White is baked into the chip SVGs rather than applied with
@@ -2832,6 +2853,7 @@ struct Index {
           .height(220)
           .constraintSize({ maxHeight: 220 })
           .objectFit(ImageFit.Cover)
+          .autoResize(true) // see typeChip
           .borderRadius(12)
         Text(this.looksLikeOpaqueData(item.preview) ? 'Image' : item.preview)
           .fontSize(13)
@@ -3402,7 +3424,7 @@ struct Index {
         List({ space: 10, scroller: this.syncedListScroller }) {
           ForEach(this.syncedItems, (item: SyncedItem) => {
             ListItem() { this.syncedItemCard(item) }
-          }, (item: SyncedItem) => item.id)
+          }, (item: SyncedItem) => this.syncedItemKey(item))
         }
         .width('100%')
         .height('100%')
@@ -3443,7 +3465,7 @@ struct Index {
             // wider than its column after a reflow (see itemConstraintSize
             // below).
             FlowItem() { this.syncedGridCard(item) }.width('100%')
-          }, (item: SyncedItem) => item.id)
+          }, (item: SyncedItem) => this.syncedItemKey(item))
         }
         .width('100%')
         .height('100%')

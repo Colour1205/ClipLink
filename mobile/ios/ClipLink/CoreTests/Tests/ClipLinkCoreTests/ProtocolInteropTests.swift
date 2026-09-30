@@ -362,6 +362,49 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertEqual(SyncEngine.windowsSafeName("a\\b/c.pdf"), "a_b_c.pdf")
     }
 
+    /// Received and shared files are created under these names, and APFS
+    /// takes at most 255 bytes of UTF-8: 240 bytes and 120 UTF-16 units, as
+    /// on Android, with the extension kept, no character split, and never
+    /// an empty name.
+    func testFileNamesAreCappedInUTF8BytesAndNeverEmpty() {
+        for blank in ["", " ", "...", ". .", " .. "] {
+            XCTAssertEqual(FileStore.sanitize(blank), "file", blank.debugDescription)
+        }
+        XCTAssertFalse(FileStore.sanitize("\u{0}\n").isEmpty)
+        XCTAssertEqual(FileStore.sanitize("report.pdf"), "report.pdf")
+        XCTAssertEqual(FileStore.sanitize(".hidden. .txt"), "hidden. .txt")
+        XCTAssertEqual(FileStore.sanitize("invoice\u{202E}txt.exe"), "invoice_txt.exe")
+
+        // 200 CJK characters are 600 bytes: cut by bytes, not characters.
+        let cjk = FileStore.sanitize(String(repeating: "文", count: 200) + ".txt")
+        XCTAssertEqual(cjk, String(repeating: "文", count: 78) + ".txt")
+        XCTAssertLessThanOrEqual(cjk.utf8.count, 240)
+
+        // A four-byte scalar is two UTF-16 units: here 120 units cut first.
+        let emoji = FileStore.sanitize(String(repeating: "😀", count: 100) + ".png")
+        XCTAssertEqual(emoji, String(repeating: "😀", count: 58) + ".png")
+
+        // A decomposed "é" (e + U+0301) never loses its accent.
+        let accents = FileStore.sanitize(String(repeating: "e\u{301}", count: 150) + ".md")
+        XCTAssertEqual(accents, String(repeating: "e\u{301}", count: 58) + ".md")
+        XCTAssertEqual(accents.unicodeScalars.filter { $0 == "e" }.count, 58)
+        XCTAssertEqual(accents.unicodeScalars.filter { $0 == "\u{301}" }.count, 58)
+
+        // One character bigger than the whole cap leaves no stem: the fallback's.
+        XCTAssertEqual(FileStore.sanitize("e" + String(repeating: "\u{301}", count: 300) + ".txt"), "file.txt")
+
+        // An over-long extension isn't kept, and no stem ends in a dot or space.
+        XCTAssertEqual(FileStore.sanitize(String(repeating: "a", count: 300) + "." + String(repeating: "x", count: 30)),
+                       String(repeating: "a", count: 120))
+        XCTAssertEqual(FileStore.sanitize(String(repeating: "a", count: 115) + " . . . . .jpg"),
+                       String(repeating: "a", count: 115) + ".jpg")
+
+        // The name that goes on the wire keeps within the caps too.
+        let wire = SyncEngine.windowsSafeName(String(repeating: "文", count: 200) + ".txt")
+        XCTAssertLessThanOrEqual(wire.utf8.count, 240)
+        XCTAssertTrue(wire.hasSuffix(".txt"))
+    }
+
     func testHistoryBatchAddDedupsAndReportsOnlySurvivors() {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("hist-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }

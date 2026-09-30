@@ -11,7 +11,7 @@ import { FileRequestMessage } from './FileRequestMessage';
 import { TrustStore } from '../identity/TrustStore';
 import { shortDeviceId } from '../identity/DeviceName';
 import { HistoryAccess } from '../storage/HistoryAccess';
-import { FileStore, isValidFileHash, sha256File } from '../storage/FileStore';
+import { FileStore, isEmptyFile, isValidFileHash, sha256File } from '../storage/FileStore';
 import { FilePayload } from '../storage/FilePayload';
 import { entryKey } from '../storage/DeletedEntries';
 import { ClipboardEntry, verifiedEntry } from '../crypto/Signing';
@@ -91,6 +91,20 @@ export class SyncManager {
 
   getHistory(): Promise<ClipboardEntry[]> {
     return this.history.getHistory(this.context);
+  }
+
+  // Once, at startup: FileStore's blobs that no history entry points at any
+  // more go (see HistoryAccess.deleteUnreferencedFiles) - left by items
+  // deleted or evicted while their bytes were on the way, bytes streamed for
+  // an entry this device dropped, and transfers the app was killed in the
+  // middle of. A transfer running meanwhile is never touched.
+  async deleteUnreferencedFiles(): Promise<void> {
+    try {
+      const deleted: number = await this.history.deleteUnreferencedFiles(this.context);
+      if (deleted > 0) this.logCallback?.(`deleted ${deleted} unused file(s) from storage`);
+    } catch (e) {
+      this.logCallback?.(`could not tidy file storage (${e})`);
+    }
   }
 
   // pendingEntries is cleared too: otherwise a file whose bytes finish
@@ -255,6 +269,18 @@ export class SyncManager {
       void this.applyFileEntry(entry);
       return;
     }
+    // An empty file never finishes arriving: its sender has no chunk to
+    // stream, so a file_request would wait forever. Its bytes are known, so
+    // they're stored here instead - no request goes out, and nothing
+    // changes for the sender, whatever build it runs.
+    if (isEmptyFile(payload)) {
+      if (!this.fileStore.write(payload.FileHash, new Uint8Array(0))) {
+        this.logCallback?.('could not store a received empty file');
+        return;
+      }
+      void this.applyFileEntry(entry);
+      return;
+    }
     this.pendingEntries.set(payload.FileHash, entry);
     this.broadcastFileRequest(payload.FileHash);
   }
@@ -361,7 +387,8 @@ export class SyncManager {
     if (!isValidFileHash(chunk.FileHash)) return;
     let chunkBytes: Uint8Array;
     try {
-      chunkBytes = base64Helper.decodeSync(chunk.DataBase64);
+      // An empty file's only chunk, should a sender ever send one, is empty.
+      chunkBytes = chunk.DataBase64 === '' ? new Uint8Array(0) : base64Helper.decodeSync(chunk.DataBase64);
     } catch (e) {
       return;
     }
@@ -377,8 +404,10 @@ export class SyncManager {
     }
 
     try {
-      const ab = chunkBytes.buffer.slice(chunkBytes.byteOffset, chunkBytes.byteOffset + chunkBytes.byteLength) as ArrayBuffer;
-      fs.writeSync(fd, ab);
+      if (chunkBytes.byteLength > 0) {
+        const ab = chunkBytes.buffer.slice(chunkBytes.byteOffset, chunkBytes.byteOffset + chunkBytes.byteLength) as ArrayBuffer;
+        fs.writeSync(fd, ab);
+      }
     } catch (e) {
       this.logCallback?.(`failed writing file chunk (${e}) - abandoning this transfer`);
       this.inProgressFds.delete(chunk.FileHash);

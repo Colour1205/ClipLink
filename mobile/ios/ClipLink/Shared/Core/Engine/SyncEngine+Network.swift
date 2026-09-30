@@ -208,8 +208,7 @@ extension SyncEngine {
 
     func handleDatagram(_ data: Data, from sender: String) {
         guard let text = String(data: data, encoding: .utf8),
-              let beacon = Beacon.parse(text, senderIP: sender),
-              beacon.deviceId != ownId // our own broadcast, looped back
+              let beacon = Beacon.parse(text, senderIP: sender)
         else { return }
         onBeacon(beacon)
     }
@@ -219,6 +218,9 @@ extension SyncEngine {
     /// then the pairing dial if both pairing screens are open.
     func onBeacon(_ beacon: Beacon) {
         let id = beacon.deviceId
+        // Our own broadcast, looped back - or replayed: it carries our own
+        // passcode proof, which must never trust our own id.
+        guard id != ownId else { return }
         // Spoof resistance: a never-seen id must at least be a real P-256 key.
         if sightings[id] == nil, !trust.isTrusted(id), !WireSignature.isValidPublicKey(id) { return }
         var sighting = sightings[id] ?? Sighting(lastSeen: Date())

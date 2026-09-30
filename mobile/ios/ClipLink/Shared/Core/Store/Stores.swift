@@ -317,14 +317,43 @@ public final class FileStore {
         try? FileManager.default.removeItem(at: exports.appendingPathComponent(Self.key(hash), isDirectory: true))
     }
 
+    /// At most this many UTF-16 units (a .NET or Java string's length)...
+    static let maxNameLength = 120
+    /// ... and this many bytes of UTF-8: APFS caps a name at 255 bytes, not
+    /// characters (120 CJK characters are 360), and a receiver may still add
+    /// " (1)" to it. The same limits as Android's and HarmonyOS' FileNames.
+    static let maxNameBytes = 240
+    /// Longer, and an extension is dropped rather than kept whole.
+    static let maxExtensionLength = 20
+
+    /// A name from somewhere else - a peer's FilePayload, or what a shared
+    /// or picked file calls itself - made safe to create inside a folder:
+    /// separators, characters a peer's file system rejects, and control and
+    /// format characters (a bidi override disguises "invoice\u{202E}txt.exe")
+    /// become "_"; no leading dots or edge spaces; capped as above with the
+    /// extension kept and never half a character. Never empty: "file".
     public static func sanitize(_ name: String) -> String {
         let bad = CharacterSet(charactersIn: "\\/:*?\"<>|\0").union(.newlines).union(.controlCharacters)
         var cleaned = name.components(separatedBy: bad).joined(separator: "_").trimmingCharacters(in: .whitespaces)
-        while cleaned.hasPrefix(".") { cleaned.removeFirst() }
-        if cleaned.count > 120 {
-            let ext = (cleaned as NSString).pathExtension
-            let stem = String(cleaned.prefix(120 - min(ext.count + 1, 20)))
-            cleaned = ext.isEmpty ? stem : stem + "." + ext
+        while let first = cleaned.first, first == "." || first == " " { cleaned.removeFirst() }
+        if cleaned.utf16.count > maxNameLength || cleaned.utf8.count > maxNameBytes {
+            let pathExtension = (cleaned as NSString).pathExtension
+            var ext = pathExtension.isEmpty ? "" : "." + pathExtension
+            if ext.utf16.count > maxExtensionLength { ext = "" }
+            // Whole characters (grapheme clusters) only: the stem ends
+            // before the first one that would go over either limit.
+            var stem = ""
+            var length = ext.utf16.count
+            var bytes = ext.utf8.count
+            for character in cleaned {
+                length += character.utf16.count
+                bytes += character.utf8.count
+                guard length <= maxNameLength, bytes <= maxNameBytes else { break }
+                stem.append(character)
+            }
+            while let last = stem.last, last == "." || last == " " { stem.removeLast() }
+            // A first character too big for the limits leaves no stem at all.
+            cleaned = (stem.isEmpty ? "file" : stem) + ext
         }
         return cleaned.isEmpty ? "file" : cleaned
     }

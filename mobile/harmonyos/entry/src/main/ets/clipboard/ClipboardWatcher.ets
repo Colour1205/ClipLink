@@ -26,6 +26,7 @@ import { util } from '@kit.ArkTS';
 import fs from '@ohos.file.fs';
 import fileUri from '@ohos.file.fileuri';
 import { common } from '@kit.AbilityKit';
+import { EMPTY_FILE_HASH } from '../storage/FileStore';
 
 const base64Helper = new util.Base64Helper();
 
@@ -183,15 +184,18 @@ export class ClipboardWatcher {
           try {
             const size = fs.statSync(file.fd).size;
             buffer = new ArrayBuffer(size);
-            fs.readSync(file.fd, buffer);
+            if (size > 0) fs.readSync(file.fd, buffer);
           } finally {
             fs.closeSync(file);
           }
+          // An empty file is still a file, with nothing to read, hash or
+          // encode - none of which is asked of an empty buffer: its hash is
+          // known and its content is ''.
           const bytes = new Uint8Array(buffer);
-          const hash = await sha256Hex(bytes);
+          const hash = bytes.length > 0 ? await sha256Hex(bytes) : EMPTY_FILE_HASH;
           if (hash === this.lastKnownHash) return null;
           this.lastKnownHash = hash;
-          return { type: 'file', content: arrayBufferToBase64(buffer), hash, fileName };
+          return { type: 'file', content: bytes.length > 0 ? arrayBufferToBase64(buffer) : '', hash, fileName };
         } catch (e) {
           return { type: 'unsupported', content: '', hash: '', detail: `could not read file: ${e}` };
         }

@@ -271,6 +271,15 @@ class SyncManager(
             onLog?.invoke("received malformed file entry from peer")
             return
         }
+        if (payload.isEmptyFile) {
+            // Nothing to wait for, and nothing would come: most builds send
+            // no chunk at all for a 0-byte file.
+            try {
+                fileStore.storeEmpty(payload.fileHash)
+            } catch (e: Exception) {
+                onLog?.invoke("couldn't store an empty file ($e)")
+            }
+        }
         if (fileStore.exists(payload.fileHash)) {
             onEntryApplied?.invoke(entry)
             return
@@ -291,6 +300,18 @@ class SyncManager(
             withContext(Dispatchers.IO) {
                 if (!file.exists()) return@withContext
                 val totalSize = file.length()
+                if (totalSize == 0L) {
+                    // One empty, final chunk, as iOS sends: older Windows and
+                    // HarmonyOS builds complete an empty file from it, and
+                    // wait for it forever without.
+                    conn.send(
+                        Protocol.envelope(
+                            Protocol.TYPE_FILE_CHUNK,
+                            FileChunkMessage(fileHash, chunkIndex = 0, isLast = true, dataBase64 = "").toJson(),
+                        ),
+                    )
+                    return@withContext
+                }
                 var sent = 0L
                 var chunkIndex = 0
                 file.inputStream().use { stream ->
@@ -323,7 +344,10 @@ class SyncManager(
 
     private suspend fun handleFileChunk(payload: String) = withContext(Dispatchers.IO) {
         val chunk = FileChunkMessage.parse(payload) ?: return@withContext
-        val bytes = B64.decodeOrNull(chunk.dataBase64) ?: return@withContext
+        // Empty is a chunk too: iOS ends an empty file - or one that shrank
+        // while it was sending - with one.
+        val bytes = if (chunk.dataBase64.isEmpty()) ByteArray(0) else B64.decodeOrNull(chunk.dataBase64)
+        if (bytes == null) return@withContext
 
         val handle = inProgress.getOrPut(chunk.fileHash) {
             val temp = fileStore.tempPath(chunk.fileHash)

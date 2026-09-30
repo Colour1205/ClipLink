@@ -139,7 +139,7 @@ public sealed partial class ClipLinkEngine
     // Trusts a device from its pairing payload (PairingInfo JSON) or a bare
     // device id, one-sided, exactly as the old command did - kept for tools
     // and tests; the app pairs with PairByAddressAsync / TrustDevice.
-    // False for a blank payload. ("trust_device")
+    // False for a blank payload, or this device's own. ("trust_device")
     public bool TrustPairingPayload(string payload)
     {
         RequireStores();
@@ -155,10 +155,12 @@ public sealed partial class ClipLinkEngine
 
         if (pairingInfo != null && !string.IsNullOrWhiteSpace(pairingInfo.PublicKey))
         {
+            if (pairingInfo.PublicKey == ownId) return false;
             trustStore.Trust(pairingInfo.PublicKey, pairingInfo.Address, pairingInfo.Name);
         }
         else
         {
+            if (payload == ownId) return false;
             trustStore.Trust(payload);
         }
         NotifyDevicesChanged();

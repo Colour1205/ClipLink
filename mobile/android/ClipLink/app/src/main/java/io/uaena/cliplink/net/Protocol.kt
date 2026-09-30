@@ -93,6 +93,14 @@ data class FilePayload(
     val fileHash: String,
     val fileSize: Long,
 ) {
+    /**
+     * A 0-byte file, whose bytes are known without asking anyone - see
+     * [FileStore.storeEmpty]. Its hash as well as its size, so an entry can't
+     * make an empty blob of anything but the one hash an empty file has.
+     */
+    val isEmptyFile: Boolean
+        get() = fileSize == 0L && fileHash.equals(FileStore.EMPTY_FILE_HASH, ignoreCase = true)
+
     fun toJson(): String = JSONObject().apply {
         put("FileName", fileName)
         put("FileHash", fileHash)

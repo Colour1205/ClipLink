@@ -8,7 +8,7 @@
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
-import { FileStore, isValidFileHash } from './FileStore';
+import { FileStore, isEmptyFile, isValidFileHash } from './FileStore';
 import { FilePayload } from './FilePayload';
 import { DeletedEntries, entryKey } from './DeletedEntries';
 
@@ -110,14 +110,19 @@ export class HistoryAccess {
   // Entries come from peers too, so their FileHash is only a blob to
   // release if it's a real hash (see FileStore's isValidFileHash) - never a
   // path to delete.
-  private fileHashOf(entry: ClipboardEntry): string | null {
+  private filePayloadOf(entry: ClipboardEntry): FilePayload | null {
     if (entry.Type !== 'file') return null;
     try {
-      const hash: string = (JSON.parse(entry.Content) as FilePayload).FileHash;
-      return isValidFileHash(hash) ? hash : null;
+      const payload: FilePayload = JSON.parse(entry.Content) as FilePayload;
+      return isValidFileHash(payload.FileHash) ? payload : null;
     } catch (e) {
       return null; // malformed descriptor — nothing coherent to clean up
     }
+  }
+
+  private fileHashOf(entry: ClipboardEntry): string | null {
+    const payload: FilePayload | null = this.filePayloadOf(entry);
+    return payload !== null ? payload.FileHash : null;
   }
 
   private releaseBlob(entry: ClipboardEntry): void {
@@ -166,6 +171,29 @@ export class HistoryAccess {
       if (!entries.some(e => this.fileHashOf(e) === hash)) {
         this.fileStore.delete(hash);
       }
+    });
+  }
+
+  // Startup housekeeping: deletes the FileStore blobs no history entry
+  // points at (see FileStore.deleteUnreferenced), and stores the empty file
+  // an entry received before empty files were handled here is still waiting
+  // for (see SyncManager.handleIncomingFileEntry). Serialized with every
+  // history write, so an entry added meanwhile is either counted here, or
+  // its blob is already in use and left alone. Returns how many went.
+  deleteUnreferencedFiles(context: common.UIAbilityContext): Promise<number> {
+    return this.serialized(async (): Promise<number> => {
+      const entries = await this.getHistory(context);
+      const referenced: Set<string> = new Set<string>();
+      for (const entry of entries) {
+        const payload: FilePayload | null = this.filePayloadOf(entry);
+        if (payload === null) continue;
+        referenced.add(payload.FileHash.toLowerCase());
+        if (isEmptyFile(payload) && !this.fileStore.exists(payload.FileHash)) {
+          // On failure it's left waiting, as before - the next start tries again.
+          this.fileStore.write(payload.FileHash, new Uint8Array(0));
+        }
+      }
+      return this.fileStore.deleteUnreferenced(referenced);
     });
   }
 

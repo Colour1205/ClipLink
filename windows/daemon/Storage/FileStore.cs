@@ -8,6 +8,10 @@ public class FileStore
 {
     private readonly string storeDir;
     private const string CopyingSuffix = ".copying";
+    private const string PartialSuffix = ".partial";
+
+    // The SHA-256 of no bytes at all: every 0-byte file's hash.
+    private const string EmptyFileHash = "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855";
 
     public FileStore(string label)
     {
@@ -32,9 +36,59 @@ public class FileStore
     public string GetPath(string hash) => Path.Combine(storeDir, Checked(hash));
 
     // Used while a file's chunks are still arriving — not yet verified/complete.
-    public string GetTempPath(string hash) => Path.Combine(storeDir, $"{Checked(hash)}.partial");
+    public string GetTempPath(string hash) => Path.Combine(storeDir, $"{Checked(hash)}{PartialSuffix}");
 
     public bool Exists(string hash) => IsValidHash(hash) && File.Exists(GetPath(hash));
+
+    // Whether hash is the SHA-256 of no bytes (in either case).
+    public static bool IsEmptyFileHash(string hash) => string.Equals(hash, EmptyFileHash, StringComparison.OrdinalIgnoreCase);
+
+    // Whether a file entry's payload is a 0-byte file: size 0, and the
+    // SHA-256 of no bytes as its hash.
+    public static bool IsEmptyFile(FilePayload payload) => payload.FileSize == 0 && IsEmptyFileHash(payload.FileHash);
+
+    // A 0-byte file's blob (IsEmptyFile), made here rather than received:
+    // there are no bytes to send, and older builds send no chunk at all for
+    // one, so asking a peer for it never ends. Nothing if it's here already.
+    // Throws IOException / UnauthorizedAccessException if it can't be made.
+    public void CreateEmpty(FilePayload payload)
+    {
+        if (!IsEmptyFile(payload)) throw new ArgumentException("Not a 0-byte file.", nameof(payload));
+        string path = GetPath(payload.FileHash);
+        try
+        {
+            using (new FileStream(path, FileMode.CreateNew, FileAccess.Write)) { }
+        }
+        catch (IOException) when (File.Exists(path))
+        {
+            // Made or received meanwhile - the same no bytes.
+        }
+    }
+
+    // The hash of every blob stored here, as its file is named.
+    public List<string> StoredHashes() =>
+        Directory.EnumerateFiles(storeDir).Select(file => Path.GetFileName(file)).Where(IsValidHash).ToList();
+
+    // Deletes every partly received file (GetTempPath) whose transfer
+    // isReceiving says isn't running - left by one cut short (the peer went
+    // away, or ClipLink quit, before its last chunk), which nothing ever
+    // finishes or deletes. Best effort. Returns how many went.
+    public int DeletePartials(Func<string, bool> isReceiving)
+    {
+        int deleted = 0;
+        foreach (string partial in Directory.EnumerateFiles(storeDir, "*" + PartialSuffix).ToList())
+        {
+            string hash = Path.GetFileNameWithoutExtension(partial);
+            if (!IsValidHash(hash) || isReceiving(hash)) continue;
+            try
+            {
+                File.Delete(partial);
+                deleted++;
+            }
+            catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+        return deleted;
+    }
 
     // A file on this PC (copied or shared) cached as hash's blob - copied
     // beside it, then moved into place: a copy cut short (ClipLink quit, or

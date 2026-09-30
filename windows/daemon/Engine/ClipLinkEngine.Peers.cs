@@ -121,6 +121,13 @@ public sealed partial class ClipLinkEngine
             return;
         }
 
+        if (FileStore.IsEmptyFile(payload) && !fileStore.Exists(payload.FileHash))
+        {
+            // Nothing to receive: made here, not asked for (see
+            // FileStore.CreateEmpty).
+            CreateEmptyFile(payload);
+        }
+
         if (fileStore.Exists(payload.FileHash))
         {
             // already have these exact bytes locally — apply right away
@@ -133,6 +140,22 @@ public sealed partial class ClipLinkEngine
         // (not just whoever handed us this entry) whether they have it
         fileTransferState.PendingEntries[payload.FileHash] = entry;
         BroadcastFileRequest(payload.FileHash);
+    }
+
+    // A 0-byte file's blob, made here - best effort: if it can't be, the
+    // entry waits for its bytes as any other would.
+    private void CreateEmptyFile(FilePayload payload)
+    {
+        try
+        {
+            fileStore.CreateEmpty(payload);
+            Console.WriteLine($"[file] {payload.FileHash[..12]}... is an empty file - made here, nothing to receive");
+            NotifyHistoryChanged(); // it's available now
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.WriteLine($"[file] couldn't make the empty file {payload.FileHash[..12]}...: {ex.Message}");
+        }
     }
 
     private void BroadcastFileRequest(string fileHash)
@@ -310,6 +333,15 @@ public sealed partial class ClipLinkEngine
                 await conn.Send(JsonSerializer.Serialize(envelope));
                 chunkIndex++;
             }
+            if (chunkIndex == 0 && FileStore.IsEmptyFileHash(fileHash))
+            {
+                // A 0-byte file: one empty, final chunk (as the iOS app
+                // sends), which finishes it for a receiver that asked - one
+                // that doesn't make empty files itself (an older build).
+                var emptyChunk = new FileChunkMessage(fileHash, 0, true, "");
+                await conn.Send(JsonSerializer.Serialize(new Envelope("file_chunk", JsonSerializer.Serialize(emptyChunk))));
+                chunkIndex++;
+            }
             Console.WriteLine($"[file] finished sending {fileHash[..12]}... to {shortPeer} ({chunkIndex} chunks)");
         }
         catch (Exception ex)
@@ -327,10 +359,63 @@ public sealed partial class ClipLinkEngine
             // deleted - and its blob, open here, couldn't be deleted then.
             // Left, it'd sit in FileStore for good; once nothing is sending
             // it, it can go.
-            if (!fileTransferState.StreamingInFlight.Keys.Any(other => other.EndsWith(":" + fileHash, StringComparison.OrdinalIgnoreCase)))
+            if (!IsBeingSent(fileHash))
             {
                 historyAccess.DeleteFileIfUnused(fileHash);
             }
+        }
+    }
+
+    // Whether fileHash's blob is being sent to any peer right now.
+    private bool IsBeingSent(string fileHash) =>
+        fileTransferState.StreamingInFlight.Keys.Any(key => key.EndsWith(":" + fileHash, StringComparison.OrdinalIgnoreCase));
+
+    // Once, as the engine starts running - before any connection, so
+    // nothing is being sent or received yet: gives each 0-byte file in
+    // history the blob it may lack (one received before this build made
+    // them itself - see HandleIncomingFileEntry), then deletes each blob no
+    // history entry refers to, and each partly received file a transfer cut
+    // short left behind. A blob can outlive its entry - more files arriving
+    // at once than history keeps, or a delete that failed because a transfer
+    // or an app had the blob open - and nothing else would ever delete it.
+    // Best effort: never a blob history refers to, or one being sent or
+    // received, and a failure here only costs disk space.
+    private void TidyFileStore()
+    {
+        // A share caches a file's blob before its entry is in history (see
+        // ShareFilesAsync). One can only be under way here if it started
+        // while Faulted and Retry came mid-share: then tidying waits for the
+        // next start.
+        if (!shareGate.Wait(0))
+        {
+            Console.WriteLine("[file] a share is under way - not tidying stored files this time");
+            return;
+        }
+        try
+        {
+            foreach (var entry in historyAccess.GetHistory())
+            {
+                if (FilePayloadOf(entry) is FilePayload payload && FileStore.IsEmptyFile(payload) && !IsStored(payload))
+                {
+                    CreateEmptyFile(payload);
+                }
+            }
+            int unused = 0;
+            foreach (string hash in fileStore.StoredHashes())
+            {
+                // (DeleteFileIfUnused checks history under its lock.)
+                if (!IsBeingSent(hash) && historyAccess.DeleteFileIfUnused(hash)) unused++;
+            }
+            int partial = fileStore.DeletePartials(hash => fileTransferState.InProgressWrites.ContainsKey(hash));
+            Console.WriteLine($"[file] deleted {unused} stored file(s) no history item uses, and {partial} partly received one(s)");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[file] couldn't tidy stored files: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            shareGate.Release();
         }
     }
 
@@ -479,8 +564,9 @@ public sealed partial class ClipLinkEngine
         }
         if (conn.PeerDeviceId == ownId)
         {
-            // Dialled one of this PC's own addresses - in pairing mode that
-            // would otherwise become a request to pair with itself.
+            // CreateAsync already refuses our own handshake (see its
+            // answeredAsSelf); this device is never trusted, nor a pairing
+            // request with itself, whatever gets here.
             conn.Close();
             return PairOutcome.ThisDevice;
         }
@@ -672,12 +758,15 @@ public sealed partial class ClipLinkEngine
             await client.ConnectAsync(address, port);
             EnableKeepAlive(client);
             // Same reason as ConnectToPeer's timeout.
-            var conn = await PeerConnection.CreateAsync(client, identity, trustStore, pairingState.ModeOpen, passphraseKeyStore, deviceName.Current)
+            bool answeredAsSelf = false;
+            var conn = await PeerConnection.CreateAsync(client, identity, trustStore, pairingState.ModeOpen, passphraseKeyStore, deviceName.Current,
+                    answeredAsSelf: () => answeredAsSelf = true)
                 .WaitAsync(HandshakeTimeout);
             if (conn == null)
             {
                 client.Close();
-                return PairOutcome.Refused;
+                // answeredAsSelf: the address is one of this PC's own.
+                return answeredAsSelf ? PairOutcome.ThisDevice : PairOutcome.Refused;
             }
             return HandleNewConnection(conn, address);
         }

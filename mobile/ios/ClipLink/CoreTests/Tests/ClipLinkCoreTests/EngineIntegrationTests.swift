@@ -538,6 +538,67 @@ final class EngineIntegrationTests: XCTestCase {
         XCTAssertEqual(b.recorder.connectedCount, 0)
     }
 
+    /// A handshake in this device's own identity is never a peer - our line
+    /// sent back, or our own listener dialled - and two of our own
+    /// connections wired together would each take the other's lines as
+    /// proof. Refused both ways, even with the pairing screen open and our
+    /// own passcode proof on the line; nothing ever trusts our own id.
+    func testOwnIdentityIsRefusedBothWaysAndNeverTrusted() throws {
+        let (a, _) = makePair()
+        setPasscode(a, "pw")
+        a.engine.enterForeground()
+        a.engine.setPairingOpen(true)
+        wait("A listening") { a.engine.queue.sync { a.engine.status.listening } }
+        let own = a.engine.ownId
+        let passcode = PassphraseAuth.deriveKey(passphrase: "pw")
+        func untouched(_ step: String) {
+            a.engine.queue.sync {
+                XCTAssertTrue(a.engine.links.isEmpty, step)
+                XCTAssertNil(a.engine.pending, step)
+                XCTAssertFalse(a.engine.trust.isTrusted(own), step)
+                XCTAssertNil(a.engine.sightings[own], step)
+            }
+            XCTAssertFalse(TrustStore(directory: a.dir).isTrusted(own), step)
+            XCTAssertNil(a.recorder.pairingRequest, step)
+        }
+
+        // Inbound: our own identity, a valid signature, our passcode proof.
+        let ephemeral = P256.KeyAgreement.PrivateKey().publicKey.derRepresentation
+        let signature = try a.engine.identity.sign(ephemeral)
+        let line = HandshakeMessage(
+            ephemeralPublicKey: ephemeral.base64EncodedString(),
+            identityPublicKey: own,
+            signature: signature.base64EncodedString(),
+            passphraseProof: PassphraseAuth.proof(key: passcode, deviceId: own),
+            deviceName: "Me Again"
+        ).jsonString()
+        let inbound = Reflector(port: a.engine.config.listenPort, handshake: line)
+        wait("A hung up on it") { inbound.closed }
+        XCTAssertEqual(inbound.echoed, 0, "not one session line")
+        inbound.close()
+        untouched("inbound")
+
+        // Outbound: A dials its own listener, which answers as A.
+        let outcome = expectation(description: "pair outcome")
+        var result: PairOutcome?
+        a.engine.pair(with: "127.0.0.1:\(a.engine.config.listenPort)") { o in
+            result = o
+            outcome.fulfill()
+        }
+        wait(for: [outcome], timeout: 15)
+        if case .ownCode = result {} else { XCTFail("expected ownCode, got \(String(describing: result))") }
+        Thread.sleep(forTimeInterval: 0.5)
+        untouched("outbound")
+
+        // Nor any other way: our own beacon replayed with our proof, or the
+        // Devices tab's Trust.
+        let beacon = Beacon(tcpPort: Int(a.engine.config.listenPort), deviceId: own, proof: PassphraseAuth.proof(key: passcode, deviceId: own),
+                            address: nil, pairing: true, name: "Me Again", senderIP: "127.0.0.1")
+        a.engine.queue.sync { a.engine.onBeacon(beacon) }
+        a.engine.trustDevice(own)
+        untouched("beacon and trust")
+    }
+
     func testBackgroundRefreshCatchesUpThenTearsDown() throws {
         let (a, b) = makePair()
         setPasscode(a, "pw")
@@ -652,6 +713,93 @@ final class EngineIntegrationTests: XCTestCase {
         XCTAssertTrue(ext.queue.sync { ext.requestedAt.isEmpty }, "no file_request from a sender only")
         XCTAssertFalse(ext.files.exists(payload.fileHash))
         ext.shutdown()
+    }
+
+    /// An empty file has no bytes to stream, and needs none: sent, it is a
+    /// well-formed entry (size 0, the hash of nothing); received - either
+    /// spelling of the hash - it is written here at once, and never asked
+    /// for, whether it arrives live or a new link finds its blob missing.
+    /// Any other file with no bytes here is still asked for.
+    func testEmptyFilesAreWrittenHereNeverRequested() throws {
+        let (a, _) = makePair()
+        setPasscode(a, "pw")
+        a.engine.enterForeground()
+        wait("A listening") { a.engine.queue.sync { a.engine.status.listening } }
+        let empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        XCTAssertEqual(SyncEngine.emptyFileKey, empty)
+        func dropBlob() { a.engine.queue.sync { a.engine.files.delete(empty) } }
+
+        // Sent from here (the app and the Share extension both come this way).
+        let source = FileManager.default.temporaryDirectory.appendingPathComponent("empty-\(UUID().uuidString).txt")
+        try Data().write(to: source)
+        let sent = expectation(description: "empty file sent")
+        a.engine.sendFile(at: source, name: "empty.txt", moveIntoStore: false) { result in
+            if case .sent = result { sent.fulfill() } else { XCTFail("\(result)") }
+        }
+        wait(for: [sent], timeout: 10)
+        wait("A lists it") { a.recorder.items.contains { $0.kind == .file } }
+        let mine = try XCTUnwrap(a.recorder.items.first { $0.kind == .file })
+        XCTAssertEqual(mine.filePayload, FilePayload(fileName: "empty.txt", fileHash: empty.uppercased(), fileSize: 0))
+        XCTAssertNotNil(EntrySigning.verified(mine.entry))
+        XCTAssertTrue(mine.fileAvailable)
+
+        // A peer, watching for A's file_requests on its link.
+        let peer = SoftwareIdentity()
+        let passcode = PassphraseAuth.deriveKey(passphrase: "pw")
+        var requested: [String] = []
+        func connect() throws -> PeerLink {
+            let link = try handshake(with: a, as: peer, named: "Peer", passcode: passcode)
+            link.onMessage = { _, text in
+                guard let envelope = Envelope.parse(text), envelope.type == Wire.MessageType.fileRequest,
+                      let request = FileRequestMessage.parse(envelope.payload) else { return }
+                requested.append(FileStore.key(request.fileHash))
+            }
+            wait("A registered the peer") { a.recorder.connectedCount == 1 }
+            link.goLive()
+            return link
+        }
+        func send(_ payload: FilePayload, on link: PeerLink) throws -> ClipboardEntry {
+            let entry = try EntrySigning.sign(content: payload.jsonString(), type: Wire.EntryType.file, identity: peer)
+            link.send(Envelope(type: Wire.MessageType.entry, payload: entry.jsonString()).jsonString())
+            return entry
+        }
+        func receivedEmpty(_ entry: ClipboardEntry) -> Bool {
+            guard let url = a.recorder.receivedEntries.first(where: { $0.0.signature == entry.signature })?.1 else { return false }
+            return (try? Data(contentsOf: url))?.isEmpty == true
+        }
+
+        // A's own entry is missing its blob when the link comes up: written
+        // again, not asked for.
+        dropBlob()
+        let link = try connect()
+        wait("A wrote its own empty file again") { a.engine.files.exists(empty) }
+
+        // The peer's entries, Android's lowercase and Windows' uppercase.
+        dropBlob()
+        let lower = try send(FilePayload(fileName: "blank.log", fileHash: empty, fileSize: 0), on: link)
+        wait("A has the lowercase one") { receivedEmpty(lower) }
+        dropBlob()
+        let upper = try send(FilePayload(fileName: "BLANK.LOG", fileHash: empty.uppercased(), fileSize: 0), on: link)
+        wait("A has the uppercase one") { receivedEmpty(upper) }
+
+        // Size 0 with any other hash is no empty file: asked for. Lines on
+        // one link arrive in order, so any request for the empty one is in.
+        let other = ContentHash.sha256Hex(Data("not empty".utf8))
+        _ = try send(FilePayload(fileName: "claims-empty.bin", fileHash: other, fileSize: 0), on: link)
+        wait("A asked for the other one") { requested.contains(other) }
+        XCTAssertFalse(requested.contains(empty), "never a file_request for an empty file")
+        XCTAssertTrue(a.engine.queue.sync { a.engine.pendingFiles[empty] == nil })
+
+        // A new link looks for every missing blob: the empty one is written.
+        link.close()
+        wait("A dropped the link") { a.recorder.connectedCount == 0 }
+        dropBlob()
+        requested.removeAll()
+        let again = try connect()
+        wait("A asked again for the other one") { requested.contains(other) }
+        XCTAssertFalse(requested.contains(empty), "never a file_request for an empty file")
+        XCTAssertTrue(a.engine.files.exists(empty))
+        again.close()
     }
 }
 

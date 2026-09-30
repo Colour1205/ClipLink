@@ -135,6 +135,17 @@ fun DetailScreen(
 
                 ClipboardEntry.TYPE_FILE -> {
                     val payload = item.filePayload
+                    // An image file shows its picture above its file card.
+                    rememberFileThumbnail(item, 1600)?.let { thumbnail ->
+                        Image(
+                            bitmap = thumbnail,
+                            contentDescription = payload?.fileName ?: "Image",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(24.dp)),
+                        )
+                        Spacer(Modifier.height(12.dp))
+                    }
                     Surface(
                         shape = RoundedCornerShape(24.dp),
                         color = MaterialTheme.colorScheme.surfaceContainerLow,

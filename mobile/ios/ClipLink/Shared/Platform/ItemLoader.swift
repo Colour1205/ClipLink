@@ -33,7 +33,8 @@ enum ItemLoader {
     static func capture(from providers: [NSItemProvider]) async -> Capture? {
         for provider in providers {
             if provider.canLoadObject(ofClass: UIImage.self) {
-                if let data = await loadData(provider, type: .png) { return .image(png: data) }
+                // Not an empty .png file: that goes as the (empty) file below.
+                if let data = await loadData(provider, type: .png), !data.isEmpty { return .image(png: data) }
                 // The original bytes (a photo is often a 12-48 MP HEIC), scaled
                 // and re-encoded by ImageIO: far less memory than a UIImage
                 // redraw, which matters most in the Share extension.
@@ -306,7 +307,8 @@ enum ItemLoader {
     static func thumbnail(ofImageFileAt url: URL, maxPixelSize: Int) -> UIImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(source) > 0 else { return nil }
         let (width, height, _) = geometry(of: source)
-        guard width > 0, height > 0, width * height <= maxPreviewPixels else { return nil }
+        // Divided, not multiplied: a header's numbers could overflow a product.
+        guard width > 0, height > 0, width <= maxPreviewPixels / height else { return nil }
         return thumbnail(of: source, maxPixelSize: maxPixelSize)
     }
 
