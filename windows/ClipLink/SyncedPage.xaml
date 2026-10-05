@@ -4,6 +4,7 @@
       xmlns:local="using:ClipLink"
       xmlns:controls="using:CommunityToolkit.WinUI.Controls"
       NavigationCacheMode="Required"
+      KeyboardAcceleratorPlacementMode="Hidden"
       PointerPressed="Page_PointerPressed">
     <Page.KeyboardAccelerators>
         <KeyboardAccelerator Key="Escape" Invoked="Back_Invoked" />

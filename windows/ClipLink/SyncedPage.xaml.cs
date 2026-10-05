@@ -18,6 +18,7 @@ public sealed partial class SyncedPage : Page
     private readonly EngineHost host = App.Host;
     // The card shown in full, if any.
     private HistoryCard? detail;
+    private bool wheelAttached;
 
     // A text is shown in full up to this long (Copy copies all of it).
     private const int MaxDetailChars = 100_000;
@@ -44,9 +45,10 @@ public sealed partial class SyncedPage : Page
         // follow the card that used to be first (the default anchoring).
         Loaded += (_, _) =>
         {
-            if (Cards.ScrollView is not { } scroll) return;
+            if (wheelAttached || Cards.ScrollView is not { } scroll) return;
             scroll.VerticalAnchorRatio = double.NaN;
             WheelScroll.Attach(scroll);
+            wheelAttached = true;
         };
         ShowAsGrid(App.Settings.SyncedGridView);
         UpdatePasscodeTip();
