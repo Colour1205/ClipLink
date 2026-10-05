@@ -1,5 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- The REAL windows/daemon engine sources (copied verbatim into src/),
+  <!-- The REAL windows/ClipLink/Engine engine sources (copied verbatim into src/),
        built for macOS with a few platform shims: DPAPI -> plain bytes,
        WinForms clipboard -> scriptable fake (stdin/stdout), beacon targets
        from env - hosted by shim/HarnessHost.cs, which also serves the old

@@ -1,11 +1,13 @@
-using System.IO;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Media.Imaging;
+using System.Runtime.InteropServices.WindowsRuntime;
 using ClipboardDaemon.Engine;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media.Imaging;
 using QRCoder;
-using Wpf.Ui.Controls;
+using Windows.Storage.Streams;
+using Windows.System;
 
 namespace ClipLink;
 
@@ -14,48 +16,47 @@ namespace ClipLink;
 // address. Pairing mode is on exactly while that view is on screen - as on
 // the phones' Pair screens - and goes off when you go back, leave the page,
 // hide the window or minimise it.
-public partial class DevicesPage : Page
+public sealed partial class DevicesPage : Page
 {
     private readonly EngineHost host = App.Host;
     private bool pairViewOpen;
-    private Window? window;
     private string? pairingPayload;
     private bool pairing; // a pair-by-address is in progress
 
     public DevicesPage()
     {
         InitializeComponent();
-        DataContext = host;
-        StatusBanner.TrackEngine(host);
+        EngineBanner.Track(StatusBanner, host);
+        WheelScroll.Attach(DeviceList);
+        WheelScroll.Attach(PairView);
+        PairTitle.ItemsSource = new[] { "Devices", "Add a device" };
         Loaded += (_, _) =>
         {
-            window = Window.GetWindow(this);
-            if (window != null) window.StateChanged += Window_StateChanged;
+            App.MainAppWindow.OnScreenChanged += UpdatePairingMode;
             UpdatePairingMode();
         };
         Unloaded += (_, _) =>
         {
             // Navigated to another page: back to the list, pairing off.
-            if (window != null) window.StateChanged -= Window_StateChanged;
+            App.MainAppWindow.OnScreenChanged -= UpdatePairingMode;
             ShowPairView(false);
         };
-        IsVisibleChanged += (_, _) => UpdatePairingMode();
         QrCard.SizeChanged += (_, e) => LayOutQrCard(e.NewSize.Width);
-        PreviewKeyDown += (_, e) =>
-        {
-            if (e.Key == Key.Escape && pairViewOpen)
-            {
-                ShowPairView(false);
-                e.Handled = true;
-            }
-        };
     }
 
-    private void Window_StateChanged(object? sender, EventArgs e) => UpdatePairingMode();
+    private void Escape_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (!pairViewOpen) return;
+        ShowPairView(false);
+        args.Handled = true;
+    }
 
     private void AddDevice_Click(object sender, RoutedEventArgs e) => ShowPairView(true);
 
-    private void BackToList_Click(object sender, RoutedEventArgs e) => ShowPairView(false);
+    private void PairTitle_ItemClicked(BreadcrumbBar sender, BreadcrumbBarItemClickedEventArgs args)
+    {
+        if (args.Index == 0) ShowPairView(false);
+    }
 
     private void ShowPairView(bool open)
     {
@@ -66,9 +67,12 @@ public partial class DevicesPage : Page
             PairView.Visibility = PairTitle.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
             if (open)
             {
-                PairView.ScrollToTop();
+                PairView.ChangeView(null, 0, null, disableAnimation: true);
                 _ = LoadPairingInfoAsync();
-                AddressBox.Focus();
+                // After the view has been laid out: a control that has only
+                // just become visible can't take focus yet.
+                DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                    () => AddressBox.Focus(FocusState.Programmatic));
             }
             else
             {
@@ -80,7 +84,7 @@ public partial class DevicesPage : Page
 
     private void UpdatePairingMode()
     {
-        bool onScreen = IsLoaded && IsVisible && window?.WindowState != WindowState.Minimized;
+        bool onScreen = IsLoaded && App.MainAppWindow.IsOnScreen;
         host.SetPairingUiActive(pairViewOpen && onScreen);
     }
 
@@ -96,9 +100,14 @@ public partial class DevicesPage : Page
         {
             // Looks up the Tailscale address afresh (runs its CLI).
             string payload = await host.Engine.GetPairingPayloadAsync();
-            var qr = await Task.Run(() => MakeQr(payload));
+            byte[] png = await Task.Run(() => MakeQr(payload));
+            using var stream = new InMemoryRandomAccessStream();
+            await stream.WriteAsync(png.AsBuffer());
+            stream.Seek(0);
+            var image = new BitmapImage();
+            await image.SetSourceAsync(stream);
             pairingPayload = payload;
-            QrImage.Source = qr;
+            QrImage.Source = image;
             CopyPairingButton.IsEnabled = true;
         }
         catch (Exception ex)
@@ -159,18 +168,11 @@ public partial class DevicesPage : Page
     // QRCoder's PNG writer needs no System.Drawing. Error correction M, as
     // on Android: the payload is long, and Q's denser code is harder for a
     // phone to read off a screen.
-    private static BitmapImage MakeQr(string payload)
+    private static byte[] MakeQr(string payload)
     {
         using var generator = new QRCodeGenerator();
         using var data = generator.CreateQrCode(payload, QRCodeGenerator.ECCLevel.M);
-        byte[] png = new PngByteQRCode(data).GetGraphic(8);
-        var image = new BitmapImage();
-        image.BeginInit();
-        image.CacheOption = BitmapCacheOption.OnLoad;
-        image.StreamSource = new MemoryStream(png);
-        image.EndInit();
-        image.Freeze();
-        return image;
+        return new PngByteQRCode(data).GetGraphic(8);
     }
 
     // Side by side when there's room, the text under the code when not.
@@ -192,9 +194,9 @@ public partial class DevicesPage : Page
 
     // ---- pair by address ----------------------------------------------------
 
-    private void AddressBox_KeyDown(object sender, KeyEventArgs e)
+    private void AddressBox_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key == Key.Enter)
+        if (e.Key == VirtualKey.Enter)
         {
             e.Handled = true;
             Connect_Click(sender, e);
@@ -208,7 +210,7 @@ public partial class DevicesPage : Page
         if (address.Length == 0)
         {
             ShowResult(InfoBarSeverity.Warning, "Enter an address first.", "The other device's IP address, or its pairing info.");
-            AddressBox.Focus();
+            AddressBox.Focus(FocusState.Programmatic);
             return;
         }
         pairing = true;
@@ -260,7 +262,7 @@ public partial class DevicesPage : Page
         PairResult.Message = message;
         PairResult.IsOpen = true;
         // It can be below the fold on a small window.
-        Dispatcher.BeginInvoke(() => PairResult.BringIntoView(), System.Windows.Threading.DispatcherPriority.Loaded);
+        PairResult.StartBringIntoView();
     }
 
     // ---- device rows --------------------------------------------------------
@@ -270,8 +272,26 @@ public partial class DevicesPage : Page
     private void CopyId_Click(object sender, RoutedEventArgs e)
     {
         if (RowOf(sender) is not { } row) return;
+        CopyId(row);
+    }
+
+    private void CopyId(DeviceRow row)
+    {
         if (host.CopyText(row.PublicKey)) App.MainAppWindow.Toast("Device ID copied");
         else App.MainAppWindow.ToastError("Couldn't copy", "Another app is using the clipboard. Try again.");
+    }
+
+    // Right-click or Shift+F10 on a row.
+    private void Device_ContextRequested(UIElement sender, ContextRequestedEventArgs args)
+    {
+        if (RowOf(sender) is not { } row) return;
+        var copy = new MenuFlyoutItem { Text = "Copy device ID", Icon = new SymbolIcon(Symbol.Copy) };
+        copy.Click += (_, _) => CopyId(row);
+        var flyout = new MenuFlyout();
+        flyout.Items.Add(copy);
+        if (args.TryGetPosition(sender, out var position)) flyout.ShowAt(sender, new FlyoutShowOptions { Position = position });
+        else flyout.ShowAt((FrameworkElement)sender);
+        args.Handled = true;
     }
 
     private void Trust_Click(object sender, RoutedEventArgs e)

@@ -1,6 +1,6 @@
 // Step 6/7 of the build order in ../../../../README.md: handshake +
 // session encryption, then trust store integration. Mirrors
-// windows/daemon/Networking/PeerConnection.cs's authenticated ECDH
+// windows/ClipLink/Engine/Networking/PeerConnection.cs's authenticated ECDH
 // handshake, AES-256-GCM session transport, and trust enforcement - refuse
 // the connection outright if the peer's claimed identity isn't trusted,
 // checked at the same point in the flow Windows checks it (right after

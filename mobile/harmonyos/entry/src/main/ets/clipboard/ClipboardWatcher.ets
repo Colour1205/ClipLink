@@ -1,6 +1,6 @@
 // Step 3 of the build order in ../../../../README.md: clipboard read + watch.
 //
-// IMPORTANT platform difference from Windows (windows/daemon/Clipboard/ClipboardSync.cs)
+// IMPORTANT platform difference from Windows (windows/ClipLink/Engine/Clipboard/ClipboardSync.cs)
 // discovered while building this: ohos.permission.READ_PASTEBOARD is a
 // restricted permission — declaring it in module.json5 makes the app
 // UNINSTALLABLE without ACL provisioning this project doesn't have (confirmed

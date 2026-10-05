@@ -11,7 +11,7 @@ import javax.crypto.spec.SecretKeySpec
  * The shared-passcode key: type the same passcode on two devices and they
  * auto-trust each other without any QR scan.
  *
- * Every constant below must match windows/daemon/Crypto/PassphraseAuth.cs
+ * Every constant below must match windows/ClipLink/Engine/Crypto/PassphraseAuth.cs
  * byte for byte - a different salt, iteration count or key length derives a
  * different key from the same passcode, and the two devices then silently
  * never match.

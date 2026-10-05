@@ -1,16 +1,25 @@
-using System.ComponentModel;
-using System.Windows;
-using System.Windows.Controls;
+using System.Runtime.InteropServices;
 using ClipboardDaemon.Engine;
-using Wpf.Ui.Appearance;
-using Wpf.Ui.Controls;
-using TextBlock = System.Windows.Controls.TextBlock;
+using Microsoft.UI;
+using Microsoft.UI.Windowing;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Windows.Graphics;
+using WinRT.Interop;
 
 namespace ClipLink;
 
-public partial class MainWindow : FluentWindow
+public sealed partial class MainWindow : Window
 {
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(nint hwnd);
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(nint hwnd);
+
     private readonly EngineHost host;
+    private readonly nint hwnd;
+    private bool isActive;
     // Only one dialog at a time: a new one replaces whatever is showing.
     private ContentDialog? openDialog;
     // The Accept/Reject prompt showing now, and whose request it is.
@@ -20,53 +29,149 @@ public partial class MainWindow : FluentWindow
     {
         this.host = host;
         InitializeComponent();
-        TitleBarIcon.Source = AppIcon.TitleBar;
+        hwnd = WindowNative.GetWindowHandle(this);
+
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(AppTitleBar);
+        Root.RequestedTheme = App.ThemeOverride;
+        AppWindow.SetIcon(AppIcon.Path);
+        AppTitleBar.IconSource = new ImageIconSource { ImageSource = new BitmapImage(new Uri(AppIcon.Path)) { DecodePixelWidth = 32 } };
         if (!App.Options.IsDefaultLabel)
         {
             // A test copy - make it obvious which one this is.
             Title = AppTitleBar.Title = $"ClipLink ({App.Options.Label})";
         }
-        if (App.Options.Theme == null)
+        SetSize();
+
+        // The close button only hides the window (ClipLink keeps syncing
+        // from the tray); Quit really closes it.
+        AppWindow.Closing += (_, e) =>
         {
-            // Light/dark and the accent colour follow Windows, live.
-            SystemThemeWatcher.Watch(this, WindowBackdropType.Mica, updateAccents: true);
-        }
+            if (!App.IsQuitting)
+            {
+                e.Cancel = true;
+                AppWindow.Hide();
+            }
+        };
+        AppWindow.Changed += (_, e) =>
+        {
+            if (e.DidVisibilityChange || e.DidPresenterChange) OnScreenChanged?.Invoke();
+        };
+        Activated += (_, e) => isActive = e.WindowActivationState != WindowActivationState.Deactivated;
 
         host.PairingRequested += OnPairingRequested;
         host.PairingResolved += OnPairingResolved;
-        Loaded += (_, _) => RootNavigation.Navigate(typeof(SyncedPage));
+        RootNavigation.IsPaneOpen = !App.Settings.NavPaneCollapsed;
+        UpdateToastMargin();
+        RootNavigation.SelectedItem = RootNavigation.MenuItems[0];
     }
 
-    public bool Navigate(Type page) => RootNavigation.Navigate(page);
+    // Open (icons and labels) or collapsed to icons only: remembered.
+    private void RootNavigation_PaneChanged(NavigationView sender, object args)
+    {
+        UpdateToastMargin();
+        if (App.Settings.NavPaneCollapsed == !sender.IsPaneOpen) return;
+        App.Settings.NavPaneCollapsed = !sender.IsPaneOpen;
+        App.Settings.Save();
+    }
+
+    // Toasts sit centred under the content, not under the pane.
+    private void UpdateToastMargin() =>
+        ToastHost.Margin = new Thickness(RootNavigation.IsPaneOpen ? RootNavigation.OpenPaneLength : RootNavigation.CompactPaneLength, 0, 0, 16);
+
+    // 960 x 680 (in device-independent pixels), in the middle of the screen
+    // it opens on.
+    private void SetSize()
+    {
+        double scale = GetDpiForWindow(hwnd) / 96.0;
+        var area = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
+        int width = Math.Min((int)(960 * scale), area.Width);
+        int height = Math.Min((int)(680 * scale), area.Height);
+        AppWindow.MoveAndResize(new RectInt32(area.X + (area.Width - width) / 2, area.Y + (area.Height - height) / 2, width, height));
+        if (AppWindow.Presenter is OverlappedPresenter presenter)
+        {
+            presenter.PreferredMinimumWidth = (int)(560 * scale);
+            presenter.PreferredMinimumHeight = (int)(480 * scale);
+        }
+    }
+
+    // On the screen and not minimised: what pairing mode needs to know.
+    public bool IsOnScreen => AppWindow.IsVisible
+        && AppWindow.Presenter is not OverlappedPresenter { State: OverlappedPresenterState.Minimized };
+
+    // ... and also the window in front of the others.
+    public bool IsInFront => IsOnScreen && isActive;
+
+    public event Action? OnScreenChanged;
+
+    // Brings the window to the front, from the tray or a second launch.
+    public void Present()
+    {
+        if (AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized } presenter) presenter.Restore();
+        AppWindow.Show();
+        Activate();
+        SetForegroundWindow(hwnd);
+    }
+
+    // ---- pages ----------------------------------------------------------------
+
+    private void RootNavigation_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
+    {
+        Type? page = (args.SelectedItemContainer?.Tag as string) switch
+        {
+            "synced" => typeof(SyncedPage),
+            "devices" => typeof(DevicesPage),
+            "settings" => typeof(SettingsPage),
+            _ => null,
+        };
+        if (page != null && ContentFrame.CurrentSourcePageType != page) ContentFrame.Navigate(page);
+    }
+
+    public void Navigate(Type page)
+    {
+        string tag = page == typeof(DevicesPage) ? "devices" : page == typeof(SettingsPage) ? "settings" : "synced";
+        foreach (var item in RootNavigation.MenuItems.Concat(RootNavigation.FooterMenuItems).OfType<NavigationViewItem>())
+        {
+            if ((item.Tag as string) == tag) RootNavigation.SelectedItem = item;
+        }
+    }
+
+    // ---- toasts and dialogs -----------------------------------------------------
 
     // A short message at the bottom of the window.
-    public void Toast(string title, string? message = null, ControlAppearance appearance = ControlAppearance.Secondary,
-        SymbolRegular icon = SymbolRegular.CheckmarkCircle24)
+    public void Toast(string title, string? message = null, InfoBarSeverity severity = InfoBarSeverity.Success)
     {
-        var snackbar = new Snackbar(Snackbars)
+        var bar = new InfoBar
         {
-            // Our type ramp (Body Strong / Body) rather than the control's 16 px title.
-            Title = new TextBlock { Text = title, Style = (Style)FindResource("BodyStrongText"), TextWrapping = TextWrapping.Wrap },
-            Content = message == null ? null
-                : new TextBlock { Text = message, Style = (Style)FindResource("BodyText"), TextWrapping = TextWrapping.Wrap },
-            Appearance = appearance,
-            Icon = new SymbolIcon(icon) { Filled = true, FontSize = 20 },
-            Timeout = TimeSpan.FromSeconds(message == null ? 3 : 6),
+            Title = title,
+            Message = message ?? "",
+            Severity = severity,
+            IsOpen = true,
+            IsClosable = false,
+            MaxWidth = 560,
+            Margin = new Thickness(0, 8, 0, 0),
         };
-        if (message == null) snackbar.MinHeight = 0; // one line: no empty second row
-        snackbar.Show(true);
+        ToastHost.Children.Add(bar);
+        while (ToastHost.Children.Count > 3) ToastHost.Children.RemoveAt(0);
+
+        var timer = DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromSeconds(message == null ? 3 : 6);
+        timer.IsRepeating = false;
+        timer.Tick += (_, _) => ToastHost.Children.Remove(bar);
+        timer.Start();
     }
 
-    public void ToastError(string title, string? message = null) =>
-        Toast(title, message, ControlAppearance.Danger, SymbolRegular.ErrorCircle24);
+    public void ToastError(string title, string? message = null) => Toast(title, message, InfoBarSeverity.Error);
 
     public async Task<ContentDialogResult> ShowDialogAsync(ContentDialog dialog)
     {
-        openDialog?.Hide(ContentDialogResult.None);
+        dialog.XamlRoot = Root.XamlRoot;
+        dialog.RequestedTheme = Root.RequestedTheme;
+        openDialog?.Hide();
         openDialog = dialog;
         try
         {
-            return await dialog.ShowAsync(CancellationToken.None);
+            return await dialog.ShowAsync();
         }
         finally
         {
@@ -77,7 +182,7 @@ public partial class MainWindow : FluentWindow
     // "Delete this item?" and the like. True if confirmed.
     public async Task<bool> ConfirmAsync(string title, string message, string confirmText)
     {
-        var dialog = new ContentDialog(DialogHost)
+        var dialog = new ContentDialog
         {
             Title = title,
             Content = Paragraph(message),
@@ -88,14 +193,13 @@ public partial class MainWindow : FluentWindow
         return await ShowDialogAsync(dialog) == ContentDialogResult.Primary;
     }
 
-    private static TextBlock Paragraph(string text) => new()
+    internal static TextBlock Paragraph(string text) => new()
     {
         Text = text,
         TextWrapping = TextWrapping.Wrap,
-        Style = (Style)Application.Current.FindResource("BodyText"),
     };
 
-    // ---- pairing requests -------------------------------------------------
+    // ---- pairing requests -------------------------------------------------------
 
     private async void OnPairingRequested(PendingPairing pending)
     {
@@ -119,7 +223,7 @@ public partial class MainWindow : FluentWindow
             $"ID {DeviceLabel.Fingerprint(pending.DeviceId)} - check that it matches the fingerprint that device shows for itself (in Settings on a PC, on the Me tab on a phone).");
         fingerprint.Margin = new Thickness(0, 12, 0, 0);
 
-        var dialog = new ContentDialog(DialogHost)
+        var dialog = new ContentDialog
         {
             Title = $"Pair with {name}?",
             Content = new StackPanel
@@ -136,7 +240,7 @@ public partial class MainWindow : FluentWindow
             DefaultButton = ContentDialogButton.Close,
         };
         pairingPrompt = (pending.DeviceId, dialog);
-        if (!IsVisible) App.Instance.ShowMainWindow();
+        if (!IsOnScreen) App.Instance.ShowMainWindow();
         var result = await ShowDialogAsync(dialog);
         if (pairingPrompt?.Dialog != dialog)
         {
@@ -163,21 +267,7 @@ public partial class MainWindow : FluentWindow
         if (pairingPrompt is { } prompt && prompt.DeviceId == deviceId)
         {
             pairingPrompt = null;
-            prompt.Dialog.Hide(ContentDialogResult.None);
+            prompt.Dialog.Hide();
         }
-    }
-
-    // ---- window ----------------------------------------------------------
-
-    // The close button only hides the window (ClipLink keeps syncing from
-    // the tray); Settings > Quit really closes it.
-    protected override void OnClosing(CancelEventArgs e)
-    {
-        if (!App.IsQuitting)
-        {
-            e.Cancel = true;
-            Hide();
-        }
-        base.OnClosing(e);
     }
 }

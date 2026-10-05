@@ -1,6 +1,6 @@
 // Step 7 of the build order in ../../../../README.md: signing/verification
-// + trust store integration. Mirrors windows/daemon/Crypto/SigningService.cs
-// and windows/daemon/Storage/ClipboardEntry.cs exactly.
+// + trust store integration. Mirrors windows/ClipLink/Engine/Crypto/SigningService.cs
+// and windows/ClipLink/Engine/Storage/ClipboardEntry.cs exactly.
 //
 // Timestamp handling is the one subtlety here. ClipboardEntry.cs's
 // Timestamp is a real DateTime, and SigningService.cs signs over

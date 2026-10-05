@@ -1,7 +1,7 @@
 # ClipLink for iOS
 
 SwiftUI app, **iOS 15+**, built with Xcode 26. Speaks exactly the same wire
-protocol as `windows/daemon`, `mobile/android` and `mobile/harmonyos` - same UDP
+protocol as `windows/ClipLink/Engine`, `mobile/android` and `mobile/harmonyos` - same UDP
 beacon, same TCP handshake, same encrypted envelopes - so all four
 interoperate directly. No servers, no daemon: iOS is a foreground node that
 also catches up in the background when iOS lets it.
@@ -51,7 +51,7 @@ Against the **actual Windows engine code** (needs the .NET 10 SDK):
 cd CoreTests && DOTNET=/path/to/dotnet ./run-daemon-interop.sh
 ```
 
-This compiles `windows/daemon` (the engine library the Windows app runs
+This compiles `windows/ClipLink/Engine` (the engine library the Windows app runs
 in-process) for macOS with only platform shims (DPAPI, WinForms clipboard,
 ports) and runs the iOS engine against it: passcode pairing in both
 tie-breaker directions with and without broadcast, QR-style pairing with

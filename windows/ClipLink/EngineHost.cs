@@ -1,8 +1,12 @@
 using System.Collections.ObjectModel;
-using System.IO;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.WindowsRuntime;
 using ClipboardDaemon.Engine;
+using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Windows.ApplicationModel.DataTransfer;
+using Windows.Graphics.Imaging;
+using Windows.Storage.Streams;
 
 namespace ClipLink;
 
@@ -11,10 +15,10 @@ namespace ClipLink;
 // state the pages bind to. Everything here is UI-thread only.
 public sealed class EngineHost : Observable
 {
-    private readonly Dispatcher dispatcher;
-    private readonly DispatcherTimer clock;
+    private readonly DispatcherQueue dispatcher;
+    private readonly DispatcherQueueTimer clock;
 
-    public EngineHost(Dispatcher dispatcher)
+    public EngineHost(DispatcherQueue dispatcher)
     {
         this.dispatcher = dispatcher;
         Engine.HistoryChanged += () => Post(ReloadHistory);
@@ -24,10 +28,12 @@ public sealed class EngineHost : Observable
         Engine.StatusChanged += _ => Post(RefreshStatus);
 
         // "5 min ago" moves on by itself.
-        clock = new DispatcherTimer(TimeSpan.FromSeconds(30), DispatcherPriority.Background, (_, _) =>
+        clock = dispatcher.CreateTimer();
+        clock.Interval = TimeSpan.FromSeconds(30);
+        clock.Tick += (_, _) =>
         {
             foreach (var card in History) card.Tick();
-        }, dispatcher);
+        };
     }
 
     public ClipLinkEngine Engine { get; } = new();
@@ -109,10 +115,12 @@ public sealed class EngineHost : Observable
         }
         try
         {
-            System.Windows.Clipboard.SetText(text);
+            var package = new DataPackage();
+            package.SetText(text);
+            Clipboard.SetContent(package);
             return true;
         }
-        catch (System.Runtime.InteropServices.ExternalException ex)
+        catch (COMException ex)
         {
             Console.WriteLine($"[app] couldn't write the clipboard: {ex.Message}");
             return false;
@@ -127,7 +135,7 @@ public sealed class EngineHost : Observable
         Console.WriteLine($"[app] pairing mode {(active ? "on" : "off")}");
     }
 
-    private void Post(Action action) => dispatcher.BeginInvoke(action);
+    private void Post(Action action) => dispatcher.TryEnqueue(() => action());
 
     private void RefreshStatus()
     {
@@ -142,7 +150,7 @@ public sealed class EngineHost : Observable
         SyncByKey(History, items, card => card.Key, item => item.Key, item => new HistoryCard(item), (card, item) => card.Update(item));
         foreach (var card in History)
         {
-            if (card.IsImage && !card.ThumbnailRequested) LoadThumbnail(card);
+            if (card.IsImage && !card.ThumbnailRequested) _ = LoadThumbnailAsync(card);
         }
         Raise(nameof(HistoryIsEmpty));
     }
@@ -186,50 +194,44 @@ public sealed class EngineHost : Observable
     private const int ThumbnailMaxWidth = 720;
     private const int ThumbnailMaxHeight = 960;
 
-    private void LoadThumbnail(HistoryCard card)
+    private async Task LoadThumbnailAsync(HistoryCard card)
     {
         card.ThumbnailRequested = true;
-        string key = card.Key;
-        _ = Task.Run(() =>
-        {
-            var (image, width, height) = DecodeImage(key, ThumbnailMaxWidth, ThumbnailMaxHeight);
-            Post(() =>
-            {
-                card.PixelWidth = image == null ? 0 : width;
-                card.PixelHeight = image == null ? 0 : height;
-                if (image == null) card.ThumbnailFailed = true;
-                else card.Thumbnail = image;
-            });
-        });
+        var (image, width, height) = await DecodeImageAsync(card.Key, ThumbnailMaxWidth, ThumbnailMaxHeight);
+        card.PixelWidth = image == null ? 0 : width;
+        card.PixelHeight = image == null ? 0 : height;
+        if (image == null) card.ThumbnailFailed = true;
+        else card.Thumbnail = image;
     }
 
     // An image entry decoded for the Synced page's full view (at most this
     // big - enough for a large window on a high-DPI screen). Null if it's
     // gone or can't be decoded. Not cached: it's one image at a time.
-    public async Task<BitmapSource?> LoadImageAsync(string key) =>
-        (await Task.Run(() => DecodeImage(key, 2400, 2400))).Image;
+    public async Task<BitmapImage?> LoadImageAsync(string key) =>
+        (await DecodeImageAsync(key, 2400, 2400)).Image;
 
-    // Decoded off the UI thread, frozen, no bigger than maxWidth x maxHeight
-    // (never enlarged); also the image's own pixel size.
-    private (BitmapSource? Image, int Width, int Height) DecodeImage(string key, int maxWidth, int maxHeight)
+    // The bytes are read off the UI thread; the decode itself is WinUI's
+    // (a BitmapImage belongs to the UI thread), no bigger than maxWidth x
+    // maxHeight (never enlarged); also the image's own pixel size.
+    private async Task<(BitmapImage? Image, int Width, int Height)> DecodeImageAsync(string key, int maxWidth, int maxHeight)
     {
         try
         {
-            if (Engine.GetImageBytes(key) is not byte[] bytes) return (null, 0, 0);
+            if (await Task.Run(() => Engine.GetImageBytes(key)) is not byte[] bytes) return (null, 0, 0);
+            using var stream = new InMemoryRandomAccessStream();
+            await stream.WriteAsync(bytes.AsBuffer());
+            stream.Seek(0);
             // Only the header, to pick the decode size.
-            var frame = BitmapFrame.Create(new MemoryStream(bytes), BitmapCreateOptions.DelayCreation, BitmapCacheOption.None);
-            int width = frame.PixelWidth;
-            int height = frame.PixelHeight;
+            var decoder = await BitmapDecoder.CreateAsync(stream);
+            int width = (int)decoder.PixelWidth;
+            int height = (int)decoder.PixelHeight;
             var bitmap = new BitmapImage();
-            bitmap.BeginInit();
-            bitmap.CacheOption = BitmapCacheOption.OnLoad;
-            bitmap.StreamSource = new MemoryStream(bytes);
             if ((long)width * maxHeight > (long)height * maxWidth)
                 bitmap.DecodePixelWidth = Math.Min(width, maxWidth);
             else
                 bitmap.DecodePixelHeight = Math.Min(height, maxHeight);
-            bitmap.EndInit();
-            bitmap.Freeze();
+            stream.Seek(0);
+            await bitmap.SetSourceAsync(stream);
             return (bitmap, width, height);
         }
         catch (Exception ex)

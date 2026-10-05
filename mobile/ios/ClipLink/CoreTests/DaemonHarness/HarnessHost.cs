@@ -1,6 +1,6 @@
 // The process the interop tests launch: `dotnet ClipboardDaemonHarness.dll
 // <label> <tcpPort> [trustedKey]`. It runs the REAL Windows engine
-// (windows/daemon's ClipLinkEngine - in the app it runs in-process, with no
+// (windows/ClipLink/Engine's ClipLinkEngine - in the app it runs in-process, with no
 // control pipe) and, for the tests, serves the old tray's named-pipe
 // commands ("ClipboardDaemonIPC_<label>", one JSON request per connection,
 // {"Success","Data"} back) by mapping each onto the engine's typed methods,

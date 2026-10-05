@@ -1,5 +1,5 @@
 // Step 5 of the build order in ../../../../README.md: networking.
-// Mirrors windows/daemon/Networking/Discovery.cs exactly — same port, same
+// Mirrors windows/ClipLink/Engine/Networking/Discovery.cs exactly — same port, same
 // beacon format ("{tcpPort}:{deviceID}:{proof}:{address}:{pairing}:{name}",
 // "-" for absent fields), same 2-second send interval. Device IDs are base64
 // (from DeviceIdentity.ets / DeviceIdentity.cs), which never contains ":", so

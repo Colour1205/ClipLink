@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runs the iOS sync engine against the REAL Windows engine code (windows/daemon,
+# Runs the iOS sync engine against the REAL Windows engine code (windows/ClipLink/Engine,
 # the ClipLinkEngine library) on macOS, hosted by DaemonHarness/HarnessHost.cs.
 #   DOTNET=/path/to/dotnet ./run-daemon-interop.sh        (needs the .NET 10 SDK)
 # Also set DEVELOPER_DIR if Xcode isn't the selected toolchain.

@@ -13,6 +13,8 @@ namespace ClipLink;
 //                           in the tray - and does
 //   --unregister            take "Share to ClipLink" out of File Explorer
 //                           (and turn its setting off), then exit
+//   --quit                  quit the running ClipLink, then exit (what the
+//                           installer does before it updates or removes it)
 // The rest run a second, separate ClipLink next to the real one, for
 // testing: its own data (label), ports, and nothing that reaches the
 // network or the clipboard - so no Windows Firewall prompt either.
@@ -30,6 +32,7 @@ public sealed record AppOptions
     // running copy can use them.
     public IReadOnlyList<string>? SharePaths { get; init; }
     public bool Unregister { get; init; }
+    public bool Quit { get; init; }
     public string Label { get; init; } = ClipLinkEngine.DefaultLabel;
     public int Port { get; init; } = ClipLinkEngine.DefaultPort;
     public int DiscoveryPort { get; init; } = ClipLinkEngine.DefaultPort;
@@ -76,6 +79,9 @@ public sealed record AppOptions
                     break;
                 case "--unregister":
                     options = options with { Unregister = true };
+                    break;
+                case "--quit":
+                    options = options with { Quit = true };
                     break;
                 case "--label":
                     string? label = Value();
@@ -131,7 +137,7 @@ public sealed record AppOptions
     }
 
     // The options that pick which ClipLink this is (everything but
-    // --background, --share and --unregister), to start the same one again
+    // --background, --share, --unregister and --quit), to start the same one again
     // at sign-in - and from File Explorer's "Share to ClipLink".
     public string IdentityArguments()
     {

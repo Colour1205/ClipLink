@@ -1,17 +1,18 @@
 using System.Diagnostics;
 using System.IO;
 using System.Net;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
 using ClipboardDaemon.Engine;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Windows.System;
 
 namespace ClipLink;
 
 // This PC (name, device ID and fingerprint, Tailscale address), the
 // passcode, starting at sign-in, "Share to ClipLink" in File Explorer,
 // clearing the synced history, About - and Quit, the only way to end ClipLink.
-public partial class SettingsPage : Page
+public sealed partial class SettingsPage : Page
 {
     private readonly EngineHost host = App.Host;
     private bool loadingToggle;
@@ -19,8 +20,8 @@ public partial class SettingsPage : Page
     public SettingsPage()
     {
         InitializeComponent();
-        DataContext = host;
-        StatusBanner.TrackEngine(host);
+        EngineBanner.Track(StatusBanner, host);
+        WheelScroll.Attach(Scroller);
         DeviceNameBox.PlaceholderText = ComputerName();
         AboutCard.Description = $"Version {App.Version}. Syncs your clipboard between your devices, directly - no cloud."
             + (App.Options.IsDefaultLabel ? "" : $" Test copy \"{App.Options.Label}\" on port {App.Options.Port}.");
@@ -45,7 +46,7 @@ public partial class SettingsPage : Page
         DeviceNameBox.Text = host.Engine.DeviceName;
         string id = host.Engine.DeviceId;
         DeviceIdCard.Description = id.Length > 40 ? id[..40] + "…" : id;
-        DeviceIdCard.ToolTip = new ToolTip { Content = new TextBlock { Text = id, TextWrapping = TextWrapping.Wrap, MaxWidth = 360 } };
+        ToolTipService.SetToolTip(DeviceIdCard, new TextBlock { Text = id, TextWrapping = TextWrapping.Wrap, MaxWidth = 360 });
         FingerprintText.Text = DeviceLabel.Fingerprint(id);
         UpdateTailscale(host.Engine.TailscaleAddress);
         _ = RefreshTailscaleAsync();
@@ -54,7 +55,7 @@ public partial class SettingsPage : Page
         loadingToggle = true;
         try
         {
-            SignInToggle.IsChecked = SignInStartup.IsEnabled(App.Options);
+            SignInToggle.IsOn = SignInStartup.IsEnabled(App.Options);
         }
         catch (Exception ex)
         {
@@ -81,9 +82,9 @@ public partial class SettingsPage : Page
 
     // ---- this PC -----------------------------------------------------------
 
-    private void DeviceNameBox_KeyDown(object sender, KeyEventArgs e)
+    private void DeviceNameBox_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key != Key.Enter) return;
+        if (e.Key != VirtualKey.Enter) return;
         e.Handled = true;
         SaveName_Click(sender, e);
     }
@@ -134,7 +135,7 @@ public partial class SettingsPage : Page
     private void UpdateTailscale(string? address)
     {
         TailscaleCard.Visibility = address == null ? Visibility.Collapsed : Visibility.Visible;
-        TailscaleCard.Description = address == null ? null
+        TailscaleCard.Description = address == null ? ""
             : $"{address} - paired devices reach this PC here when they're away from your network.";
     }
 
@@ -157,9 +158,9 @@ public partial class SettingsPage : Page
         PasscodeError.Visibility = error == null ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    private void PasscodeBox_KeyDown(object sender, KeyEventArgs e)
+    private void PasscodeBox_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key != Key.Enter) return;
+        if (e.Key != VirtualKey.Enter) return;
         e.Handled = true;
         SetPasscode_Click(sender, e);
     }
@@ -172,7 +173,7 @@ public partial class SettingsPage : Page
         if (passcode.Trim().Length == 0)
         {
             ShowPasscodeError("Enter a passcode first.");
-            PasscodeBox.Focus();
+            PasscodeBox.Focus(FocusState.Programmatic);
             return;
         }
         ShowPasscodeError(null);
@@ -228,10 +229,10 @@ public partial class SettingsPage : Page
 
     // ---- general -----------------------------------------------------------
 
-    private void SignInToggle_Changed(object sender, RoutedEventArgs e)
+    private void SignInToggle_Toggled(object sender, RoutedEventArgs e)
     {
         if (loadingToggle) return;
-        bool on = SignInToggle.IsChecked == true;
+        bool on = SignInToggle.IsOn;
         try
         {
             if (on) SignInStartup.Enable(App.Options);
@@ -244,7 +245,7 @@ public partial class SettingsPage : Page
             Console.WriteLine($"[startup] couldn't change the sign-in entry: {ex.Message}");
             App.MainAppWindow.ToastError("Couldn't change that", ex.Message);
             loadingToggle = true;
-            SignInToggle.IsChecked = !on;
+            SignInToggle.IsOn = !on;
             loadingToggle = false;
         }
     }
@@ -252,14 +253,14 @@ public partial class SettingsPage : Page
     private void UpdateShareMenuToggle()
     {
         loadingToggle = true;
-        ShareMenuToggle.IsChecked = App.Instance.ExplorerShareMenuOn;
+        ShareMenuToggle.IsOn = App.Instance.ExplorerShareMenuOn;
         loadingToggle = false;
     }
 
-    private void ShareMenuToggle_Changed(object sender, RoutedEventArgs e)
+    private void ShareMenuToggle_Toggled(object sender, RoutedEventArgs e)
     {
         if (loadingToggle) return;
-        bool on = ShareMenuToggle.IsChecked == true;
+        bool on = ShareMenuToggle.IsOn;
         try
         {
             App.Instance.SetExplorerShareMenu(on);

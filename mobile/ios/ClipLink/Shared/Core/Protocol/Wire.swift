@@ -1,7 +1,7 @@
 import Foundation
 
 /// Constants every ClipLink node must agree on byte-for-byte. Each one is
-/// mirrored in windows/daemon, mobile/android and mobile/harmonyos; changing
+/// mirrored in windows/ClipLink/Engine, mobile/android and mobile/harmonyos; changing
 /// any of them here silently partitions this device from the mesh.
 public enum Wire {
     /// UDP beacons and the TCP listener share one port number on every platform.

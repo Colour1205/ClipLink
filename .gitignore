@@ -1,8 +1,10 @@
 # Build output
 bin/
 obj/
-# windows/publish.ps1 output (ClipLink.exe)
+# windows/publish.ps1 output (the app folder and the installer) and the
+# Inno Setup compiler it fetches
 windows/dist/
+windows/.tools/
 
 # VS / VS Code
 .vs/

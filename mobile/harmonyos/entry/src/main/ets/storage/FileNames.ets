@@ -1,4 +1,4 @@
-// Mirrors windows/daemon/Storage/FileNames.cs. A file's name always comes
+// Mirrors windows/ClipLink/Engine/Storage/FileNames.cs. A file's name always comes
 // from somewhere else - a peer's signed FilePayload, or the app that shared
 // the file to ClipLink - and it's shown, offered to a save picker, and sent
 // on to peers that do turn it into a path. Only its last path segment counts

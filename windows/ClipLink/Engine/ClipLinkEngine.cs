@@ -27,8 +27,8 @@ namespace ClipboardDaemon.Engine;
 // async (those do network or slow crypto work - await them, don't block on
 // them from a UI thread). Events are raised one at a time, in order, on a
 // background thread - never the caller's, never the UI thread, never while
-// the engine holds a lock. A UI must marshal them (WPF:
-// Dispatcher.BeginInvoke) and should keep handlers short: a slow handler
+// the engine holds a lock. A UI must marshal them (WinUI:
+// DispatcherQueue.TryEnqueue) and should keep handlers short: a slow handler
 // delays later events (not the networking). An exception thrown by a
 // handler is logged and otherwise ignored.
 public sealed partial class ClipLinkEngine : IDisposable

@@ -1,4 +1,4 @@
-// Test double for windows/daemon/Clipboard/ClipboardSync.cs (WinForms is
+// Test double for windows/ClipLink/Engine/Clipboard/ClipboardSync.cs (WinForms is
 // Windows-only). Same public surface and the same echo-suppression rules
 // (UPPERCASE SHA-256; files hashed as the UTF-8 of their FileHash), but a
 // "copy" arrives as a stdin command and every clipboard write is printed:

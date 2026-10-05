@@ -1,6 +1,6 @@
 // Step 4 of the build order in ../../../../README.md: local persistence.
-// Mirrors windows/daemon/Identity/PassphraseKeyStore.cs and
-// windows/daemon/Crypto/PassphraseAuth.cs.
+// Mirrors windows/ClipLink/Engine/Identity/PassphraseKeyStore.cs and
+// windows/ClipLink/Engine/Crypto/PassphraseAuth.cs.
 //
 // Security level deliberately kept at parity with Windows, not "improved"
 // unilaterally: the Windows version doesn't put this key in a hardware

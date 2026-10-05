@@ -2,17 +2,24 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using ClipboardDaemon.Engine;
+using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
 
 namespace ClipLink;
 
-// Own entry point (App.xaml is an ordinary page): the single-instance check
-// runs before WPF starts. One ClipLink runs per user session (and label); a
-// second launch hands its request to that one (InstancePipe) and exits.
+// Own entry point (App.xaml's generated Main is off): the single-instance
+// check runs before WinUI starts. One ClipLink runs per user session (and
+// label); a second launch hands its request to that one (InstancePipe) and
+// exits.
 public static class Program
 {
     [DllImport("user32.dll")]
     private static extern bool AllowSetForegroundWindow(int processId);
     private const int ASFW_ANY = -1;
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int MessageBoxW(nint hWnd, string text, string caption, uint type);
+    private const uint MB_OK_ICONERROR = 0x10;
 
     // How long a second launch keeps trying to reach the running copy. A
     // share waits longest: File Explorer may have started a hundred of them
@@ -33,6 +40,7 @@ public static class Program
         }
 
         if (options.Unregister) return Unregister(options);
+        if (options.Quit) return QuitRunning(options);
 
         using var mutex = new Mutex(initiallyOwned: false, MutexName(options.Label));
         if (!TryOwn(mutex))
@@ -78,11 +86,11 @@ public static class Program
         }
     }
 
-    // These two are kept out of Main, so a second launch - the many "Share
-    // to ClipLink" ones especially - never loads WPF.
+    // Kept out of Main, so a second launch - the many "Share to ClipLink"
+    // ones especially - never loads WinUI.
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void ShowError(string? error) =>
-        System.Windows.MessageBox.Show(error, "ClipLink", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
+    internal static void ShowError(string? error) =>
+        MessageBoxW(0, error ?? "", "ClipLink", MB_OK_ICONERROR);
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static int RunApp(AppOptions options)
@@ -105,11 +113,27 @@ public static class Program
         Console.WriteLine($"[app] ClipLink {App.Version} starting (pid {Environment.ProcessId}, label {options.Label}"
             + (options.Background ? ", in the background" : "")
             + (options.SharePaths is { } paths ? $", to share {paths.Count} file(s)" : "") + ")");
-        var app = new App(options);
-        app.InitializeComponent();
-        int exitCode = app.Run();
-        Console.WriteLine($"[app] exited ({exitCode})");
-        return exitCode;
+
+        WinRT.ComWrappersSupport.InitializeComWrappers();
+        Application.Start(callbackParams =>
+        {
+            SynchronizationContext.SetSynchronizationContext(
+                new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread()));
+            _ = new App(options);
+        });
+        Console.WriteLine($"[app] exited ({App.ExitCode})");
+        return App.ExitCode;
+    }
+
+    // ClipLink.exe --quit: asks the running ClipLink to quit - what the
+    // installer does before it updates or removes it. Nothing running is
+    // fine: that's the state the caller wants.
+    private static int QuitRunning(AppOptions options)
+    {
+        bool running = Mutex.TryOpenExisting(MutexName(options.Label), out var existing);
+        existing?.Dispose();
+        if (!running) return 0;
+        return InstancePipe.Send(options.Label, new InstancePipe.Message(InstancePipe.Quit), ActivateTimeout) ? 0 : 1;
     }
 
     // ClipLink.exe --unregister: "Share to ClipLink" out of File Explorer,

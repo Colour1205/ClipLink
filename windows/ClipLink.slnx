@@ -1,4 +1,3 @@
 <Solution>
   <Project Path="ClipLink/ClipLink.csproj" />
-  <Project Path="daemon/ClipboardDaemon.csproj" />
 </Solution>

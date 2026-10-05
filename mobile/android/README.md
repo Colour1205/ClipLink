@@ -1,7 +1,7 @@
 # ClipLink for Android
 
 Jetpack Compose + Material 3 Expressive. Speaks the same wire protocol as
-`windows/daemon` and `mobile/harmonyos` — same UDP beacon, same TCP handshake,
+`windows/ClipLink/Engine` and `mobile/harmonyos` — same UDP beacon, same TCP handshake,
 same encrypted envelopes — so all three interoperate directly.
 
 ## Build
@@ -96,6 +96,6 @@ the Windows daemon uses culture-sensitive `String.CompareTo`. ICU sorts `'k'`
 before `'Q'`; ordinal does not. For roughly one key pair in six the two sides
 disagree about who should dial, so either both dial or neither does.
 
-The fix belongs in `windows/daemon` (`string.CompareOrdinal`). Do **not**
+The fix belongs in `windows/ClipLink/Engine` (`string.CompareOrdinal`). Do **not**
 "match" it by going culture-sensitive here — that would only break this
 against HarmonyOS as well.
