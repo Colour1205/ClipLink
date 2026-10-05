@@ -128,24 +128,33 @@ export class TcpSocketConnectionAdapter implements TcpLike {
   }
 }
 
-// A key's bytes written out again as Base64: one spelling for every one
-// the decoder takes. null if it isn't Base64 at all.
-function canonicalBase64(base64: string): string | null {
+// The bytes a Base64 IdentityPublicKey decodes to - by the same decoder
+// verifyRawSignature reads it with - or null if it isn't Base64 at all.
+function decodedKey(base64: string): Uint8Array | null {
   try {
-    return base64Helper.encodeToStringSync(base64Helper.decodeSync(base64));
+    return base64Helper.decodeSync(base64);
   } catch (e) {
     return null;
   }
 }
 
+// Whether two keys' bytes are one key. No bytes at all (an empty key, or
+// one the decoder refused) is nobody's key, so it never matches.
+export function sameKeyBytes(a: Uint8Array | null, b: Uint8Array | null): boolean {
+  if (a === null || b === null || a.length === 0 || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 // Whether two IdentityPublicKeys are one key: compared as the bytes they
 // decode to, not just as text, so our own key spelt some other way the
-// decoder still takes (whitespace in it, say) is still ours - as Windows'
-// CreateAsync compares the key it re-exports.
+// decoder still takes (whitespace in it, say) is still ours. The same as
+// comparing canonical re-encodings (one Base64 spelling per byte string),
+// which is how Windows' CreateAsync compares the key it re-exports.
 export function sameIdentityKey(a: string, b: string): boolean {
-  if (a === b) return true;
-  const canonical: string | null = canonicalBase64(a);
-  return canonical !== null && canonical === canonicalBase64(b);
+  return (a.length > 0 && a === b) || sameKeyBytes(decodedKey(a), decodedKey(b));
 }
 
 async function sha256(data: Uint8Array): Promise<Uint8Array> {
@@ -354,9 +363,21 @@ const PING_SENTINEL = '__ping__';
 const HEARTBEAT_INTERVAL_MS = 3000;
 const HEARTBEAT_TIMEOUT_MS = 9000;
 
-// An envelope's first 16 base64 characters are exactly its 12-byte nonce
-// (see AesGcm.ets's packing) - what sentNonces keys on.
-const NONCE_BASE64_LENGTH = 16;
+// What sentNonces keeps a line by: its nonce - the first AesGcm.NONCE_SIZE
+// of its packed nonce || tag || ciphertext bytes - in hex. The decoded
+// bytes, as Windows and Android keep them, never the line's text: a decoder
+// may take more than one spelling of the same bytes (whitespace in them, or
+// a character outside the alphabet read as some other), so an echo of one
+// of our lines spelt another way would miss a text match and still decrypt.
+// null for bytes too short to hold a nonce, which decryptPacked refuses.
+export function nonceKey(packed: Uint8Array): string | null {
+  if (packed.length < AesGcm.NONCE_SIZE) return null;
+  let key = '';
+  for (let i = 0; i < AesGcm.NONCE_SIZE; i++) {
+    key += packed[i].toString(16).padStart(2, '0');
+  }
+  return key;
+}
 
 export class PeerConnection {
   private messageCallback: ((message: string) => void) | null = null;
@@ -390,7 +411,7 @@ export class PeerConnection {
   // proven, then null. Both directions share one key with no AAD, so an
   // envelope of ours echoed back would decrypt too - a replayed handshake's
   // sender could "prove" the session with this side's own history batch or
-  // ping. listenLoop refuses such a line instead.
+  // ping. listenLoop refuses such a line instead. Keyed by nonceKey.
   private sentNonces: Set<string> | null = new Set<string>();
 
   private constructor(channel: TcpLineChannel, sessionKey: Uint8Array, peerDeviceId: string, wasAlreadyTrusted: boolean, newlyTrustedViaPassphrase: boolean, peerName: string | null) {
@@ -510,9 +531,11 @@ export class PeerConnection {
   }
 
   async send(message: string): Promise<void> {
-    const encrypted = await AesGcm.encrypt(this.sessionKey, message);
-    if (this.sentNonces !== null) this.sentNonces.add(encrypted.slice(0, NONCE_BASE64_LENGTH));
-    await this.channel.writeLine(encrypted);
+    const packed: Uint8Array = await AesGcm.encryptPacked(this.sessionKey, message);
+    // Before the write, so its echo can't arrive ahead of it.
+    const nonce: string | null = nonceKey(packed);
+    if (this.sentNonces !== null && nonce !== null) this.sentNonces.add(nonce);
+    await this.channel.writeLine(base64Helper.encodeToStringSync(packed));
   }
 
   onMessage(callback: (message: string) => void): void {
@@ -569,13 +592,16 @@ export class PeerConnection {
       while (true) {
         const line = await this.channel.readLine();
         if (line === null) break;
-        // Checked before decrypting: an echo of this side's own envelope
-        // would decrypt (see sentNonces), and must neither prove the
-        // session nor count as activity for the heartbeat watchdog.
-        if (this.sentNonces !== null && this.sentNonces.has(line.slice(0, NONCE_BASE64_LENGTH))) {
+        // Decoded once: the nonce checked is the one decrypted with (see
+        // nonceKey). Checked before decrypting: an echo of this side's own
+        // envelope would decrypt (see sentNonces), and must neither prove
+        // the session nor count as activity for the heartbeat watchdog.
+        const packed: Uint8Array = base64Helper.decodeSync(line);
+        const nonce: string | null = nonceKey(packed);
+        if (this.sentNonces !== null && nonce !== null && this.sentNonces.has(nonce)) {
           throw new Error('reflected line');
         }
-        const decrypted = await AesGcm.decrypt(this.sessionKey, line);
+        const decrypted = await AesGcm.decryptPacked(this.sessionKey, packed);
         this.lastActivityAt = Date.now();
         if (!this.sessionProven) this.markSessionProven();
         if (decrypted === PING_SENTINEL) continue; // heartbeat only, not real data

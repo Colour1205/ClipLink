@@ -31,9 +31,10 @@ object Protocol {
         }.toString()
 
     /**
-     * The one sanitiser for device names: control and bidi/format characters
-     * removed, then trimmed and capped at [MAX_DEVICE_NAME_LENGTH] code
-     * points, or null when nothing is left. Applied to our own name before it
+     * The one sanitiser for device names: control, bidi and zero-width
+     * characters ([FileNames.isUnsafeChar] - the set a received file name
+     * loses too) removed, then trimmed and capped at
+     * [MAX_DEVICE_NAME_LENGTH] code points, or null when nothing is left. Applied to our own name before it
      * goes out AND to every name that comes in - beacon, handshake and
      * pairing code alike. A peer's name is self-claimed untrusted text: a
      * handshake line has no length limit of its own, and a right-to-left
@@ -43,24 +44,13 @@ object Protocol {
      */
     fun normalizeDeviceName(raw: String?): String? {
         val cleaned = buildString {
-            raw?.codePoints()?.forEach { if (!isUnsafeInName(it)) appendCodePoint(it) }
+            raw?.codePoints()?.forEach { if (!FileNames.isUnsafeChar(it)) appendCodePoint(it) }
         }
         val trimmed = cleaned.trim()
         if (trimmed.isEmpty()) return null
         if (trimmed.codePointCount(0, trimmed.length) <= MAX_DEVICE_NAME_LENGTH) return trimmed
         return trimmed.substring(0, trimmed.offsetByCodePoints(0, MAX_DEVICE_NAME_LENGTH))
     }
-
-    /**
-     * C0 and C1 controls (DEL included), the bidi controls (U+061C,
-     * U+200E/F, U+202A-E, U+2066-9) and the zero-width ones (U+200B-D,
-     * U+FEFF) - the same set every platform strips.
-     */
-    private fun isUnsafeInName(codePoint: Int): Boolean =
-        codePoint <= 0x1F || codePoint in 0x7F..0x9F ||
-            codePoint == 0x061C || codePoint in 0x200B..0x200F ||
-            codePoint in 0x202A..0x202E || codePoint in 0x2066..0x2069 ||
-            codePoint == 0xFEFF
 }
 
 /** `{Type, Payload}` - Payload is itself a JSON *string*, not a nested object. */

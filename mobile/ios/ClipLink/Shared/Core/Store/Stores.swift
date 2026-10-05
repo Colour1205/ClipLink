@@ -326,36 +326,60 @@ public final class FileStore {
     /// Longer, and an extension is dropped rather than kept whole.
     static let maxExtensionLength = 20
 
+    /// Characters Windows refuses in a name. (Its separators never get this
+    /// far: only the last path segment is kept.)
+    private static let invalidNameCharacters = CharacterSet(charactersIn: "\\/:*?\"<>|")
+
     /// A name from somewhere else - a peer's FilePayload, or what a shared
-    /// or picked file calls itself - made safe to create inside a folder:
-    /// separators, characters a peer's file system rejects, and control and
-    /// format characters (a bidi override disguises "invoice\u{202E}txt.exe")
-    /// become "_"; no leading dots or edge spaces; capped as above with the
-    /// extension kept and never half a character. Never empty: "file".
+    /// or picked file calls itself - made safe to create inside a folder, by
+    /// the same rule as FileNames.cs and Android's and HarmonyOS' FileNames,
+    /// so a name comes out the same on every device: only its last path
+    /// segment counts (a "../../x" or "C:\...\Startup\x.exe" lands in the
+    /// folder it is put in); control characters and the invisible bidi and
+    /// zero-width ones are removed, the set a device name loses
+    /// (DeviceName.isHidden: a right-to-left override disguises
+    /// "invoice\u{202E}txt.exe"), and characters a peer's file system
+    /// rejects become "_"; trimmed, then no trailing dots or spaces (so "."
+    /// and ".." are nothing) - leading dots stay; capped as above by code
+    /// point, never half of one, keeping an extension of up to 20. Never
+    /// empty: "file".
     public static func sanitize(_ name: String) -> String {
-        let bad = CharacterSet(charactersIn: "\\/:*?\"<>|\0").union(.newlines).union(.controlCharacters)
-        var cleaned = name.components(separatedBy: bad).joined(separator: "_").trimmingCharacters(in: .whitespaces)
-        while let first = cleaned.first, first == "." || first == " " { cleaned.removeFirst() }
+        let scalars = Array(name.unicodeScalars)
+        let start = scalars.lastIndex(where: { $0 == "/" || $0 == "\\" }).map { $0 + 1 } ?? 0
+        var kept = String.UnicodeScalarView()
+        for scalar in scalars[start...] where !DeviceName.isHidden(scalar) {
+            kept.append(invalidNameCharacters.contains(scalar) ? "_" : scalar)
+        }
+        var cleaned = trimmingTrailingDotsAndSpaces(String(kept).trimmingCharacters(in: .whitespacesAndNewlines))
+        if cleaned.isEmpty { return "file" }
         if cleaned.utf16.count > maxNameLength || cleaned.utf8.count > maxNameBytes {
-            let pathExtension = (cleaned as NSString).pathExtension
-            var ext = pathExtension.isEmpty ? "" : "." + pathExtension
+            // From the last dot on, as Path.GetExtension has it.
+            var ext = cleaned.unicodeScalars.lastIndex(of: ".").map { String(cleaned.unicodeScalars[$0...]) } ?? ""
             if ext.utf16.count > maxExtensionLength { ext = "" }
-            // Whole characters (grapheme clusters) only: the stem ends
-            // before the first one that would go over either limit.
-            var stem = ""
+            // Whole code points only, as the other platforms count them: the
+            // stem ends before the first one that would go over either limit.
+            var stem = String.UnicodeScalarView()
             var length = ext.utf16.count
             var bytes = ext.utf8.count
-            for character in cleaned {
-                length += character.utf16.count
-                bytes += character.utf8.count
+            for scalar in cleaned.unicodeScalars {
+                length += UTF16.width(scalar)
+                bytes += UTF8.width(scalar)
                 guard length <= maxNameLength, bytes <= maxNameBytes else { break }
-                stem.append(character)
+                stem.append(scalar)
             }
-            while let last = stem.last, last == "." || last == " " { stem.removeLast() }
-            // A first character too big for the limits leaves no stem at all.
-            cleaned = (stem.isEmpty ? "file" : stem) + ext
+            cleaned = trimmingTrailingDotsAndSpaces(String(stem)) + ext
+            // A stem of nothing but dots and spaces trims away entirely - and
+            // with no extension left either, "" would name the folder itself.
+            if cleaned.isEmpty { return "file" }
         }
-        return cleaned.isEmpty ? "file" : cleaned
+        return cleaned
+    }
+
+    /// Windows drops a name's trailing dots and spaces itself.
+    private static func trimmingTrailingDotsAndSpaces(_ text: String) -> String {
+        var scalars = text.unicodeScalars
+        while let last = scalars.last, last == "." || last == " " { scalars.removeLast() }
+        return String(scalars)
     }
 }
 

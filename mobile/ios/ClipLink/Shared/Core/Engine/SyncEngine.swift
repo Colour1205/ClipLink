@@ -139,6 +139,9 @@ public final class SyncEngine {
     /// Files we're waiting on whose stream went by unreceived, and when to
     /// ask for each again (see handleFileChunk, retryStalledFiles).
     var skippedStreams: [String: Date] = [:]
+    /// How often each file we're waiting on was asked for again with no
+    /// stream of it seen since (see retryStalledFiles).
+    var unansweredRetries: [String: Int] = [:]
     /// Hashes whose completed download is being hash-checked right now.
     var verifying: Set<String> = []
 
@@ -440,6 +443,7 @@ public final class SyncEngine {
         for transfer in incoming.values { transfer.abort() }
         incoming.removeAll()
         skippedStreams.removeAll()
+        unansweredRetries.removeAll()
     }
 
     /// Timers, UDP and the listener - everything except live links.

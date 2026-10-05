@@ -622,14 +622,7 @@ final class EngineIntegrationTests: XCTestCase {
             XCTAssertNil(a.recorder.pairingRequest, step)
         }
 
-        var copies = [own.replacingOccurrences(of: "A", with: "A "), String(own.dropLast(2)), own + "\r\n"]
-        // A spare bit set in the last digit, where this decoder takes it.
-        let digits = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
-        var chars = Array(own)
-        if let value = digits.firstIndex(of: chars[chars.count - 3]) {
-            chars[chars.count - 3] = digits[value | 0x01]
-            if Data(base64Encoded: String(chars)) == Data(base64Encoded: own) { copies.append(String(chars)) }
-        }
+        let copies = [own.replacingOccurrences(of: "A", with: "A "), String(own.dropLast(2)), own + "\r\n", Self.withSpareBitSet(own)]
         for copy in copies {
             let step = copy.debugDescription
             XCTAssertNotEqual(copy, own)
@@ -667,6 +660,110 @@ final class EngineIntegrationTests: XCTestCase {
             XCTAssertEqual(result, .ownCode, step)
             untouched("beacon, code and trust as \(step)")
         }
+    }
+
+    /// `id` with a spare bit set in its last digit (91 bytes leave 4 bits
+    /// over): our key all the same to a decoder that ignores them.
+    private static func withSpareBitSet(_ id: String) -> String {
+        let digits = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+        var chars = Array(id)
+        let last = chars.count - 3 // before the "=="
+        guard let value = digits.firstIndex(of: chars[last]) else { return id }
+        chars[last] = digits[value | 0x01]
+        return String(chars)
+    }
+
+    /// The handshake itself turns our own key away however it is spelt, as
+    /// the dialer and as the acceptor: "that's this device", before trust,
+    /// a passcode or an open pairing screen count. Compared as text, a
+    /// spelling this decoder rejects would end as a bad signature instead
+    /// (a pairing dial says "refused", not "your own code"), and one it
+    /// takes would connect us to ourselves. Anyone else's key gets through.
+    func testHandshakeRefusesOurOwnKeyHoweverItIsSpelt() throws {
+        let me = SoftwareIdentity()
+        let own = me.publicKeyBase64
+        let spellings = [own.replacingOccurrences(of: "A", with: "A "), String(own.dropLast(2)), own + "\r\n", Self.withSpareBitSet(own)]
+        func context(_ identity: IdentitySigner) -> HandshakeContext {
+            HandshakeContext(identity: identity, trusted: [], passphraseKey: nil, pairingOpen: true, deviceName: nil)
+        }
+        let port = Self.portBase
+        Self.portBase += 10
+
+        // Two listeners: one answering as `answerAs`, for us to dial; one
+        // answering as us, for a raw socket to dial.
+        var answerAs: IdentitySigner = me
+        var answered: [PeerLink] = []
+        var accepted: [Result<PeerLink, HandshakeFailure>] = []
+        var ready = 0
+        let dialled = try TCPServer(port: port)
+        let listening = try TCPServer(port: port + 1)
+        defer {
+            dialled.stop()
+            listening.stop()
+        }
+        dialled.onConnection = { connection in
+            DispatchQueue.main.async {
+                PeerLink.accept(connection: connection, context: context(answerAs), maxLineBytes: 1 << 20, deliveryQueue: .main) { result in
+                    if case .success(let link) = result { answered.append(link) }
+                }
+            }
+        }
+        listening.onConnection = { connection in
+            DispatchQueue.main.async {
+                PeerLink.accept(connection: connection, context: context(me), maxLineBytes: 1 << 20, deliveryQueue: .main) { accepted.append($0) }
+            }
+        }
+        for server in [dialled, listening] {
+            server.onState = { up, _ in DispatchQueue.main.async { if up { ready += 1 } } }
+            server.start()
+        }
+        wait("both listening") { ready == 2 }
+
+        // We dial, and the far end answers in our key.
+        func dial(answeredAs identity: IdentitySigner) -> Result<PeerLink, HandshakeFailure>? {
+            answerAs = identity
+            let done = expectation(description: "dial")
+            var outcome: Result<PeerLink, HandshakeFailure>?
+            PeerLink.dial(host: "127.0.0.1", port: port, context: context(me), connectTimeout: 3,
+                          maxLineBytes: 1 << 20, deliveryQueue: .main, gate: { _ in true }) { result in
+                outcome = result
+                done.fulfill()
+            }
+            wait(for: [done], timeout: 15)
+            return outcome
+        }
+        for spelling in spellings {
+            XCTAssertNotEqual(spelling, own)
+            let outcome = dial(answeredAs: RespeltIdentity(me, as: spelling))
+            if case .failure(.selfConnection) = outcome {} else { XCTFail("dialled \(spelling.debugDescription): \(String(describing: outcome))") }
+        }
+        let other = dial(answeredAs: SoftwareIdentity())
+        if case .success(let link) = other { link.close() } else { XCTFail("dialled another key: \(String(describing: other))") }
+
+        // They dial us, in our key, with a valid signature.
+        func dialledIn(as spelling: String, signedBy identity: IdentitySigner) throws -> Result<PeerLink, HandshakeFailure>? {
+            let ephemeral = P256.KeyAgreement.PrivateKey().publicKey.derRepresentation
+            let signature = try identity.sign(ephemeral)
+            let line = HandshakeMessage(
+                ephemeralPublicKey: ephemeral.base64EncodedString(),
+                identityPublicKey: spelling,
+                signature: signature.base64EncodedString(),
+                passphraseProof: nil
+            ).jsonString()
+            let before = accepted.count
+            let inbound = Reflector(port: port + 1, handshake: line)
+            defer { inbound.close() }
+            wait("handshake as \(spelling.debugDescription) settled") { accepted.count > before }
+            return accepted.last
+        }
+        for spelling in spellings {
+            let outcome = try dialledIn(as: spelling, signedBy: me)
+            if case .failure(.selfConnection) = outcome {} else { XCTFail("accepted \(spelling.debugDescription): \(String(describing: outcome))") }
+        }
+        let stranger = SoftwareIdentity()
+        let welcome = try dialledIn(as: stranger.publicKeyBase64, signedBy: stranger)
+        if case .success(let link) = welcome { link.close() } else { XCTFail("accepted another key: \(String(describing: welcome))") }
+        answered.forEach { $0.close() }
     }
 
     func testBackgroundRefreshCatchesUpThenTearsDown() throws {
@@ -941,6 +1038,64 @@ final class EngineIntegrationTests: XCTestCase {
         link.close()
     }
 
+    /// A file no peer here has (its sender gone, its bytes deleted there) is
+    /// asked for again only a few times, not every 15 s for as long as the
+    /// app is open - each request a log line on every peer. A new link gets
+    /// a few more tries.
+    func testAFileNobodyHasIsAskedForAgainOnlyAFewTimes() throws {
+        let (a, _) = makePair()
+        setPasscode(a, "pw")
+        a.engine.enterForeground()
+        wait("A listening") { a.engine.queue.sync { a.engine.status.listening } }
+
+        let peer = SoftwareIdentity()
+        let passcode = PassphraseAuth.deriveKey(passphrase: "pw")
+        let bytes = Data("nobody has these".utf8)
+        let hash = ContentHash.sha256Hex(bytes).uppercased()
+        let key = FileStore.key(hash)
+        var asked = 0
+        func connect() throws -> PeerLink {
+            let link = try handshake(with: a, as: peer, named: "Peer", passcode: passcode)
+            link.onMessage = { _, text in
+                guard let envelope = Envelope.parse(text), envelope.type == Wire.MessageType.fileRequest,
+                      let request = FileRequestMessage.parse(envelope.payload), FileStore.key(request.fileHash) == key else { return }
+                asked += 1
+            }
+            wait("A registered the peer") { a.recorder.connectedCount == 1 }
+            link.goLive()
+            return link
+        }
+        // Each wait for an answer backdated here, rather than sat out.
+        func unanswered() {
+            a.engine.queue.sync { a.engine.requestedAt[key] = Date(timeIntervalSinceNow: -SyncEngine.fileRetryInterval - 1) }
+        }
+        func askedAgainUpToTheLimit(after first: Int) {
+            for n in 1...SyncEngine.maxUnansweredRetries {
+                unanswered()
+                wait("asked again (\(n))") { asked == first + n }
+            }
+            unanswered()
+            RunLoop.main.run(until: Date().addingTimeInterval(SyncEngine.tickInterval * 2 + 0.5))
+            XCTAssertEqual(asked, first + SyncEngine.maxUnansweredRetries, "then no more")
+        }
+
+        let link = try connect()
+        let payload = FilePayload(fileName: "gone.bin", fileHash: hash, fileSize: Int64(bytes.count))
+        let entry = try EntrySigning.sign(content: payload.jsonString(), type: Wire.EntryType.file, identity: peer)
+        link.send(Envelope(type: Wire.MessageType.entry, payload: entry.jsonString()).jsonString())
+        wait("asked for as it came") { asked == 1 }
+        askedAgainUpToTheLimit(after: 1)
+
+        link.close()
+        wait("A dropped the link") { a.recorder.connectedCount == 0 }
+        let again = try connect()
+        let onNewLink = 1 + SyncEngine.maxUnansweredRetries + 1
+        wait("asked for on the new link") { asked == onNewLink }
+        askedAgainUpToTheLimit(after: onNewLink)
+        XCTAssertNotNil(a.engine.queue.sync { a.engine.pendingFiles[key] }, "still waiting for it")
+        again.close()
+    }
+
     /// A streams at most `maxStreamsPerLink` files to one peer at a time
     /// (each holds over a megabyte in flight; the Share extension has about
     /// 120 MB), the rest in turn - each whole, and each once.
@@ -1050,5 +1205,21 @@ private final class Reflector {
 
     private func markEnded() {
         lock.lock(); ended = true; lock.unlock()
+    }
+}
+
+/// Signs as `identity`, but spells its id as given: the same key, written
+/// another way.
+private final class RespeltIdentity: IdentitySigner {
+    private let identity: IdentitySigner
+    let publicKeyBase64: String
+
+    init(_ identity: IdentitySigner, as spelling: String) {
+        self.identity = identity
+        self.publicKeyBase64 = spelling
+    }
+
+    func sign(_ data: Data) throws -> Data {
+        try identity.sign(data)
     }
 }

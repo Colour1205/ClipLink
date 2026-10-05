@@ -4,11 +4,12 @@
 // on to peers that do turn it into a path. Only its last path segment counts
 // (a "../../x" or "/data/storage/.../x" must never reach any of those as
 // one), with the characters Windows refuses, control characters and the
-// bidi marks and overrides that can disguise an extension ("txt.exe" shown
-// as "exe.txt") replaced, trailing dots/spaces dropped, and the length
-// capped with the extension kept. Blank after all that: fallback. Windows'
-// extra reserved-device-name rule only matters where the name becomes a
-// Windows path, so the receiver there applies it.
+// invisible ones Windows' FileNames.IsUnsafeChar names - bidi marks and
+// overrides that can disguise an extension ("txt.exe" shown as "exe.txt"),
+// zero-width characters that hide text - replaced, trailing dots/spaces
+// dropped, and the length capped with the extension kept. Blank after all
+// that: fallback. Windows' extra reserved-device-name rule only matters
+// where the name becomes a Windows path, so the receiver there applies it.
 
 const MAX_NAME_LENGTH: number = 120;
 const MAX_EXTENSION_LENGTH: number = 20;
@@ -17,7 +18,7 @@ const MAX_EXTENSION_LENGTH: number = 20;
 // and creating that name fails. Kept under 255 so a receiver can still add
 // a " (1)" to it. Same cap as Android's FileNames.kt.
 const MAX_NAME_UTF8_BYTES: number = 240;
-const UNSAFE_CHARS: RegExp = new RegExp('[\\\\/:*?"<>|\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]', 'g');
+const UNSAFE_CHARS: RegExp = new RegExp('[\\\\/:*?"<>|\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200b-\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]', 'g');
 
 function trimEndDotsAndSpaces(s: string): string {
   let end: number = s.length;

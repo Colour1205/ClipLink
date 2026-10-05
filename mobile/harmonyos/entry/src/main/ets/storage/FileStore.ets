@@ -34,7 +34,7 @@ export function isEmptyFile(payload: FilePayload): boolean {
 // one: anything else, "../../preferences/cliplink_passphrase_key" say, let a
 // peer read (file_request streams it back), overwrite (file_chunk) or delete
 // (history eviction) files outside this store. Same rule as FileStore.cs's
-// IsValidHash: getPath/getTempPath throw for it, exists is false and delete
+// IsValidHash: getPath/newTempPath throw for it, exists is false and delete
 // does nothing. The typeof check is for a descriptor whose FileHash isn't a
 // string at all - JSON.parse(...) as FilePayload checks nothing.
 const HASH_PATTERN: RegExp = new RegExp('^[0-9A-Fa-f]{64}$');
@@ -127,11 +127,11 @@ export class FileStore {
     }
   }
 
-  // Stores bytes this app holds in memory - a PasteButton read, or an empty
-  // file (see isEmptyFile) - under their hash. An empty file is only
-  // created: there's nothing to write. False if it couldn't be stored, and
-  // then nothing is left under the hash - a cut-short blob would pass
-  // exists() for the whole file.
+  // Stores bytes this app holds in memory under their hash - an empty
+  // file's (see isEmptyFile); a pasted or shared file comes in through
+  // adopt instead. An empty file is only created: there's nothing to write.
+  // False if it couldn't be stored, and then nothing is left under the hash
+  // - a cut-short blob would pass exists() for the whole file.
   write(hash: string, data: Uint8Array): boolean {
     const path: string = this.getPath(hash);
     this.inUse.add(hash.toLowerCase());

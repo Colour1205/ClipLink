@@ -57,7 +57,8 @@ public enum WireSignature {
         return (try? P256.Signing.PublicKey(derRepresentation: bytes)) != nil
     }
 
-    private static let base64Digits = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+    private static let base64Alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+    private static let base64Digits = Set(base64Alphabet)
 
     /// The key itself (its raw P-256 point) that a base64 SPKI names, however
     /// the text is spelled: whitespace and other stray characters, missing
@@ -65,9 +66,16 @@ public enum WireSignature {
     /// (.NET skips whitespace, Java needs no padding). Nil for anything that
     /// isn't a P-256 key.
     public static func canonicalPublicKey(_ base64: String) -> Data? {
-        var digits = base64.filter(base64Digits.contains)
-        digits += String(repeating: "=", count: (4 - digits.count % 4) % 4)
-        guard let bytes = Data(base64Encoded: digits),
+        var digits = Array(base64.filter(base64Digits.contains))
+        // The last digit's bits past the final whole byte carry nothing, and
+        // a lenient decoder ignores them: cleared, so they count for nothing
+        // here either, whichever way this Foundation treats them.
+        let spareBits = [0, 0, 0x0F, 0x03][digits.count % 4]
+        if spareBits != 0, let value = base64Alphabet.firstIndex(of: digits[digits.count - 1]) {
+            digits[digits.count - 1] = base64Alphabet[value & ~spareBits]
+        }
+        let padded = String(digits) + String(repeating: "=", count: (4 - digits.count % 4) % 4)
+        guard let bytes = Data(base64Encoded: padded),
               let key = try? P256.Signing.PublicKey(derRepresentation: bytes)
         else { return nil }
         return key.rawRepresentation

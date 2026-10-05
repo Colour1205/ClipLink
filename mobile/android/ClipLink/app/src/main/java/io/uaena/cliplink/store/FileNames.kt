@@ -22,19 +22,31 @@ object FileNames {
     private const val INVALID = "\\/:*?\"<>|"
 
     /**
-     * Right-to-left and other bidi overrides: "invoice\u202Etxt.exe" is shown
-     * as "invoiceexe.txt". Legal in a name, but only ever used to disguise one.
+     * Never kept in a name another device chose - a file name here, a device
+     * name in Protocol.normalizeDeviceName: control characters (C0 and C1),
+     * and the invisible ones that reorder or hide text - the Arabic letter
+     * mark (U+061C), zero-width space, non-joiner and joiner (U+200B-U+200D),
+     * the left-to-right and right-to-left marks (U+200E, U+200F), bidi
+     * embeddings and overrides (U+202A-U+202E), bidi isolates (U+2066-U+2069)
+     * and the zero-width no-break space / BOM (U+FEFF). "invoice\u202Etxt.exe"
+     * is shown as "invoiceexe.txt". The same set as FileNames.IsUnsafeChar on
+     * Windows.
      */
-    private fun isBidiControl(c: Char): Boolean =
-        c in '\u202A'..'\u202E' || c in '\u2066'..'\u2069' || c == '\u200E' || c == '\u200F' || c == '\u061C'
+    fun isUnsafeChar(codePoint: Int): Boolean =
+        codePoint <= 0x1F || codePoint in 0x7F..0x9F ||
+            codePoint == 0x061C || codePoint in 0x200B..0x200F ||
+            codePoint in 0x202A..0x202E || codePoint in 0x2066..0x2069 ||
+            codePoint == 0xFEFF
 
     /**
      * [name] made safe to create inside a folder and to hand to another app:
      * only its last path segment (a "../../x" or "C:\Users\...\x.exe" must
-     * land in the folder it's put in, not there), invalid and control
-     * characters replaced, no trailing dots or spaces (so "." and ".." are
-     * nothing), and at most 120 characters and 240 UTF-8 bytes with the
-     * extension kept. Blank after all that: [fallback].
+     * land in the folder it's put in, not there), the characters in
+     * [isUnsafeChar] removed and the ones a file system refuses replaced
+     * with "_" - as Windows does it, so "report\u200B.pdf" is "report.pdf"
+     * on both - no trailing dots or spaces (so "." and ".." are nothing),
+     * and at most 120 characters and 240 UTF-8 bytes with the extension
+     * kept. Blank after all that: [fallback].
      *
      * Windows' reserved device names (CON, NUL...) are left alone - they mean
      * nothing here, and a Windows peer renames them itself on receipt.
@@ -43,7 +55,7 @@ object FileNames {
         var safe = name.orEmpty().replace('\\', '/').substringAfterLast('/')
         safe = buildString(safe.length) {
             for (c in safe) {
-                append(if (c in INVALID || Character.isISOControl(c) || isBidiControl(c)) '_' else c)
+                if (!isUnsafeChar(c.code)) append(if (c in INVALID) '_' else c)
             }
         }.trim().trimEnd('.', ' ')
         if (safe.isEmpty()) return fallback

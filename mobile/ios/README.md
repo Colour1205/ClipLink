@@ -115,7 +115,9 @@ how many it left out). As on the other platforms, whatever the system hands
 over as a file - from Files, Photos, Mail - is synced as that file, with its
 own bytes and name (a photo arrives as `IMG_0001.HEIC`, say); only an image
 with no file behind it (a screenshot being marked up) goes inline as a
-picture, and text or a link only when nothing else came with it. Files over
+picture (past 16 MB of those in one share, the rest go as `Image.png` files),
+and text or a link only when nothing else came with it - all of it as one
+text, so a caption and the link an app passes beside it both arrive. Files over
 1 GB and folders are left out, and nothing goes on this device's clipboard.
 "Open in ClipLink" from Files sends the file as a file too. The extension's
 node is a sender only: it never takes, or asks for, file bytes.
@@ -152,7 +154,11 @@ uppercase hex, and a lowercase hash makes it re-broadcast your file. Blobs are
 stored lowercase-keyed; peers' own spellings are always echoed back
 byte-for-byte. Incoming streams are locked to one sender and checked for chunk
 order (the other ports interleave two senders into a corrupt file), and
-missing blobs are re-requested on every connect.
+missing blobs are re-requested on every connect. At most 8 streams come in at
+once: a file whose stream went by for want of a slot (a share of many files)
+is asked for again once that stream ends, and an unanswered request up to 3
+more times, 15 s apart. Files go out to each peer 3 at a time, the rest in
+turn.
 
 ## Fixed here that other ports still have (reported separately)
 

@@ -163,6 +163,11 @@ extension SyncEngine {
     /// sender ignores one for a file it is already streaming (or has queued)
     /// for us, and a peer without the bytes says nothing.
     static let fileRetryInterval: TimeInterval = 15
+    /// Unanswered requests for one file sent again, at most, until a stream
+    /// of it is seen or a new link comes up: a file no peer here has (its
+    /// sender gone, its bytes deleted there) isn't asked for every 15 s for
+    /// as long as the app is open - each a log line on every peer.
+    static let maxUnansweredRetries = 3
     /// A skipped stream whose chunks stop coming has died: ask again after this.
     static let skippedStreamQuiet: TimeInterval = 10
     /// After a skipped stream's last chunk: long enough for its sender to
@@ -171,12 +176,14 @@ extension SyncEngine {
 
     /// Asks again for files we're waiting on whose bytes aren't coming - a
     /// stream that went by unreceived (see handleFileChunk), or a request
-    /// nobody answered - oldest first, no more at a time than there are
-    /// free slots. Every beacon tick and whenever a transfer finishes. No
-    /// sender ever sends a file again unasked, so without this a share of
-    /// more than `maxConcurrentIncoming` files stalls until the next link.
+    /// nobody answered (a few times) - oldest first, no more at a time than
+    /// there are free slots. Every beacon tick and whenever a transfer
+    /// finishes. No sender ever sends a file again unasked, so without this
+    /// a share of more than `maxConcurrentIncoming` files stalls until the
+    /// next link.
     func retryStalledFiles() {
         skippedStreams = skippedStreams.filter { pendingFiles[$0.key] != nil }
+        unansweredRetries = unansweredRetries.filter { pendingFiles[$0.key] != nil }
         guard !config.sendOnly, !links.isEmpty, !pendingFiles.isEmpty else { return }
         var free = Self.maxConcurrentIncoming - incoming.count
         let now = Date()
@@ -188,8 +195,10 @@ extension SyncEngine {
             if let retryAt = skippedStreams[key] {
                 // Still going past us: its sender would ignore the request.
                 guard now >= retryAt else { continue }
-            } else if let last = requestedAt[key], now.timeIntervalSince(last) < Self.fileRetryInterval {
-                continue
+            } else {
+                if let last = requestedAt[key], now.timeIntervalSince(last) < Self.fileRetryInterval { continue }
+                guard unansweredRetries[key, default: 0] < Self.maxUnansweredRetries else { continue }
+                unansweredRetries[key, default: 0] += 1
             }
             requestedAt[key] = nil
             requestFile(payload.fileHash, from: Array(links.values))
@@ -207,6 +216,8 @@ extension SyncEngine {
             let key = FileStore.key(payload.fileHash)
             if pendingFiles[key] == nil { pendingFiles[key] = PendingFile(entry: entry, apply: false) }
             requestedAt[key] = nil
+            // A new peer may have it: worth a few more tries.
+            unansweredRetries[key] = nil
             requestFile(payload.fileHash, from: [link])
         }
     }
@@ -228,6 +239,7 @@ extension SyncEngine {
             pendingFiles[key] = nil
             requestedAt[key] = nil
             skippedStreams[key] = nil
+            unansweredRetries[key] = nil
         }
         for (key, transfer) in incoming where !referenced.contains(key) {
             transfer.abort()
@@ -257,6 +269,7 @@ extension SyncEngine {
                 // request while this stream lasts: asked for again once it
                 // has ended (retryStalledFiles).
                 skippedStreams[key] = Date().addingTimeInterval(chunk.isLast ? Self.skippedStreamEndGrace : Self.skippedStreamQuiet)
+                unansweredRetries[key] = nil
                 return
             }
             let pendingPayload = pendingFiles[key].flatMap { FilePayload.parse($0.entry.content) }
@@ -271,6 +284,7 @@ extension SyncEngine {
                 return
             }
             incoming[key] = transfer
+            unansweredRetries[key] = nil
         }
         guard let transfer = incoming[key] else { return }
 
@@ -363,6 +377,7 @@ extension SyncEngine {
         guard let pending = pendingFiles.removeValue(forKey: key) else { return }
         requestedAt[key] = nil
         skippedStreams[key] = nil
+        unansweredRetries[key] = nil
         if pending.apply, history.contains(pending.entry) {
             deliverToApp(pending.entry, fileURL: files.url(for: key))
         }
@@ -505,14 +520,15 @@ extension SyncEngine {
         finish(completion, .sent(type: type, peers: links.count, name: name))
     }
 
-    /// Windows applies a received file by copying it to ReceivedFiles under
-    /// this exact name, unsanitised: characters or names Windows rejects
-    /// would make the file land in its store but never on its clipboard.
+    /// Older Windows builds apply a received file by copying it to
+    /// ReceivedFiles under this exact name, unsanitised: characters or names
+    /// Windows rejects would make the file land in their store but never on
+    /// their clipboard. `sanitize` already replaces those characters and
+    /// drops trailing dots and spaces; this adds the reserved device names.
     static func windowsSafeName(_ name: String) -> String {
-        var cleaned = FileStore.sanitize(name)
-        while let last = cleaned.last, last == "." || last == " " { cleaned.removeLast() }
-        if cleaned.isEmpty { cleaned = "file" }
-        let stem = cleaned.split(separator: ".", maxSplits: 1).first.map(String.init)?.uppercased() ?? ""
+        let cleaned = FileStore.sanitize(name)
+        // Up to the first dot: "con.txt" is a device, ".con" (no stem) isn't.
+        let stem = cleaned.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)?.uppercased() ?? ""
         let reserved = Set(["CON", "PRN", "AUX", "NUL"] + (1...9).map { "COM\($0)" } + (1...9).map { "LPT\($0)" })
         return reserved.contains(stem) ? "_" + cleaned : cleaned
     }

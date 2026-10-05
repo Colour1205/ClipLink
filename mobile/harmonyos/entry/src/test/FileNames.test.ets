@@ -44,6 +44,9 @@ export default function fileNamesTest() {
       expect(safeFileName('nul\u0000.txt', 'file')).assertEqual('nul_.txt');
       // Shown as "invoiceexe.txt" if the override were kept.
       expect(safeFileName('invoice\u202Etxt.exe', 'file')).assertEqual('invoice_txt.exe');
+      // Zero-width characters and the BOM, which Windows' IsUnsafeChar
+      // names too: invisible, so they'd hide text.
+      expect(safeFileName('\uFEFFre\u200Bport\u200C\u200D.pdf', 'file')).assertEqual('_re_port__.pdf');
       expect(safeFileName('  name.txt . ', 'file')).assertEqual('name.txt');
       expect(safeFileName('Café 日本語 😀.png', 'file')).assertEqual('Café 日本語 😀.png');
     });

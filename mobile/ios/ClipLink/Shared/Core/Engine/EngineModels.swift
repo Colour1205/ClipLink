@@ -223,3 +223,20 @@ public enum SendResult: Equatable {
     case sent(type: String, peers: Int, name: String?)
     case failed(String)
 }
+
+/// The texts and links of one share, when nothing else came with them, as
+/// the one text they go as: in the order shared, each once. An app sharing
+/// a caption and a link passes them separately - and its caption often
+/// carries that link too. Nil when there is no text at all.
+public enum SharedText {
+    public static func merged(_ texts: [String]) -> String? {
+        var kept: [String] = []
+        for text in texts where !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Already there, perhaps inside a caption: once is enough.
+            guard !kept.contains(where: { $0.contains(text) }) else { continue }
+            kept.removeAll { text.contains($0) }
+            kept.append(text)
+        }
+        return kept.isEmpty ? nil : kept.joined(separator: "\n")
+    }
+}
