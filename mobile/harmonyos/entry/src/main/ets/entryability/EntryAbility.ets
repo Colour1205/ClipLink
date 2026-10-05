@@ -1,6 +1,7 @@
 import { AbilityConstant, Configuration, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
+import { enqueueShares, intakeShare, isShareWant, SHARED_IN_EVENT, SharedIn, sweepShareCopies } from '../share/ShareIntake';
 
 const DOMAIN = 0x0000;
 
@@ -15,6 +16,26 @@ export default class EntryAbility extends UIAbility {
     // to them), and needs to know when light/dark flips to re-resolve them.
     AppStorage.setOrCreate<number>('colorMode', this.context.config.colorMode);
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
+    sweepShareCopies(this.context);
+    this.acceptShare(want, launchParam);
+  }
+
+  // ClipLink is a singleton UIAbility, so a share while it's running
+  // arrives here rather than in onCreate (onForeground never sees the Want).
+  onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    this.acceptShare(want, launchParam);
+  }
+
+  // "Share to ClipLink" (see share/ShareIntake.ets): copies the shared files
+  // now, while the grant holds, then queues everything for Index.ets.
+  private acceptShare(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    if (!isShareWant(want, launchParam)) return;
+    intakeShare(this.context, want).then((items: SharedIn[]) => {
+      enqueueShares(items);
+      this.context.eventHub.emit(SHARED_IN_EVENT);
+    }).catch((err: Error) => {
+      hilog.error(DOMAIN, 'testTag', 'Failed to take a share. Cause: %{public}s', JSON.stringify(err));
+    });
   }
 
   onConfigurationUpdate(newConfig: Configuration): void {

@@ -19,6 +19,7 @@ public partial class App : Application
     private EngineHost? host;
     private WinForms.NotifyIcon? tray;
     private MainWindow? window;
+    private ShareBatcher? shares;
 
     internal App(AppOptions options)
     {
@@ -51,8 +52,12 @@ public partial class App : Application
         ApplyTheme();
         settings = AppSettings.Load(options);
 
+        // Files to share arrive one by one (File Explorer starts a ClipLink
+        // per selected file) - gathered, then shared together on this thread.
+        shares = new ShareBatcher(paths => Dispatcher.BeginInvoke(() => ShareNow(paths)));
+
         // Listening before anything slow, so a second launch right now
-        // still gets through (it waits up to 3 s).
+        // gets through sooner (it keeps trying for a while).
         _ = InstancePipe.ListenAsync(options.Label, message => Dispatcher.BeginInvoke(() => OnInstanceMessage(message)), quitting.Token);
 
         host = new EngineHost(Dispatcher);
@@ -74,9 +79,12 @@ public partial class App : Application
 
         CreateTrayIcon();
         SetUpSignInStartup();
+        SetUpShellIntegration();
 
         window = new MainWindow(host);
-        if (!options.Background)
+        // A share that found no ClipLink running started this one: it stays
+        // in the tray, as at sign-in, and says what it shared from there.
+        if (!options.Background && options.SharePaths == null)
         {
             ShowMainWindow();
         }
@@ -86,6 +94,7 @@ public partial class App : Application
             tray!.ShowBalloonTip(10_000, "ClipLink can't sync", host.Status.Error ?? "Open ClipLink to see why.", WinForms.ToolTipIcon.Warning);
         }
 
+        // With whatever other launches forward meanwhile.
         if (options.SharePaths is { Count: > 0 } paths) OnShare(paths);
     }
 
@@ -172,6 +181,42 @@ public partial class App : Application
         }
     }
 
+    // "Show 'Share to ClipLink' in File Explorer": while it's on, every
+    // start puts it back if it's missing or points at another exe (moved,
+    // or a build somewhere else).
+    public bool ExplorerShareMenuOn => settings.ExplorerShareMenuOn(options);
+
+    // The setting changed (Settings, or ClipLink.exe --unregister).
+    public event Action? ExplorerShareMenuChanged;
+
+    private void SetUpShellIntegration()
+    {
+        if (!ExplorerShareMenuOn) return;
+        try
+        {
+            if (ShellIntegration.For(options).EnsureRegistered())
+                Console.WriteLine("[shell] \"Share to ClipLink\" added to File Explorer (or pointed at this exe)");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[shell] couldn't add \"Share to ClipLink\" to File Explorer: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // Turns it on or off, and remembers that. Throws if File Explorer's
+    // entries couldn't be written or removed - the setting is then left as
+    // it was.
+    public void SetExplorerShareMenu(bool on)
+    {
+        var shell = ShellIntegration.For(options);
+        if (on) shell.EnsureRegistered();
+        else shell.Unregister();
+        Console.WriteLine($"[shell] \"Share to ClipLink\" {(on ? "on" : "off")}");
+        settings.ExplorerShareMenu = on;
+        settings.Save();
+        ExplorerShareMenuChanged?.Invoke();
+    }
+
     public void ShowMainWindow()
     {
         if (window == null || IsQuitting) return;
@@ -190,16 +235,70 @@ public partial class App : Application
             case InstancePipe.Share:
                 OnShare(message.Paths ?? Array.Empty<string>());
                 break;
+            case InstancePipe.Unregister:
+                // ClipLink.exe --unregister (which removed the entries
+                // itself): the setting goes off here too, so it isn't saved
+                // back on.
+                try
+                {
+                    SetExplorerShareMenu(false);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[shell] couldn't remove \"Share to ClipLink\": {ex.Message}");
+                }
+                break;
             default:
                 Console.WriteLine($"[instance] unknown command \"{message.Command}\" - ignored");
                 break;
         }
     }
 
-    // Explorer's "Share to ClipLink" arrives in batch 7.
-    private static void OnShare(IReadOnlyList<string> paths)
+    // File Explorer's "Share to ClipLink" / Send To > ClipLink, from this
+    // launch's command line or forwarded by another: into the batch.
+    private void OnShare(IReadOnlyList<string> paths)
     {
-        Console.WriteLine($"[app] asked to share {paths.Count} file(s) - not supported yet, ignored");
+        if (IsQuitting || host == null) return;
+        shares?.Add(paths);
+    }
+
+    private async void ShareNow(IReadOnlyList<string> paths)
+    {
+        if (IsQuitting || host == null) return;
+        Console.WriteLine($"[share] sharing {paths.Count} path(s)");
+        ShareResult result;
+        try
+        {
+            result = await host.Engine.ShareFilesAsync(paths);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[share] failed: {ex}");
+            Notify(new ShareSummary("Couldn't share", ex.Message, IsError: true));
+            return;
+        }
+        if (IsQuitting || result.Shared.Count + result.Skipped.Count == 0) return;
+        Notify(ShareSummary.Of(result, host.ConnectedCount));
+    }
+
+    // In the window if it's the one in front, else from the tray icon (as a
+    // Windows notification; clicking it opens the window) - a share comes
+    // from File Explorer, so ClipLink's window, even if open, is usually
+    // behind it.
+    private void Notify(ShareSummary summary)
+    {
+        if (window is { IsVisible: true, IsActive: true } && window.WindowState != WindowState.Minimized)
+        {
+            if (summary.IsError) window.ToastError(summary.Title, summary.Message);
+            else window.Toast(summary.Title, summary.Message);
+        }
+        else
+        {
+            // (Windows cuts a notification's text at 255 characters.)
+            string text = summary.Message.Length > 0 ? summary.Message : summary.Title;
+            if (text.Length > 250) text = text[..249] + "…";
+            tray?.ShowBalloonTip(5000, summary.Title, text, summary.IsError ? WinForms.ToolTipIcon.Warning : WinForms.ToolTipIcon.Info);
+        }
     }
 
     // Settings > Quit - the only way out.
@@ -209,6 +308,7 @@ public partial class App : Application
         IsQuitting = true;
         Console.WriteLine("[app] quitting");
         quitting.Cancel();
+        shares?.Dispose();
         // First, so peers see this device go right away.
         host?.Stop();
         if (tray != null)

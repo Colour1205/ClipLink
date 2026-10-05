@@ -62,6 +62,32 @@
             "actions": [
               "ohos.want.action.home"
             ]
+          },
+          {
+            // "Share to ClipLink" in the system share panel - see
+            // share/ShareIntake.ets. A skill of its own (one action per
+            // skill is Huawei's advice). maxFileSupported defaults to 0,
+            // which means "not accepted", so each type states its limit.
+            // general.object is the catch-all Huawei's docs name;
+            // general.file too, since a file with an unknown extension
+            // gets a "flex." type that may not descend from general.object.
+            // "scheme" does nothing here, but the SDK schema requires it
+            // next to "utd" (the build fails without it).
+            "actions": [
+              "ohos.want.action.sendData"
+            ],
+            "uris": [
+              {
+                "scheme": "file",
+                "utd": "general.object",
+                "maxFileSupported": 50
+              },
+              {
+                "scheme": "file",
+                "utd": "general.file",
+                "maxFileSupported": 50
+              }
+            ]
           }
         ]
       }

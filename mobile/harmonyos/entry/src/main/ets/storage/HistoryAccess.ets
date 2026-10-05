@@ -8,7 +8,7 @@
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
-import { FileStore } from './FileStore';
+import { FileStore, isValidFileHash } from './FileStore';
 import { FilePayload } from './FilePayload';
 import { DeletedEntries, entryKey } from './DeletedEntries';
 
@@ -107,10 +107,14 @@ export class HistoryAccess {
     }
   }
 
+  // Entries come from peers too, so their FileHash is only a blob to
+  // release if it's a real hash (see FileStore's isValidFileHash) - never a
+  // path to delete.
   private fileHashOf(entry: ClipboardEntry): string | null {
     if (entry.Type !== 'file') return null;
     try {
-      return (JSON.parse(entry.Content) as FilePayload).FileHash;
+      const hash: string = (JSON.parse(entry.Content) as FilePayload).FileHash;
+      return isValidFileHash(hash) ? hash : null;
     } catch (e) {
       return null; // malformed descriptor — nothing coherent to clean up
     }

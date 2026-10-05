@@ -62,23 +62,39 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+        </activity>
 
-            <!-- Android 10+ forbids reading the clipboard outside the
-                 foreground/default-IME, so "share into ClipLink" is the
-                 real escape hatch for pushing something from another app
-                 without switching to this one first and tapping paste. -->
+        <!-- "Share to ClipLink". Android 10+ forbids reading the clipboard
+             outside the foreground/default-IME, so sharing into ClipLink is
+             the real escape hatch for pushing something from another app
+             without switching to this one first and tapping paste.
+
+             Its own activity, not MainActivity: it copies what was shared,
+             toasts and finishes, never showing the app. Translucent, out of
+             recents and history, and in a task of its own (empty affinity)
+             if the sender asks for a new one - with ClipLink's affinity it
+             would bring ClipLink's task forward and leave the user there.
+             It handles configuration changes itself because a recreation
+             mid-copy would lose the share.
+
+             */* covers text/plain and image/* too. SEND_MULTIPLE is what a
+             gallery or file manager sends for more than one item. -->
+        <activity
+            android:name=".ShareReceiverActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection"
+            android:theme="@style/Theme.ClipLink.Share">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="text/plain" />
+                <data android:mimeType="*/*" />
             </intent-filter>
             <intent-filter>
-                <action android:name="android.intent.action.SEND" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="image/*" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="*/*" />
             </intent-filter>

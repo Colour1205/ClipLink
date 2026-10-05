@@ -5,13 +5,12 @@
 import { common } from '@kit.AbilityKit';
 import fs from '@ohos.file.fs';
 import { util } from '@kit.ArkTS';
-import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { PeerConnection } from './PeerConnection';
 import { FileChunkMessage } from './FileChunkMessage';
 import { FileRequestMessage } from './FileRequestMessage';
 import { TrustStore } from '../identity/TrustStore';
 import { HistoryAccess } from '../storage/HistoryAccess';
-import { FileStore } from '../storage/FileStore';
+import { FileStore, isValidFileHash, sha256File } from '../storage/FileStore';
 import { FilePayload } from '../storage/FilePayload';
 import { entryKey } from '../storage/DeletedEntries';
 import { ClipboardEntry, verifiedEntry } from '../crypto/Signing';
@@ -23,27 +22,6 @@ const CHUNK_SIZE = 256 * 1024;
 interface Envelope {
   Type: string;
   Payload: string;
-}
-
-async function hashFile(path: string): Promise<string> {
-  const file = fs.openSync(path, fs.OpenMode.READ_ONLY);
-  const md = cryptoFramework.createMd('SHA256');
-  try {
-    const buffer = new ArrayBuffer(CHUNK_SIZE);
-    let bytesRead = fs.readSync(file.fd, buffer);
-    while (bytesRead > 0) {
-      await md.update({ data: new Uint8Array(buffer.slice(0, bytesRead)) });
-      bytesRead = fs.readSync(file.fd, buffer);
-    }
-  } finally {
-    fs.closeSync(file);
-  }
-  const digest = (await md.digest()).data;
-  let out = '';
-  for (let i = 0; i < digest.length; i++) {
-    out += digest[i].toString(16).padStart(2, '0');
-  }
-  return out;
 }
 
 export class SyncManager {
@@ -266,6 +244,12 @@ export class SyncManager {
       this.logCallback?.('received malformed file entry from peer');
       return;
     }
+    // Asked for by hash, then written and read under it - so only a real
+    // one (see FileStore's isValidFileHash).
+    if (!isValidFileHash(payload.FileHash)) {
+      this.logCallback?.('received malformed file entry from peer');
+      return;
+    }
     if (this.fileStore.exists(payload.FileHash)) {
       void this.applyFileEntry(entry);
       return;
@@ -300,6 +284,9 @@ export class SyncManager {
     } catch (e) {
       return;
     }
+    // Only ever a hash of something in FileStore - never a path to whatever
+    // file a peer names (see FileStore's isValidFileHash).
+    if (!isValidFileHash(request.FileHash)) return;
     if (this.fileStore.exists(request.FileHash)) {
       void this.streamFileToPeer(requestingConn, this.fileStore.getPath(request.FileHash), request.FileHash);
     }
@@ -369,6 +356,8 @@ export class SyncManager {
     } catch (e) {
       return;
     }
+    // The hash names the file these bytes are written to.
+    if (!isValidFileHash(chunk.FileHash)) return;
     let chunkBytes: Uint8Array;
     try {
       chunkBytes = base64Helper.decodeSync(chunk.DataBase64);
@@ -402,7 +391,7 @@ export class SyncManager {
     this.inProgressFds.delete(chunk.FileHash);
 
     const tempPath = this.fileStore.getTempPath(chunk.FileHash);
-    const actualHash = await hashFile(tempPath);
+    const actualHash = await sha256File(tempPath);
     if (actualHash.toLowerCase() !== chunk.FileHash.toLowerCase()) {
       // corrupted in transit, or tampered - the signed entry's hash is
       // what we trust, not whatever bytes actually showed up

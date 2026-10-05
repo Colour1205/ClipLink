@@ -7,12 +7,18 @@ namespace ClipboardDaemon.Storage;
 public class FileStore
 {
     private readonly string storeDir;
+    private const string CopyingSuffix = ".copying";
 
     public FileStore(string label)
     {
         string app_data_dir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         storeDir = Path.Combine(app_data_dir, "ClipboardDaemon", $"filestore{label}");
         Directory.CreateDirectory(storeDir);
+        // Left by a CopyIn that never finished.
+        foreach (string stale in Directory.EnumerateFiles(storeDir, "*" + CopyingSuffix))
+        {
+            try { File.Delete(stale); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
     }
 
     // A hash always comes from another device - a file entry, a file_request
@@ -30,12 +36,44 @@ public class FileStore
 
     public bool Exists(string hash) => IsValidHash(hash) && File.Exists(GetPath(hash));
 
+    // A file on this PC (copied or shared) cached as hash's blob - copied
+    // beside it, then moved into place: a copy cut short (ClipLink quit, or
+    // Windows shut down, halfway through a big file) mustn't leave a
+    // truncated blob under the hash, which Exists would take for the file
+    // and every device would then reject. Throws IOException /
+    // UnauthorizedAccessException if it can't be done.
+    public void CopyIn(string sourcePath, string hash)
+    {
+        string path = GetPath(hash);
+        string copying = Path.Combine(storeDir, $"{hash}.{Guid.NewGuid():N}{CopyingSuffix}");
+        try
+        {
+            File.Copy(sourcePath, copying);
+            // File.Copy keeps a read-only source's attribute - and a
+            // read-only blob can't be deleted (or replaced) later.
+            File.SetAttributes(copying, FileAttributes.Normal);
+            File.Move(copying, path, overwrite: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && File.Exists(path))
+        {
+            // Cached meanwhile by another copy of the same file (and being
+            // sent, so it can't be replaced) - same hash, same bytes.
+        }
+        finally
+        {
+            try { File.Delete(copying); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+    }
+
     public void Delete(string hash)
     {
         if (!IsValidHash(hash)) return;
         string path = GetPath(hash);
         if (File.Exists(path))
         {
+            // (One cached by an older build from a read-only file is
+            // read-only itself, which File.Delete refuses.)
+            File.SetAttributes(path, FileAttributes.Normal);
             File.Delete(path);
         }
     }

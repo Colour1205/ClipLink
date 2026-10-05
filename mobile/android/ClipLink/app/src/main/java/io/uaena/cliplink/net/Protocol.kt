@@ -1,6 +1,8 @@
 package io.uaena.cliplink.net
 
 import io.uaena.cliplink.core.optStringOrNull
+import io.uaena.cliplink.store.FileNames
+import io.uaena.cliplink.store.FileStore
 import org.json.JSONObject
 
 /**
@@ -56,7 +58,18 @@ data class Envelope(val type: String, val payload: String) {
     }
 }
 
-/** What `ClipboardEntry.Content` holds when `Type == "file"` - a descriptor, never bytes. */
+/**
+ * What `ClipboardEntry.Content` holds when `Type == "file"` - a descriptor, never bytes.
+ *
+ * Every parser here refuses a FileHash that isn't 64 hex digits (see
+ * [FileStore.isValidHash]): the hash becomes a path into the FileStore, and
+ * a peer's "../shared_prefs/..." must never get that far. [parse] also
+ * passes the sender's FileName through [FileNames.safe]: it names a file here
+ * (see ClipboardBridge.contentUriFor), and it is shown as the item's title,
+ * where a right-to-left override would make "invoice\u202Etxt.exe" read as
+ * "invoiceexe.txt". Only the parsed copy changes - the signed entry is stored
+ * and relayed exactly as it arrived.
+ */
 data class FilePayload(
     val fileName: String,
     val fileHash: String,
@@ -72,11 +85,11 @@ data class FilePayload(
         fun parse(json: String): FilePayload? = try {
             val obj = JSONObject(json)
             val hash = obj.optString("FileHash", "")
-            if (hash.isEmpty()) {
+            if (!FileStore.isValidHash(hash)) {
                 null
             } else {
                 FilePayload(
-                    fileName = obj.optString("FileName", "file"),
+                    fileName = FileNames.safe(obj.optString("FileName", ""), "file"),
                     fileHash = hash,
                     fileSize = obj.optLong("FileSize", 0L),
                 )
@@ -104,7 +117,7 @@ data class FileChunkMessage(
         fun parse(json: String): FileChunkMessage? = try {
             val obj = JSONObject(json)
             val hash = obj.optString("FileHash", "")
-            if (hash.isEmpty()) {
+            if (!FileStore.isValidHash(hash)) {
                 null
             } else {
                 FileChunkMessage(
@@ -127,7 +140,7 @@ data class FileRequestMessage(val fileHash: String) {
     companion object {
         fun parse(json: String): FileRequestMessage? = try {
             JSONObject(json).optString("FileHash", "")
-                .takeIf { it.isNotEmpty() }
+                .takeIf(FileStore::isValidHash)
                 ?.let(::FileRequestMessage)
         } catch (e: Exception) {
             null

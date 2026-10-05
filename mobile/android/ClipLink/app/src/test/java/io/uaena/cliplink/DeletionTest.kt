@@ -133,11 +133,13 @@ class DeletionTest {
 
     @Test
     fun `a deleted file's blob goes only when no remaining entry still uses it`() {
-        val first = fileEntry("abc123", "2026-09-26T10:00:00.0000001Z")
-        val resent = fileEntry("ABC123", "2026-09-26T11:00:00.0000001Z")
-        val other = fileEntry("def456", "2026-09-26T12:00:00.0000001Z")
+        // Real 64-hex hashes: FilePayload refuses anything else.
+        val hash = "abc123".repeat(10) + "abcd"
+        val first = fileEntry(hash, "2026-09-26T10:00:00.0000001Z")
+        val resent = fileEntry(hash.uppercase(), "2026-09-26T11:00:00.0000001Z")
+        val other = fileEntry("def456".repeat(10) + "defd", "2026-09-26T12:00:00.0000001Z")
 
-        assertEquals("abc123", first.blobToRelease(listOf(other)))
+        assertEquals(hash, first.blobToRelease(listOf(other)))
         // The same file sent twice is one blob - deleting one copy keeps it.
         assertNull(first.blobToRelease(listOf(resent, other)))
         assertNull(entry("text", "2026-09-26T10:00:00.0000001Z").blobToRelease(emptyList()))

@@ -329,13 +329,14 @@ final class AppModel: ObservableObject {
     /// "Open in ClipLink" / Copy to ClipLink from Files or another app. The
     /// URL can be a document opened in place from a file provider (maybe not
     /// even downloaded yet), so it is read under file coordination, off the
-    /// main thread.
+    /// main thread. A file shared in stays a file - an image file too - as
+    /// with the Share extension and on every other platform.
     func openFile(at url: URL) {
         let name = url.lastPathComponent
         Task {
             let temp = await Task.detached(priority: .userInitiated) { Self.coordinatedCopy(of: url) }.value
             guard let temp else { return showToast("Couldn't read that file.") }
-            sendCopiedFile(temp, name: name)
+            send(.file(temp, name: name), quiet: false)
         }
     }
 

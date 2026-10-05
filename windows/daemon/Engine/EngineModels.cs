@@ -1,3 +1,5 @@
+using ClipboardDaemon.Storage;
+
 namespace ClipboardDaemon.Engine;
 
 // What ClipLinkEngine hands the UI - plain immutable snapshots, safe to keep
@@ -96,6 +98,13 @@ public enum PairOutcome
     // The engine isn't running.
     NotRunning,
 }
+
+// What ShareFilesAsync did: Shared - the paths now in history and on their
+// way to the other devices, in the order given; Skipped - the rest, each with
+// why (Error: the system's message, for a file that couldn't be read).
+public sealed record ShareResult(IReadOnlyList<string> Shared, IReadOnlyList<SkippedShare> Skipped);
+
+public sealed record SkippedShare(string Path, FileSkipReason Reason, string? Error);
 
 // One synced-history row for the UI, newest first from GetHistory(). Light
 // on purpose: never the full text, the image or the file bytes - fetch those

@@ -10,8 +10,6 @@ using ClipboardDaemon.Storage;
 
 public class ClipboardSync
 {
-    private const long MaxFileBytes = 1024L * 1024 * 1024; // 1GB — a ceiling against something absurd, not a memory constraint anymore now that this streams
-
     private readonly FileStore fileStore;
     private const int MaxApplyAttempts = 5;
 
@@ -144,31 +142,27 @@ public class ClipboardSync
 
     // Multiple files can be selected and copied together in Explorer — sync
     // every one of them, not just the first, each as its own history entry.
+    // (The per-file checks and payload are LocalFiles.Describe, which "Share
+    // to ClipLink" uses too.)
     private void HandleFileDropList()
     {
         var files = System.Windows.Forms.Clipboard.GetFileDropList();
         var fileHashes = new List<string>();
-        var readableFiles = new List<(string path, FileInfo info, string hash)>();
+        var readableFiles = new List<(string path, FilePayload payload)>();
 
         foreach (string? path in files)
         {
             if (path == null) continue;
-            var fileInfo = new FileInfo(path);
-            if (!fileInfo.Exists)
+            var payload = LocalFiles.Describe(path, out var skip, out string? error);
+            if (payload == null)
             {
-                Console.WriteLine($"skipping file drop, not a readable file: {path}");
+                Console.WriteLine(skip == FileSkipReason.TooLarge
+                    ? $"skipping file drop, too large to sync (limit {LocalFiles.MaxFileBytes} bytes): {path}"
+                    : $"skipping file drop, not a readable file ({skip}{(error != null ? ": " + error : "")}): {path}");
                 continue;
             }
-            if (fileInfo.Length > MaxFileBytes)
-            {
-                Console.WriteLine($"skipping file drop, too large to sync ({fileInfo.Length} bytes, limit {MaxFileBytes}): {path}");
-                continue;
-            }
-
-            using var stream = File.OpenRead(path);
-            string hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream)); // streams internally — never loads the whole file for hashing
-            fileHashes.Add(hash);
-            readableFiles.Add((path, fileInfo, hash));
+            fileHashes.Add(payload.FileHash);
+            readableFiles.Add((path, payload));
         }
 
         if (readableFiles.Count == 0) return;
@@ -180,9 +174,8 @@ public class ClipboardSync
         if (combinedHash == _lastKnownHash) return;
         _lastKnownHash = combinedHash;
 
-        foreach (var (path, info, hash) in readableFiles)
+        foreach (var (path, payload) in readableFiles)
         {
-            var payload = new FilePayload(info.Name, hash, info.Length);
             ClipboardChanged?.Invoke((System.Text.Json.JsonSerializer.Serialize(payload), "file", path));
         }
     }

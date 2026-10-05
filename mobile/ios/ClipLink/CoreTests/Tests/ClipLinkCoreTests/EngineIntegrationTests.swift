@@ -399,4 +399,42 @@ final class EngineIntegrationTests: XCTestCase {
         wait("app lists it") { app.recorder.items.contains { $0.entry.content == "shared while the app is open" } }
         ext.shutdown()
     }
+
+    /// The Share extension's node drops file bytes, so it must never ask for
+    /// any - not even the blobs missing from the history it shares with the
+    /// app: the peer would stream each whole file for nothing.
+    func testShareExtensionNeverAsksForFileBytes() throws {
+        let (app, peer) = makePair()
+        setPasscode(app, "pw")
+        setPasscode(peer, "pw")
+        app.engine.enterForeground()
+        peer.engine.enterForeground()
+        wait("connected") { app.recorder.connectedCount == 1 && peer.recorder.connectedCount == 1 }
+
+        // The app has the peer's file in its history but not its bytes (as
+        // after a download cut short).
+        let source = FileManager.default.temporaryDirectory.appendingPathComponent("src-\(UUID().uuidString).bin")
+        try Data(repeating: 7, count: 4096).write(to: source)
+        peer.engine.sendFile(at: source, name: "notes.bin", moveIntoStore: false)
+        wait("app got the file") { app.recorder.receivedEntries.contains { $0.0.type == "file" && $0.1 != nil } }
+        let entry = try XCTUnwrap(app.recorder.receivedEntries.first { $0.0.type == "file" }?.0)
+        let payload = try XCTUnwrap(FilePayload.parse(entry.content))
+        let backgrounded = expectation(description: "backgrounded")
+        app.engine.enterBackground(grace: 0) { backgrounded.fulfill() }
+        wait(for: [backgrounded], timeout: 10)
+        app.engine.files.delete(payload.fileHash)
+
+        var extConfig = app.engine.config
+        extConfig.sendOnly = true
+        let ext = SyncEngine(config: extConfig, identity: app.engine.identity, secrets: app.engine.secrets)
+        let extRecorder = Recorder()
+        ext.delegate = extRecorder
+        ext.enterForeground()
+        // A new link asks for missing blobs as it registers, before it counts
+        // as connected.
+        wait("extension connected", timeout: 30) { extRecorder.connectedCount == 1 }
+        XCTAssertTrue(ext.queue.sync { ext.requestedAt.isEmpty }, "no file_request from a sender only")
+        XCTAssertFalse(ext.files.exists(payload.fileHash))
+        ext.shutdown()
+    }
 }

@@ -458,6 +458,69 @@ public sealed partial class ClipLinkEngine
         NotifyHistoryChanged();
     }
 
+    // ---- share ------------------------------------------------------
+
+    // One share at a time, in the order they came.
+    private readonly SemaphoreSlim shareGate = new(1, 1);
+
+    // "Share to ClipLink" (File Explorer's menu, Send To): each file goes
+    // out exactly as if it had been copied here - a "file" entry in history,
+    // its bytes in the FileStore, sent to every connected device and to the
+    // others when they next connect - but this PC's clipboard is never
+    // touched, and an image file stays a file. Folders, missing files, files
+    // over LocalFiles.MaxFileBytes and files that can't be read are skipped
+    // (see ShareResult); a path given twice is shared once. Hashing and
+    // caching a big file takes a while, so this runs off the caller's
+    // thread. Works while Faulted too: the entries wait in history for the
+    // next connection.
+    public async Task<ShareResult> ShareFilesAsync(IEnumerable<string> paths)
+    {
+        RequireStores();
+        var unique = paths.Where(path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        await shareGate.WaitAsync();
+        try
+        {
+            return await Task.Run(() =>
+            {
+                var shared = new List<string>();
+                var skipped = new List<SkippedShare>();
+                foreach (string path in unique)
+                {
+                    var payload = LocalFiles.Describe(path, out var skip, out string? error);
+                    if (payload == null)
+                    {
+                        Console.WriteLine($"[share] skipped ({skip}{(error != null ? ": " + error : "")}): {path}");
+                        skipped.Add(new SkippedShare(path, skip, error));
+                        continue;
+                    }
+                    try
+                    {
+                        // Its bytes first: one that can't be cached here
+                        // (disk full, say) could never reach the other
+                        // devices - better reported than an entry with
+                        // nothing behind it. PublishLocal finds them there.
+                        if (!fileStore.Exists(payload.FileHash)) fileStore.CopyIn(path, payload.FileHash);
+                        PublishLocal(JsonSerializer.Serialize(payload), "file", path, "shared");
+                        shared.Add(path);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[share] couldn't share {path}: {ex.GetType().Name}: {ex.Message}");
+                        skipped.Add(new SkippedShare(path, FileSkipReason.Unreadable, ex.Message));
+                    }
+                }
+                Console.WriteLine($"[share] shared {shared.Count} file(s), skipped {skipped.Count}");
+                return new ShareResult(shared, skipped);
+            });
+        }
+        finally
+        {
+            shareGate.Release();
+        }
+    }
+
     // ---- helpers -----------------------------------------------------
 
     private void RequireStores()
