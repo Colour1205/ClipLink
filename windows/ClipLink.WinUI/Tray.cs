@@ -14,11 +14,13 @@ internal sealed class Tray : IDisposable
 
     public Tray(string toolTip, Action open, Action quit)
     {
-        var openItem = new MenuFlyoutItem { Text = "Open ClipLink", Icon = new SymbolIcon(Symbol.OpenWith) };
+        var openItem = new MenuFlyoutItem { Text = "Open", Icon = new SymbolIcon(Symbol.OpenWith) };
         openItem.Click += (_, _) => open();
-        var quitItem = new MenuFlyoutItem { Text = "Quit ClipLink", Icon = new SymbolIcon(Symbol.Cancel) };
+        var quitItem = new MenuFlyoutItem { Text = "Quit", Icon = new SymbolIcon(Symbol.Cancel) };
         quitItem.Click += (_, _) => quit();
 
+        // Short labels: the flyout's own window is sized from its items, and
+        // a long one ("Quit ClipLink") is cut short.
         var menu = new MenuFlyout();
         menu.Items.Add(openItem);
         menu.Items.Add(new MenuFlyoutSeparator());

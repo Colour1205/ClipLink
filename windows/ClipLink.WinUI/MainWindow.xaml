@@ -15,16 +15,19 @@
         <TitleBar x:Name="AppTitleBar" Grid.Row="0" Title="ClipLink" />
 
         <!-- Three destinations, Settings in the footer - the mobile apps'
-             tabs. The pane stays open: it's only three items. Each page is
-             made once and kept (they subscribe to EngineHost in their
-             constructors). -->
+             tabs. The pane is open (icons and labels) or collapsed to icons
+             only, by the button at its top; the choice is remembered. Each
+             page is made once and kept (they subscribe to EngineHost in
+             their constructors). -->
         <NavigationView x:Name="RootNavigation"
                         Grid.Row="1"
                         PaneDisplayMode="Left"
                         OpenPaneLength="200"
                         IsSettingsVisible="False"
                         IsBackButtonVisible="Collapsed"
-                        IsPaneToggleButtonVisible="False"
+                        IsPaneToggleButtonVisible="True"
+                        PaneOpened="RootNavigation_PaneChanged"
+                        PaneClosed="RootNavigation_PaneChanged"
                         SelectionChanged="RootNavigation_SelectionChanged">
             <NavigationView.MenuItems>
                 <NavigationViewItem Content="Synced" Tag="synced">

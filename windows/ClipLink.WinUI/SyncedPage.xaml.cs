@@ -27,6 +27,7 @@ public sealed partial class SyncedPage : Page
         InitializeComponent();
         Cards.ItemsSource = host.History;
         EngineBanner.Track(StatusBanner, host);
+        WheelScroll.Attach(DetailView);
         host.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName == nameof(EngineHost.HasPasscode)) UpdatePasscodeTip();
@@ -39,6 +40,14 @@ public sealed partial class SyncedPage : Page
         };
         // Navigated to another page: back to the cards for next time.
         Unloaded += (_, _) => ShowList();
+        // New items arrive at the top: the view must stay where it is, not
+        // follow the card that used to be first (the default anchoring).
+        Loaded += (_, _) =>
+        {
+            if (Cards.ScrollView is not { } scroll) return;
+            scroll.VerticalAnchorRatio = double.NaN;
+            WheelScroll.Attach(scroll);
+        };
         ShowAsGrid(App.Settings.SyncedGridView);
         UpdatePasscodeTip();
     }
@@ -91,6 +100,15 @@ public sealed partial class SyncedPage : Page
         App.Settings.PasscodeTipDismissed = true;
         App.Settings.Save();
         UpdatePasscodeTip();
+    }
+
+    // The grid's thumbnail: as wide as the card, as high as the image (a
+    // very tall one cropped at the border's MaxHeight, like the phones' grid).
+    private void GridThumb_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (sender is not Border { DataContext: HistoryCard { AspectRatio: > 0 } card } border) return;
+        double height = Math.Min(border.MaxHeight, Math.Round(e.NewSize.Width * card.AspectRatio));
+        if (double.IsNaN(border.Height) || Math.Abs(border.Height - height) > 0.5) border.Height = height;
     }
 
     private static HistoryCard? CardOf(object sender) => (sender as FrameworkElement)?.DataContext as HistoryCard;
@@ -182,7 +200,7 @@ public sealed partial class SyncedPage : Page
         }
         UpdateDetail();
 
-        ListTitle.Visibility = ListSubtitle.Visibility = ViewSwitch.Visibility = Cards.Visibility = Visibility.Collapsed;
+        ListTitle.Visibility = ListSubtitle.Visibility = ViewSwitch.Visibility = Cards.Visibility = PasscodeTip.Visibility = Visibility.Collapsed;
         EmptyState.Visibility = Visibility.Collapsed;
         DetailTitle.Visibility = DetailOrigin.Visibility = DetailView.Visibility = Visibility.Visible;
         DetailView.ChangeView(null, 0, null, disableAnimation: true);
@@ -202,7 +220,7 @@ public sealed partial class SyncedPage : Page
         DetailFile.Content = null;
 
         DetailTitle.Visibility = DetailOrigin.Visibility = DetailView.Visibility = Visibility.Collapsed;
-        ListTitle.Visibility = ListSubtitle.Visibility = ViewSwitch.Visibility = Cards.Visibility = Visibility.Visible;
+        ListTitle.Visibility = ListSubtitle.Visibility = ViewSwitch.Visibility = Cards.Visibility = PasscodeTip.Visibility = Visibility.Visible;
         EmptyState.Visibility = host.HistoryIsEmpty ? Visibility.Visible : Visibility.Collapsed;
         DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => Cards.Focus(FocusState.Programmatic));
     }

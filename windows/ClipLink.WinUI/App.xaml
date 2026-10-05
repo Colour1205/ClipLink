@@ -34,6 +34,17 @@
                 <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
             </Style>
 
+            <!-- The page title as a breadcrumb ("Synced > Text"): the same size
+                 and weight as the plain title on the list, not the control's
+                 small default text. -->
+            <DataTemplate x:Key="PageBreadcrumbItem">
+                <TextBlock Text="{Binding}" Style="{StaticResource TitleTextBlockStyle}" />
+            </DataTemplate>
+            <Style x:Key="PageBreadcrumb" TargetType="BreadcrumbBar">
+                <Setter Property="ItemTemplate" Value="{StaticResource PageBreadcrumbItem}" />
+            </Style>
+            <x:Double x:Key="BreadcrumbBarChevronFontSize">16</x:Double>
+
             <!-- Square icon-only button (give it AutomationProperties.Name and a ToolTip). -->
             <Style x:Key="IconButton" TargetType="Button" BasedOn="{StaticResource SubtleButtonStyle}">
                 <Setter Property="Width" Value="32" />

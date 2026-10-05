@@ -27,6 +27,8 @@ public sealed partial class DevicesPage : Page
     {
         InitializeComponent();
         EngineBanner.Track(StatusBanner, host);
+        WheelScroll.Attach(DeviceList);
+        WheelScroll.Attach(PairView);
         PairTitle.ItemsSource = new[] { "Devices", "Add a device" };
         Loaded += (_, _) =>
         {

@@ -21,6 +21,7 @@ public sealed partial class SettingsPage : Page
     {
         InitializeComponent();
         EngineBanner.Track(StatusBanner, host);
+        WheelScroll.Attach(Scroller);
         DeviceNameBox.PlaceholderText = ComputerName();
         AboutCard.Description = $"Version {App.Version}. Syncs your clipboard between your devices, directly - no cloud."
             + (App.Options.IsDefaultLabel ? "" : $" Test copy \"{App.Options.Label}\" on port {App.Options.Port}.");

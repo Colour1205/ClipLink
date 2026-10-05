@@ -76,7 +76,7 @@
                     </Grid.ColumnDefinitions>
                     <TextBlock x:Name="ListTitle" Text="Devices" Style="{StaticResource TitleTextBlockStyle}" />
                     <!-- In the pairing view: "Devices > Add a device", Devices going back. -->
-                    <BreadcrumbBar x:Name="PairTitle" Visibility="Collapsed" ItemClicked="PairTitle_ItemClicked" />
+                    <BreadcrumbBar x:Name="PairTitle" Style="{StaticResource PageBreadcrumb}" Visibility="Collapsed" ItemClicked="PairTitle_ItemClicked" />
                     <Button x:Name="AddDeviceButton" Grid.Column="1"
                             Style="{StaticResource AccentButtonStyle}"
                             VerticalAlignment="Center" Margin="12,0,0,0"

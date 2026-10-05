@@ -4,6 +4,7 @@ using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Graphics;
 using WinRT.Interop;
 
@@ -34,6 +35,7 @@ public sealed partial class MainWindow : Window
         SetTitleBar(AppTitleBar);
         Root.RequestedTheme = App.ThemeOverride;
         AppWindow.SetIcon(AppIcon.Path);
+        AppTitleBar.IconSource = new ImageIconSource { ImageSource = new BitmapImage(new Uri(AppIcon.Path)) { DecodePixelWidth = 32 } };
         if (!App.Options.IsDefaultLabel)
         {
             // A test copy - make it obvious which one this is.
@@ -59,8 +61,23 @@ public sealed partial class MainWindow : Window
 
         host.PairingRequested += OnPairingRequested;
         host.PairingResolved += OnPairingResolved;
+        RootNavigation.IsPaneOpen = !App.Settings.NavPaneCollapsed;
+        UpdateToastMargin();
         RootNavigation.SelectedItem = RootNavigation.MenuItems[0];
     }
+
+    // Open (icons and labels) or collapsed to icons only: remembered.
+    private void RootNavigation_PaneChanged(NavigationView sender, object args)
+    {
+        UpdateToastMargin();
+        if (App.Settings.NavPaneCollapsed == !sender.IsPaneOpen) return;
+        App.Settings.NavPaneCollapsed = !sender.IsPaneOpen;
+        App.Settings.Save();
+    }
+
+    // Toasts sit centred under the content, not under the pane.
+    private void UpdateToastMargin() =>
+        ToastHost.Margin = new Thickness(RootNavigation.IsPaneOpen ? RootNavigation.OpenPaneLength : RootNavigation.CompactPaneLength, 0, 0, 16);
 
     // 960 x 680 (in device-independent pixels), in the middle of the screen
     // it opens on.

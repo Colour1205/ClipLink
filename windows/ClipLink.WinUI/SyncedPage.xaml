@@ -78,7 +78,8 @@
                      one cropped at 320). -->
                 <Border CornerRadius="4" BorderThickness="1" MaxHeight="320"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                        Visibility="{x:Bind HasThumbnail, Mode=OneWay}">
+                        Visibility="{x:Bind HasThumbnail, Mode=OneWay}"
+                        SizeChanged="GridThumb_SizeChanged">
                     <Image Source="{x:Bind Thumbnail, Mode=OneWay}" Stretch="UniformToFill" />
                 </Border>
                 <Border Height="120" CornerRadius="4"
@@ -142,75 +143,79 @@
         <!-- List: what it is, when, where from, and the buttons along the
              top; the content under them. -->
         <DataTemplate x:Key="ListCard" x:DataType="local:HistoryCard">
+            <ItemContainer CornerRadius="4" AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}">
             <Border Style="{StaticResource CardBorder}" Padding="16,10,8,14"
-                    AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
+                        AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
 
-                    <!-- The device last: a long name is what gets cut short, never the time. -->
-                    <SymbolIcon Symbol="{x:Bind KindSymbol, Mode=OneWay}"
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                VerticalAlignment="Center" Margin="0,0,10,0" />
-                    <TextBlock Grid.Column="1" Style="{StaticResource CaptionSecondary}"
-                               Text="{x:Bind Summary, Mode=OneWay}"
-                               VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
-                               ToolTipService.ToolTip="{x:Bind Origin, Mode=OneWay}" />
-                    <ContentControl Grid.Column="2" Margin="8,0,0,0" Content="{x:Bind}"
-                                    ContentTemplate="{StaticResource CardActions}"
-                                    HorizontalContentAlignment="Stretch" IsTabStop="False" />
+                        <!-- The device last: a long name is what gets cut short, never the time. -->
+                        <SymbolIcon Symbol="{x:Bind KindSymbol, Mode=OneWay}"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    VerticalAlignment="Center" Margin="0,0,10,0" />
+                        <TextBlock Grid.Column="1" Style="{StaticResource CaptionSecondary}"
+                                   Text="{x:Bind Summary, Mode=OneWay}"
+                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                                   ToolTipService.ToolTip="{x:Bind Origin, Mode=OneWay}" />
+                        <ContentControl Grid.Column="2" Margin="8,0,0,0" Content="{x:Bind}"
+                                        ContentTemplate="{StaticResource CardActions}"
+                                        HorizontalContentAlignment="Stretch" IsTabStop="False" />
 
-                    <ContentControl Grid.Row="1" Grid.ColumnSpan="3" Margin="0,6,8,0"
-                                    Content="{x:Bind}"
-                                    ContentTemplateSelector="{StaticResource ContentSelector}"
-                                    HorizontalContentAlignment="Stretch" IsTabStop="False" />
-                </Grid>
-            </Border>
+                        <ContentControl Grid.Row="1" Grid.ColumnSpan="3" Margin="0,6,8,0"
+                                        Content="{x:Bind}"
+                                        ContentTemplateSelector="{StaticResource ContentSelector}"
+                                        HorizontalContentAlignment="Stretch" IsTabStop="False" />
+                    </Grid>
+                </Border>
+            </ItemContainer>
         </DataTemplate>
 
         <!-- Grid: the content first (a card's job is showing it), then when
              and where from, and the buttons, along the bottom. -->
         <DataTemplate x:Key="GridCard" x:DataType="local:HistoryCard">
+            <ItemContainer CornerRadius="4" AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}">
             <Border Style="{StaticResource CardBorder}" Padding="12,12,6,6"
-                    AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
+                        AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
 
-                    <ContentControl Grid.ColumnSpan="3" Margin="0,0,6,6"
-                                    Content="{x:Bind}"
-                                    ContentTemplateSelector="{StaticResource GridContentSelector}"
-                                    HorizontalContentAlignment="Stretch" IsTabStop="False" />
+                        <ContentControl Grid.ColumnSpan="3" Margin="0,0,6,6"
+                                        Content="{x:Bind}"
+                                        ContentTemplateSelector="{StaticResource GridContentSelector}"
+                                        HorizontalContentAlignment="Stretch" IsTabStop="False" />
 
-                    <SymbolIcon Grid.Row="1" Symbol="{x:Bind KindSymbol, Mode=OneWay}"
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                ToolTipService.ToolTip="{x:Bind KindText, Mode=OneWay}"
-                                VerticalAlignment="Center" Margin="0,0,10,0" />
-                    <!-- When over where from: a narrow card has no room for both on one line. -->
-                    <StackPanel Grid.Row="1" Grid.Column="1" VerticalAlignment="Center"
-                                ToolTipService.ToolTip="{x:Bind Origin, Mode=OneWay}">
-                        <TextBlock Text="{x:Bind When, Mode=OneWay}" Style="{StaticResource CaptionSecondary}" TextTrimming="CharacterEllipsis" />
-                        <TextBlock Text="{x:Bind Source, Mode=OneWay}" Style="{StaticResource CaptionSecondary}" TextTrimming="CharacterEllipsis" />
-                    </StackPanel>
-                    <ContentControl Grid.Row="1" Grid.Column="2" Margin="4,0,0,0" Content="{x:Bind}"
-                                    ContentTemplate="{StaticResource CardActions}"
-                                    HorizontalContentAlignment="Stretch" IsTabStop="False" />
-                </Grid>
-            </Border>
+                        <SymbolIcon Grid.Row="1" Symbol="{x:Bind KindSymbol, Mode=OneWay}"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    ToolTipService.ToolTip="{x:Bind KindText, Mode=OneWay}"
+                                    VerticalAlignment="Center" Margin="0,0,10,0" />
+                        <!-- When over where from: a narrow card has no room for both on one line. -->
+                        <StackPanel Grid.Row="1" Grid.Column="1" VerticalAlignment="Center"
+                                    ToolTipService.ToolTip="{x:Bind Origin, Mode=OneWay}">
+                            <TextBlock Text="{x:Bind When, Mode=OneWay}" Style="{StaticResource CaptionSecondary}" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{x:Bind Source, Mode=OneWay}" Style="{StaticResource CaptionSecondary}" TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                        <ContentControl Grid.Row="1" Grid.Column="2" Margin="4,0,0,0" Content="{x:Bind}"
+                                        ContentTemplate="{StaticResource CardActions}"
+                                        HorizontalContentAlignment="Stretch" IsTabStop="False" />
+                    </Grid>
+                </Border>
+            </ItemContainer>
         </DataTemplate>
     </Page.Resources>
 
@@ -233,7 +238,7 @@
                     </Grid.ColumnDefinitions>
                     <TextBlock x:Name="ListTitle" Text="Synced" Style="{StaticResource TitleTextBlockStyle}" />
                     <!-- One item in full: "Synced > Text", Synced going back. -->
-                    <BreadcrumbBar x:Name="DetailTitle" Visibility="Collapsed" ItemClicked="DetailTitle_ItemClicked" />
+                    <BreadcrumbBar x:Name="DetailTitle" Style="{StaticResource PageBreadcrumb}" Visibility="Collapsed" ItemClicked="DetailTitle_ItemClicked" />
 
                     <!-- List or grid, as on the phones. -->
                     <controls:Segmented x:Name="ViewSwitch" Grid.Column="1" SelectionMode="Single"

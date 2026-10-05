@@ -20,7 +20,7 @@
             </StackPanel>
         </Grid>
 
-        <ScrollViewer Grid.Row="1">
+        <ScrollViewer x:Name="Scroller" Grid.Row="1">
             <Grid Margin="{StaticResource PageContentMargin}">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" MaxWidth="{StaticResource PageMaxWidth}" />
