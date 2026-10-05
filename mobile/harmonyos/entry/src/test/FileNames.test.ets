@@ -38,15 +38,27 @@ export default function fileNamesTest() {
       expect(safeFileName('. . .', 'file')).assertEqual('file');
     });
 
-    it('replacesUnsafeCharacters', 0, () => {
+    it('replacesInvalidCharactersAndRemovesInvisibleOnes', 0, () => {
       expect(safeFileName('a:b*c?d"e<f>g|.txt', 'file')).assertEqual('a_b_c_d_e_f_g_.txt');
-      expect(safeFileName('line\nbreak.txt', 'file')).assertEqual('line_break.txt');
-      expect(safeFileName('nul\u0000.txt', 'file')).assertEqual('nul_.txt');
+      // Removed, as Windows' FileNames.Safe removes them - the same set a
+      // device name loses.
+      const unsafe: number[] = [0x061C, 0xFEFF];
+      for (let c = 0x00; c <= 0x1F; c++) unsafe.push(c);
+      for (let c = 0x7F; c <= 0x9F; c++) unsafe.push(c);
+      for (let c = 0x200B; c <= 0x200F; c++) unsafe.push(c);
+      for (let c = 0x202A; c <= 0x202E; c++) unsafe.push(c);
+      for (let c = 0x2066; c <= 0x2069; c++) unsafe.push(c);
+      for (const c of unsafe) {
+        expect(safeFileName(`a${String.fromCharCode(c)}b.txt`, 'file')).assertEqual('ab.txt');
+      }
+      expect(safeFileName('line\nbreak.txt', 'file')).assertEqual('linebreak.txt');
+      expect(safeFileName('nul\u0000.txt', 'file')).assertEqual('nul.txt');
       // Shown as "invoiceexe.txt" if the override were kept.
-      expect(safeFileName('invoice\u202Etxt.exe', 'file')).assertEqual('invoice_txt.exe');
-      // Zero-width characters and the BOM, which Windows' IsUnsafeChar
-      // names too: invisible, so they'd hide text.
-      expect(safeFileName('\uFEFFre\u200Bport\u200C\u200D.pdf', 'file')).assertEqual('_re_port__.pdf');
+      expect(safeFileName('invoice\u202Etxt.exe', 'file')).assertEqual('invoicetxt.exe');
+      expect(safeFileName('report\u200B.pdf', 'file')).assertEqual('report.pdf');
+      // Removed, THEN trimmed: the spaces they were hiding go too.
+      expect(safeFileName('\uFEFF name.txt \u200E', 'file')).assertEqual('name.txt');
+      expect(safeFileName('\u202E\u200B\u0007', 'file')).assertEqual('file');
       expect(safeFileName('  name.txt . ', 'file')).assertEqual('name.txt');
       expect(safeFileName('Café 日本語 😀.png', 'file')).assertEqual('Café 日本語 😀.png');
     });

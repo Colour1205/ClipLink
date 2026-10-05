@@ -123,12 +123,13 @@ public sealed partial class ClipLinkEngine
     // first connection with the device that proves its session stores the
     // name from its handshake (RememberProvenName). One-sided: it
     // connects once that device trusts this PC too (paired or same passcode
-    // there). False for a blank id or this device's own; true, changing
-    // nothing, if it's already trusted.
+    // there). False for a blank id or this device's own (however it's spelt
+    // - see DeviceIdentity.IsSameKey); true, changing nothing, if it's
+    // already trusted.
     public bool TrustDevice(string deviceId)
     {
         RequireStores();
-        if (string.IsNullOrWhiteSpace(deviceId) || deviceId == ownId) return false;
+        if (string.IsNullOrWhiteSpace(deviceId) || DeviceIdentity.IsSameKey(deviceId, ownId)) return false;
         if (trustStore.IsTrusted(deviceId)) return true;
         seenPeers.TryGetValue(deviceId, out var seen);
         trustStore.Trust(deviceId, seen?.AdvertisedAddress ?? seen?.LanAddress);
@@ -139,7 +140,8 @@ public sealed partial class ClipLinkEngine
     // Trusts a device from its pairing payload (PairingInfo JSON) or a bare
     // device id, one-sided, exactly as the old command did - kept for tools
     // and tests; the app pairs with PairByAddressAsync / TrustDevice.
-    // False for a blank payload, or this device's own. ("trust_device")
+    // False for a blank payload, or this device's own (however its id is
+    // spelt - see DeviceIdentity.IsSameKey). ("trust_device")
     public bool TrustPairingPayload(string payload)
     {
         RequireStores();
@@ -155,12 +157,12 @@ public sealed partial class ClipLinkEngine
 
         if (pairingInfo != null && !string.IsNullOrWhiteSpace(pairingInfo.PublicKey))
         {
-            if (pairingInfo.PublicKey == ownId) return false;
+            if (DeviceIdentity.IsSameKey(pairingInfo.PublicKey, ownId)) return false;
             trustStore.Trust(pairingInfo.PublicKey, pairingInfo.Address, pairingInfo.Name);
         }
         else
         {
-            if (payload == ownId) return false;
+            if (DeviceIdentity.IsSameKey(payload, ownId)) return false;
             trustStore.Trust(payload);
         }
         NotifyDevicesChanged();

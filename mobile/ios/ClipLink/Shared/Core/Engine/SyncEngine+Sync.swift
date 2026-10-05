@@ -524,13 +524,14 @@ extension SyncEngine {
     /// ReceivedFiles under this exact name, unsanitised: characters or names
     /// Windows rejects would make the file land in their store but never on
     /// their clipboard. `sanitize` already replaces those characters and
-    /// drops trailing dots and spaces; this adds the reserved device names.
+    /// drops trailing dots and spaces; this adds the reserved device names,
+    /// cut again if the "_" takes one over the caps (as FileNames.Safe does).
     static func windowsSafeName(_ name: String) -> String {
         let cleaned = FileStore.sanitize(name)
         // Up to the first dot: "con.txt" is a device, ".con" (no stem) isn't.
         let stem = cleaned.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)?.uppercased() ?? ""
         let reserved = Set(["CON", "PRN", "AUX", "NUL"] + (1...9).map { "COM\($0)" } + (1...9).map { "LPT\($0)" })
-        return reserved.contains(stem) ? "_" + cleaned : cleaned
+        return reserved.contains(stem) ? FileStore.sanitize("_" + cleaned) : cleaned
     }
 
     /// Incoming streams at once; any more go past and are asked for again

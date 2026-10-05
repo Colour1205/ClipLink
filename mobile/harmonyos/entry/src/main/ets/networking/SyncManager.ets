@@ -45,6 +45,7 @@ export class SyncManager {
   private context: common.UIAbilityContext;
   private fileStore: FileStore;
   private entryAppliedCallback: ((entry: ClipboardEntry, result: ApplyResult, fromPeer: boolean) => void) | null = null;
+  private fileStoredCallback: ((fileHash: string) => void) | null = null;
   private logCallback: ((message: string) => void) | null = null;
   private connectionsChangedCallback: ((count: number) => void) | null = null;
 
@@ -89,6 +90,13 @@ export class SyncManager {
 
   onEntryApplied(callback: (entry: ClipboardEntry, result: ApplyResult, fromPeer: boolean) => void): void {
     this.entryAppliedCallback = callback;
+  }
+
+  // A file's bytes arrived that no newly received entry was waiting on - an
+  // older item's, asked for again (see requestMissingFiles). Its card can
+  // show what it now has (an image's preview, say). Android's onFileStored.
+  onFileStored(callback: (fileHash: string) => void): void {
+    this.fileStoredCallback = callback;
   }
 
   onLog(callback: (message: string) => void): void {
@@ -656,7 +664,7 @@ export class SyncManager {
       await this.history.deleteFileIfUnused(this.context, chunk.FileHash);
       return;
     }
-    await this.tryFulfillPendingEntry(chunk.FileHash);
+    if (!(await this.tryFulfillPendingEntry(chunk.FileHash))) this.fileStoredCallback?.(chunk.FileHash);
   }
 
   // Ends one incoming stream early: off the map, its fd closed and its
@@ -700,12 +708,13 @@ export class SyncManager {
   // completion (above), but also this device's own local capture of a
   // file (see Index.ets's onPasteButtonClick). Whichever way a hash
   // becomes available, a pending entry waiting on exactly that hash
-  // should get applied.
-  private async tryFulfillPendingEntry(fileHash: string): Promise<void> {
+  // should get applied. False if none was waiting.
+  private async tryFulfillPendingEntry(fileHash: string): Promise<boolean> {
     const entry = this.pendingEntries.get(fileHash);
-    if (entry === undefined) return;
+    if (entry === undefined) return false;
     this.pendingEntries.delete(fileHash);
     await this.applyFileEntry(entry);
+    return true;
   }
 
   private async handleMessage(msg: string, conn: PeerConnection): Promise<void> {

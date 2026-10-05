@@ -417,6 +417,10 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertEqual(SyncEngine.windowsSafeName("Con.tar.gz"), "_Con.tar.gz")
         // No stem: not a device name.
         XCTAssertEqual(SyncEngine.windowsSafeName(".con"), ".con")
+        // The "_" doesn't take a name at the cap over it: Windows' own
+        // FileNames.Safe gives the same 120 characters.
+        XCTAssertEqual(SyncEngine.windowsSafeName("con." + String(repeating: "b", count: 200)),
+                       "_con." + String(repeating: "b", count: 115))
     }
 
     /// The same cases as Android's ShareTest and HarmonyOS' FileNames.test

@@ -158,7 +158,12 @@ missing blobs are re-requested on every connect. At most 8 streams come in at
 once: a file whose stream went by for want of a slot (a share of many files)
 is asked for again once that stream ends, and an unanswered request up to 3
 more times, 15 s apart. Files go out to each peer 3 at a time, the rest in
-turn.
+turn. A file's name - a peer's, or one shared in - follows Windows'
+`FileNames.Safe`, as on Android and HarmonyOS, so it reads the same on every
+device (`FileStore.sanitize`): only its last path segment, without control,
+bidi or zero-width characters, `\/:*?"<>|` as `_`, no trailing dots or
+spaces (leading ones stay), and at most 120 UTF-16 units and 240 UTF-8 bytes,
+cut by code point with its extension kept.
 
 ## Fixed here that other ports still have (reported separately)
 

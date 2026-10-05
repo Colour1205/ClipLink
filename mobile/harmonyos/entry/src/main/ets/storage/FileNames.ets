@@ -3,13 +3,15 @@
 // the file to ClipLink - and it's shown, offered to a save picker, and sent
 // on to peers that do turn it into a path. Only its last path segment counts
 // (a "../../x" or "/data/storage/.../x" must never reach any of those as
-// one), with the characters Windows refuses, control characters and the
-// invisible ones Windows' FileNames.IsUnsafeChar names - bidi marks and
-// overrides that can disguise an extension ("txt.exe" shown as "exe.txt"),
-// zero-width characters that hide text - replaced, trailing dots/spaces
-// dropped, and the length capped with the extension kept. Blank after all
-// that: fallback. Windows' extra reserved-device-name rule only matters
-// where the name becomes a Windows path, so the receiver there applies it.
+// one), with control characters and the invisible ones Windows'
+// FileNames.IsUnsafeChar names - bidi marks and overrides that can disguise
+// an extension ("txt.exe" shown as "exe.txt"), zero-width characters that
+// hide text - removed, the characters Windows refuses replaced with "_" (as
+// Windows, Android and iOS do it, so a name comes out the same on every
+// device), trailing dots/spaces dropped, and the length capped with the
+// extension kept. Blank after all that: fallback. Windows' extra
+// reserved-device-name rule only matters where the name becomes a Windows
+// path, so the receiver there applies it.
 
 const MAX_NAME_LENGTH: number = 120;
 const MAX_EXTENSION_LENGTH: number = 20;
@@ -18,7 +20,10 @@ const MAX_EXTENSION_LENGTH: number = 20;
 // and creating that name fails. Kept under 255 so a receiver can still add
 // a " (1)" to it. Same cap as Android's FileNames.kt.
 const MAX_NAME_UTF8_BYTES: number = 240;
-const UNSAFE_CHARS: RegExp = new RegExp('[\\\\/:*?"<>|\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200b-\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]', 'g');
+// Removed - the same set a peer's device name loses (see DeviceName.ets).
+const UNSAFE_CHARS: RegExp = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200b-\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]', 'g');
+// Replaced with "_": the characters Windows refuses in a name.
+const INVALID_CHARS: RegExp = new RegExp('[\\\\/:*?"<>|]', 'g');
 
 function trimEndDotsAndSpaces(s: string): string {
   let end: number = s.length;
@@ -72,7 +77,8 @@ export function safeFileName(name: string | null | undefined, fallback: string):
   if (typeof name !== 'string') return fallback;
   let safe: string = name.split('\\').join('/');
   safe = safe.substring(safe.lastIndexOf('/') + 1);
-  safe = trimEndDotsAndSpaces(safe.replace(UNSAFE_CHARS, '_').trim());
+  // Removed, THEN trimmed: the spaces they were hiding go too.
+  safe = trimEndDotsAndSpaces(safe.replace(UNSAFE_CHARS, '').replace(INVALID_CHARS, '_').trim());
   if (safe.length === 0) return fallback;
   if (safe.length > MAX_NAME_LENGTH || utf8Length(safe) > MAX_NAME_UTF8_BYTES) {
     const dot: number = safe.lastIndexOf('.');

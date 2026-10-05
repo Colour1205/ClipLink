@@ -59,14 +59,15 @@ public sealed partial class ClipLinkEngine : IDisposable
     // is already listening on the port.
     public event Action<EngineStatus>? StatusChanged;
 
-    // Bundles the two pieces of state a chunked file transfer needs while
-    // it's in progress: the still-open write stream for each hash currently
-    // being received, and any entry that arrived (and was verified) before
-    // its bytes finished streaming in, waiting to be applied once they do.
+    // Bundles the state chunked file transfers need besides the streams
+    // being received (those are IncomingFiles'): any entry that arrived (and
+    // was verified) before its bytes finished streaming in, waiting to be
+    // applied once they do, and how often each file has been asked for again
+    // after a transfer of it failed (see RequestAgain).
     private class FileTransferState
     {
-        public ConcurrentDictionary<string, FileStream> InProgressWrites = new();
         public ConcurrentDictionary<string, ClipboardEntry> PendingEntries = new();
+        public ConcurrentDictionary<string, int> Retries = new(StringComparer.OrdinalIgnoreCase);
         // Guards against streaming the same file to the same peer twice at
         // once: ClipboardChanged proactively streams a freshly-captured
         // file right after broadcasting its entry, but the receiving side
@@ -98,6 +99,7 @@ public sealed partial class ClipLinkEngine : IDisposable
     private string ownId = "";
     private DeviceIdentity identity = null!;
     private FileStore fileStore = null!;
+    private IncomingFiles incomingFiles = null!;
     private HistoryAccess historyAccess = null!;
     private TrustStore trustStore = null!;
     private PassphraseKeyStore passphraseKeyStore = null!;
@@ -186,6 +188,7 @@ public sealed partial class ClipLinkEngine : IDisposable
 
             identity = new DeviceIdentity(label);
             fileStore = new FileStore(label);
+            incomingFiles = new IncomingFiles(fileStore);
             historyAccess = new HistoryAccess(label, fileStore, new DeletedEntries(label));
             trustStore = new TrustStore(label);
             passphraseKeyStore = new PassphraseKeyStore(label);
@@ -422,23 +425,24 @@ public sealed partial class ClipLinkEngine : IDisposable
         {
             if (stopping.IsCancellationRequested) return;
 
-            // Remember every other device's latest beacon (our own loops
-            // back on localhost) - its name and LAN address for the
-            // Devices list, whether or not it's trusted. In memory only:
-            // nothing a beacon says about a name is ever saved (see SeenPeer).
-            if (other_device_id != ownId)
-            {
-                RememberBeacon(other_device_id,
-                    new SeenPeer(otherName, sender.ToString(), peerAddress, otherPairingOpen, DateTime.UtcNow));
-            }
+            // Nothing here is for this PC's own id: UDP broadcasts loop back
+            // to the sender on localhost, so without this a device would list
+            // itself, and "auto-trust" itself below. Compared as keys, not
+            // text: a beacon can spell this PC's id some other way (see
+            // DeviceIdentity.IsSameKey), and it's still this PC.
+            if (DeviceIdentity.IsSameKey(other_device_id, ownId)) return;
+
+            // Remember every other device's latest beacon - its name and LAN
+            // address for the Devices list, whether or not it's trusted. In
+            // memory only: nothing a beacon says about a name is ever saved
+            // (see SeenPeer).
+            RememberBeacon(other_device_id,
+                new SeenPeer(otherName, sender.ToString(), peerAddress, otherPairingOpen, DateTime.UtcNow));
 
             // auto-trust: if this device wasn't already trusted, but it proved
             // knowledge of the same passphrase we have configured, trust it now —
             // an alternative to manual QR/key pairing for "these are all my own devices".
-            // Excludes our own id: UDP broadcasts loop back to the sender on
-            // localhost, so without this check a device would "auto-trust" itself.
-            if (other_device_id != ownId
-                && !trustStore.IsTrusted(other_device_id) && proof != null && passphraseKeyStore.GetKey() is byte[] passphraseKey
+            if (!trustStore.IsTrusted(other_device_id) && proof != null && passphraseKeyStore.GetKey() is byte[] passphraseKey
                 && PassphraseAuth.VerifyProof(passphraseKey, other_device_id, proof))
             {
                 Console.WriteLine($"Auto-trusting {other_device_id} — proved knowledge of shared passphrase");
@@ -448,10 +452,7 @@ public sealed partial class ClipLinkEngine : IDisposable
             }
 
             bool isTrusted = trustStore.IsTrusted(other_device_id);
-            if (other_device_id != ownId)
-            {
-                NotifyDevicesChanged(); // an event only if the list really changed
-            }
+            NotifyDevicesChanged(); // an event only if the list really changed
 
             // connect only when the other device's public key is "smaller" than this device's public key (to avoid duplicate connections)
             // connect only if the other device is in the trust store

@@ -630,6 +630,12 @@ struct Index {
       const item: SyncedItem = this.syncedItemFor(entry, fromPeer);
       this.syncedItems = [item, ...this.syncedItems.filter((i: SyncedItem) => i.id !== item.id)].slice(0, 50);
     });
+    // An older item's bytes, fetched again (see SyncManager.onFileStored):
+    // the list is laid out again, so its card gets the key - and the image
+    // preview - it has now (see syncedItemKey).
+    syncManager.onFileStored(() => {
+      this.syncedItems = this.syncedItems.slice();
+    });
     syncManager.onLog((message: string) => {
       this.log(message);
     });

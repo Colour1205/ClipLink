@@ -33,9 +33,9 @@ object Protocol {
     /**
      * The one sanitiser for device names: control, bidi and zero-width
      * characters ([FileNames.isUnsafeChar] - the set a received file name
-     * loses too) removed, then trimmed and capped at
-     * [MAX_DEVICE_NAME_LENGTH] code points, or null when nothing is left. Applied to our own name before it
-     * goes out AND to every name that comes in - beacon, handshake and
+     * loses too) removed, then trimmed and capped at [MAX_DEVICE_NAME_LENGTH]
+     * code points, or null when nothing is left. Applied to our own name before
+     * it goes out AND to every name that comes in - beacon, handshake and
      * pairing code alike. A peer's name is self-claimed untrusted text: a
      * handshake line has no length limit of its own, and a right-to-left
      * override or a zero-width character is enough to make one name render

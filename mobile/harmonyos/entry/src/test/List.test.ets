@@ -3,6 +3,7 @@ import lineFramerTest from './LineFramer.test';
 import fileNamesTest from './FileNames.test';
 import identityKeyTest from './IdentityKey.test';
 import chunkOrderTest from './ChunkOrder.test';
+import nonceKeyTest from './NonceKey.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -10,4 +11,5 @@ export default function testsuite() {
   fileNamesTest();
   identityKeyTest();
   chunkOrderTest();
+  nonceKeyTest();
 }

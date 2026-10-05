@@ -165,8 +165,11 @@ public class PeerConnection
         // Two of our own connections cross-wired that way derive one session
         // key, so each would take the other's lines as proof, out of sight of
         // the per-connection sentNonces check - and our own passcode proof
-        // would even vouch for our own id. So before anything else.
-        if (theirHandshake.IdentityPublicKey == myIdentityPublicKey)
+        // would even vouch for our own id. So before anything else, trust
+        // and pairing included. Our own key written some other way (Base64
+        // with a space in it, say) is still us, so it's the keys that are
+        // compared, not just the text (see DeviceIdentity.IsSameKey).
+        if (DeviceIdentity.IsSameKey(theirHandshake.IdentityPublicKey, myIdentityPublicKey))
         {
             answeredAsSelf?.Invoke();
             return null;
@@ -199,14 +202,6 @@ public class PeerConnection
             verifyEcdsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(theirHandshake.IdentityPublicKey), out _);
         }
         catch (CryptographicException) { return null; }
-
-        // Our own key written some other way (Base64 with a space in it, say)
-        // is still us - the check above compares the text.
-        if (Convert.ToBase64String(verifyEcdsa.ExportSubjectPublicKeyInfo()) == myIdentityPublicKey)
-        {
-            answeredAsSelf?.Invoke();
-            return null;
-        }
 
         if (!verifyEcdsa.VerifyData(theirEphemeralPublicKeyBytes, theirSignature, HashAlgorithmName.SHA256))
         {
