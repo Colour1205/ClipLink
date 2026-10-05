@@ -5,11 +5,54 @@
     <Window.SystemBackdrop>
         <MicaBackdrop />
     </Window.SystemBackdrop>
-    <NavigationView PaneDisplayMode="Left" IsSettingsVisible="False" IsBackButtonVisible="Collapsed">
-        <NavigationView.MenuItems>
-            <NavigationViewItem Content="Synced" Icon="Sync" />
-            <NavigationViewItem Content="Devices" Icon="Contact" />
-        </NavigationView.MenuItems>
-        <TextBlock Text="WinUI 3 skeleton" Margin="24" />
-    </NavigationView>
+
+    <Grid x:Name="Root">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <TitleBar x:Name="AppTitleBar" Grid.Row="0" Title="ClipLink" />
+
+        <!-- Three destinations, Settings in the footer - the mobile apps'
+             tabs. The pane stays open: it's only three items. Each page is
+             made once and kept (they subscribe to EngineHost in their
+             constructors). -->
+        <NavigationView x:Name="RootNavigation"
+                        Grid.Row="1"
+                        PaneDisplayMode="Left"
+                        OpenPaneLength="200"
+                        IsSettingsVisible="False"
+                        IsBackButtonVisible="Collapsed"
+                        IsPaneToggleButtonVisible="False"
+                        SelectionChanged="RootNavigation_SelectionChanged">
+            <NavigationView.MenuItems>
+                <NavigationViewItem Content="Synced" Tag="synced">
+                    <NavigationViewItem.Icon>
+                        <SymbolIcon Symbol="Paste" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="Devices" Tag="devices">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE975;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.MenuItems>
+            <NavigationView.FooterMenuItems>
+                <NavigationViewItem Content="Settings" Tag="settings">
+                    <NavigationViewItem.Icon>
+                        <SymbolIcon Symbol="Setting" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.FooterMenuItems>
+
+            <Frame x:Name="ContentFrame" />
+        </NavigationView>
+
+        <!-- "Copied", "Saved"... at the bottom of the content, centred
+             under it - not stretched across a wide window. -->
+        <StackPanel x:Name="ToastHost" Grid.Row="1"
+                    VerticalAlignment="Bottom" HorizontalAlignment="Center"
+                    Margin="200,0,0,16" />
+    </Grid>
 </Window>

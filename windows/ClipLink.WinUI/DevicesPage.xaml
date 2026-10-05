@@ -1,0 +1,212 @@
+<Page x:Class="ClipLink.DevicesPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:local="using:ClipLink"
+      NavigationCacheMode="Required">
+    <Page.KeyboardAccelerators>
+        <KeyboardAccelerator Key="Escape" Invoked="Escape_Invoked" />
+    </Page.KeyboardAccelerators>
+
+    <Page.Resources>
+        <!-- One device: name, then status and addresses; full id on hover. -->
+        <DataTemplate x:Key="DeviceTemplate" x:DataType="local:DeviceRow">
+            <Border Style="{StaticResource CardBorder}"
+                    Padding="16,12,12,12"
+                    Margin="0,0,0,4"
+                    AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}"
+                    ToolTipService.ToolTip="{x:Bind IdToolTip, Mode=OneWay}"
+                    ContextRequested="Device_ContextRequested">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Grid Width="40" Height="40" VerticalAlignment="Center">
+                        <Border CornerRadius="20" Background="{ThemeResource SubtleFillColorSecondaryBrush}">
+                            <FontIcon Glyph="&#xE975;" FontSize="18" />
+                        </Border>
+                        <!-- Connected: a green dot on the icon. -->
+                        <Ellipse Width="12" Height="12"
+                                 HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                 Fill="{ThemeResource SystemFillColorSuccessBrush}"
+                                 Stroke="{ThemeResource SolidBackgroundFillColorBaseBrush}" StrokeThickness="2"
+                                 Visibility="{x:Bind Connected, Mode=OneWay}" />
+                    </Grid>
+                    <StackPanel Grid.Column="1" Margin="12,0,12,0" VerticalAlignment="Center">
+                        <TextBlock Text="{x:Bind Title, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{x:Bind Details, Mode=OneWay}" Style="{StaticResource CaptionSecondary}" TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <Button Style="{StaticResource IconButton}"
+                                ToolTipService.ToolTip="Copy device ID" AutomationProperties.Name="Copy device ID"
+                                Click="CopyId_Click">
+                            <SymbolIcon Symbol="Copy" />
+                        </Button>
+                        <Button Content="Remove" MinWidth="88"
+                                Visibility="{x:Bind Trusted, Mode=OneWay}"
+                                AutomationProperties.Name="{x:Bind RemoveLabel, Mode=OneWay}"
+                                Click="Remove_Click" />
+                        <Button Content="Trust" MinWidth="88" Style="{StaticResource AccentButtonStyle}"
+                                Visibility="{x:Bind local:Fn.VisibleIfNot(Trusted), Mode=OneWay}"
+                                AutomationProperties.Name="{x:Bind TrustLabel, Mode=OneWay}"
+                                Click="Trust_Click" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </DataTemplate>
+    </Page.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- Header: stays put while the list scrolls. -->
+        <Grid Margin="{StaticResource PageMargin}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" MaxWidth="{StaticResource PageMaxWidth}" />
+            </Grid.ColumnDefinitions>
+            <StackPanel>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Name="ListTitle" Text="Devices" Style="{StaticResource TitleTextBlockStyle}" />
+                    <!-- In the pairing view: "Devices > Add a device", Devices going back. -->
+                    <BreadcrumbBar x:Name="PairTitle" Visibility="Collapsed" ItemClicked="PairTitle_ItemClicked" />
+                    <Button x:Name="AddDeviceButton" Grid.Column="1"
+                            Style="{StaticResource AccentButtonStyle}"
+                            VerticalAlignment="Center" Margin="12,0,0,0"
+                            Click="AddDevice_Click">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <SymbolIcon Symbol="Add" />
+                            <TextBlock Text="Add device" />
+                        </StackPanel>
+                    </Button>
+                </Grid>
+                <InfoBar x:Name="StatusBanner" Margin="0,12,0,0" />
+            </StackPanel>
+        </Grid>
+
+        <!-- The device list -->
+        <ScrollViewer x:Name="DeviceList" Grid.Row="1">
+            <Grid Margin="{StaticResource PageContentMargin}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" MaxWidth="{StaticResource PageMaxWidth}" />
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <StackPanel Visibility="{x:Bind host.HasPairedDevices, Mode=OneWay}">
+                        <TextBlock Text="Paired devices" Style="{StaticResource SectionHeader}" Margin="1,12,0,8" />
+                        <ItemsControl ItemsSource="{x:Bind host.PairedDevices}" ItemTemplate="{StaticResource DeviceTemplate}" IsTabStop="False" />
+                    </StackPanel>
+
+                    <StackPanel Visibility="{x:Bind host.HasNearbyDevices, Mode=OneWay}">
+                        <TextBlock Text="On this network" Style="{StaticResource SectionHeader}" Margin="1,20,0,2" />
+                        <TextBlock Style="{StaticResource CaptionSecondary}" TextWrapping="Wrap" Margin="1,0,0,8"
+                                   Text="Not paired with this PC. Trust one to sync with it once it trusts this PC too, or use Add device to pair both at once." />
+                        <ItemsControl ItemsSource="{x:Bind host.NearbyDevices}" ItemTemplate="{StaticResource DeviceTemplate}" IsTabStop="False" />
+                    </StackPanel>
+
+                    <!-- Nothing paired or nearby. -->
+                    <StackPanel Visibility="{x:Bind host.HasNoDevices, Mode=OneWay}"
+                                HorizontalAlignment="Center" MaxWidth="380" Margin="0,56,0,0">
+                        <FontIcon Glyph="&#xE975;" FontSize="48" HorizontalAlignment="Center"
+                                  Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <TextBlock Text="No devices yet" Style="{StaticResource SubtitleTextBlockStyle}"
+                                   HorizontalAlignment="Center" Margin="0,16,0,4" />
+                        <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap" TextAlignment="Center"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Text="Devices running ClipLink on this network show up here. Select Add device to pair one." />
+                    </StackPanel>
+                </StackPanel>
+            </Grid>
+        </ScrollViewer>
+
+        <!-- Pairing: open only while this is showing. -->
+        <ScrollViewer x:Name="PairView" Grid.Row="1" Visibility="Collapsed">
+            <Grid Margin="{StaticResource PageContentMargin}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" MaxWidth="{StaticResource PageMaxWidth}" />
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <InfoBar IsOpen="True" IsClosable="False" Severity="Informational" Margin="0,12,0,0"
+                             Title="Pairing is on while this page is open."
+                             Message="Open the pairing screen on your other device too. Each device asks you to accept the other - nothing is trusted until both do." />
+
+                    <TextBlock Text="Scan with your phone" Style="{StaticResource SectionHeader}" />
+                    <Border x:Name="QrCard" Style="{StaticResource CardBorder}">
+                        <Grid x:Name="QrLayout">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <!-- Always dark on white, whatever the theme - scanners expect it. -->
+                            <Border Width="184" Height="184" CornerRadius="8" Background="White" Padding="6"
+                                    HorizontalAlignment="Left" VerticalAlignment="Top">
+                                <Grid>
+                                    <Image x:Name="QrImage" Stretch="Uniform"
+                                           AutomationProperties.Name="Pairing QR code" />
+                                    <ProgressRing x:Name="QrProgress" IsActive="True" Width="32" Height="32" />
+                                </Grid>
+                            </Border>
+                            <StackPanel x:Name="QrText" Grid.Column="1" Margin="24,4,0,0" VerticalAlignment="Top">
+                                <TextBlock x:Name="PairingName" Style="{StaticResource SubtitleTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap" Margin="0,4,0,0"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           Text="In ClipLink on your phone, open Pair and scan this code. It holds this PC's device ID, its name and its Tailscale address, if it has one." />
+                                <Button x:Name="CopyPairingButton" Margin="0,16,0,0" IsEnabled="False" Click="CopyPairingInfo_Click">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <SymbolIcon Symbol="Copy" />
+                                        <TextBlock Text="Copy pairing info" />
+                                    </StackPanel>
+                                </Button>
+                                <TextBlock Style="{StaticResource CaptionSecondary}" TextWrapping="Wrap" Margin="0,8,0,0"
+                                           Text="For a device that can't scan: paste it there under Pair by address." />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <TextBlock Text="Pair by address" Style="{StaticResource SectionHeader}" />
+                    <Border Style="{StaticResource CardBorder}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"
+                                       Text="If the two can't find each other - on another network, or over Tailscale - enter the other device's IP address or paste its pairing info." />
+                            <!-- What to type on the other device instead (the
+                                 phones show theirs on their Me screen). -->
+                            <TextBlock x:Name="OwnAddresses" Style="{StaticResource CaptionSecondary}" TextWrapping="Wrap"
+                                       Margin="0,4,0,0" Visibility="Collapsed" />
+                            <Grid Margin="0,12,0,0" ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBox x:Name="AddressBox"
+                                         PlaceholderText="For example 192.168.1.20 or 100.101.102.103"
+                                         AutomationProperties.Name="Address or pairing info"
+                                         KeyDown="AddressBox_KeyDown" />
+                                <Button x:Name="ConnectButton" Grid.Column="1" Style="{StaticResource AccentButtonStyle}" Content="Connect"
+                                        MinWidth="96" VerticalAlignment="Stretch" Click="Connect_Click" />
+                            </Grid>
+                            <StackPanel x:Name="Connecting" Orientation="Horizontal" Spacing="8" Margin="0,12,0,0" Visibility="Collapsed">
+                                <ProgressRing IsActive="True" Width="16" Height="16" />
+                                <TextBlock Style="{StaticResource BodyTextBlockStyle}" VerticalAlignment="Center"
+                                           Text="Connecting... this can take up to 20 seconds." />
+                            </StackPanel>
+                            <InfoBar x:Name="PairResult" IsOpen="False" IsClosable="True" Margin="0,12,0,0" />
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock Style="{StaticResource CaptionSecondary}" TextWrapping="Wrap" Margin="1,16,0,0"
+                               Text="Devices on the same network pair by themselves while both have this screen open - the code and the address are only for when they can't find each other." />
+                </StackPanel>
+            </Grid>
+        </ScrollViewer>
+    </Grid>
+</Page>
