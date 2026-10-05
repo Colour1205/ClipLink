@@ -170,11 +170,16 @@ public struct FilePayload: Equatable {
         WireJSON.string(["FileName": fileName, "FileHash": fileHash, "FileSize": NSNumber(value: fileSize)])
     }
 
+    /// The sender's FileName comes out through `FileStore.sanitize`, as
+    /// Android's parser and HarmonyOS' views have it: it is shown as the
+    /// item's title, where a right-to-left override would make
+    /// "invoice\u{202E}txt.exe" read as "invoiceexe.txt". Only the parsed
+    /// copy changes - the signed entry is stored and relayed as it arrived.
     public static func parse(_ json: String) -> FilePayload? {
         guard let obj = WireJSON.object(json),
               let hash = WireJSON.str(obj, "FileHash"), Wire.isSHA256Hex(hash)
         else { return nil }
-        let name = WireJSON.str(obj, "FileName").flatMap { $0.isEmpty ? nil : $0 } ?? "file"
+        let name = FileStore.sanitize(WireJSON.str(obj, "FileName") ?? "")
         return FilePayload(fileName: name, fileHash: hash, fileSize: WireJSON.int64(obj, "FileSize") ?? 0)
     }
 }
@@ -275,7 +280,7 @@ public struct HandshakeMessage: Equatable {
             identityPublicKey: identity,
             signature: signature,
             passphraseProof: proof,
-            deviceName: DeviceName.clean(WireJSON.str(obj, "DeviceName"))
+            deviceName: DeviceName.sanitize(WireJSON.str(obj, "DeviceName"))
         )
     }
 }
@@ -315,7 +320,7 @@ public struct PairingInfo: Equatable {
         return PairingInfo(
             publicKey: key,
             address: (address?.isEmpty ?? true) ? nil : address,
-            name: DeviceName.clean(WireJSON.str(obj, "Name"))
+            name: DeviceName.sanitize(WireJSON.str(obj, "Name"))
         )
     }
 }

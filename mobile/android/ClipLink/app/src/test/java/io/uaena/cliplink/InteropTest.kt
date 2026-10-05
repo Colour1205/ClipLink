@@ -1,6 +1,7 @@
 package io.uaena.cliplink
 
 import io.uaena.cliplink.core.ClipboardEntry
+import io.uaena.cliplink.core.DeviceIdentity
 import io.uaena.cliplink.core.DotNetTimestamp
 import io.uaena.cliplink.core.EcdsaDer
 import io.uaena.cliplink.core.Pbkdf2
@@ -8,7 +9,12 @@ import io.uaena.cliplink.core.Signing
 import io.uaena.cliplink.core.fixedTimeEquals
 import io.uaena.cliplink.core.toHex
 import io.uaena.cliplink.engine.DeviceRow
+import io.uaena.cliplink.engine.PeerNames
+import io.uaena.cliplink.engine.displayNameOf
+import io.uaena.cliplink.engine.fingerprintOf
+import io.uaena.cliplink.engine.shortIdOf
 import io.uaena.cliplink.net.Discovery
+import io.uaena.cliplink.net.EchoGuard
 import io.uaena.cliplink.net.HandshakeMessage
 import io.uaena.cliplink.net.PairingInfo
 import io.uaena.cliplink.net.Protocol
@@ -415,6 +421,35 @@ class InteropTest {
     }
 
     @Test
+    fun `device names lose control bidi and zero width characters`() {
+        val unsafe = (0x00..0x1F) + (0x7F..0x9F) + 0x061C + (0x200B..0x200F) +
+            (0x202A..0x202E) + (0x2066..0x2069) + 0xFEFF
+        for (codePoint in unsafe) {
+            val name = "a" + String(Character.toChars(codePoint)) + "b"
+            assertEquals("U+%04X".format(codePoint), "ab", Protocol.normalizeDeviceName(name))
+        }
+        // A right-to-left override is how one name renders as another.
+        assertEquals("Colour's PC", Protocol.normalizeDeviceName("\u202EColour's PC\u202C"))
+        // Stripped, THEN trimmed: spaces the controls were hiding go too...
+        assertEquals("Pixel 8", Protocol.normalizeDeviceName("\u200E Pixel 8 \u2069"))
+        assertNull(Protocol.normalizeDeviceName("\u202E\u200B\u0007"))
+        // ...then capped, so they can't use up any of the 64.
+        assertEquals("a".repeat(64), Protocol.normalizeDeviceName("\u200B".repeat(10) + "a".repeat(70)))
+        // Everything else is left alone: combining marks, emoji, CJK.
+        assertEquals("e\u0301 😀 我", Protocol.normalizeDeviceName("e\u0301 😀 我"))
+
+        // Every way a peer's name comes in goes through it: beacon, handshake, pairing code.
+        val beaconField = java.util.Base64.getEncoder()
+            .encodeToString("Pixel\u202E 8\u0000".toByteArray(Charsets.UTF_8))
+        assertEquals("Pixel 8", Discovery.parse("49000:K:-:-:-:$beaconField", "10.0.0.2")?.name)
+        val handshake = HandshakeMessage.parse(
+            """{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S","DeviceName":"Pixel\u202E 8\n"}""",
+        )
+        assertEquals("Pixel 8", handshake?.deviceName)
+        assertEquals("Pixel 8", PairingInfo.parse("""{"PublicKey":"K","Name":"\u2067Pixel 8\u200B"}""")?.name)
+    }
+
+    @Test
     fun `beacon name field matches the other platforms byte for byte`() {
         // Golden values from the Windows daemon's Discovery.EncodeName; the
         // HarmonyOS and iOS encoders produce the same strings.
@@ -549,6 +584,168 @@ class InteropTest {
         assertNull(start.withName("A", null))
         assertNull(start.withName("A", ""))
         assertNull(start.withName("Z", "Stranger"))
+    }
+
+    // ---- beacon names never reach the trust store ---------------------------
+
+    @Test
+    fun `a beacon name is only ever a display label`() {
+        val names = PeerNames()
+        names.heardInBeacon("A", "Laptop")
+        names.heardInBeacon("A", "Laptop") // the same name again
+        names.heardInBeacon("A", "Evil twin") // and a different one
+        // Shown for a device that isn't trusted, or is but has no stored name...
+        assertEquals("Evil twin", names.display("A", null))
+        // ...but never over a trusted device's stored name.
+        assertEquals("Desk", names.display("A", "Desk"))
+        assertNull(names.display("B", null))
+    }
+
+    @Test
+    fun `a handshake name is shown ahead of a beacon's and a beacon can't displace it`() {
+        val names = PeerNames()
+        names.heardInBeacon("A", "From a beacon")
+        names.heardInHandshake("A", "Pixel 8")
+        assertEquals("Pixel 8", names.display("A", null))
+
+        // A later beacon claiming another name doesn't change it.
+        names.heardInBeacon("A", "Spoofed")
+        assertEquals("Pixel 8", names.display("A", null))
+        // Nor does an older build's nameless handshake blank it out.
+        names.heardInHandshake("A", null)
+        assertEquals("Pixel 8", names.display("A", null))
+    }
+
+    // ---- handshake names wait for a proven session --------------------------
+
+    @Test
+    fun `a handshake name is stored only once its session is proven`() {
+        val names = PeerNames()
+        // Accepting a pairing, or trusting by passcode, stores the device
+        // without a name: the handshake's is only shown, from memory.
+        names.heardInHandshake("A", "Pixel 8")
+        var stored = emptyList<TrustedDevice>().withTrusted("A", "10.0.0.1", null)
+        assertEquals(TrustedDevice("A", "10.0.0.1"), stored.single())
+        assertEquals("Pixel 8", names.display("A", stored.single().name))
+
+        // That connection's first decrypted envelope stores its name...
+        stored = stored.withName("A", "Pixel 8") ?: error("a proven name should be stored")
+        assertEquals(TrustedDevice("A", "10.0.0.1", "Pixel 8"), stored.single())
+        // ...which a replayed handshake, never proven, can't displace on screen...
+        names.heardInHandshake("A", "Evil twin")
+        assertEquals("Pixel 8", names.display("A", stored.single().name))
+        // ...and a later connection's address back-fill keeps.
+        assertEquals(TrustedDevice("A", "10.0.0.9", "Pixel 8"), stored.withTrusted("A", "10.0.0.9", null).single())
+
+        // A proof that lands before the passcode path has stored the device
+        // writes nothing - a name never adds a device - which is why the
+        // engine looks at isSessionProven again right after that write.
+        assertNull(emptyList<TrustedDevice>().withName("B", "Tablet"))
+    }
+
+    @Test
+    fun `an unproven connection's handshake name goes with it`() {
+        val names = PeerNames()
+        names.heardInBeacon("A", "Laptop")
+        // A replayed handshake's name is shown while its connection lives...
+        names.heardInHandshake("A", "Evil twin")
+        assertEquals("Evil twin", names.display("A", null))
+        // ...and once that ends unproven, the beacon's is back.
+        assertTrue(names.forgetHandshake("A", "Evil twin"))
+        assertEquals("Laptop", names.display("A", null))
+
+        // It takes only its own name, never a newer handshake's.
+        names.heardInHandshake("A", "Evil twin")
+        names.heardInHandshake("A", "Pixel 8")
+        assertFalse(names.forgetHandshake("A", "Evil twin"))
+        assertEquals("Pixel 8", names.display("A", null))
+        // And a nameless handshake has nothing to take back.
+        assertFalse(names.forgetHandshake("A", null))
+        assertEquals("Pixel 8", names.display("A", null))
+    }
+
+    @Test
+    fun `our own line echoed back is caught by its nonce`() {
+        val random = java.security.SecureRandom()
+        // What AesGcm packs: nonce(12) || tag(16) || ciphertext.
+        fun packed(nonce: ByteArray = ByteArray(12).also(random::nextBytes)): ByteArray =
+            nonce + ByteArray(16 + 40).also(random::nextBytes)
+
+        val ours = packed()
+        val guard = EchoGuard()
+        guard.sent(ours) // say, the history batch
+        guard.sent(packed()) // and a heartbeat
+        // The key is the same both ways, so this would decrypt - but it's ours.
+        assertTrue(guard.isEcho(ours.copyOf()))
+        // The peer's own lines carry their own nonces.
+        assertFalse(guard.isEcho(packed()))
+        // Too short to hold a nonce is too short to decrypt.
+        assertFalse(guard.isEcho(ours.copyOf(10)))
+        assertFalse(guard.isEcho(ByteArray(0)))
+
+        // Once the session is proven nothing is held.
+        guard.clear()
+        assertFalse(guard.isEcho(ours))
+    }
+
+    @Test
+    fun `an echo spelt with junk the decoder skips is still our own line`() {
+        // B64 is android.util.Base64, which skips every character outside
+        // the alphabet - as the JDK's MIME decoder does, so it stands in here.
+        val lenient = java.util.Base64.getMimeDecoder()
+        val random = java.security.SecureRandom()
+        val ours = ByteArray(12 + 16 + 40).also(random::nextBytes)
+        val line = java.util.Base64.getEncoder().encodeToString(ours)
+
+        val guard = EchoGuard()
+        guard.sent(ours)
+        for (respelt in listOf(" $line", ".$line", "${line.take(5)}\t${line.drop(5)}")) {
+            // The first 16 characters, which the guard used to key on, miss...
+            assertFalse(respelt, respelt.take(16) == line.take(16))
+            // ...but each decodes to our very bytes, so it's caught.
+            assertTrue(respelt, guard.isEcho(lenient.decode(respelt)))
+        }
+    }
+
+    // ---- a handshake carrying our own identity -------------------------------
+
+    @Test
+    fun `our own key is recognised however its id is spelt`() {
+        fun keyPair() = KeyPairGenerator.getInstance("EC").run {
+            initialize(ECGenParameterSpec("secp256r1"))
+            generateKeyPair()
+        }
+        val ours = keyPair().public.encoded
+        val id = java.util.Base64.getEncoder().encodeToString(ours)
+        // B64 skips what isn't base64 (see the echo test above), so each of
+        // these decodes to our key while failing a plain text comparison.
+        val lenient = java.util.Base64.getMimeDecoder()
+        for (respelt in listOf(" $id", "${id.take(40)}.${id.drop(40)}", "$id\u0000", "${id.take(1)}\n${id.drop(1)}")) {
+            assertFalse(respelt == id)
+            assertTrue(respelt, DeviceIdentity.isSameKey(lenient.decode(respelt), ours))
+        }
+        assertTrue(DeviceIdentity.isSameKey(ours.copyOf(), ours))
+
+        // Anyone else's key, and anything that isn't a key, is not us.
+        assertFalse(DeviceIdentity.isSameKey(keyPair().public.encoded, ours))
+        assertFalse(DeviceIdentity.isSameKey(ByteArray(0), ours))
+        assertFalse(DeviceIdentity.isSameKey(ours.copyOf(ours.size - 1), ours))
+        assertFalse(DeviceIdentity.isSameKey("not a key".toByteArray(), ours))
+    }
+
+    // ---- how an id is shown -------------------------------------------------
+
+    @Test
+    fun `an id is shown by the same fingerprint iOS shows`() {
+        // SHA-256("abc") starts ba7816bf - the FIPS 180-2 test vector.
+        assertEquals("BA78·16BF", fingerprintOf("abc"))
+        assertEquals("Device BA78·16BF", shortIdOf("abc"))
+        // Every P-256 id starts with the same 36 characters, so a prefix
+        // would label these two alike; the fingerprint doesn't.
+        val spkiPrefix = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE"
+        assertEquals("Device E601·FFD9", displayNameOf(spkiPrefix + "aaaa", null))
+        assertEquals("Device BD03·7086", displayNameOf(spkiPrefix + "bbbb", " "))
+        assertEquals("Pixel 8", displayNameOf(spkiPrefix + "aaaa", "Pixel 8"))
     }
 
     // ---- device list order --------------------------------------------------

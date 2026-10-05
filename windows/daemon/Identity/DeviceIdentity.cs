@@ -56,4 +56,26 @@ public class DeviceIdentity
     {
         return key.SignData(data, HashAlgorithmName.SHA256);
     }
+
+    // Whether id is the public key canonicalId names - canonicalId as
+    // GetPublicKey writes it - however id is spelt. Convert.FromBase64String
+    // skips whitespace, so a space inside id still decodes to the same key:
+    // comparing the text only proves two ids are different text. So id's
+    // key is re-encoded canonically (its DER SubjectPublicKeyInfo, as
+    // standard Base64) and compared. False when id isn't a public key at all.
+    public static bool IsSameKey(string? id, string canonicalId)
+    {
+        if (id == null) return false;
+        if (id == canonicalId) return true;
+        try
+        {
+            using var decoded = ECDsa.Create();
+            decoded.ImportSubjectPublicKeyInfo(Convert.FromBase64String(id), out _);
+            return Convert.ToBase64String(decoded.ExportSubjectPublicKeyInfo()) == canonicalId;
+        }
+        catch (Exception ex) when (ex is FormatException or CryptographicException)
+        {
+            return false;
+        }
+    }
 }

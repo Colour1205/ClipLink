@@ -1,5 +1,6 @@
 package io.uaena.cliplink
 
+import io.uaena.cliplink.clipboard.sharedCopyOf
 import io.uaena.cliplink.net.FileChunkMessage
 import io.uaena.cliplink.net.FilePayload
 import io.uaena.cliplink.net.FileRequestMessage
@@ -111,12 +112,24 @@ class ShareTest {
     }
 
     @Test
-    fun `invalid control and bidi characters are replaced`() {
+    fun `invalid characters are replaced and invisible ones removed`() {
         assertEquals("a_b_c_d_e_f_g_.txt", FileNames.safe("a:b*c?d\"e<f>g|.txt", "file"))
-        assertEquals("line_break.txt", FileNames.safe("line\nbreak.txt", "file"))
-        assertEquals("nul_.txt", FileNames.safe("nul\u0000.txt", "file"))
+        // Removed, as Windows' FileNames.Safe removes them - the same set a
+        // device name loses.
+        val unsafe = (0x00..0x1F) + (0x7F..0x9F) + 0x061C + (0x200B..0x200F) +
+            (0x202A..0x202E) + (0x2066..0x2069) + 0xFEFF
+        for (codePoint in unsafe) {
+            val name = "a" + String(Character.toChars(codePoint)) + "b.txt"
+            assertEquals("U+%04X".format(codePoint), "ab.txt", FileNames.safe(name, "file"))
+        }
+        assertEquals("linebreak.txt", FileNames.safe("line\nbreak.txt", "file"))
+        assertEquals("nul.txt", FileNames.safe("nul\u0000.txt", "file"))
         // Shown as "invoiceexe.txt" if the override were kept.
-        assertEquals("invoice_txt.exe", FileNames.safe("invoice\u202Etxt.exe", "file"))
+        assertEquals("invoicetxt.exe", FileNames.safe("invoice\u202Etxt.exe", "file"))
+        assertEquals("report.pdf", FileNames.safe("report\u200B.pdf", "file"))
+        // Removed, THEN trimmed: the spaces they were hiding go too.
+        assertEquals("name.txt", FileNames.safe("\uFEFF name.txt \u200E", "file"))
+        assertEquals("file", FileNames.safe("\u202E\u200B\u0007", "file"))
         assertEquals("name.txt", FileNames.safe("  name.txt . ", "file"))
         assertEquals("Café 日本語 😀.png", FileNames.safe("Café 日本語 😀.png", "file"))
     }
@@ -162,7 +175,7 @@ class ShareTest {
             JSONObject().put("FileName", name).put("FileHash", hash).put("FileSize", 1).toString(),
         )?.fileName
         assertEquals("report.pdf", parsedName("report.pdf"))
-        assertEquals("invoice_txt.exe", parsedName("invoice\u202Etxt.exe"))
+        assertEquals("invoicetxt.exe", parsedName("invoice\u202Etxt.exe"))
         assertEquals("passwd", parsedName("../../etc/passwd"))
         assertEquals("file", parsedName(".."))
         assertEquals("file", FilePayload.parse(JSONObject().put("FileHash", hash).toString())?.fileName)
@@ -190,6 +203,19 @@ class ShareTest {
         assertEquals("notes.txt", sharedFileName("notes.txt", null, "bin"))
         // An extension that isn't one is ignored.
         assertEquals("1234", sharedFileName(null, "1234", "../x"))
+    }
+
+    @Test
+    fun `two files with one name get a shared copy each`() {
+        val shared = temp.newFolder("shared")
+        val first = File(temp.root, hash)
+        val second = File(temp.root, "a".repeat(64))
+        // Same name - and say the same length: still two copies, never the first one's bytes twice.
+        assertEquals(File(shared, "$hash/id_ed25519"), sharedCopyOf(shared, first, "id_ed25519"))
+        assertEquals(File(shared, "${"a".repeat(64)}/id_ed25519"), sharedCopyOf(shared, second, "id_ed25519"))
+        // And a peer's name still only ever names a file in that folder.
+        assertEquals(File(shared, "$hash/passwd"), sharedCopyOf(shared, first, "../../etc/passwd"))
+        assertEquals(File(shared, "$hash/file"), sharedCopyOf(shared, first, ".."))
     }
 
     // ---- file hashes ------------------------------------------------------

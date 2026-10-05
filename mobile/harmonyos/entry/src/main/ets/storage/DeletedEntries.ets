@@ -22,7 +22,9 @@ export interface DeletedEntry {
   DeletedAt: number; // ms since the epoch
 }
 
-function sha256Hex(text: string): string {
+// Lowercase hex SHA-256 of the text's UTF-8 bytes. Also what DeviceName.ets's
+// deviceFingerprint fingerprints a device id with.
+export function sha256Hex(text: string): string {
   const md = cryptoFramework.createMd('SHA256');
   md.updateSync({ data: textEncoder.encodeInto(text) });
   const digest = md.digestSync().data;

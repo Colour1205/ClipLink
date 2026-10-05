@@ -101,6 +101,23 @@ class HistoryStore(
         if (all().none { it.usesBlob(fileHash) }) fileStore.delete(fileHash)
     }
 
+    /**
+     * Startup housekeeping, before any peer connects: deletes the blobs no
+     * entry points at (see [FileStore.sweepUnreferenced]), and gives a 0-byte
+     * file entry received before this build could store one its empty blob -
+     * it would otherwise say "Transferring…" for good. Returns how many
+     * blobs were deleted.
+     */
+    @Synchronized
+    fun tidyBlobs(): Int {
+        val files = all().mapNotNull { entry ->
+            if (entry.type == ClipboardEntry.TYPE_FILE) FilePayload.parse(entry.content) else null
+        }
+        val swept = fileStore.sweepUnreferenced(files.mapTo(HashSet()) { it.fileHash })
+        files.filter { it.isEmptyFile }.forEach { fileStore.storeEmpty(it.fileHash) }
+        return swept
+    }
+
     private fun trim(entries: MutableList<ClipboardEntry>) {
         while (entries.size > MAX_ITEMS) {
             // Timestamps are .NET round-trip format, which is fixed-width and
@@ -161,7 +178,11 @@ internal fun ClipboardEntry.blobToRelease(remaining: List<ClipboardEntry>): Stri
     return hash.takeIf { remaining.none { it.usesBlob(hash) } }
 }
 
-private fun ClipboardEntry.usesBlob(hash: String): Boolean = fileHash().equals(hash, ignoreCase = true)
+// Exact, case and all: FileStore names a blob by the hash string exactly as
+// the entry spells it, on a case-sensitive filesystem - so "abc" and "ABC"
+// are two different files, and a case-insensitive match here would leave one
+// orphaned when the other spelling's entry is deleted.
+private fun ClipboardEntry.usesBlob(hash: String): Boolean = fileHash() == hash
 
 private fun ClipboardEntry.fileHash(): String? =
     if (type == ClipboardEntry.TYPE_FILE) FilePayload.parse(content)?.fileHash else null

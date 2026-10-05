@@ -110,15 +110,26 @@ public partial class MainWindow : FluentWindow
         if (pairingPrompt?.DeviceId == pending.DeviceId) return; // already asking
 
         string name = DeviceLabel.Of(pending.DeviceId, pending.Name);
-        // Where it's asking from, as the phones say it. (No short device ID:
-        // every device's starts with the same characters, so it tells you
-        // nothing.)
+        // Where it's asking from, as the phones say it.
         string from = pending.Address != null ? $"{name} at {pending.Address}" : name;
+        // The name is whatever that device chose; its fingerprint comes from
+        // its id, and it shows the same one for itself (as this PC does in
+        // Settings), so a copied name can't pass for a device you know.
+        var fingerprint = Paragraph(
+            $"ID {DeviceLabel.Fingerprint(pending.DeviceId)} - check that it matches the fingerprint that device shows for itself (in Settings on a PC, on the Me tab on a phone).");
+        fingerprint.Margin = new Thickness(0, 12, 0, 0);
 
         var dialog = new ContentDialog(DialogHost)
         {
             Title = $"Pair with {name}?",
-            Content = Paragraph($"{from} wants to pair with this PC. Only accept if you're pairing it right now."),
+            Content = new StackPanel
+            {
+                Children =
+                {
+                    Paragraph($"{from} wants to pair with this PC. Only accept if you're pairing it right now."),
+                    fingerprint,
+                },
+            },
             PrimaryButtonText = "Accept",
             CloseButtonText = "Reject",
             // Enter doesn't pair by accident.

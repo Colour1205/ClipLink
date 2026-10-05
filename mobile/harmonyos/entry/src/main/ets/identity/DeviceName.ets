@@ -7,10 +7,18 @@
 import { common } from '@kit.AbilityKit';
 import { deviceInfo, settings } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { sha256Hex } from '../storage/DeletedEntries';
 
 // Same cap on every platform, counted in Unicode code points (not UTF-16
 // units, so an emoji is one character), applied after trimming.
 const MAX_NAME_CHARS = 64;
+// A peer picks its own name, so it's untrusted text: C0/C1 controls (line
+// breaks included), bidi marks/overrides/isolates (U+061C, U+200E-U+200F,
+// U+202A-U+202E, U+2066-U+2069) and zero-width characters (U+200B-U+200D,
+// U+FEFF) are removed, so a name can't reorder or hide the text shown next
+// to it - e.g. the short id and address in a pairing prompt. Same set on
+// every platform.
+const UNSAFE_NAME_CHARS = new RegExp('[\\u0000-\\u001F\\u007F-\\u009F\\u061C\\u200B-\\u200F\\u202A-\\u202E\\u2066-\\u2069\\uFEFF]', 'g');
 
 /**
  * Human-readable name of THIS device, permission-free.
@@ -36,12 +44,14 @@ export function getLocalDeviceName(context: common.UIAbilityContext | common.Ext
 }
 
 /**
- * Trimmed and capped at MAX_NAME_CHARS code points; null when nothing is
- * left. Used both for what this device sends and for what peers send, so a
- * peer can't make a row arbitrarily long.
+ * Stripped of UNSAFE_NAME_CHARS, trimmed and capped at MAX_NAME_CHARS code
+ * points; null when nothing is left. The one sanitiser for every name: what
+ * this device sends, and what peers send in a beacon, a handshake or a
+ * pairing code (and names stored by older builds, see TrustStore) - so a
+ * peer can't make a row arbitrarily long or disguise the text around it.
  */
 export function normalizeDeviceName(name: string): string | null {
-  const trimmed: string = name.trim();
+  const trimmed: string = name.replace(UNSAFE_NAME_CHARS, '').trim();
   let count = 0;
   let i = 0;
   while (i < trimmed.length && count < MAX_NAME_CHARS) {
@@ -60,4 +70,30 @@ export function normalizeDeviceName(name: string): string | null {
 export function effectiveDeviceName(override: string, systemName: string): string | null {
   const own: string | null = normalizeDeviceName(override);
   return own !== null ? own : normalizeDeviceName(systemName);
+}
+
+/**
+ * A device id's fingerprint, "XXXX·XXXX": the first 4 bytes of SHA-256 over
+ * the id's UTF-8, as uppercase hex - byte for byte what iOS
+ * (DeviceLabel.fingerprint) and Android (fingerprintOf) show. Not the id's
+ * first characters: every P-256 SPKI starts with the same 36 base64
+ * characters, so those read "MFkwEwYHKoZI…" for every device.
+ *
+ * Never throws: it labels log lines in connection setup and teardown
+ * (PeerConnection's listenLoop, Index's handleNewConnection), where a throw
+ * would leave a link registered-but-dead or never registered.
+ */
+export function deviceFingerprint(deviceId: string): string {
+  let hex: string;
+  try {
+    hex = sha256Hex(deviceId).slice(0, 8).toUpperCase();
+  } catch (e) {
+    return '????·????'; // the crypto framework itself failed
+  }
+  return `${hex.slice(0, 4)}·${hex.slice(4)}`;
+}
+
+/** How a device without a known name is shown, and logged: "Device XXXX·XXXX", same on every platform. */
+export function shortDeviceId(deviceId: string): string {
+  return `Device ${deviceFingerprint(deviceId)}`;
 }

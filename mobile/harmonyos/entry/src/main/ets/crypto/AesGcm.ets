@@ -1,6 +1,8 @@
 // Step 6 of the build order in ../../../../README.md: handshake + session
 // encryption. Matches PeerConnection.cs's Encrypt/Decrypt exactly: packed
-// = nonce(12) || tag(16) || ciphertext, base64-encoded, AES-256-GCM.
+// = nonce(12) || tag(16) || ciphertext, AES-256-GCM. The Base64 around it is
+// PeerConnection.ets's, which keeps the packed bytes in hand to tell its own
+// lines by their nonce (see nonceKey there).
 //
 // GENUINE UNKNOWN going in: this SDK's Cipher interface has no getAuthTag()
 // method (unlike some blog examples referencing a different SDK version) -
@@ -14,10 +16,9 @@
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { util } from '@kit.ArkTS';
 
-const NONCE_SIZE = 12;
+export const NONCE_SIZE = 12;
 const TAG_SIZE = 16;
 
-const base64Helper = new util.Base64Helper();
 const decoder = util.TextDecoder.create('utf-8');
 
 // See Signing.ets's stringToBytes for the full explanation - this was the
@@ -50,7 +51,8 @@ function concatBytes(parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
-export async function encrypt(sessionKey: Uint8Array, plaintext: string): Promise<string> {
+// One line's bytes before the Base64: nonce || tag || ciphertext.
+export async function encryptPacked(sessionKey: Uint8Array, plaintext: string): Promise<Uint8Array> {
   const nonce = randomBytes(NONCE_SIZE);
   const keyGen = cryptoFramework.createSymKeyGenerator('AES256');
   const symKey = await keyGen.convertKey({ data: sessionKey });
@@ -70,12 +72,16 @@ export async function encrypt(sessionKey: Uint8Array, plaintext: string): Promis
   const cipherBytes = outBytes.slice(0, outBytes.length - TAG_SIZE);
   const tag = outBytes.slice(outBytes.length - TAG_SIZE);
 
-  const packed = concatBytes([nonce, tag, cipherBytes]);
-  return base64Helper.encodeToStringSync(packed);
+  return concatBytes([nonce, tag, cipherBytes]);
 }
 
-export async function decrypt(sessionKey: Uint8Array, packedBase64: string): Promise<string> {
-  const packed = base64Helper.decodeSync(packedBase64);
+// A line already decoded from its Base64. Throws if it's too short to hold
+// a nonce and a tag (as Windows' and Android's Decrypt do), or was forged,
+// corrupted or sealed with another key.
+export async function decryptPacked(sessionKey: Uint8Array, packed: Uint8Array): Promise<string> {
+  if (packed.length < NONCE_SIZE + TAG_SIZE) {
+    throw new Error('packed message too short');
+  }
   const nonce = packed.slice(0, NONCE_SIZE);
   const tag = packed.slice(NONCE_SIZE, NONCE_SIZE + TAG_SIZE);
   const cipherBytes = packed.slice(NONCE_SIZE + TAG_SIZE);

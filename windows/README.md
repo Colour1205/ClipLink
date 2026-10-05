@@ -39,14 +39,19 @@ it to ship it). Run it from anywhere; nothing is installed.
   Right-click or Shift+F10 on a card for Copy / Open / Show in folder / Delete.
 - First run turns on **Start ClipLink when I sign in** (Settings): an
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value "ClipLink"
-  starting it with `--background` (tray icon only).
+  starting it with `--background` (tray icon only). If the value points at
+  another `ClipLink.exe` (moved, or another build), each start points it at
+  the running one, keeping its arguments.
 - **Share to ClipLink** from File Explorer: right-click one or more files and
   choose **Share to ClipLink**, or **Send to > ClipLink**. **On Windows 11
   both are under "Show more options"** (or Shift+right-click / Shift+F10) —
   the new top-level menu only takes packaged apps. Each file goes to your
   devices exactly like a copied file (a file entry in Synced, streamed to
   them; images stay files), without touching this PC's clipboard; folders
-  and files over 1 GB are skipped. ClipLink says what it shared in its
+  and files over 1 GB are skipped. A file another app has open (a Word
+  document you're editing) shares as it was last saved; one that changes
+  while it's being shared (still downloading, say) is skipped — share it
+  again once it's done. ClipLink says what it shared in its
   window, or as a notification from the tray icon. If ClipLink isn't
   running, sharing starts it (in the tray). As with copies, Synced keeps
   the latest 25 items on every device, so a device that connects after a
@@ -69,9 +74,17 @@ it to ship it). Run it from anywhere; nothing is installed.
   `identitydefault.key`, `truststoredefault.json`, `historydefault.json`,
   `deleteddefault.json` (deleted items), `passphrasekeydefault.key`,
   `devicenamedefault.txt`, `filestoredefault\` (synced files by hash) and
-  `ReceivedFiles\` (files and images put on the clipboard). The app's own
+  `ReceivedFiles\` (files and images put on the clipboard; received images
+  are named by their content, `ClipLink image <hash>.png`, only the newest 50
+  are kept, and **Clear synced history** deletes them — all but the one on
+  the clipboard right then, so it still pastes into a folder; a copy started with
+  another `--label` keeps its received images in `receivedimages<label>\`
+  instead, so it never touches these). The app's own
   preferences: `%LOCALAPPDATA%\ClipLink\settings.json`. Files opened from
-  Synced are copied to `%TEMP%\ClipLink\default` first.
+  Synced are copied to `%TEMP%\ClipLink\default` first, one folder per item.
+  A copy you've edited is never overwritten (opening the item again makes a
+  fresh copy next to it) and never deleted. The other copies are deleted with
+  their item, on **Clear synced history** and whenever ClipLink starts.
 - Log: `%LOCALAPPDATA%\ClipLink\logs\cliplink.log`, rolled over to
   `cliplink.1.log` at 5 MB (Settings > About > Open log folder).
 - The first run from a new location may bring up a Windows Firewall prompt

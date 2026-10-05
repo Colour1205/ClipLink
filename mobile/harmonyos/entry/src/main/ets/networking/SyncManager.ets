@@ -6,11 +6,13 @@ import { common } from '@kit.AbilityKit';
 import fs from '@ohos.file.fs';
 import { util } from '@kit.ArkTS';
 import { PeerConnection } from './PeerConnection';
+import { ChunkPlace, placeChunk } from './ChunkOrder';
 import { FileChunkMessage } from './FileChunkMessage';
 import { FileRequestMessage } from './FileRequestMessage';
 import { TrustStore } from '../identity/TrustStore';
+import { shortDeviceId } from '../identity/DeviceName';
 import { HistoryAccess } from '../storage/HistoryAccess';
-import { FileStore, isValidFileHash, sha256File } from '../storage/FileStore';
+import { FileStore, isEmptyFile, isValidFileHash, removeIfThere, sha256File } from '../storage/FileStore';
 import { FilePayload } from '../storage/FilePayload';
 import { entryKey } from '../storage/DeletedEntries';
 import { ClipboardEntry, verifiedEntry } from '../crypto/Signing';
@@ -18,10 +20,22 @@ import { applyEntryToClipboard, ApplyResult } from '../clipboard/ClipboardApply'
 
 const base64Helper = new util.Base64Helper();
 const CHUNK_SIZE = 256 * 1024;
+// See requestAgain. Same as Android's SyncManager.MAX_RETRIES.
+const MAX_RETRIES = 3;
 
 interface Envelope {
   Type: string;
   Payload: string;
+}
+
+// One file's bytes arriving over one connection (see handleFileChunk),
+// written to a temp file of its own until IsLast.
+interface IncomingTransfer {
+  fileHash: string;
+  conn: PeerConnection;
+  fd: number;
+  tempPath: string;
+  nextIndex: number;
 }
 
 export class SyncManager {
@@ -31,18 +45,26 @@ export class SyncManager {
   private context: common.UIAbilityContext;
   private fileStore: FileStore;
   private entryAppliedCallback: ((entry: ClipboardEntry, result: ApplyResult, fromPeer: boolean) => void) | null = null;
+  private fileStoredCallback: ((fileHash: string) => void) | null = null;
   private logCallback: ((message: string) => void) | null = null;
   private connectionsChangedCallback: ((count: number) => void) | null = null;
 
-  // In-progress incoming chunk writes, keyed by file hash - the fd stays
-  // open across every "file_chunk" message for that hash until IsLast.
-  private inProgressFds: Map<string, number> = new Map();
+  // In-progress incoming chunk streams, keyed `${peerDeviceId}:${fileHash}`
+  // like streamingInFlight - the fd stays open across every "file_chunk"
+  // message for that hash from that peer until IsLast. Keyed by hash alone,
+  // two peers answering one file_request (it goes to every peer) were
+  // written into one file, which then failed verification; now each stream
+  // has its own file, and whichever finishes first is kept.
+  private incoming: Map<string, IncomingTransfer> = new Map();
   // Entries that arrived (and verified) before their bytes finished
   // streaming in, keyed by the file hash they're waiting on.
   private pendingEntries: Map<string, ClipboardEntry> = new Map();
   // File hashes whose waiting entry was deleted or cleared before the bytes
   // finished arriving - see handleFileChunk.
   private abandonedHashes: Set<string> = new Set();
+  // How often each file (lowercase hash) has been asked for again after a
+  // transfer of it came to nothing - see requestAgain.
+  private retries: Map<string, number> = new Map();
   // Guards against streaming the same file to the same peer twice at once
   // (key: `${peerDeviceId}:${fileHash}`) - broadcastEntry proactively
   // streams a freshly-captured file right after sending its entry, but the
@@ -70,6 +92,13 @@ export class SyncManager {
     this.entryAppliedCallback = callback;
   }
 
+  // A file's bytes arrived that no newly received entry was waiting on - an
+  // older item's, asked for again (see requestMissingFiles). Its card can
+  // show what it now has (an image's preview, say). Android's onFileStored.
+  onFileStored(callback: (fileHash: string) => void): void {
+    this.fileStoredCallback = callback;
+  }
+
   onLog(callback: (message: string) => void): void {
     this.logCallback = callback;
   }
@@ -90,6 +119,20 @@ export class SyncManager {
 
   getHistory(): Promise<ClipboardEntry[]> {
     return this.history.getHistory(this.context);
+  }
+
+  // Once, at startup: FileStore's blobs that no history entry points at any
+  // more go (see HistoryAccess.deleteUnreferencedFiles) - left by items
+  // deleted or evicted while their bytes were on the way, bytes streamed for
+  // an entry this device dropped, and transfers the app was killed in the
+  // middle of. A transfer running meanwhile is never touched.
+  async deleteUnreferencedFiles(): Promise<void> {
+    try {
+      const deleted: number = await this.history.deleteUnreferencedFiles(this.context);
+      if (deleted > 0) this.logCallback?.(`deleted ${deleted} unused file(s) from storage`);
+    } catch (e) {
+      this.logCallback?.(`could not tidy file storage (${e})`);
+    }
   }
 
   // pendingEntries is cleared too: otherwise a file whose bytes finish
@@ -140,6 +183,9 @@ export class SyncManager {
     this.connectionsChangedCallback?.(this.connections.size);
     conn.onMessage((msg: string) => { void this.handleMessage(msg, conn); });
     conn.onDisconnected(() => {
+      // Its streams are dead whether or not it was replaced - see
+      // dropTransfersFrom.
+      const cutOff: string[] = this.dropTransfersFrom(conn);
       // Only evict if the map still points at THIS connection. Removing by
       // peerDeviceId alone meant a stale link's teardown deleted the newer,
       // live connection that had replaced it - after which isConnected()
@@ -148,13 +194,22 @@ export class SyncManager {
       // The Windows daemon carries the identical guard (Program.cs's
       // Disconnected handler); both ends need it or the other end's churn
       // keeps the loop alive.
-      if (this.connections.get(conn.peerDeviceId) !== conn) return;
-      this.connections.delete(conn.peerDeviceId);
-      this.connectionsChangedCallback?.(this.connections.size);
-      this.logCallback?.(`peer disconnected: ${conn.peerDeviceId.slice(0, 20)}...`);
+      if (this.connections.get(conn.peerDeviceId) === conn) {
+        this.connections.delete(conn.peerDeviceId);
+        this.connectionsChangedCallback?.(this.connections.size);
+        this.logCallback?.(`peer disconnected: ${shortDeviceId(conn.peerDeviceId)}`);
+      }
+      // Nobody resumes a broken stream on their own, so a file still wanted
+      // is asked for again - here from whoever's left, and from the next
+      // connection to come up (see requestMissingFiles) if that's nobody.
+      const others: PeerConnection[] = this.connectionsExcept(conn);
+      for (const fileHash of cutOff) {
+        void this.requestAgain(fileHash, others);
+      }
     });
     conn.listen();
     void this.sendHistoryBatch(conn);
+    void this.requestMissingFiles(conn);
     if (previous !== undefined && previous !== conn) {
       // A second connection to this same peer just replaced the first one
       // in the map (duplicate connections happen when a beacon-triggered
@@ -174,6 +229,19 @@ export class SyncManager {
       // means there is only ever one live socket per peer, on both ends.
       previous.close();
     }
+  }
+
+  // Closes the connection to a device that's just been removed (see Index's
+  // untrustDevice), as Windows' UntrustDevice does - left open, the
+  // heartbeat kept it up, and it went on receiving everything this device
+  // sent and could still ask for any stored file. Off the map first, so the
+  // count updates now and its teardown (onDisconnected) leaves the map be.
+  disconnect(deviceId: string): void {
+    const conn: PeerConnection | undefined = this.connections.get(deviceId);
+    if (conn === undefined) return;
+    this.connections.delete(deviceId);
+    this.connectionsChangedCallback?.(this.connections.size);
+    conn.close();
   }
 
   private async sendHistoryBatch(conn: PeerConnection): Promise<void> {
@@ -254,8 +322,23 @@ export class SyncManager {
       void this.applyFileEntry(entry);
       return;
     }
+    // An empty file might never finish arriving: an older sender has no
+    // chunk to stream for one (see streamFileToPeer), so a file_request
+    // could wait forever. Its bytes are known, so they're stored here
+    // instead - no request goes out, whatever build the sender runs.
+    if (isEmptyFile(payload)) {
+      if (!this.fileStore.write(payload.FileHash, new Uint8Array(0))) {
+        this.logCallback?.('could not store a received empty file');
+        return;
+      }
+      void this.applyFileEntry(entry);
+      return;
+    }
     this.pendingEntries.set(payload.FileHash, entry);
-    this.broadcastFileRequest(payload.FileHash);
+    // Already arriving (its sender streams a new file right after its entry,
+    // and that can overtake the entry's checks here): more peers sending it
+    // too would only be wasted.
+    if (!this.isReceiving(payload.FileHash)) this.broadcastFileRequest(payload.FileHash);
   }
 
   // Bytes are still fetched and cached when autoApply is off (handleIncomingFileEntry
@@ -268,12 +351,104 @@ export class SyncManager {
     this.entryAppliedCallback?.(entry, result, true);
   }
 
-  private broadcastFileRequest(fileHash: string): void {
+  private fileRequestJson(fileHash: string): string {
     const request: FileRequestMessage = { FileHash: fileHash };
     const envelope: Envelope = { Type: 'file_request', Payload: JSON.stringify(request) };
-    const json = JSON.stringify(envelope);
+    return JSON.stringify(envelope);
+  }
+
+  private broadcastFileRequest(fileHash: string): void {
+    const json = this.fileRequestJson(fileHash);
     for (const conn of this.connections.values()) {
       void conn.send(json);
+    }
+  }
+
+  private connectionsExcept(conn: PeerConnection | null): PeerConnection[] {
+    const out: PeerConnection[] = [];
+    for (const c of this.connections.values()) {
+      if (c !== conn) out.push(c);
+    }
+    return out;
+  }
+
+  // The files history entries point at whose bytes aren't here, keyed by
+  // lowercase hash, each spelt as its entry spells it (the blob is stored,
+  // and looked for, under that). An empty file is never missing: its bytes
+  // are known (see handleIncomingFileEntry).
+  private async missingFiles(): Promise<Map<string, string>> {
+    const missing: Map<string, string> = new Map<string, string>();
+    for (const entry of await this.history.getHistory(this.context)) {
+      if (entry.Type !== 'file') continue;
+      let payload: FilePayload;
+      try {
+        payload = JSON.parse(entry.Content) as FilePayload;
+      } catch (e) {
+        continue;
+      }
+      if (!isValidFileHash(payload.FileHash) || isEmptyFile(payload) || this.fileStore.exists(payload.FileHash)) continue;
+      missing.set(payload.FileHash.toLowerCase(), payload.FileHash);
+    }
+    return missing;
+  }
+
+  // Asks a peer that just connected for every file this device is still
+  // missing: a new item's whose stream was cut off or failed - a phone loses
+  // every connection whenever it goes to the background - and any older
+  // item's whose bytes never came (the app killed mid-transfer, say).
+  // Nothing else would ask again: an entry is no longer new when its
+  // sender's history batch brings it back. Android's requestMissingFiles and
+  // iOS's requestMissingBlobs do the same.
+  private async requestMissingFiles(conn: PeerConnection): Promise<void> {
+    const wanted: Map<string, string> = new Map<string, string>();
+    for (const fileHash of this.pendingEntries.keys()) {
+      wanted.set(fileHash.toLowerCase(), fileHash);
+    }
+    try {
+      (await this.missingFiles()).forEach((fileHash: string, key: string) => {
+        if (!wanted.has(key)) wanted.set(key, fileHash);
+      });
+    } catch (e) {
+      // history unreadable - the entries waiting here are still asked for
+    }
+    wanted.forEach((fileHash: string) => {
+      if (!this.fileStore.exists(fileHash) && !this.isReceiving(fileHash)) {
+        void conn.send(this.fileRequestJson(fileHash));
+      }
+    });
+  }
+
+  // Asks `from` for a file again after a transfer of it came to nothing -
+  // failed its hash check, had a gap, or went by unused - while an item
+  // still wants it and nobody is sending it. Only MAX_RETRIES times between
+  // successes: a sender whose copy is bad would otherwise be asked forever.
+  // A peer connecting asks once more anyway (see requestMissingFiles). The
+  // same rule as Android's requestAgain.
+  private async requestAgain(fileHash: string, from: PeerConnection[]): Promise<void> {
+    if (this.fileStore.exists(fileHash) || this.isReceiving(fileHash)) return;
+    // A new item's (see pendingEntries), or an older one's.
+    let wanted: boolean = this.pendingEntries.has(fileHash);
+    if (!wanted) {
+      try {
+        wanted = (await this.missingFiles()).has(fileHash.toLowerCase());
+      } catch (e) {
+        // history unreadable - nothing known to want it
+      }
+    }
+    // Checked again after reading the history: a stream may have started.
+    if (!wanted || this.fileStore.exists(fileHash) || this.isReceiving(fileHash)) return;
+    const live: PeerConnection[] = from.filter((c: PeerConnection) => !c.isClosed);
+    if (live.length === 0) return;
+    const key: string = fileHash.toLowerCase();
+    const tries: number = (this.retries.get(key) ?? 0) + 1;
+    this.retries.set(key, tries);
+    if (tries > MAX_RETRIES) {
+      if (tries === MAX_RETRIES + 1) this.logCallback?.('giving up on a file until a device reconnects');
+      return;
+    }
+    const json: string = this.fileRequestJson(fileHash);
+    for (const c of live) {
+      void c.send(json);
     }
   }
 
@@ -314,6 +489,18 @@ export class SyncManager {
       } catch (e) {
         return; // source file vanished - nothing to stream
       }
+      if (totalSize === 0) {
+        // Still one chunk - empty, and the last - as every other platform
+        // sends: an older receiver only finishes an empty file on it.
+        const emptyChunk: FileChunkMessage = { FileHash: fileHash, ChunkIndex: 0, IsLast: true, DataBase64: '' };
+        const envelope: Envelope = { Type: 'file_chunk', Payload: JSON.stringify(emptyChunk) };
+        try {
+          await conn.send(JSON.stringify(envelope));
+        } catch (e) {
+          // peer disconnected - nothing further to do
+        }
+        return;
+      }
       let file: fs.File;
       try {
         file = fs.openSync(filePath, fs.OpenMode.READ_ONLY);
@@ -349,7 +536,15 @@ export class SyncManager {
     }
   }
 
-  private async handleFileChunk(payloadJson: string): Promise<void> {
+  // One stream per peer per file, each into a temp file of its own (see
+  // incoming), taken in order: a stream starts at chunk 0, so the middle of
+  // one this side never saw start (cut off, or begun before this run) is
+  // ignored, and a sender that starts over at 0 gets a fresh file. Bytes
+  // already stored aren't written again - a second peer's stream of a file
+  // stops as soon as the first one's is stored. A file whose stream comes to
+  // nothing (a gap, a hash mismatch) is asked for again, a few times - see
+  // requestAgain.
+  private async handleFileChunk(payloadJson: string, conn: PeerConnection): Promise<void> {
     let chunk: FileChunkMessage;
     try {
       chunk = JSON.parse(payloadJson) as FileChunkMessage;
@@ -358,69 +553,168 @@ export class SyncManager {
     }
     // The hash names the file these bytes are written to.
     if (!isValidFileHash(chunk.FileHash)) return;
+
+    const key = `${conn.peerDeviceId}:${chunk.FileHash}`;
+    let transfer: IncomingTransfer | undefined = this.incoming.get(key);
+    const place: ChunkPlace =
+      placeChunk(transfer !== undefined, transfer?.conn === conn, transfer?.nextIndex ?? 0, chunk.ChunkIndex);
+    if (place === 'ignore') {
+      // The end of a stream this side couldn't use - one it gave up on, say.
+      // With nobody else sending the file now, its sender may as well start
+      // over.
+      if (chunk.IsLast) await this.requestAgain(chunk.FileHash, [conn]);
+      return;
+    }
+    if (transfer !== undefined && place === 'abandon') {
+      this.logCallback?.('file chunk out of order - abandoning this transfer');
+      this.abortTransfer(key, transfer);
+      await this.requestAgain(chunk.FileHash, this.connectionsExcept(null));
+      return;
+    }
+    if (transfer !== undefined && place === 'restart') {
+      // Its sender started over (or its new connection did): so does this
+      // side, from an empty file.
+      this.abortTransfer(key, transfer);
+      transfer = undefined;
+    }
+    // Stored already - by another peer's stream that got here first, or this
+    // device copying the same file itself meanwhile, in which case an entry
+    // may still be waiting on them.
+    if (transfer !== undefined && this.fileStore.exists(chunk.FileHash)) {
+      this.abortTransfer(key, transfer);
+      await this.tryFulfillPendingEntry(chunk.FileHash);
+      return;
+    }
+    if (transfer === undefined) {
+      // 'start', or 'restart' - chunk 0 either way.
+      if (this.fileStore.exists(chunk.FileHash)) {
+        await this.tryFulfillPendingEntry(chunk.FileHash);
+        return;
+      }
+      const tempPath = this.fileStore.newTempPath(chunk.FileHash);
+      try {
+        const file = fs.openSync(tempPath, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+        transfer = { fileHash: chunk.FileHash, conn: conn, fd: file.fd, tempPath: tempPath, nextIndex: 0 };
+      } catch (e) {
+        this.logCallback?.(`failed writing file chunk (${e}) - abandoning this transfer`);
+        return;
+      }
+      this.incoming.set(key, transfer);
+    }
+
+    // Decoded only once it's known to be written: the rest of a second
+    // peer's stream of a file that's stored already is ignored unread.
     let chunkBytes: Uint8Array;
     try {
-      chunkBytes = base64Helper.decodeSync(chunk.DataBase64);
+      // An empty file's only chunk is empty (see streamFileToPeer).
+      chunkBytes = chunk.DataBase64 === '' ? new Uint8Array(0) : base64Helper.decodeSync(chunk.DataBase64);
     } catch (e) {
+      this.logCallback?.('file chunk is not Base64 - abandoning this transfer');
+      this.abortTransfer(key, transfer);
       return;
     }
-
-    let fd = this.inProgressFds.get(chunk.FileHash);
-    if (fd === undefined) {
-      const file = fs.openSync(
-        this.fileStore.getTempPath(chunk.FileHash),
-        fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC,
-      );
-      fd = file.fd;
-      this.inProgressFds.set(chunk.FileHash, fd);
-    }
-
     try {
-      const ab = chunkBytes.buffer.slice(chunkBytes.byteOffset, chunkBytes.byteOffset + chunkBytes.byteLength) as ArrayBuffer;
-      fs.writeSync(fd, ab);
+      if (chunkBytes.byteLength > 0) {
+        const ab = chunkBytes.buffer.slice(chunkBytes.byteOffset, chunkBytes.byteOffset + chunkBytes.byteLength) as ArrayBuffer;
+        fs.writeSync(transfer.fd, ab);
+      }
     } catch (e) {
       this.logCallback?.(`failed writing file chunk (${e}) - abandoning this transfer`);
-      this.inProgressFds.delete(chunk.FileHash);
-      fs.closeSync(fd);
+      this.abortTransfer(key, transfer);
       return;
     }
+    transfer.nextIndex++;
 
     if (!chunk.IsLast) return;
 
-    fs.closeSync(fd);
-    this.inProgressFds.delete(chunk.FileHash);
-
-    const tempPath = this.fileStore.getTempPath(chunk.FileHash);
-    const actualHash = await sha256File(tempPath);
+    // Off the map before anything awaits: another stream of this file (its
+    // sender answering a file_request once this one's done, say) writes a
+    // file of its own meanwhile, and can't truncate or delete this one.
+    this.incoming.delete(key);
+    const tempPath = transfer.tempPath;
+    let actualHash = '';
+    try {
+      fs.closeSync(transfer.fd);
+      actualHash = await sha256File(tempPath);
+    } catch (e) {
+      // unreadable - fails the check below
+    }
     if (actualHash.toLowerCase() !== chunk.FileHash.toLowerCase()) {
       // corrupted in transit, or tampered - the signed entry's hash is
       // what we trust, not whatever bytes actually showed up
       this.logCallback?.('file transfer failed hash verification - discarding');
-      fs.unlinkSync(tempPath);
-      this.pendingEntries.delete(chunk.FileHash);
+      removeIfThere(tempPath);
+      // The entry still waits: another peer's copy, or this one's next
+      // stream, may be intact.
+      await this.requestAgain(chunk.FileHash, this.connectionsExcept(null));
       return;
     }
 
-    fs.renameSync(tempPath, this.fileStore.getPath(chunk.FileHash));
+    try {
+      fs.renameSync(tempPath, this.fileStore.getPath(chunk.FileHash));
+    } catch (e) {
+      this.logCallback?.(`could not store a received file (${e})`);
+      removeIfThere(tempPath);
+      return;
+    }
+    this.retries.delete(chunk.FileHash.toLowerCase());
     // Its item was deleted or cleared while these bytes were on their way,
     // and nothing is waiting on them now: kept, they'd be an orphan.
     if (this.abandonedHashes.delete(chunk.FileHash) && !this.pendingEntries.has(chunk.FileHash)) {
       await this.history.deleteFileIfUnused(this.context, chunk.FileHash);
       return;
     }
-    await this.tryFulfillPendingEntry(chunk.FileHash);
+    if (!(await this.tryFulfillPendingEntry(chunk.FileHash))) this.fileStoredCallback?.(chunk.FileHash);
+  }
+
+  // Ends one incoming stream early: off the map, its fd closed and its
+  // half-written file deleted.
+  private abortTransfer(key: string, transfer: IncomingTransfer): void {
+    this.incoming.delete(key);
+    try {
+      fs.closeSync(transfer.fd);
+    } catch (e) {
+      // closed already
+    }
+    removeIfThere(transfer.tempPath);
+  }
+
+  private isReceiving(fileHash: string): boolean {
+    for (const transfer of this.incoming.values()) {
+      if (transfer.fileHash === fileHash) return true;
+    }
+    return false;
+  }
+
+  // A closed connection's streams never resume - every sender starts over
+  // at chunk 0 - so each one's half-written file goes, rather than its fd
+  // staying open for good. Returns the hashes that were cut off.
+  private dropTransfersFrom(conn: PeerConnection): string[] {
+    const keys: string[] = [];
+    this.incoming.forEach((transfer: IncomingTransfer, key: string) => {
+      if (transfer.conn === conn) keys.push(key);
+    });
+    const cutOff: string[] = [];
+    for (const key of keys) {
+      const transfer: IncomingTransfer | undefined = this.incoming.get(key);
+      if (transfer === undefined) continue;
+      this.abortTransfer(key, transfer);
+      cutOff.push(transfer.fileHash);
+    }
+    return cutOff;
   }
 
   // FileStore can gain a blob through more than one path - chunk-stream
   // completion (above), but also this device's own local capture of a
   // file (see Index.ets's onPasteButtonClick). Whichever way a hash
   // becomes available, a pending entry waiting on exactly that hash
-  // should get applied.
-  private async tryFulfillPendingEntry(fileHash: string): Promise<void> {
+  // should get applied. False if none was waiting.
+  private async tryFulfillPendingEntry(fileHash: string): Promise<boolean> {
     const entry = this.pendingEntries.get(fileHash);
-    if (entry === undefined) return;
+    if (entry === undefined) return false;
     this.pendingEntries.delete(fileHash);
     await this.applyFileEntry(entry);
+    return true;
   }
 
   private async handleMessage(msg: string, conn: PeerConnection): Promise<void> {
@@ -449,7 +743,7 @@ export class SyncManager {
         // actually happens. type/deviceId included since this is the
         // first concrete data point telling us whether it's even getting
         // this far.
-        this.logCallback?.(`dropped ${received.Type} entry from ${received.DeviceId.slice(0, 12)}... - failed signature/trust check`);
+        this.logCallback?.(`dropped ${received.Type} entry from ${shortDeviceId(received.DeviceId)} - failed signature/trust check`);
         return;
       }
       // Deleted here before - neither re-listed nor put on the clipboard.
@@ -478,7 +772,7 @@ export class SyncManager {
         }
       }
     } else if (envelope.Type === 'file_chunk') {
-      await this.handleFileChunk(envelope.Payload);
+      await this.handleFileChunk(envelope.Payload, conn);
     } else if (envelope.Type === 'file_request') {
       this.handleFileRequest(envelope.Payload, conn);
     } else {

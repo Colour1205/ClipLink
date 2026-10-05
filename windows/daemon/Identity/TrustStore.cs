@@ -4,9 +4,11 @@ namespace ClipboardDaemon.Identity;
 // Tailscale IP), learned at pairing time and used as a fallback when LAN
 // broadcast discovery can't find this device directly.
 //
-// Name is the peer's own display name, as last carried by its handshake or
-// beacon (null until one has) - see UpdateName. Optional, so a trust store
-// written before names existed still loads.
+// Name is the peer's own display name, as last carried by its pairing
+// payload or by a handshake whose connection then proved itself (null until
+// one has) - see UpdateName. Never a beacon's: beacons are unauthenticated,
+// so the engine only shows those. Optional, so a trust store written before
+// names existed still loads.
 public record TrustedDevice(string PublicKey, string? Address = null, string? Name = null);
 
 public class TrustStore
@@ -65,18 +67,39 @@ public class TrustStore
         }
     }
 
-    // Records the latest name a trusted peer's handshake or beacon carried,
-    // leaving its address alone. A no-op for an untrusted id, an unknown
-    // (null/blank) name or an unchanged one - cheap enough for every beacon.
-    public void UpdateName(string publicKey, string? name)
+    // Records the latest name a trusted peer's handshake carried - once a
+    // line from the peer on that connection has decrypted, never at the
+    // handshake itself (see ClipLinkEngine.RememberProvenName) - leaving its
+    // address alone. A no-op (no write) for an untrusted id, an unknown
+    // (null/blank) name or an unchanged one. Returns whether it changed the
+    // name.
+    public bool UpdateName(string publicKey, string? name)
     {
         string? normalized = DeviceNameStore.Normalize(name);
-        if (normalized == null) return;
+        if (normalized == null) return false;
         lock (gate)
         {
-            if (!trustedDevices.TryGetValue(publicKey, out var existing) || existing.Name == normalized) return;
+            if (!trustedDevices.TryGetValue(publicKey, out var existing) || existing.Name == normalized) return false;
             trustedDevices[publicKey] = existing with { Name = normalized };
             saveTrustStore();
+            return true;
+        }
+    }
+
+    // Clears a trusted peer's stored address if it's still address (compared
+    // ignoring case) - one found to be useless for it - leaving its trust and
+    // name alone. Unlike Trust(publicKey, null), never trusts a device again
+    // that was untrusted meanwhile, nor clears an address learned since.
+    // Returns whether it cleared it.
+    public bool ForgetAddress(string publicKey, string address)
+    {
+        lock (gate)
+        {
+            if (!trustedDevices.TryGetValue(publicKey, out var existing)
+                || !string.Equals(existing.Address, address, StringComparison.OrdinalIgnoreCase)) return false;
+            trustedDevices[publicKey] = existing with { Address = null };
+            saveTrustStore();
+            return true;
         }
     }
 

@@ -123,7 +123,8 @@ public final class TrustStore {
         return raw.compactMap { obj in
             guard let key = obj["publicKey"] as? String, !key.isEmpty else { return nil }
             let address = (obj["address"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-            let name = (obj["name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            // Earlier builds stored peers' names exactly as they came.
+            let name = DeviceName.sanitize(obj["name"] as? String)
             return TrustedDevice(publicKey: key, address: address, name: name)
         }
     }
@@ -163,12 +164,14 @@ public final class TrustStore {
         }
     }
 
-    /// Records the latest name a TRUSTED device gave itself (beacon or
-    /// handshake). Never adds trust, never touches the address, and an
-    /// unknown (nil/empty) name never erases a known one.
+    /// Records the latest name a TRUSTED device gave itself in a handshake,
+    /// once that connection has decrypted a line (the handshake signature
+    /// doesn't cover the name) - never a beacon's, which is unauthenticated
+    /// UDP. Never adds trust, never touches the address, and an unknown
+    /// (nil/empty) name never erases a known one.
     public func updateName(_ publicKey: String, name: String?) {
         guard let name = name.flatMap({ $0.isEmpty ? nil : $0 }) else { return }
-        // Beacons arrive every 2 s: skip the lock and file check when
+        // Every connection calls this: skip the lock and file check when
         // nothing changed.
         guard let current = device(publicKey), current.name != name else { return }
         mutate {
@@ -314,16 +317,69 @@ public final class FileStore {
         try? FileManager.default.removeItem(at: exports.appendingPathComponent(Self.key(hash), isDirectory: true))
     }
 
+    /// At most this many UTF-16 units (a .NET or Java string's length)...
+    static let maxNameLength = 120
+    /// ... and this many bytes of UTF-8: APFS caps a name at 255 bytes, not
+    /// characters (120 CJK characters are 360), and a receiver may still add
+    /// " (1)" to it. The same limits as Android's and HarmonyOS' FileNames.
+    static let maxNameBytes = 240
+    /// Longer, and an extension is dropped rather than kept whole.
+    static let maxExtensionLength = 20
+
+    /// Characters Windows refuses in a name. (Its separators never get this
+    /// far: only the last path segment is kept.)
+    private static let invalidNameCharacters = CharacterSet(charactersIn: "\\/:*?\"<>|")
+
+    /// A name from somewhere else - a peer's FilePayload, or what a shared
+    /// or picked file calls itself - made safe to create inside a folder, by
+    /// the same rule as FileNames.cs and Android's and HarmonyOS' FileNames,
+    /// so a name comes out the same on every device: only its last path
+    /// segment counts (a "../../x" or "C:\...\Startup\x.exe" lands in the
+    /// folder it is put in); control characters and the invisible bidi and
+    /// zero-width ones are removed, the set a device name loses
+    /// (DeviceName.isHidden: a right-to-left override disguises
+    /// "invoice\u{202E}txt.exe"), and characters a peer's file system
+    /// rejects become "_"; trimmed, then no trailing dots or spaces (so "."
+    /// and ".." are nothing) - leading dots stay; capped as above by code
+    /// point, never half of one, keeping an extension of up to 20. Never
+    /// empty: "file".
     public static func sanitize(_ name: String) -> String {
-        let bad = CharacterSet(charactersIn: "\\/:*?\"<>|\0").union(.newlines).union(.controlCharacters)
-        var cleaned = name.components(separatedBy: bad).joined(separator: "_").trimmingCharacters(in: .whitespaces)
-        while cleaned.hasPrefix(".") { cleaned.removeFirst() }
-        if cleaned.count > 120 {
-            let ext = (cleaned as NSString).pathExtension
-            let stem = String(cleaned.prefix(120 - min(ext.count + 1, 20)))
-            cleaned = ext.isEmpty ? stem : stem + "." + ext
+        let scalars = Array(name.unicodeScalars)
+        let start = scalars.lastIndex(where: { $0 == "/" || $0 == "\\" }).map { $0 + 1 } ?? 0
+        var kept = String.UnicodeScalarView()
+        for scalar in scalars[start...] where !DeviceName.isHidden(scalar) {
+            kept.append(invalidNameCharacters.contains(scalar) ? "_" : scalar)
         }
-        return cleaned.isEmpty ? "file" : cleaned
+        var cleaned = trimmingTrailingDotsAndSpaces(String(kept).trimmingCharacters(in: .whitespacesAndNewlines))
+        if cleaned.isEmpty { return "file" }
+        if cleaned.utf16.count > maxNameLength || cleaned.utf8.count > maxNameBytes {
+            // From the last dot on, as Path.GetExtension has it.
+            var ext = cleaned.unicodeScalars.lastIndex(of: ".").map { String(cleaned.unicodeScalars[$0...]) } ?? ""
+            if ext.utf16.count > maxExtensionLength { ext = "" }
+            // Whole code points only, as the other platforms count them: the
+            // stem ends before the first one that would go over either limit.
+            var stem = String.UnicodeScalarView()
+            var length = ext.utf16.count
+            var bytes = ext.utf8.count
+            for scalar in cleaned.unicodeScalars {
+                length += UTF16.width(scalar)
+                bytes += UTF8.width(scalar)
+                guard length <= maxNameLength, bytes <= maxNameBytes else { break }
+                stem.append(scalar)
+            }
+            cleaned = trimmingTrailingDotsAndSpaces(String(stem)) + ext
+            // A stem of nothing but dots and spaces trims away entirely - and
+            // with no extension left either, "" would name the folder itself.
+            if cleaned.isEmpty { return "file" }
+        }
+        return cleaned
+    }
+
+    /// Windows drops a name's trailing dots and spaces itself.
+    private static func trimmingTrailingDotsAndSpaces(_ text: String) -> String {
+        var scalars = text.unicodeScalars
+        while let last = scalars.last, last == "." || last == " " { scalars.removeLast() }
+        return String(scalars)
     }
 }
 

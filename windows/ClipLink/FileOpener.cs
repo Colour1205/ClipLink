@@ -15,8 +15,9 @@ internal static class FileOpener
         ".bat", ".cmd", ".ps1", ".psm1", ".psd1", ".ps1xml", ".psc1", ".vbs", ".vbe", ".vb", ".js", ".jse",
         ".wsf", ".wsh", ".wsc", ".sct", ".hta", ".jar", ".py", ".pyw",
         ".msi", ".msp", ".mst", ".msix", ".msixbundle", ".appx", ".appxbundle", ".appinstaller",
-        ".application", ".appref-ms", ".gadget", ".xll", ".xbap",
-        ".lnk", ".url", ".scf", ".inf", ".reg", ".chm", ".settingcontent-ms", ".library-ms", ".search-ms", ".searchconnector-ms",
+        ".application", ".appref-ms", ".gadget", ".xll", ".xbap", ".jnlp",
+        ".lnk", ".url", ".website", ".scf", ".inf", ".reg", ".chm", ".settingcontent-ms", ".library-ms", ".search-ms", ".searchconnector-ms",
+        ".rdp", ".diagcab", ".theme", ".themepack",
         ".iso", ".img", ".vhd", ".vhdx",
     };
 
@@ -30,7 +31,13 @@ internal static class FileOpener
     {
         try
         {
+            // Writing the mark counts as writing the file: its last-write
+            // time goes back as it was, or the engine would take the copy
+            // for one the user edited and never clean it up (see
+            // ClipLinkEngine.GetFileToOpen).
+            DateTime lastWrite = File.GetLastWriteTimeUtc(path);
             File.WriteAllText(path + ":Zone.Identifier", "[ZoneTransfer]\r\nZoneId=3\r\n");
+            File.SetLastWriteTimeUtc(path, lastWrite);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
         {

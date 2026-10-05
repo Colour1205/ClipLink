@@ -50,6 +50,60 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertFalse(WireSignature.verify(publicKeyBase64: id, data: Data(), rawSignature: Data(count: 70)))
     }
 
+    /// Ids are compared as text everywhere else, but our own must be spotted
+    /// however a copy of it is spelt: .NET skips whitespace, Java needs no
+    /// padding, and a padding character's spare bits decode either way.
+    func testSameKeyIsFoundHoweverTheIdIsSpelt() throws {
+        let id = SoftwareIdentity().publicKeyBase64
+        let key = try XCTUnwrap(WireSignature.canonicalPublicKey(id))
+        XCTAssertEqual(key.count, 64, "the raw point")
+        XCTAssertTrue(WireSignature.isSameKey(id, id))
+
+        let wrapped = stride(from: 0, to: id.count, by: 40).map { start -> String in
+            let from = id.index(id.startIndex, offsetBy: start)
+            return String(id[from..<id.index(from, offsetBy: min(40, id.count - start))])
+        }.joined(separator: "\r\n")
+        let respelt = [
+            wrapped,
+            " " + id + "\n",
+            String(id.dropLast(2)), // no padding
+            id.replacingOccurrences(of: "A", with: "A "),
+        ]
+        for copy in respelt {
+            XCTAssertNotEqual(copy, id)
+            XCTAssertEqual(WireSignature.canonicalPublicKey(copy), key, copy.debugDescription)
+            XCTAssertTrue(WireSignature.isSameKey(copy, id), copy.debugDescription)
+            XCTAssertTrue(WireSignature.isSameKey(id, copy), copy.debugDescription)
+        }
+
+        // 91 bytes end in one byte over: its last digit's low 4 bits are
+        // spare. A decoder that ignores them takes them set as our key too,
+        // so it is ours here whether or not this Foundation's decoder would.
+        let digits = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+        var chars = Array(id)
+        XCTAssertTrue(id.hasSuffix("=="))
+        let last = chars.count - 3
+        let value = try XCTUnwrap(digits.firstIndex(of: chars[last]))
+        XCTAssertEqual(value & 0x0F, 0)
+        chars[last] = digits[value | 0x05]
+        let spareBits = String(chars)
+        for copy in [spareBits, String(spareBits.dropLast(2)), spareBits.replacingOccurrences(of: "A", with: "A ")] {
+            XCTAssertNotEqual(copy, id)
+            XCTAssertEqual(WireSignature.canonicalPublicKey(copy), key, copy.debugDescription)
+            XCTAssertTrue(WireSignature.isSameKey(copy, id), copy.debugDescription)
+        }
+        // Not a spare bit: a different key, or none.
+        chars[last] = digits[value ^ 0x10]
+        XCTAssertFalse(WireSignature.isSameKey(String(chars), id))
+
+        // Anyone else's key, or no key at all, isn't ours.
+        XCTAssertFalse(WireSignature.isSameKey(SoftwareIdentity().publicKeyBase64, id))
+        XCTAssertFalse(WireSignature.isSameKey("", id))
+        XCTAssertFalse(WireSignature.isSameKey("not a key", id))
+        XCTAssertFalse(WireSignature.isSameKey(String(id.dropFirst(4)), id))
+        XCTAssertNil(WireSignature.canonicalPublicKey(Data(repeating: 1, count: 91).base64EncodedString()))
+    }
+
     // MARK: handshake / session
 
     func testSessionKeyMatchesOpenSSL() throws {
@@ -296,6 +350,34 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertEqual(hs?.deviceName, colour)
     }
 
+    /// Peers choose their own names, so every way one arrives - beacon,
+    /// handshake, pairing code, and what earlier builds stored - drops control
+    /// characters and invisible bidi/format ones, then trims and caps.
+    func testPeerNamesAreSanitisedOnEveryPath() throws {
+        let hostile = "\u{FEFF} Desk\u{7}\n\u{7F}\u{85} PC\u{202E}\u{2066}\u{61C}\u{200B}\u{200D}\u{200E} \u{1F4BB}\u{2069}\u{202C}\t "
+        let clean = "Desk PC \u{1F4BB}"
+        XCTAssertEqual(DeviceName.sanitize(hostile), clean)
+        XCTAssertEqual(Beacon.parse("49000:K:-:-:-:" + Data(hostile.utf8).base64EncodedString(), senderIP: "x")?.name, clean)
+        XCTAssertEqual(HandshakeMessage.parse(WireJSON.string(["EphemeralPublicKey": "E", "IdentityPublicKey": "I", "Signature": "S", "DeviceName": hostile]))?.deviceName, clean)
+        // Escaped, as System.Text.Json writes them.
+        XCTAssertEqual(HandshakeMessage.parse(#"{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S","DeviceName":"\u202EDesk\u0007 PC\u200F"}"#)?.deviceName, "Desk PC")
+        XCTAssertEqual(PairingInfo.parse(WireJSON.string(["PublicKey": "KEY", "Name": hostile]))?.name, clean)
+
+        // Hidden characters alone are no name at all, and they go before the cap.
+        XCTAssertNil(DeviceName.sanitize("\u{202E}\u{200B}\u{FEFF}\r\n"))
+        XCTAssertEqual(DeviceName.sanitize(String(repeating: "\u{200B}", count: 100) + String(repeating: "n", count: 70)), String(repeating: "n", count: 64))
+        // Everything visible stays: accents, combining marks, CJK, RTL letters, emoji.
+        let fine = "Zo\u{EB}'s e\u{301} \u{6211}\u{7684} \u{5D0}\u{5D1} \u{1F1EC}\u{1F1E7}"
+        XCTAssertEqual(DeviceName.sanitize(fine), fine)
+
+        // A name an earlier build stored as it came is cleaned when read back.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("trust-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: [["publicKey": "A", "name": hostile]]).write(to: dir.appendingPathComponent("trusted_devices.json"))
+        XCTAssertEqual(TrustStore(directory: dir).device("A")?.name, clean)
+    }
+
     // MARK: framing
 
     func testFramerHandlesCRLFSplitsAndEmptyLines() throws {
@@ -331,7 +413,153 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertEqual(SyncEngine.windowsSafeName("con.txt"), "_con.txt")
         XCTAssertEqual(SyncEngine.windowsSafeName("LPT1"), "_LPT1")
         XCTAssertEqual(SyncEngine.windowsSafeName("report. "), "report")
-        XCTAssertEqual(SyncEngine.windowsSafeName("a\\b/c.pdf"), "a_b_c.pdf")
+        XCTAssertEqual(SyncEngine.windowsSafeName("a\\b/c.pdf"), "c.pdf")
+        XCTAssertEqual(SyncEngine.windowsSafeName("Con.tar.gz"), "_Con.tar.gz")
+        // No stem: not a device name.
+        XCTAssertEqual(SyncEngine.windowsSafeName(".con"), ".con")
+        // The "_" doesn't take a name at the cap over it: Windows' own
+        // FileNames.Safe gives the same 120 characters.
+        XCTAssertEqual(SyncEngine.windowsSafeName("con." + String(repeating: "b", count: 200)),
+                       "_con." + String(repeating: "b", count: 115))
+    }
+
+    /// The same cases as Android's ShareTest and HarmonyOS' FileNames.test
+    /// (FileNames.cs's rule): a file name comes out the same on every device.
+    func testFileNamesFollowTheOtherPlatformsRule() {
+        // Only the last path segment counts.
+        XCTAssertEqual(FileStore.sanitize("../../etc/passwd"), "passwd")
+        XCTAssertEqual(FileStore.sanitize("C:\\Users\\me\\AppData\\Roaming\\Startup\\evil.exe"), "evil.exe")
+        XCTAssertEqual(FileStore.sanitize("/data/data/io.uaena.cliplink/shared_prefs/../x.txt"), "x.txt")
+        XCTAssertEqual(FileStore.sanitize("..\\..\\x.txt"), "x.txt")
+
+        // Characters a file system refuses become "_"...
+        XCTAssertEqual(FileStore.sanitize("a:b*c?d\"e<f>g|.txt"), "a_b_c_d_e_f_g_.txt")
+        // ...and the invisible ones a device name loses are removed, as
+        // Windows' FileNames.Safe removes them.
+        var unsafe: [ClosedRange<UInt32>] = [0x00...0x1F, 0x7F...0x9F, 0x061C...0x061C, 0x200B...0x200F]
+        unsafe += [0x202A...0x202E, 0x2066...0x2069, 0xFEFF...0xFEFF]
+        for value in unsafe.joined() {
+            let name = "a" + String(Character(Unicode.Scalar(value)!)) + "b.txt"
+            XCTAssertEqual(FileStore.sanitize(name), "ab.txt", "U+" + String(value, radix: 16, uppercase: true))
+        }
+        XCTAssertEqual(FileStore.sanitize("line\nbreak.txt"), "linebreak.txt")
+        XCTAssertEqual(FileStore.sanitize("nul\u{0}.txt"), "nul.txt")
+        // Shown as "invoiceexe.txt" if the override were kept.
+        XCTAssertEqual(FileStore.sanitize("invoice\u{202E}txt.exe"), "invoicetxt.exe")
+        XCTAssertEqual(FileStore.sanitize("report\u{200B}.pdf"), "report.pdf")
+        // Removed, THEN trimmed: the spaces they were hiding go too.
+        XCTAssertEqual(FileStore.sanitize("\u{FEFF} name.txt \u{200E}"), "name.txt")
+        XCTAssertEqual(FileStore.sanitize("\u{202E}\u{200B}\u{7}"), "file")
+        // Other format characters are names' own business, as everywhere else.
+        XCTAssertEqual(FileStore.sanitize("soft\u{AD}hy\u{2060}phen.txt"), "soft\u{AD}hy\u{2060}phen.txt")
+        XCTAssertEqual(FileStore.sanitize("Café 日本語 😀.png"), "Café 日本語 😀.png")
+
+        // Trimmed, then no trailing dots or spaces; leading dots stay.
+        XCTAssertEqual(FileStore.sanitize("  name.txt . "), "name.txt")
+        XCTAssertEqual(FileStore.sanitize("invoice.pdf."), "invoice.pdf")
+        XCTAssertEqual(FileStore.sanitize(".env"), ".env")
+        XCTAssertEqual(FileStore.sanitize(".hidden. .txt"), ".hidden. .txt")
+        for blank in [".", "..", "../..", "dir/", ". . ."] {
+            XCTAssertEqual(FileStore.sanitize(blank), "file", blank.debugDescription)
+        }
+
+        // Cut to 120 UTF-16 units keeping the extension; an "extension" over
+        // 20 characters is just part of the name.
+        let long = FileStore.sanitize(String(repeating: "a", count: 200) + ".jpeg")
+        XCTAssertEqual(long.utf16.count, 120)
+        XCTAssertTrue(long.hasSuffix("a.jpeg"))
+        let noExtension = FileStore.sanitize("x." + String(repeating: "b", count: 200))
+        XCTAssertEqual(noExtension.utf16.count, 120)
+        XCTAssertTrue(noExtension.hasPrefix("x.b"))
+
+        // And to 240 bytes of UTF-8: 78 * 3 + 4 bytes = 238.
+        let cjk = FileStore.sanitize(String(repeating: "文", count: 100) + ".pdf")
+        XCTAssertEqual(cjk, String(repeating: "文", count: 78) + ".pdf")
+        XCTAssertEqual(FileStore.sanitize(String(repeating: "😀", count: 70)), String(repeating: "😀", count: 60))
+        XCTAssertEqual(FileStore.sanitize(String(repeating: "a", count: 119) + "😀" + "tail"), String(repeating: "a", count: 119))
+
+        // A cut that keeps only dots and spaces, with no extension to keep: the fallback.
+        XCTAssertEqual(FileStore.sanitize(String(repeating: ".", count: 150) + String(repeating: "b", count: 21)), "file")
+        XCTAssertEqual(FileStore.sanitize(String(repeating: ". ", count: 75) + "." + String(repeating: "b", count: 30)), "file")
+        // With one, the extension is all that's left - as on Windows and Android.
+        XCTAssertEqual(FileStore.sanitize(String(repeating: ".", count: 200) + ".txt"), ".txt")
+    }
+
+    /// A peer's FileName is shown and saved as `sanitize` has it, as Android's
+    /// FilePayload.parse does; the entry itself is left as it was signed.
+    func testParsedFileNamesAreMadeSafe() {
+        let hash = String(repeating: "a1", count: 32)
+        func parsedName(_ name: String) -> String? {
+            FilePayload.parse(WireJSON.string(["FileName": name, "FileHash": hash, "FileSize": 1]))?.fileName
+        }
+        XCTAssertEqual(parsedName("report.pdf"), "report.pdf")
+        XCTAssertEqual(parsedName("invoice\u{202E}txt.exe"), "invoicetxt.exe")
+        XCTAssertEqual(parsedName("../../etc/passwd"), "passwd")
+        XCTAssertEqual(parsedName(".."), "file")
+        XCTAssertEqual(parsedName(""), "file")
+        XCTAssertEqual(FilePayload.parse(WireJSON.string(["FileHash": hash]))?.fileName, "file")
+    }
+
+    /// Received and shared files are created under these names, and APFS
+    /// takes at most 255 bytes of UTF-8: 240 bytes and 120 UTF-16 units, as
+    /// on Android, with the extension kept, no code point split, and never
+    /// an empty name.
+    func testFileNamesAreCappedInUTF8BytesAndNeverEmpty() {
+        for blank in ["", " ", "...", ". .", " .. "] {
+            XCTAssertEqual(FileStore.sanitize(blank), "file", blank.debugDescription)
+        }
+        XCTAssertEqual(FileStore.sanitize("\u{0}\n"), "file")
+        XCTAssertEqual(FileStore.sanitize("report.pdf"), "report.pdf")
+
+        // 200 CJK characters are 600 bytes: cut by bytes, not characters.
+        let cjk = FileStore.sanitize(String(repeating: "文", count: 200) + ".txt")
+        XCTAssertEqual(cjk, String(repeating: "文", count: 78) + ".txt")
+        XCTAssertLessThanOrEqual(cjk.utf8.count, 240)
+
+        // A four-byte scalar is two UTF-16 units: here 120 units cut first.
+        let emoji = FileStore.sanitize(String(repeating: "😀", count: 100) + ".png")
+        XCTAssertEqual(emoji, String(repeating: "😀", count: 58) + ".png")
+
+        // Cut by code point, as Windows, Android and HarmonyOS count: a
+        // decomposed "é" (e + U+0301) can lose its accent at the cut, as it
+        // does there, so the name comes out the same.
+        let accents = FileStore.sanitize(String(repeating: "e\u{301}", count: 150) + ".md")
+        XCTAssertEqual(accents, String(repeating: "e\u{301}", count: 58) + "e.md")
+        XCTAssertEqual(accents.unicodeScalars.filter { $0 == "e" }.count, 59)
+        XCTAssertEqual(accents.unicodeScalars.filter { $0 == "\u{301}" }.count, 58)
+        XCTAssertEqual(accents.utf16.count, 120)
+
+        // A "character" bigger than the whole cap is cut too, not dropped.
+        let marks = FileStore.sanitize("e" + String(repeating: "\u{301}", count: 300) + ".txt")
+        XCTAssertEqual(Array(marks.unicodeScalars), Array(("e" + String(repeating: "\u{301}", count: 115) + ".txt").unicodeScalars))
+
+        // An over-long extension isn't kept, and no stem ends in a dot or space.
+        XCTAssertEqual(FileStore.sanitize(String(repeating: "a", count: 300) + "." + String(repeating: "x", count: 30)),
+                       String(repeating: "a", count: 120))
+        XCTAssertEqual(FileStore.sanitize(String(repeating: "a", count: 115) + " . . . . .jpg"),
+                       String(repeating: "a", count: 115) + ".jpg")
+
+        // The name that goes on the wire keeps within the caps too.
+        let wire = SyncEngine.windowsSafeName(String(repeating: "文", count: 200) + ".txt")
+        XCTAssertLessThanOrEqual(wire.utf8.count, 240)
+        XCTAssertTrue(wire.hasSuffix(".txt"))
+    }
+
+    /// A share of text and links goes as one text - the link an app passes
+    /// beside its caption included, as Android gets both in one EXTRA_TEXT.
+    func testSharedTextsAndLinksGoAsOneText() {
+        let link = "https://example.com/post/42"
+        XCTAssertNil(SharedText.merged([]))
+        XCTAssertNil(SharedText.merged(["", " \n"]))
+        XCTAssertEqual(SharedText.merged([link]), link)
+        // A caption and its link, as UIActivityViewController([title, url]) gives them.
+        XCTAssertEqual(SharedText.merged(["Check this out", link]), "Check this out\n" + link)
+        XCTAssertEqual(SharedText.merged([link, "Check this out"]), link + "\nCheck this out")
+        // Each once: the same link twice, or a caption that already has it.
+        XCTAssertEqual(SharedText.merged([link, link]), link)
+        XCTAssertEqual(SharedText.merged(["Look: " + link, link]), "Look: " + link)
+        XCTAssertEqual(SharedText.merged([link, "Look: " + link]), "Look: " + link)
+        XCTAssertEqual(SharedText.merged(["a", "", "b", "a"]), "a\nb")
     }
 
     func testHistoryBatchAddDedupsAndReportsOnlySurvivors() {
@@ -415,6 +643,20 @@ final class ProtocolInteropTests: XCTestCase {
         store.updateName("Stranger", name: "Nope")
         XCTAssertFalse(store.isTrusted("Stranger"), "a name never adds trust")
         XCTAssertEqual(TrustStore(directory: dir).all, [TrustedDevice(publicKey: "A", address: "10.0.0.2", name: "Studio PC")], "persisted")
+    }
+
+    /// Every P-256 SPKI starts with the same 36 base64 characters, so ids are
+    /// shown by the first 4 bytes of SHA-256 of their UTF-8 - byte for byte
+    /// what the other ports show.
+    func testDeviceFingerprintIsTheSameEverywhere() {
+        XCTAssertEqual(DeviceLabel.fingerprint("abc"), "BA78·16BF")
+        XCTAssertEqual(DeviceLabel.short("abc"), "Device BA78·16BF")
+        let row = DeviceRow(deviceId: "abc", name: nil, trusted: false, connected: false, addresses: [], pairing: false, lastSeen: nil, nearby: false)
+        XCTAssertEqual(row.shortId, "Device BA78·16BF")
+        let a = SoftwareIdentity().publicKeyBase64
+        let b = SoftwareIdentity().publicKeyBase64
+        XCTAssertEqual(a.prefix(36), b.prefix(36), "why a prefix can't tell devices apart")
+        XCTAssertNotEqual(DeviceLabel.fingerprint(a), DeviceLabel.fingerprint(b))
     }
 
     func testDeviceRowsSortByGroupThenNameThenIdOnly() {

@@ -85,6 +85,23 @@ struct MeView: View {
                     .accessibilityElement(children: .combine)
                 }
 
+                // The id's first characters are the same for every device;
+                // this hash of it is what other devices' pairing prompts show.
+                HStack(spacing: 12) {
+                    MeRowLabel(
+                        title: "Fingerprint",
+                        subtitle: "Pairing requests on your other devices show this next to this iPhone's name. Check it matches before accepting there.",
+                        systemImage: "touchid",
+                        tint: .green
+                    )
+                    Spacer(minLength: 8)
+                    Text(ownId.isEmpty ? "…" : DeviceLabel.fingerprint(ownId))
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .fixedSize()
+                }
+                .accessibilityElement(children: .combine)
+
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Device ID")
                         .font(.subheadline)

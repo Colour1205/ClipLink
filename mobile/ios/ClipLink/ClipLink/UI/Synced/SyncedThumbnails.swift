@@ -25,11 +25,23 @@ final class SyncedThumbnailCache: @unchecked Sendable {
         cache.setObject(image, forKey: key as NSString, cost: cost)
     }
 
-    /// ImageIO downsampling: never inflates the full-size bitmap, and applies
-    /// the EXIF orientation.
+    /// No preview past this many pixels (400 MB as a bitmap): not every
+    /// format decodes straight to a reduced size, and a compressed picture's
+    /// pixel count has little to do with its file size. Photos and
+    /// screenshots are far below it.
+    static let maxSourcePixels = 100_000_000
+
+    /// ImageIO downsampling, with the EXIF orientation applied - image files
+    /// and inline images alike.
     static func decode(_ data: Data, maxPixel: CGFloat) -> UIImage? {
         let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions) else { return nil }
+        // From the header alone. Divided, not multiplied: the numbers are
+        // the sender's, and a product could overflow.
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let width = properties?[kCGImagePropertyPixelWidth] as? Int ?? 0
+        let height = properties?[kCGImagePropertyPixelHeight] as? Int ?? 0
+        guard width > 0, height > 0, width <= maxSourcePixels / height else { return nil }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,

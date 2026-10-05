@@ -11,20 +11,28 @@ using ClipboardDaemon.Storage;
 public class ClipboardSync
 {
     private readonly FileStore fileStore;
+    private readonly string label; // whose received images these are - see ReceivedFiles
     private const int MaxApplyAttempts = 5;
 
     BlockingCollection<(string content, string type, int attempts)> _pendingSets = new BlockingCollection<(string content, string type, int attempts)>();
     private string? _lastKnownHash;
     private volatile bool _stopRequested;
 
+    // The received image's file (ReceivedFiles) this last put on the
+    // clipboard with the picture, and the clipboard's sequence number right
+    // after - see ImageFileOnClipboard.
+    private sealed record ImageFileWrite(string Path, uint Sequence);
+    private volatile ImageFileWrite? _imageFileWrite;
+
     // sourceFilePath is only ever set for type == "file" — it's the local path
     // to read the actual bytes from when streaming to peers. ClipLinkEngine uses
     // it; nothing else in this class needs it once the event has fired.
     public event Action<(string content, string type, string? sourceFilePath)>? ClipboardChanged;
 
-    public ClipboardSync(FileStore fileStore)
+    public ClipboardSync(FileStore fileStore, string label)
     {
         this.fileStore = fileStore;
+        this.label = label;
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -192,6 +200,17 @@ public class ClipboardSync
         _pendingSets.Add((content, type, 0));
     }
 
+    // The received image's file the clipboard refers to right now - the one
+    // this put there with the picture (see setContent), while nothing else
+    // has been copied since - or null. Any thread. "Clear synced history"
+    // keeps that one (ReceivedFiles.DeleteImages): a clear never touches the
+    // clipboard, and pasting the picture into a folder needs its file.
+    public string? ImageFileOnClipboard()
+    {
+        var written = _imageFileWrite;
+        return written != null && GetClipboardSequenceNumber() == written.Sequence ? written.Path : null;
+    }
+
     public void setContent(String content, string type = "text")
     {
         if (type == "text")
@@ -205,10 +224,13 @@ public class ClipboardSync
             _lastKnownHash = ComputeHash(imageBytes);
             // Saved as a real file too, and put on the clipboard both ways (see
             // SetImageAndFile) - a bitmap alone pasted into Word or Paint but
-            // not into an Explorer folder, which only accepts files.
-            string destPath = GetNonCollidingPath(ReceivedFilesDir(), $"ClipLink image {DateTime.Now:yyyy-MM-dd HHmmss}{ImageFiles.Extension(imageBytes)}");
-            File.WriteAllBytes(destPath, imageBytes);
-            SetImageAndFile(imageBytes, destPath);
+            // not into an Explorer folder, which only accepts files. Named by
+            // its content, so applying it again reuses the file (see
+            // ReceivedFiles.SaveImage). If it can't be saved, the picture
+            // still goes on, without the file.
+            string? imageFile = ReceivedFiles.SaveImage(imageBytes, label);
+            SetImageAndFile(imageBytes, imageFile);
+            if (imageFile != null) _imageFileWrite = new ImageFileWrite(imageFile, GetClipboardSequenceNumber());
         }
         else if (type == "file")
         {
@@ -224,7 +246,7 @@ public class ClipboardSync
 
             // The sender's name for it, but only as a name: joined on as it
             // came, a rooted or "..\" one put the file anywhere.
-            string destPath = GetNonCollidingPath(ReceivedFilesDir(), FileNames.Safe(payload.FileName, "file"));
+            string destPath = GetNonCollidingPath(ReceivedFiles.Folder(), FileNames.Safe(payload.FileName, "file"));
             File.Copy(fileStore.GetPath(payload.FileHash), destPath);
             _lastKnownHash = ComputeHash(System.Text.Encoding.UTF8.GetBytes(payload.FileHash)); // suppress our own echo of this apply
 
@@ -258,36 +280,38 @@ public class ClipboardSync
     private static readonly HashSet<string> ImageFileExtensions = new(StringComparer.OrdinalIgnoreCase) { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff" };
     private const long MaxInlineImageBytes = 50L * 1024 * 1024;
 
-    private static string ReceivedFilesDir()
-    {
-        string dir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "ClipboardDaemon", "ReceivedFiles");
-        Directory.CreateDirectory(dir);
-        return dir;
-    }
-
     // One clipboard item carrying the picture AND the file it's saved as:
     // apps that paste images (Word, Paint, chat apps) take the bitmap - or
     // the "PNG" format, which keeps transparency, for the ones that look for
     // it - while Explorer takes the file. If the bytes aren't an image GDI+
     // can decode (e.g. WebP or HEIC from a phone), the file alone still pastes.
-    private static void SetImageAndFile(byte[] imageBytes, string filePath)
+    // No filePath (it couldn't be saved): the picture alone.
+    private static void SetImageAndFile(byte[] imageBytes, string? filePath)
     {
         var data = new System.Windows.Forms.DataObject();
-        data.SetFileDropList(new System.Collections.Specialized.StringCollection { filePath });
+        if (filePath != null)
+        {
+            data.SetFileDropList(new System.Collections.Specialized.StringCollection { filePath });
+        }
         System.Drawing.Image? image = null;
         try
         {
             image = System.Drawing.Image.FromStream(new MemoryStream(imageBytes));
+            bool turned = TurnUpright(image);
             data.SetImage(image);
             if (ImageFiles.Extension(imageBytes) == ".png")
             {
-                data.SetData("PNG", new MemoryStream(imageBytes));
+                data.SetData("PNG", turned ? PngOf(image) : new MemoryStream(imageBytes));
             }
         }
         catch (ArgumentException)
         {
+            if (filePath == null)
+            {
+                image?.Dispose();
+                Console.WriteLine("image format not decodable here, and it couldn't be saved as a file - nothing to put on the clipboard");
+                return;
+            }
             Console.WriteLine($"image format not decodable here, putting it on the clipboard as a file only: {filePath}");
         }
         try
@@ -299,6 +323,53 @@ public class ClipboardSync
         {
             image?.Dispose();
         }
+    }
+
+    private const int ExifOrientation = 0x0112;
+
+    // GDI+ ignores a photo's EXIF orientation - a phone saves a portrait
+    // photo sideways, with a tag saying how to turn it - so JPEG and TIFF
+    // photos pasted sideways. Turns the bitmap itself the way the tag says
+    // and drops the tag, so nothing turns it again. True if it turned it.
+    private static bool TurnUpright(System.Drawing.Image image)
+    {
+        bool turned = false;
+        try
+        {
+            if (!image.PropertyIdList.Contains(ExifOrientation)) return false;
+            byte[]? value = image.GetPropertyItem(ExifOrientation)?.Value;
+            int orientation = value is { Length: >= 2 } ? BitConverter.ToUInt16(value, 0) : value is { Length: 1 } ? value[0] : 1;
+            System.Drawing.RotateFlipType? turn = orientation switch
+            {
+                2 => System.Drawing.RotateFlipType.RotateNoneFlipX,
+                3 => System.Drawing.RotateFlipType.Rotate180FlipNone,
+                4 => System.Drawing.RotateFlipType.Rotate180FlipX,
+                5 => System.Drawing.RotateFlipType.Rotate90FlipX,
+                6 => System.Drawing.RotateFlipType.Rotate90FlipNone,
+                7 => System.Drawing.RotateFlipType.Rotate270FlipX,
+                8 => System.Drawing.RotateFlipType.Rotate270FlipNone,
+                _ => null,
+            };
+            if (turn == null) return false;
+            image.RotateFlip(turn.Value);
+            turned = true;
+            image.RemovePropertyItem(ExifOrientation);
+        }
+        catch (Exception ex) when (ex is ArgumentException or System.Runtime.InteropServices.ExternalException)
+        {
+            Console.WriteLine($"couldn't apply the image's EXIF orientation: {ex.Message}");
+        }
+        return turned;
+    }
+
+    // The turned bitmap as PNG, for the "PNG" format - the received bytes
+    // would paste it unturned.
+    private static MemoryStream PngOf(System.Drawing.Image image)
+    {
+        var png = new MemoryStream();
+        image.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+        png.Position = 0;
+        return png;
     }
 
     // If "photo.jpg" already exists, try "photo (1).jpg", "photo (2).jpg", etc.

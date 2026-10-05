@@ -28,11 +28,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import io.uaena.cliplink.R
 import io.uaena.cliplink.engine.LogLine
+import io.uaena.cliplink.engine.shortIdOf
 
 data class MeState(
     val ownDeviceId: String,
@@ -40,6 +43,8 @@ data class MeState(
     val deviceNameOverride: String,
     val defaultDeviceName: String,
     val hasPassphrase: Boolean,
+    /** A new passcode's key is still being derived; Change and Clear wait for it. */
+    val passphraseBusy: Boolean,
     val tailscaleIp: String,
     val keepAlive: Boolean,
     val autoApply: Boolean,
@@ -110,13 +115,22 @@ fun MeScreen(
                         )
                     }
                     Spacer(Modifier.height(8.dp))
+                    // The fingerprint a pairing prompt on the other device
+                    // shows - the id's first characters are the same for
+                    // every device, so they're no use for comparing.
                     Text(
-                        state.ownDeviceId.take(44).ifEmpty { "Generating identity…" } +
-                            if (state.ownDeviceId.length > 44) "…" else "",
+                        if (state.ownDeviceId.isEmpty()) "Generating identity…" else shortIdOf(state.ownDeviceId),
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
                     )
+                    if (state.ownDeviceId.isNotEmpty()) {
+                        Text(
+                            "Pairing prompts on your other devices show this ID — check that it matches.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
                     if (state.localAddresses.isNotEmpty()) {
                         Spacer(Modifier.height(10.dp))
                         Text(
@@ -233,6 +247,8 @@ fun MeScreen(
                         value = passphrase,
                         onValueChange = { passphrase = it },
                         label = { Text("Passcode") },
+                        // Advice only - nothing is refused for being short.
+                        supportingText = { Text(stringResource(R.string.passcode_length_hint)) },
                         singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
                         modifier = Modifier.fillMaxWidth(),
@@ -243,18 +259,29 @@ fun MeScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         // No minimum length - blank is the only thing refused,
-                        // and the engine trims before deriving the key.
+                        // and the engine trims before deriving the key. Both
+                        // buttons wait out a key that is still being derived,
+                        // so a Change and a Clear can never cross.
                         Button(
                             onClick = {
                                 actions.onSetPassphrase(passphrase)
                                 passphrase = ""
                             },
-                            enabled = passphrase.isNotBlank(),
+                            enabled = passphrase.isNotBlank() && !state.passphraseBusy,
                         ) {
-                            Text(if (state.hasPassphrase) "Change passcode" else "Set passcode")
+                            Text(
+                                when {
+                                    state.passphraseBusy -> "Saving…"
+                                    state.hasPassphrase -> "Change passcode"
+                                    else -> "Set passcode"
+                                },
+                            )
                         }
                         if (state.hasPassphrase) {
-                            TextButton(onClick = { confirmingClearPassphrase = true }) {
+                            TextButton(
+                                onClick = { confirmingClearPassphrase = true },
+                                enabled = !state.passphraseBusy,
+                            ) {
                                 Text("Clear")
                             }
                         }

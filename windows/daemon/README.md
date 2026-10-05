@@ -16,13 +16,16 @@ any more.
   thread — a UI marshals them to its own thread.
 - `Engine/EngineModels.cs` — what the API hands out (`DeviceListing`,
   `HistoryItem`, `PendingPairing`, `PairOutcome`, `EngineStatus`, ...).
-- `Engine/DeviceLabel.cs` — how to show a device's name safely.
+- `Engine/DeviceLabel.cs` — how to show a device's name safely, and its
+  fingerprint (`Device XXXX·XXXX`, the same on every platform).
 - `Engine/ConsoleLog.cs` — sends the engine's Console logging to a rolling
   log file (`%LOCALAPPDATA%\ClipLink\logs\cliplink.log`).
 - `Clipboard/`, `Identity/`, `Networking/`, `Storage/`, `Crypto/` — the pieces
   the engine wires together (see `docs/protocol.md` for the wire format).
   `Storage/LocalFiles.cs` is the per-file check and payload (name, size,
-  streamed SHA-256, 1 GB cap) shared by copied files and shared ones.
+  streamed SHA-256, 1 GB cap) shared by copied files and shared ones, and
+  their copy into the FileStore, which refuses a file changed since it was
+  hashed.
 
 Build: `dotnet build -c Debug` here. The iOS interop tests compile these same
 sources for macOS (`mobile/ios/ClipLink/CoreTests/DaemonHarness`), patching a

@@ -28,14 +28,19 @@ class PassphraseKeyStore(context: Context) {
 
     fun hasPassphrase(): Boolean = !prefs.getString(KEY_KEY, null).isNullOrEmpty()
 
-    /** Runs 210,000 HMAC rounds - call this off the main thread. */
-    fun setPassphrase(passphrase: String) {
-        val key = Pbkdf2.deriveSha256(
-            passphrase.toByteArray(Charsets.UTF_8),
-            FIXED_SALT.toByteArray(Charsets.UTF_8),
-            ITERATIONS,
-            KEY_LEN_BYTES,
-        )
+    /**
+     * Runs 210,000 HMAC rounds - call this off the main thread. Derives only;
+     * nothing is stored until [saveKey], so a caller can drop a key that a
+     * Clear overtook while it was being derived.
+     */
+    fun deriveKey(passphrase: String): ByteArray = Pbkdf2.deriveSha256(
+        passphrase.toByteArray(Charsets.UTF_8),
+        FIXED_SALT.toByteArray(Charsets.UTF_8),
+        ITERATIONS,
+        KEY_LEN_BYTES,
+    )
+
+    fun saveKey(key: ByteArray) {
         prefs.edit().putString(KEY_KEY, B64.encode(key)).commit()
     }
 

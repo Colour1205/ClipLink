@@ -56,6 +56,38 @@ public enum WireSignature {
         guard let bytes = Data(base64Encoded: base64) else { return false }
         return (try? P256.Signing.PublicKey(derRepresentation: bytes)) != nil
     }
+
+    private static let base64Alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+    private static let base64Digits = Set(base64Alphabet)
+
+    /// The key itself (its raw P-256 point) that a base64 SPKI names, however
+    /// the text is spelled: whitespace and other stray characters, missing
+    /// padding and non-zero padding bits all decode somewhere in the mesh
+    /// (.NET skips whitespace, Java needs no padding). Nil for anything that
+    /// isn't a P-256 key.
+    public static func canonicalPublicKey(_ base64: String) -> Data? {
+        var digits = Array(base64.filter(base64Digits.contains))
+        // The last digit's bits past the final whole byte carry nothing, and
+        // a lenient decoder ignores them: cleared, so they count for nothing
+        // here either, whichever way this Foundation treats them.
+        let spareBits = [0, 0, 0x0F, 0x03][digits.count % 4]
+        if spareBits != 0, let value = base64Alphabet.firstIndex(of: digits[digits.count - 1]) {
+            digits[digits.count - 1] = base64Alphabet[value & ~spareBits]
+        }
+        let padded = String(digits) + String(repeating: "=", count: (4 - digits.count % 4) % 4)
+        guard let bytes = Data(base64Encoded: padded),
+              let key = try? P256.Signing.PublicKey(derRepresentation: bytes)
+        else { return nil }
+        return key.rawRepresentation
+    }
+
+    /// True when both name the same public key - a text compare misses a
+    /// re-encoded copy of an id.
+    public static func isSameKey(_ a: String, _ b: String) -> Bool {
+        if a == b { return true }
+        guard let x = canonicalPublicKey(a), let y = canonicalPublicKey(b) else { return false }
+        return x == y
+    }
 }
 
 // MARK: - Entry signing

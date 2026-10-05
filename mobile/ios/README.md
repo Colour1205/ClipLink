@@ -115,7 +115,9 @@ how many it left out). As on the other platforms, whatever the system hands
 over as a file - from Files, Photos, Mail - is synced as that file, with its
 own bytes and name (a photo arrives as `IMG_0001.HEIC`, say); only an image
 with no file behind it (a screenshot being marked up) goes inline as a
-picture, and text or a link only when nothing else came with it. Files over
+picture (past 16 MB of those in one share, the rest go as `Image.png` files),
+and text or a link only when nothing else came with it - all of it as one
+text, so a caption and the link an app passes beside it both arrive. Files over
 1 GB and folders are left out, and nothing goes on this device's clipboard.
 "Open in ClipLink" from Files sends the file as a file too. The extension's
 node is a sender only: it never takes, or asks for, file bytes.
@@ -132,13 +134,36 @@ nothing deleted comes back when a peer reconnects and resends its history.
 see until you set *Me › Device Name*. The app reads the OS name on the main
 actor and stores it, with that setting, in the App Group - the Share extension
 and background rounds send the same name without touching UIKit.
+Beacons are unauthenticated, so a name heard in one is only kept in memory and
+shown for nearby devices (and for a paired one with no stored name yet). The
+handshake's signature doesn't cover its name either, so a name from a handshake
+is stored - for a paired, passcode-paired or just-accepted device alike - only
+once that connection decrypts its first line (normally the peer's history
+batch, a round trip later), which a replayed handshake never can: one key
+covers both directions, so one of our own lines sent back ends the connection
+instead of counting. A paired
+device's rename shows once it reconnects. Every name a peer sends loses control,
+bidi and zero-width characters (`DeviceName.sanitize`). Every id starts with
+the same key header, so devices are told apart by a fingerprint, the first 4
+bytes of the SHA-256 of the id ("Device AB12·CD34", the same on every
+platform): a pairing request shows it beside the requester's name, to compare
+with *Me › Fingerprint* on that device.
 
 **Files.** Hashes go out UPPERCASE: Windows' echo suppression compares
 uppercase hex, and a lowercase hash makes it re-broadcast your file. Blobs are
 stored lowercase-keyed; peers' own spellings are always echoed back
 byte-for-byte. Incoming streams are locked to one sender and checked for chunk
 order (the other ports interleave two senders into a corrupt file), and
-missing blobs are re-requested on every connect.
+missing blobs are re-requested on every connect. At most 8 streams come in at
+once: a file whose stream went by for want of a slot (a share of many files)
+is asked for again once that stream ends, and an unanswered request up to 3
+more times, 15 s apart. Files go out to each peer 3 at a time, the rest in
+turn. A file's name - a peer's, or one shared in - follows Windows'
+`FileNames.Safe`, as on Android and HarmonyOS, so it reads the same on every
+device (`FileStore.sanitize`): only its last path segment, without control,
+bidi or zero-width characters, `\/:*?"<>|` as `_`, no trailing dots or
+spaces (leading ones stay), and at most 120 UTF-16 units and 240 UTF-8 bytes,
+cut by code point with its extension kept.
 
 ## Fixed here that other ports still have (reported separately)
 

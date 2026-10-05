@@ -11,6 +11,18 @@
     {
       "name": "EntryAbility_label",
       "value": "ClipLink"
+    },
+    {
+      "name": "passcode_length_hint",
+      "value": "Longer passcodes are harder to guess."
+    },
+    {
+      "name": "device_fingerprint_label",
+      "value": "Fingerprint"
+    },
+    {
+      "name": "device_fingerprint_hint",
+      "value": "Your other devices show this in a pairing request from this one. Check it matches before accepting."
     }
   ]
 }

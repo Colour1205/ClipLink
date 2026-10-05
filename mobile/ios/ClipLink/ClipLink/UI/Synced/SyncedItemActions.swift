@@ -96,7 +96,9 @@ struct SyncedItemActions {
         case .file:
             guard item.fileAvailable, let url = model.shareURL(for: item),
                   let provider = NSItemProvider(contentsOf: url) else { return NSItemProvider() }
-            provider.suggestedName = item.filePayload?.fileName
+            // The export's own, sanitised name - never the peer's raw one,
+            // which the drop target would create as is.
+            provider.suggestedName = url.lastPathComponent
             return provider
         }
     }

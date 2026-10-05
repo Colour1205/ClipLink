@@ -61,7 +61,10 @@ extension SyncEngine {
         guard tickTimer == nil, reconnectTimer == nil else { return }
         let tick = DispatchSource.makeTimerSource(queue: queue)
         tick.schedule(deadline: .now() + Self.tickInterval, repeating: Self.tickInterval)
-        tick.setEventHandler { [weak self] in self?.beaconTick() }
+        tick.setEventHandler { [weak self] in
+            self?.beaconTick()
+            self?.retryStalledFiles()
+        }
         tick.resume()
         tickTimer = tick
 
@@ -208,8 +211,7 @@ extension SyncEngine {
 
     func handleDatagram(_ data: Data, from sender: String) {
         guard let text = String(data: data, encoding: .utf8),
-              let beacon = Beacon.parse(text, senderIP: sender),
-              beacon.deviceId != ownId // our own broadcast, looped back
+              let beacon = Beacon.parse(text, senderIP: sender)
         else { return }
         onBeacon(beacon)
     }
@@ -219,6 +221,9 @@ extension SyncEngine {
     /// then the pairing dial if both pairing screens are open.
     func onBeacon(_ beacon: Beacon) {
         let id = beacon.deviceId
+        // Our own broadcast, looped back - or replayed: it carries our own
+        // passcode proof, which must never trust our own id. Re-spelt too.
+        guard !isOwnIdentity(id) else { return }
         // Spoof resistance: a never-seen id must at least be a real P-256 key.
         if sightings[id] == nil, !trust.isTrusted(id), !WireSignature.isValidPublicKey(id) { return }
         var sighting = sightings[id] ?? Sighting(lastSeen: Date())
@@ -229,16 +234,18 @@ extension SyncEngine {
         sighting.pairing = beacon.pairing
         if beacon.pairing { sighting.pairingSeen = Date() }
         // A beacon without a name (an older build) keeps the one we know.
+        // Beacons are unauthenticated UDP: the name is held here, in memory,
+        // for display only - never written to the trust store.
         if let name = beacon.name { sighting.name = name }
         sightings[id] = sighting
         capStrangerSightings()
-        trust.updateName(id, name: beacon.name)
         schedulePublish()
 
         if !trust.isTrusted(id), let key = passphraseKey, let proof = beacon.proof,
            PassphraseAuth.verifyProof(key: key, deviceId: id, proofBase64: proof) {
             log("auto-trusting \(DeviceLabel.short(id)) (shared passcode)")
-            trust.trust(id, address: beacon.address, name: sighting.name)
+            // Nameless until a connection to it decrypts a line (register).
+            trust.trust(id, address: beacon.address)
         }
 
         guard links[id] == nil, !connectingTo.contains(id), DeviceOrder.shouldDial(peerId: id, ownId: ownId) else { return }
@@ -382,16 +389,18 @@ extension SyncEngine {
         }
     }
 
-    /// `name`: what the device's handshake called itself, if anything.
+    /// `name`: what the device's handshake called itself, if anything. Held
+    /// in memory only: a refused or unwanted handshake line was never
+    /// verified, so storing a name is register's job, once a link proves it
+    /// holds the session key.
     func noteSighting(_ id: String, address: String?, name: String? = nil) {
-        guard id != ownId else { return }
+        guard !isOwnIdentity(id) else { return }
         var sighting = sightings[id] ?? Sighting(lastSeen: Date())
         sighting.lastSeen = Date()
         if let address, Self.isPeerAddress(address) { sighting.addresses[address] = Date() }
         if let name { sighting.name = name }
         sightings[id] = sighting
         capStrangerSightings()
-        trust.updateName(id, name: name)
         schedulePublish()
     }
 
@@ -695,7 +704,9 @@ extension SyncEngine {
     /// made it (inbound, beacon dial, reconnect, sweep, manual pairing).
     func handleNewConnection(_ link: PeerLink, address: String?) {
         let id = link.peerDeviceId
-        // Also records a trusted peer's handshake name in the trust store.
+        // Shown at once, but held in memory only: the handshake signature
+        // doesn't cover DeviceName, so a replayed handshake could carry any
+        // name. register() stores it once this link decrypts a line.
         noteSighting(id, address: address, name: link.peerName)
         guard running else {
             link.close()
@@ -728,7 +739,8 @@ extension SyncEngine {
         // trust-store bookkeeping below.
         register(link, acceptedByUser: false)
         if link.newlyTrustedViaPassphrase {
-            trust.trust(id, address: address, name: peerName(for: id))
+            // Nameless for now, like any trust: see register().
+            trust.trust(id, address: address)
             log("auto-paired via passcode: \(DeviceLabel.short(id))")
             notice("Paired with \(displayName(for: id)) using your passcode.")
         } else {
@@ -775,6 +787,19 @@ extension SyncEngine {
         sendHistoryBatch(to: link)
         requestMissingBlobs(from: link)
 
+        // The handshake's name is stored only once this link decrypts a line
+        // (a replayed handshake never can) - normally the peer's history
+        // batch, which every peer sends as soon as it registers the link,
+        // else its first ping. Once per link; trust records made on Accept
+        // or by the passcode start without it.
+        var nameStored = false
+        let storeName: (PeerLink) -> Void = { [weak self] link in
+            guard let self, !nameStored else { return }
+            nameStored = true
+            self.trust.updateName(id, name: link.peerName)
+            self.schedulePublish()
+        }
+
         if let previous = links[id], previous !== link, !previous.isClosed, previous.hasReceivedSessionLine,
            !link.hasReceivedSessionLine {
             // A working link already exists. The newest link wins - as on every
@@ -783,6 +808,7 @@ extension SyncEngine {
             // must not knock out the real connection. Genuine peers send their
             // history batch at once, so this takes a round trip.
             link.onFirstSessionLine = { [weak self] link in
+                storeName(link)
                 guard let self, !link.isClosed else { return }
                 let old = self.links[id]
                 self.links[id] = link
@@ -790,6 +816,7 @@ extension SyncEngine {
                 self.schedulePublish()
             }
         } else {
+            link.onFirstSessionLine = storeName
             let previous = links[id]
             links[id] = link
             if let previous, previous !== link {
@@ -798,11 +825,26 @@ extension SyncEngine {
                 previous.close()
             }
         }
+        // Its first line may have come in before now (glued to the handshake,
+        // or while a pairing request was held), when nothing was listening.
+        // Checked after the caller's trust bookkeeping, so a passcode or
+        // Accept record exists by then.
+        queue.async {
+            if link.hasReceivedSessionLine { storeName(link) }
+        }
         schedulePublish()
     }
 
     func linkClosed(_ link: PeerLink) {
         let id = link.peerDeviceId
+        // An unproven handshake's name was shown for this connection only:
+        // a replay's must not outlive it (off the LAN no beacon replaces it).
+        // Kept if the link that replaced this one brought the same name.
+        if !link.hasReceivedSessionLine, let name = link.peerName, sightings[id]?.name == name,
+           links[id] === link || links[id]?.peerName != name {
+            sightings[id]?.name = nil
+            schedulePublish()
+        }
         var aborted: [String] = []
         for (key, transfer) in incoming where transfer.owner == ObjectIdentifier(link) {
             transfer.abort()
@@ -847,7 +889,7 @@ extension SyncEngine {
 
         if let info = PairingInfo.parse(trimmed) {
             let key = info.publicKey
-            if key == ownId { return completion(.ownCode) }
+            if isOwnIdentity(key) { return completion(.ownCode) }
             if links[key] != nil {
                 return completion(.connected(addressCandidates(for: key).first ?? displayName(for: key)))
             }

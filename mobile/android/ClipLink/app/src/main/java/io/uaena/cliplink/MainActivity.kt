@@ -76,6 +76,7 @@ class MainActivity : ComponentActivity() {
                 val ownDeviceId by engine.ownDeviceId.collectAsState()
                 val pairingRequest by engine.pairingRequest.collectAsState()
                 val hasPassphrase by engine.hasPassphrase.collectAsState()
+                val passphraseBusy by engine.passphraseBusy.collectAsState()
                 val tailscaleIp by engine.tailscaleIp.collectAsState()
                 val deviceNameOverride by engine.deviceNameOverride.collectAsState()
                 val defaultDeviceName by engine.defaultDeviceName.collectAsState()
@@ -102,6 +103,7 @@ class MainActivity : ComponentActivity() {
                         pairingPayload = engine.pairingPayload(),
                         pairingRequest = pairingRequest,
                         hasPassphrase = hasPassphrase,
+                        passphraseBusy = passphraseBusy,
                         tailscaleIp = tailscaleIp,
                         keepAlive = keepAlive,
                         autoApply = autoApply,

@@ -23,7 +23,10 @@ object AesGcm {
 
     private val random = SecureRandom()
 
-    fun encrypt(sessionKey: ByteArray, plaintext: String): String {
+    fun encrypt(sessionKey: ByteArray, plaintext: String): String = B64.encode(encryptPacked(sessionKey, plaintext))
+
+    /** [encrypt] before the base64: `nonce(12) || tag(16) || ciphertext`. */
+    fun encryptPacked(sessionKey: ByteArray, plaintext: String): ByteArray {
         val nonce = ByteArray(NONCE_SIZE).also { random.nextBytes(it) }
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(
@@ -38,12 +41,15 @@ object AesGcm {
         nonce.copyInto(packed, 0)
         output.copyInto(packed, NONCE_SIZE, cipherTextLength, output.size) // tag
         output.copyInto(packed, NONCE_SIZE + TAG_SIZE, 0, cipherTextLength) // ciphertext
-        return B64.encode(packed)
+        return packed
     }
 
     /** Throws on a corrupt, forged or truncated message - the caller treats that as a dead connection. */
-    fun decrypt(sessionKey: ByteArray, packedBase64: String): String {
-        val packed = B64.decode(packedBase64)
+    fun decrypt(sessionKey: ByteArray, packedBase64: String): String =
+        decryptPacked(sessionKey, B64.decode(packedBase64))
+
+    /** [decrypt] of a line already decoded from its base64. */
+    fun decryptPacked(sessionKey: ByteArray, packed: ByteArray): String {
         require(packed.size >= NONCE_SIZE + TAG_SIZE) { "packed message too short" }
         val nonce = packed.copyOfRange(0, NONCE_SIZE)
         val tag = packed.copyOfRange(NONCE_SIZE, NONCE_SIZE + TAG_SIZE)

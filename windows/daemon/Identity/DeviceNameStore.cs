@@ -32,6 +32,13 @@ public class DeviceNameStore
             try
             {
                 overrideName = Normalize(File.ReadAllText(override_path));
+                if (overrideName == osDefault)
+                {
+                    // The computer's own name, pinned by an unedited Save
+                    // before SetOverride stopped doing that: follow it again.
+                    overrideName = null;
+                    File.Delete(override_path);
+                }
             }
             catch (Exception ex)
             {
@@ -45,13 +52,15 @@ public class DeviceNameStore
         get { lock (gate) { return overrideName ?? osDefault; } }
     }
 
-    // Blank (or null) clears the override, back to the computer name.
-    // Returns the name now in effect.
+    // Blank (or null) clears the override, back to the computer name - and
+    // so does the computer name itself: saving it as it's shown mustn't pin
+    // it, it keeps following the computer's. Returns the name now in effect.
     public string SetOverride(string? name)
     {
         lock (gate)
         {
             overrideName = Normalize(name);
+            if (overrideName == osDefault) overrideName = null;
             try
             {
                 if (overrideName == null) File.Delete(override_path);

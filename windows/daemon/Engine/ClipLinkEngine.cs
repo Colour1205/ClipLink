@@ -59,14 +59,15 @@ public sealed partial class ClipLinkEngine : IDisposable
     // is already listening on the port.
     public event Action<EngineStatus>? StatusChanged;
 
-    // Bundles the two pieces of state a chunked file transfer needs while
-    // it's in progress: the still-open write stream for each hash currently
-    // being received, and any entry that arrived (and was verified) before
-    // its bytes finished streaming in, waiting to be applied once they do.
+    // Bundles the state chunked file transfers need besides the streams
+    // being received (those are IncomingFiles'): any entry that arrived (and
+    // was verified) before its bytes finished streaming in, waiting to be
+    // applied once they do, and how often each file has been asked for again
+    // after a transfer of it failed (see RequestAgain).
     private class FileTransferState
     {
-        public ConcurrentDictionary<string, FileStream> InProgressWrites = new();
         public ConcurrentDictionary<string, ClipboardEntry> PendingEntries = new();
+        public ConcurrentDictionary<string, int> Retries = new(StringComparer.OrdinalIgnoreCase);
         // Guards against streaming the same file to the same peer twice at
         // once: ClipboardChanged proactively streams a freshly-captured
         // file right after broadcasting its entry, but the receiving side
@@ -82,9 +83,13 @@ public sealed partial class ClipLinkEngine : IDisposable
 
     // The latest beacon heard from another device, trusted or not. Memory
     // only: it's what GetDevices shows for a device's LAN address, and the
-    // only place an untrusted device's name is kept (a trusted one's is also
-    // written to the trust store). Name keeps the last known one when a later
-    // beacon carries none.
+    // only place a beacon's name is ever kept. Beacons are unauthenticated
+    // (anyone on the LAN can send one under any device id), so that name is
+    // never written to the trust store - only a pairing payload's is, or a
+    // handshake's once its connection proves itself (RememberProvenName) -
+    // and it's shown for an untrusted device, or a trusted one with no
+    // stored name yet (nor a live connection's). Name keeps the last known
+    // one when a later beacon carries none.
     private record SeenPeer(string? Name, string LanAddress, string? AdvertisedAddress, bool PairingOpen, DateTime LastSeenUtc);
 
     // Set once by Start, before anything can use them.
@@ -94,6 +99,7 @@ public sealed partial class ClipLinkEngine : IDisposable
     private string ownId = "";
     private DeviceIdentity identity = null!;
     private FileStore fileStore = null!;
+    private IncomingFiles incomingFiles = null!;
     private HistoryAccess historyAccess = null!;
     private TrustStore trustStore = null!;
     private PassphraseKeyStore passphraseKeyStore = null!;
@@ -119,6 +125,9 @@ public sealed partial class ClipLinkEngine : IDisposable
     private readonly ConcurrentDictionary<string, byte> connectingTo = new();
     // Latest beacon per other device - see SeenPeer.
     private readonly ConcurrentDictionary<string, SeenPeer> seenPeers = new();
+    // One GetFileToOpen at a time picks and writes a copy, so two opens of
+    // the same entry at once don't both write the same new file.
+    private readonly object openCopiesGate = new();
 
     // Computed once, when discovery starts - Tailscale IPs are stable, and
     // shelling out to the CLI on every 2-second beacon would be wasteful.
@@ -179,16 +188,35 @@ public sealed partial class ClipLinkEngine : IDisposable
 
             identity = new DeviceIdentity(label);
             fileStore = new FileStore(label);
+            incomingFiles = new IncomingFiles(fileStore);
             historyAccess = new HistoryAccess(label, fileStore, new DeletedEntries(label));
             trustStore = new TrustStore(label);
             passphraseKeyStore = new PassphraseKeyStore(label);
             deviceName = new DeviceNameStore(label);
-            clipboardSync = new ClipboardSync(fileStore);
+            clipboardSync = new ClipboardSync(fileStore, label);
             clipboardSync.ClipboardChanged += OnLocalClipboardChanged;
             ownId = identity.GetPublicKey();
             storesLoaded = true;
             Console.WriteLine($"Device ID (public key): {ownId}");
+            Console.WriteLine($"Device fingerprint: {DeviceLabel.Fingerprint(ownId)}");
             Console.WriteLine($"Device name: {deviceName.Current}");
+            if (trustStore.IsTrusted(ownId))
+            {
+                // Trusted by an older build (its own beacon, looped back) -
+                // nothing trusts this device itself now.
+                try
+                {
+                    trustStore.Untrust(ownId);
+                    Console.WriteLine("[engine] this device was in its own trust store - removed");
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    Console.WriteLine($"[engine] couldn't remove this device from its own trust store: {ex.Message}");
+                }
+            }
+            // Copies opened from Synced last time (see GetFileToOpen) - all
+            // but the ones the user has edited.
+            DeleteOpenCopies(OpenCopiesRoot());
 
             return TryRun();
         }
@@ -276,6 +304,11 @@ public sealed partial class ClipLinkEngine : IDisposable
         }
         tcpListener = listener;
         SetStatus(new EngineStatus(EngineState.Running, null));
+
+        // Only now that this copy has the port - a copy already running for
+        // the same label (which Faulted this one) could be mid-transfer in
+        // the same FileStore - and before anything below starts a transfer.
+        TidyFileStore();
 
         CancellationToken token = stopping.Token;
         StartClipboardWatcher();
@@ -392,37 +425,34 @@ public sealed partial class ClipLinkEngine : IDisposable
         {
             if (stopping.IsCancellationRequested) return;
 
-            // Remember every other device's latest beacon (our own loops
-            // back on localhost) - its name and LAN address for the
-            // Devices list, whether or not it's trusted.
-            if (other_device_id != ownId)
-            {
-                RememberBeacon(other_device_id,
-                    new SeenPeer(otherName, sender.ToString(), peerAddress, otherPairingOpen, DateTime.UtcNow));
-            }
+            // Nothing here is for this PC's own id: UDP broadcasts loop back
+            // to the sender on localhost, so without this a device would list
+            // itself, and "auto-trust" itself below. Compared as keys, not
+            // text: a beacon can spell this PC's id some other way (see
+            // DeviceIdentity.IsSameKey), and it's still this PC.
+            if (DeviceIdentity.IsSameKey(other_device_id, ownId)) return;
+
+            // Remember every other device's latest beacon - its name and LAN
+            // address for the Devices list, whether or not it's trusted. In
+            // memory only: nothing a beacon says about a name is ever saved
+            // (see SeenPeer).
+            RememberBeacon(other_device_id,
+                new SeenPeer(otherName, sender.ToString(), peerAddress, otherPairingOpen, DateTime.UtcNow));
 
             // auto-trust: if this device wasn't already trusted, but it proved
             // knowledge of the same passphrase we have configured, trust it now —
             // an alternative to manual QR/key pairing for "these are all my own devices".
-            // Excludes our own id: UDP broadcasts loop back to the sender on
-            // localhost, so without this check a device would "auto-trust" itself.
-            if (other_device_id != ownId
-                && !trustStore.IsTrusted(other_device_id) && proof != null && passphraseKeyStore.GetKey() is byte[] passphraseKey
+            if (!trustStore.IsTrusted(other_device_id) && proof != null && passphraseKeyStore.GetKey() is byte[] passphraseKey
                 && PassphraseAuth.VerifyProof(passphraseKey, other_device_id, proof))
             {
                 Console.WriteLine($"Auto-trusting {other_device_id} — proved knowledge of shared passphrase");
-                trustStore.Trust(other_device_id, peerAddress, otherName);
+                // Not the beacon's name: the connection that follows stores
+                // its handshake's name once it proves its session.
+                trustStore.Trust(other_device_id, peerAddress);
             }
 
             bool isTrusted = trustStore.IsTrusted(other_device_id);
-            if (isTrusted)
-            {
-                trustStore.UpdateName(other_device_id, otherName); // no-op unless it changed
-            }
-            if (other_device_id != ownId)
-            {
-                NotifyDevicesChanged(); // an event only if the list really changed
-            }
+            NotifyDevicesChanged(); // an event only if the list really changed
 
             // connect only when the other device's public key is "smaller" than this device's public key (to avoid duplicate connections)
             // connect only if the other device is in the trust store
@@ -551,22 +581,42 @@ public sealed partial class ClipLinkEngine : IDisposable
     // ClipLink" (ShareFilesAsync; how says which, for the log): signed, sent
     // to every connected device and added to history. For a file, content
     // is its FilePayload and sourceFilePath where its bytes are: they're
-    // cached in the FileStore and streamed to those devices (the others ask
-    // for them when they connect and get the entry in the history batch).
+    // cached in the FileStore first and streamed to those devices (the
+    // others ask for them when they connect and get the entry in the history
+    // batch). A file that can't be cached - it changed since it was hashed,
+    // or can't be stored - isn't sent at all: its entry would have nothing
+    // behind it, on every device, for good.
     private void PublishLocal(string content, string type, string? sourceFilePath, string how)
     {
+        FilePayload? payload = null;
+        if (type == "file" && sourceFilePath != null)
+        {
+            try { payload = JsonSerializer.Deserialize<FilePayload>(content); }
+            catch (JsonException) { }
+        }
+        if (payload != null)
+        {
+            Console.WriteLine($"[file] {how}: {payload.FileName} ({payload.FileSize} bytes, {payload.FileHash[..12]}...) - {connectionsByDeviceId.Count} peer(s) connected");
+            if (!fileStore.Exists(payload.FileHash)
+                && !LocalFiles.CopyInto(fileStore, sourceFilePath!, payload.FileHash, out var skip, out string? error))
+            {
+                Console.WriteLine($"[file] couldn't store {payload.FileName} to send it ({skip}{(error != null ? ": " + error : "")}) - not sent");
+                return;
+            }
+        }
+
         var entry = new ClipboardEntry(content, type, ownId, DateTime.UtcNow);
         var signedEntry = SigningService.Sign(entry, identity);
         var envelope = new Envelope("entry", JsonSerializer.Serialize(signedEntry));
         var json = JsonSerializer.Serialize(envelope);
         foreach (var conn in connectionsByDeviceId.Values)
         {
-            string peerShort = conn.PeerDeviceId[..Math.Min(12, conn.PeerDeviceId.Length)];
+            string peerShort = DeviceLabel.ShortId(conn.PeerDeviceId);
             _ = conn.Send(json).ContinueWith(t =>
             {
                 if (t.IsFaulted)
                 {
-                    Console.WriteLine($"[clip] failed sending {type} entry to {peerShort}...: {t.Exception?.GetBaseException().Message}");
+                    Console.WriteLine($"[clip] failed sending {type} entry to {peerShort}: {t.Exception?.GetBaseException().Message}");
                 }
             }, TaskContinuationOptions.OnlyOnFaulted);
         }
@@ -575,40 +625,17 @@ public sealed partial class ClipLinkEngine : IDisposable
             NotifyHistoryChanged();
         }
 
-        if (type == "file" && sourceFilePath != null)
+        if (payload != null && fileStore.Exists(payload.FileHash))
         {
-            FilePayload? payload = null;
-            try { payload = JsonSerializer.Deserialize<FilePayload>(content); }
-            catch (JsonException) { }
-
-            if (payload != null)
+            foreach (var conn in connectionsByDeviceId.Values)
             {
-                Console.WriteLine($"[file] {how}: {payload.FileName} ({payload.FileSize} bytes, {payload.FileHash[..12]}...) - {connectionsByDeviceId.Count} peer(s) connected");
-                if (!fileStore.Exists(payload.FileHash))
-                {
-                    try
-                    {
-                        fileStore.CopyIn(sourceFilePath, payload.FileHash);
-                        NotifyHistoryChanged(); // its bytes are here now
-                    }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                    {
-                        Console.WriteLine($"Could not cache file locally ({ex.Message}) — won't be able to stream it to peers.");
-                    }
-                }
-                if (fileStore.Exists(payload.FileHash))
-                {
-                    foreach (var conn in connectionsByDeviceId.Values)
-                    {
-                        _ = StreamFileToPeer(conn, fileStore.GetPath(payload.FileHash), payload.FileHash);
-                    }
-                    // this exact content might already be something we were
-                    // waiting on from a peer (e.g. this device independently
-                    // captured the same file another connected device just
-                    // applied) — fulfill that now rather than leaving it stuck
-                    TryFulfillPendingEntry(payload.FileHash);
-                }
+                _ = StreamFileToPeer(conn, fileStore.GetPath(payload.FileHash), payload.FileHash);
             }
+            // this exact content might already be something we were
+            // waiting on from a peer (e.g. this device independently
+            // captured the same file another connected device just
+            // applied) — fulfill that now rather than leaving it stuck
+            TryFulfillPendingEntry(payload.FileHash);
         }
     }
 

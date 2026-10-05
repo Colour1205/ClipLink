@@ -61,6 +61,7 @@ data class AppState(
     val pairingPayload: String,
     val pairingRequest: PairingRequest?,
     val hasPassphrase: Boolean,
+    val passphraseBusy: Boolean,
     val tailscaleIp: String,
     val keepAlive: Boolean,
     val autoApply: Boolean,
@@ -177,7 +178,10 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
                 label = "screen",
             ) { screen ->
                 when (screen) {
-                    Screen.Detail -> detail?.let { item ->
+                    Screen.Detail -> detail?.let { opened ->
+                        // The live copy: a file that finishes arriving while
+                        // it's open is shown as arrived - its picture too.
+                        val item = state.items.firstOrNull { it.id == opened.id } ?: opened
                         DetailScreen(
                             item = item,
                             contentPadding = padding,
@@ -233,6 +237,7 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
                             deviceNameOverride = state.deviceNameOverride,
                             defaultDeviceName = state.defaultDeviceName,
                             hasPassphrase = state.hasPassphrase,
+                            passphraseBusy = state.passphraseBusy,
                             tailscaleIp = state.tailscaleIp,
                             keepAlive = state.keepAlive,
                             autoApply = state.autoApply,
@@ -249,7 +254,7 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
 
             state.pairingRequest?.let { request ->
                 PairingPromptCard(
-                    title = request.title,
+                    request = request,
                     onAccept = actions.onAcceptPairing,
                     onReject = actions.onRejectPairing,
                     modifier = Modifier

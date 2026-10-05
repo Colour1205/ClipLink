@@ -181,7 +181,8 @@ public sealed class DeviceRow : Observable
         ? Status
         : $"{Status} · {string.Join(" · ", Listing.Addresses)}";
 
-    public string IdToolTip => $"Device ID: {Listing.PublicKey}";
+    // The fingerprint too: it's what that device shows for itself.
+    public string IdToolTip => $"Fingerprint: {DeviceLabel.Fingerprint(Listing.PublicKey)}\nDevice ID: {Listing.PublicKey}";
 
     public string AutomationName => $"{Title}, {Details}";
 

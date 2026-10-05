@@ -29,6 +29,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -89,12 +90,8 @@ class ClipLinkEngine(context: Context) {
     private val beacons = ConcurrentHashMap<String, Discovery.Beacon>()
     private val beaconSeenAt = ConcurrentHashMap<String, Long>()
 
-    /**
-     * The latest name each peer announced, by beacon or handshake - trusted
-     * or not. Only ever replaced by another name, never by "unknown", so an
-     * older build's nameless beacon can't blank out what we already know.
-     */
-    private val peerNames = ConcurrentHashMap<String, String>()
+    /** Names heard this session, by beacon or handshake - memory only, see [rememberProvenName]. */
+    private val peerNames = PeerNames()
 
     /** The remote address of each peer's most recent connection, for the Devices tab. */
     private val connectionAddresses = ConcurrentHashMap<String, String>()
@@ -127,6 +124,10 @@ class ClipLinkEngine(context: Context) {
     private val _hasPassphrase = MutableStateFlow(false)
     val hasPassphrase: StateFlow<Boolean> = _hasPassphrase.asStateFlow()
 
+    /** True while a Set or Change is still deriving its key - Change and Clear wait for it. */
+    private val _passphraseBusy = MutableStateFlow(false)
+    val passphraseBusy: StateFlow<Boolean> = _passphraseBusy.asStateFlow()
+
     private val _tailscaleIp = MutableStateFlow("")
     val tailscaleIp: StateFlow<String> = _tailscaleIp.asStateFlow()
 
@@ -152,6 +153,15 @@ class ClipLinkEngine(context: Context) {
     @Volatile
     private var cachedProof: String? = null
     private val passphraseStateLock = Any()
+
+    /**
+     * Bumped by every Set, Change and Clear, under [passphraseStateLock]. A
+     * Set stores its key only if nothing bumped it while the key was being
+     * derived - otherwise a Clear tapped mid-derivation would be silently
+     * undone the moment the older Set finished.
+     */
+    private var passphraseGeneration = 0L
+    private var derivationsInFlight = 0
     private var started = false
 
     /**
@@ -175,6 +185,12 @@ class ClipLinkEngine(context: Context) {
             withContext(Dispatchers.IO) { identity.ensureKey() }
             val id = withContext(Dispatchers.IO) { identity.publicKeyBase64() }
             _ownDeviceId.value = id
+            // After the id - a capture waits for that (see readyOwnId), so
+            // this mustn't hold it up - but before the TCP server starts and
+            // before the first refreshItems, so a 0-byte file's blob is there
+            // for it. A dial onForeground makes meanwhile is safe: the sweep
+            // spares every file this process has touched.
+            tidyFileStore()
             _tailscaleIp.value = deviceSettings.tailscaleIp
             _deviceNameOverride.value = deviceSettings.deviceNameOverride
             _defaultDeviceName.value = deviceSettings.systemDeviceName()
@@ -206,6 +222,9 @@ class ClipLinkEngine(context: Context) {
         }
         syncManager.onLog = { message -> log(message) }
         syncManager.onEntryApplied = { entry -> onEntryReceived(entry) }
+        syncManager.onFileStored = { refreshItems() }
+        syncManager.onSessionProven = { conn -> rememberProvenName(conn) }
+        syncManager.onConnectionClosed = { conn -> forgetUnprovenName(conn) }
     }
 
     /**
@@ -240,6 +259,20 @@ class ClipLinkEngine(context: Context) {
             reconnectJob?.cancel()
             releaseMulticastLock()
             started = false
+        }
+    }
+
+    /**
+     * Deletes the stored files no item refers to any more - see
+     * [HistoryStore.tidyBlobs]. Never stops the start: at worst they wait for
+     * the next one.
+     */
+    private suspend fun tidyFileStore() = withContext(Dispatchers.IO) {
+        try {
+            val swept = historyStore.tidyBlobs()
+            if (swept > 0) log("deleted $swept file(s) no item refers to")
+        } catch (e: Exception) {
+            log("couldn't tidy stored files: ${e.message}")
         }
     }
 
@@ -301,7 +334,9 @@ class ClipLinkEngine(context: Context) {
         if (beacon.deviceId == _ownDeviceId.value) return // our own broadcast, looped back
         beacons[beacon.deviceId] = beacon
         beaconSeenAt[beacon.deviceId] = System.currentTimeMillis()
-        recordPeerName(beacon.deviceId, beacon.name)
+        // Memory only, trusted or not: a beacon is unauthenticated, so its
+        // name must never be written to the trust store.
+        peerNames.heardInBeacon(beacon.deviceId, beacon.name)
         refreshDevices()
 
         scope.launch {
@@ -321,25 +356,17 @@ class ClipLinkEngine(context: Context) {
         if (trustStore.isTrusted(beacon.deviceId)) return
         val key = withContext(Dispatchers.IO) { passphraseKeyStore.key() } ?: return
         if (!passphraseKeyStore.verifyProof(key, beacon.deviceId, proof)) return
-        log("auto-trusting ${beacon.deviceId.take(12)}… (shared passcode)")
-        trustStore.trust(beacon.deviceId, beacon.address, beacon.name ?: peerNames[beacon.deviceId])
+        log("auto-trusting ${shortIdOf(beacon.deviceId)} (shared passcode)")
+        // No name - the proof vouches for the device id, not for whatever
+        // label rode along with it. The connection that follows stores its
+        // handshake's name once it proves its session (rememberProvenName).
+        trustStore.trust(beacon.deviceId, beacon.address)
         refreshDevices()
     }
 
-    /**
-     * Keeps a peer's latest announced name: in memory for everyone, and in
-     * the trust record too when the peer is trusted. A null name (an older
-     * build, or a field that didn't decode) changes nothing.
-     */
-    private fun recordPeerName(deviceId: String, name: String?) {
-        if (name == null) return
-        peerNames[deviceId] = name
-        trustStore.rememberName(deviceId, name)
-    }
-
-    /** The best name we have for a peer, from this session or from its trust record. */
+    /** The best name we have for a peer, from its trust record or from this session. */
     private fun knownNameOf(deviceId: String): String? =
-        peerNames[deviceId] ?: trustStore.all().firstOrNull { it.publicKey == deviceId }?.name
+        peerNames.display(deviceId, trustStore.all().firstOrNull { it.publicKey == deviceId }?.name)
 
     /** Connect to an already-trusted device the moment its beacon is heard. */
     private suspend fun maybeAutoConnect(beacon: Discovery.Beacon) {
@@ -459,19 +486,23 @@ class ClipLinkEngine(context: Context) {
      * the three paths made it (incoming TCP, beacon dial, manual address).
      */
     private fun handleNewConnection(conn: PeerConnection, address: String?) {
+        // Shown right away, but stored only once proven - see rememberProvenName.
+        peerNames.heardInHandshake(conn.peerDeviceId, conn.peerName)
         if (!conn.wasAlreadyTrusted) {
             if (_pairingRequest.value != null) {
                 // Already prompting for a different candidate. Don't juggle
                 // two - whoever came second just doesn't pair this round.
                 conn.close()
+                forgetUnprovenName(conn)
                 return
             }
             pendingPairingConnection = conn
-            recordPeerName(conn.peerDeviceId, conn.peerName) // in memory only - not trusted
             _pairingRequest.value = PairingRequest(
                 conn.peerDeviceId,
                 address,
-                conn.peerName ?: peerNames[conn.peerDeviceId],
+                // Handshake name first; a beacon's only for display. The
+                // prompt shows the id and address beside it either way.
+                peerNames.display(conn.peerDeviceId, null),
             )
             return
         }
@@ -484,20 +515,46 @@ class ClipLinkEngine(context: Context) {
 
         (conn.remoteAddress ?: address)?.let { connectionAddresses[conn.peerDeviceId] = it }
         if (conn.newlyTrustedViaPassphrase) {
-            trustStore.trust(conn.peerDeviceId, address, conn.peerName ?: peerNames[conn.peerDeviceId])
-            log("auto-paired via passcode: ${conn.peerDeviceId.take(12)}…")
+            trustStore.trust(conn.peerDeviceId, address)
+            // The read loop is already running, so the session may have been
+            // proven before this record existed to take the name.
+            if (conn.isSessionProven) rememberProvenName(conn)
+            log("auto-paired via passcode: ${shortIdOf(conn.peerDeviceId)}")
         } else {
             // Already trusted, but we may have just learned a real address -
             // back-fill it. This is what repairs a trust record written before
             // the accept path captured addresses at all, which would otherwise
             // be permanently stuck with nothing to dial off-LAN.
             if (address != null) trustStore.trust(conn.peerDeviceId, address)
-            log("connected: ${conn.peerDeviceId.take(12)}…")
+            log("connected: ${shortIdOf(conn.peerDeviceId)}")
         }
-        // After the trust writes, so the record exists: this is what picks up
-        // a trusted peer that has been renamed since we last heard from it.
-        recordPeerName(conn.peerDeviceId, conn.peerName)
         refreshDevices()
+    }
+
+    /**
+     * Stores [conn]'s handshake name once its session is proven - its first
+     * envelope decrypted - and never before. The handshake signature covers
+     * only the ephemeral key, so a recorded handshake of a trusted device
+     * replays with any DeviceName, but a replayer never gets this far - not
+     * even by echoing our own lines (PeerConnection's EchoGuard). This
+     * connection's own name, not PeerNames' latest, which may be from a
+     * handshake that proved nothing. It's what picks up a trusted peer that
+     * has been renamed since we last heard from it, and fills in the name a
+     * new pairing was stored without. Never adds a device.
+     */
+    private fun rememberProvenName(conn: PeerConnection) {
+        if (trustStore.rememberName(conn.peerDeviceId, conn.peerName)) refreshDevices()
+    }
+
+    /**
+     * The other half of [rememberProvenName]: a connection that ends - or is
+     * turned away - without proving its session takes its handshake's name
+     * off the screen with it. Otherwise a replayed handshake would leave its
+     * name on a device that has none stored, ahead of anything its beacons say.
+     */
+    private fun forgetUnprovenName(conn: PeerConnection) {
+        if (conn.isSessionProven) return
+        if (peerNames.forgetHandshake(conn.peerDeviceId, conn.peerName)) refreshDevices()
     }
 
     fun acceptPairing() {
@@ -505,16 +562,21 @@ class ClipLinkEngine(context: Context) {
         val request = _pairingRequest.value
         pendingPairingConnection = null
         _pairingRequest.value = null
-        trustStore.trust(conn.peerDeviceId, request?.address, request?.name ?: conn.peerName)
+        // No name yet, whatever the prompt showed: this connection's is
+        // stored once its session is proven (rememberProvenName).
+        trustStore.trust(conn.peerDeviceId, request?.address)
         conn.remoteAddress?.let { connectionAddresses[conn.peerDeviceId] = it }
-        log("paired: ${conn.peerDeviceId.take(12)}…")
+        log("paired: ${shortIdOf(conn.peerDeviceId)}")
         syncManager.registerConnection(conn)
         refreshDevices()
         showToast("Paired.")
     }
 
     fun rejectPairing() {
-        pendingPairingConnection?.close()
+        pendingPairingConnection?.let { conn ->
+            conn.close()
+            forgetUnprovenName(conn) // never listened, so never proven
+        }
         pendingPairingConnection = null
         _pairingRequest.value = null
     }
@@ -594,7 +656,9 @@ class ClipLinkEngine(context: Context) {
             if (info.publicKey == _ownDeviceId.value) return "That's this device's own code."
             val candidates = addressCandidatesFor(info.publicKey, info.address)
             if (candidates.isEmpty()) {
-                return "${displayNameOf(info.publicKey, info.name)} has no address in its code. " +
+                // The id beside the name: a code's name is self-claimed.
+                val who = info.name?.let { "$it (${shortIdOf(info.publicKey)})" } ?: shortIdOf(info.publicKey)
+                return "$who has no address in its code. " +
                     "If it's on the same network, keep this screen open and its beacon will " +
                     "pair automatically."
             }
@@ -616,18 +680,45 @@ class ClipLinkEngine(context: Context) {
         return "Couldn't reach $trimmed."
     }
 
+    /** False when nothing was stored: a blank passcode, or a Clear or newer Set overtook it. */
     suspend fun setPassphrase(passphrase: String): Boolean = withContext(Dispatchers.Default) {
         if (passphrase.isBlank()) return@withContext false
-        // 210,000 HMAC rounds - never on the main thread. Trimmed like
-        // HarmonyOS and Windows do, so a stray space on one device can't
-        // silently derive a different key.
-        passphraseKeyStore.setPassphrase(passphrase.trim())
-        refreshPassphraseState()
-        true
+        val generation = synchronized(passphraseStateLock) {
+            derivationsInFlight++
+            _passphraseBusy.value = true
+            ++passphraseGeneration
+        }
+        try {
+            // 210,000 HMAC rounds - never on the main thread. Trimmed like
+            // HarmonyOS and Windows do, so a stray space on one device can't
+            // silently derive a different key.
+            val key = passphraseKeyStore.deriveKey(passphrase.trim())
+            // Saved and refreshed together even when the caller is cancelled
+            // meanwhile - its activity recreated by a rotation mid-derivation.
+            // Otherwise the key would be stored while the Me screen and the
+            // beacons' proof still showed the old passcode, or none.
+            withContext(NonCancellable) {
+                val stored = synchronized(passphraseStateLock) {
+                    (generation == passphraseGeneration).also { current ->
+                        if (current) passphraseKeyStore.saveKey(key)
+                    }
+                }
+                if (stored) refreshPassphraseState()
+                stored
+            }
+        } finally {
+            synchronized(passphraseStateLock) {
+                derivationsInFlight--
+                _passphraseBusy.value = derivationsInFlight > 0
+            }
+        }
     }
 
     fun clearPassphrase() {
-        passphraseKeyStore.clearPassphrase()
+        synchronized(passphraseStateLock) {
+            passphraseGeneration++ // any Set still deriving is now stale
+            passphraseKeyStore.clearPassphrase()
+        }
         scope.launch { refreshPassphraseState() }
     }
 
@@ -671,7 +762,8 @@ class ClipLinkEngine(context: Context) {
 
     fun trustDevice(deviceId: String) {
         val beacon = beacons[deviceId]
-        trustStore.trust(deviceId, beacon?.senderIp, peerNames[deviceId])
+        // Nameless until a connection to it proves its session.
+        trustStore.trust(deviceId, beacon?.senderIp)
         refreshDevices()
         scope.launch { beacon?.let { connectToAddress(it.senderIp, it.tcpPort) } }
     }
@@ -684,7 +776,7 @@ class ClipLinkEngine(context: Context) {
         // beaconing doesn't vanish from the list, it reappears as "discovered"
         // with a Trust button - so without this, Remove looks like it did
         // nothing at all.
-        log("untrusted ${deviceId.take(12)}…")
+        log("untrusted ${shortIdOf(deviceId)}")
         showToast("Removed $label")
     }
 
@@ -697,14 +789,16 @@ class ClipLinkEngine(context: Context) {
      */
     fun captureAndBroadcast(quiet: Boolean = false) {
         scope.launch {
-            when (val capture = clipboard.capture()) {
+            // On IO: a copied file is streamed into the FileStore right here.
+            when (val capture = withContext(Dispatchers.IO) { clipboard.capture() }) {
                 // `quiet` is for the automatic on-open capture: an unprompted
                 // "nothing to sync" every time the app opens is noise, but the
                 // same message after a deliberate button press is the answer.
                 null -> if (!quiet) showToast("Nothing on the clipboard to sync.")
                 is Capture.Text -> broadcastText(capture.text, quiet)
                 is Capture.Image -> broadcastImage(capture.pngBytes, quiet)
-                is Capture.Payload -> broadcastFile(capture.fileName, capture.bytes, quiet)
+                is Capture.Payload -> broadcastFile(capture, quiet)
+                is Capture.TooLarge -> if (!quiet) showToast("${capture.fileName} is over 1 GB, too big to sync.")
                 Capture.Ours -> alreadySynced(quiet)
             }
         }
@@ -756,9 +850,8 @@ class ClipLinkEngine(context: Context) {
         if (stored.isEmpty() && sharedText == null) return outcome
 
         // A cold start via the share sheet gets here while start() may still
-        // be creating the identity key - an entry signed before then would
-        // carry an empty device id.
-        val ownId = withTimeoutOrNull(READY_TIMEOUT_MS) { _ownDeviceId.first { it.isNotEmpty() } }
+        // be creating the identity key - see readyOwnId.
+        val ownId = readyOwnId()
         if (ownId == null) {
             stored.forEach { historyStore.releaseBlobIfUnused(it.hash) }
             return ShareOutcome(failed = true)
@@ -798,38 +891,56 @@ class ClipLinkEngine(context: Context) {
         return entry
     }
 
+    /**
+     * This device's id, once start() has it - or null if it never comes. A
+     * paste, the on-open capture or a share can all come first on a cold
+     * start, and an entry signed with an empty id is shown as another
+     * device's and dropped by every peer.
+     */
+    private suspend fun readyOwnId(): String? =
+        withTimeoutOrNull(READY_TIMEOUT_MS) { _ownDeviceId.first { it.isNotEmpty() } }
+
+    /** A capture [readyOwnId] gave up on - before its hash was noted, so trying again works. */
+    private fun notReady(quiet: Boolean) {
+        if (!quiet) showToast("ClipLink is still starting - try again in a moment.")
+    }
+
     private suspend fun broadcastText(text: String, quiet: Boolean = false) {
         val hash = FileStore.hashOf(text.toByteArray(Charsets.UTF_8))
         if (hash == clipboard.lastKnownHash) return alreadySynced(quiet)
+        val ownId = readyOwnId() ?: return notReady(quiet)
         clipboard.noteLocalHash(hash)
-        broadcast(Signing.sign(identity, text, ClipboardEntry.TYPE_TEXT, _ownDeviceId.value))
+        broadcast(Signing.sign(identity, text, ClipboardEntry.TYPE_TEXT, ownId))
         if (!quiet) showToast("Synced text.")
     }
 
     private suspend fun broadcastImage(pngBytes: ByteArray, quiet: Boolean = false) {
         val hash = FileStore.hashOf(pngBytes)
         if (hash == clipboard.lastKnownHash) return alreadySynced(quiet)
+        val ownId = readyOwnId() ?: return notReady(quiet)
         clipboard.noteLocalHash(hash)
         // Images travel inline as base64 in the entry itself, matching the
         // other two platforms - they are NOT sent through the file-chunk path.
         val content = B64.encode(pngBytes)
-        broadcast(Signing.sign(identity, content, ClipboardEntry.TYPE_IMAGE, _ownDeviceId.value))
+        broadcast(Signing.sign(identity, content, ClipboardEntry.TYPE_IMAGE, ownId))
         if (!quiet) showToast("Synced image.")
     }
 
-    private suspend fun broadcastFile(fileName: String, bytes: ByteArray, quiet: Boolean = false) {
-        val hash = FileStore.hashOf(bytes)
+    // A copy that goes no further here is left in the store for the next
+    // start's sweep (FileStore.sweepUnreferenced) rather than deleted now: a
+    // share of the same file may be about to record an entry for it.
+    private suspend fun broadcastFile(file: Capture.Payload, quiet: Boolean = false) {
+        val hash = file.hash
         if (hash == clipboard.lastKnownHash) return alreadySynced(quiet)
+        val ownId = readyOwnId() ?: return notReady(quiet)
         clipboard.noteLocalHash(hash)
-        // The bytes must be in the store BEFORE the entry goes out: the
-        // receiver broadcasts a file_request the instant it sees an entry it
-        // has no bytes for, and that request can come back before this
-        // coroutine would otherwise have written them.
-        withContext(Dispatchers.IO) { fileStore.write(hash, bytes) }
-        val payload = FilePayload(fileName, hash, bytes.size.toLong()).toJson()
-        broadcast(Signing.sign(identity, payload, ClipboardEntry.TYPE_FILE, _ownDeviceId.value))
+        // The bytes are in the store already (see ClipboardBridge.capture),
+        // BEFORE the entry goes out: the receiver broadcasts a file_request
+        // the instant it sees an entry it has no bytes for.
+        val payload = FilePayload(file.fileName, hash, file.size).toJson()
+        broadcast(Signing.sign(identity, payload, ClipboardEntry.TYPE_FILE, ownId))
         syncManager.tryFulfillPendingEntry(hash)
-        if (!quiet) showToast("Synced $fileName.")
+        if (!quiet) showToast("Synced ${file.fileName}.")
     }
 
     /**
@@ -850,7 +961,7 @@ class ClipLinkEngine(context: Context) {
 
     private fun onEntryReceived(entry: ClipboardEntry) {
         refreshItems()
-        log("received ${entry.type} from ${entry.deviceId.take(12)}…")
+        log("received ${entry.type} from ${shortIdOf(entry.deviceId)}")
         if (deviceSettings.autoApply) {
             if (clipboard.apply(entry)) showToast("Copied ${entry.type} from a paired device.")
         }
@@ -883,11 +994,16 @@ class ClipLinkEngine(context: Context) {
             // .NET round-trip format sorts chronologically once canonicalised.
             .sortedByDescending { DotNetTimestamp.canonical(it.timestamp) }
             .map { entry ->
+                val file = if (entry.type == ClipboardEntry.TYPE_FILE) {
+                    FilePayload.parse(entry.content)?.let { fileStore.path(it.fileHash) }?.takeIf { it.exists() }
+                } else {
+                    null
+                }
                 SyncedItem(
                     entry = entry,
                     isOwn = entry.deviceId == own,
-                    fileAvailable = entry.type != ClipboardEntry.TYPE_FILE ||
-                        FilePayload.parse(entry.content)?.let { fileStore.exists(it.fileHash) } == true,
+                    fileAvailable = entry.type != ClipboardEntry.TYPE_FILE || file != null,
+                    file = file,
                 )
             }
     }
@@ -915,7 +1031,9 @@ class ClipLinkEngine(context: Context) {
             }
             DeviceRow(
                 deviceId = id,
-                name = peerNames[id] ?: trustedEntry?.name,
+                // A trusted device's stored name wins; a beacon name only
+                // fills in while there is none.
+                name = peerNames.display(id, trustedEntry?.name),
                 trusted = trustedEntry != null,
                 connected = connected.contains(id),
                 addresses = addresses.toList(),

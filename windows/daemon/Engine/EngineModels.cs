@@ -101,7 +101,8 @@ public enum PairOutcome
 
 // What ShareFilesAsync did: Shared - the paths now in history and on their
 // way to the other devices, in the order given; Skipped - the rest, each with
-// why (Error: the system's message, for a file that couldn't be read).
+// why (Error: the system's message, for a file that couldn't be read or
+// stored).
 public sealed record ShareResult(IReadOnlyList<string> Shared, IReadOnlyList<SkippedShare> Skipped);
 
 public sealed record SkippedShare(string Path, FileSkipReason Reason, string? Error);

@@ -55,6 +55,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -245,7 +246,7 @@ private fun SyncedCard(item: SyncedItem, actions: SyncedActions, compact: Boolea
             ) {
                 when {
                     item.type == ClipboardEntry.TYPE_IMAGE -> ImagePreview(item, compact)
-                    item.type == ClipboardEntry.TYPE_FILE -> FileRow(item, style)
+                    item.type == ClipboardEntry.TYPE_FILE -> FileContent(item, style, compact)
                     else -> Text(
                         item.preview,
                         style = if (compact) {
@@ -342,14 +343,43 @@ private fun ImagePreview(item: SyncedItem, compact: Boolean) {
         )
         return
     }
+    PreviewImage(bitmap, "Synced image", compact)
+}
+
+@Composable
+private fun PreviewImage(bitmap: ImageBitmap, contentDescription: String, compact: Boolean) {
     Image(
         bitmap = bitmap,
-        contentDescription = "Synced image",
+        contentDescription = contentDescription,
         contentScale = ContentScale.FillWidth,
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(max = if (compact) 260.dp else 340.dp)
             .clip(RoundedCornerShape(16.dp)),
+    )
+}
+
+/**
+ * An image file shows its picture, as an inline image does, with its name
+ * under it. Any other file - and an image one until its bytes are here and
+ * decoded - is its file card.
+ */
+@Composable
+private fun FileContent(item: SyncedItem, style: TypeStyle, compact: Boolean) {
+    val thumbnail = rememberFileThumbnail(item, if (compact) 480 else 900)
+    if (thumbnail == null) {
+        FileRow(item, style)
+        return
+    }
+    val name = item.filePayload?.fileName ?: "Image"
+    PreviewImage(thumbnail, name, compact)
+    Spacer(Modifier.height(10.dp))
+    Text(
+        name,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
     )
 }
 

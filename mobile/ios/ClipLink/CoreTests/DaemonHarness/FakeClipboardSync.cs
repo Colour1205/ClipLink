@@ -17,7 +17,7 @@ public class ClipboardSync
 
     public event Action<(string content, string type, string? sourceFilePath)>? ClipboardChanged;
 
-    public ClipboardSync(FileStore fileStore)
+    public ClipboardSync(FileStore fileStore, string label)
     {
         this.fileStore = fileStore;
     }
@@ -67,8 +67,10 @@ public class ClipboardSync
                     case "recopy":
                     {
                         // Simulates the real 500 ms poll re-reading what setContent just
-                        // wrote: text/file hashes match (suppressed); an image is re-encoded
-                        // by GDI+ on Windows, so the real daemon re-broadcasts it.
+                        // wrote: text/file hashes match (suppressed). An image would re-read
+                        // as different PNG bytes (GDI+ re-encodes it), but the real engine
+                        // never re-reads its own writes at all any more - it records the
+                        // clipboard sequence number after each one - so nothing is re-broadcast.
                         Console.WriteLine("RECOPY lastHash=" + _lastKnownHash);
                         break;
                     }
@@ -85,6 +87,9 @@ public class ClipboardSync
     public void Stop() { }
 
     public void addToQueue(string content, string type = "text") => setContent(content, type);
+
+    // No image is ever saved as a file here, so none is on the clipboard.
+    public string? ImageFileOnClipboard() => null;
 
     public void setContent(string content, string type = "text")
     {

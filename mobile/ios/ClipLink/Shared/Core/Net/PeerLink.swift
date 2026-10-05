@@ -42,8 +42,8 @@ enum HandshakeFailure: Error, CustomStringConvertible {
         case .silent: return "no handshake received"
         case .closedEarly: return "closed before handshake"
         case .malformed: return "malformed handshake"
-        case .refused(let id, _): return "refused untrusted \(id.prefix(12))…"
-        case .notWanted(let theirs): return "not wanted: \(theirs.identityPublicKey.prefix(12))…"
+        case .refused(let id, _): return "refused untrusted \(DeviceLabel.short(id))"
+        case .notWanted(let theirs): return "not wanted: \(DeviceLabel.short(theirs.identityPublicKey))"
         case .badSignature: return "bad handshake signature"
         case .selfConnection: return "connected to itself"
         }
@@ -97,6 +97,11 @@ final class PeerLink {
     private var heldMessages: [String] = []
     private var lastActivity = Date()
     private var receivedSessionLine = false
+    /// The nonces (a sealed line's first 16 base64 characters) of the lines
+    /// we sent, until the peer's first line. One key covers both directions,
+    /// so a replayed handshake can't make a line but can send ours back - and
+    /// that must never count as the peer holding the key. Nil after that.
+    private var sentNonces: Set<String>? = []
     private var lastSessionLineAt = Date()
     private var reportedDrops = 0
     private var heartbeat: DispatchSourceTimer?
@@ -114,13 +119,16 @@ final class PeerLink {
     /// e.g. a replayed handshake trickling junk to look alive.
     static let sessionLineDeadAfter: TimeInterval = 120
     static let handshakeTimeout: TimeInterval = 10
+    /// Base64 characters that encode exactly a line's 12-byte nonce.
+    private static let nonceChars = SessionCipher.nonceSize / 3 * 4
 
     /// Called on the delivery queue, in arrival order.
     var onMessage: ((PeerLink, String) -> Void)?
     /// Called once, on the delivery queue.
     var onClosed: ((PeerLink) -> Void)?
     /// Called once, on the delivery queue, when the first session line (a
-    /// ping counts) decrypts: proof the peer really holds the session key.
+    /// ping counts, one of ours sent back doesn't) decrypts: proof the peer
+    /// really holds the session key.
     var onFirstSessionLine: ((PeerLink) -> Void)?
     /// Called on the delivery queue when a line over the size cap was skipped.
     var onOversizedLine: ((PeerLink) -> Void)?
@@ -288,7 +296,12 @@ final class PeerLink {
                 finish(.failure(.malformed))
                 return
             }
-            if theirs.identityPublicKey == ownId {
+            // Our own handshake sent back (or our own listener dialled) - never
+            // a real peer, in either direction. Two of our own connections
+            // wired together derive one key, so each would take the other's
+            // lines as proof, and our own passcode proof would vouch for it.
+            // By the key itself: a re-spelt copy of our id still verifies.
+            if WireSignature.isSameKey(theirs.identityPublicKey, ownId) {
                 finish(.failure(.selfConnection))
                 return
             }
@@ -381,6 +394,11 @@ final class PeerLink {
 
     private func handleSessionLine(_ line: Data) {
         guard let cipher else { return }
+        if let sent = sentNonces, sent.contains(String(decoding: line.prefix(Self.nonceChars), as: UTF8.self)) {
+            // One of our own lines sent back: all a replayed handshake can do.
+            teardown()
+            return
+        }
         let text: String
         do {
             text = try cipher.open(line)
@@ -392,6 +410,7 @@ final class PeerLink {
         lastSessionLineAt = Date()
         if !receivedSessionLine {
             receivedSessionLine = true
+            sentNonces = nil
             deliveryQueue.async { [self] in onFirstSessionLine?(self) }
         }
         if text == Wire.pingSentinel { return }
@@ -481,6 +500,7 @@ final class PeerLink {
             completion?(false)
             return
         }
+        sentNonces?.insert(String(sealed.prefix(Self.nonceChars)))
         var data = Data(sealed.utf8)
         data.append(0x0A)
         connection.send(content: data, completion: .contentProcessed { error in

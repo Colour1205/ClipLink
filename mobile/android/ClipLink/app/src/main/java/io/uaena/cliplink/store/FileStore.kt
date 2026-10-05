@@ -9,8 +9,9 @@ import java.io.OutputStream
 import java.security.MessageDigest
 
 /**
- * Content-addressed blob cache, keyed by lowercase SHA-256 hex. Mirrors
- * FileStore.cs / FileStore.ets.
+ * Content-addressed blob cache, keyed by SHA-256 hex exactly as the entry
+ * spells it (this device writes lowercase; Windows and iOS send uppercase).
+ * Mirrors FileStore.cs / FileStore.ets.
  *
  * Descriptor-only by design: entry payloads carry a name/hash/size, never
  * bytes. The bytes arrive separately as chunk messages and land here.
@@ -33,6 +34,16 @@ class FileStore internal constructor(
         File(context.applicationContext.cacheDir, "shared"),
     )
 
+    /**
+     * Every hash this process has turned into a path so far - stored,
+     * checked for, or being received - which [sweepUnreferenced] must leave
+     * alone: a share's blob is nobody's until its entry is signed and
+     * recorded a moment after the import, and a .tmp may be a live
+     * transfer's. Null once the sweep has run; it runs once.
+     */
+    private var touched: MutableSet<String>? = HashSet()
+    private val sweepLock = Any()
+
     init {
         baseDir.mkdirs()
         sharedDir.mkdirs()
@@ -41,9 +52,14 @@ class FileStore internal constructor(
         baseDir.listFiles { file -> file.name.startsWith(IMPORT_PREFIX) }?.forEach { it.delete() }
     }
 
-    fun path(hash: String): File = File(baseDir, checked(hash))
+    private fun touch(hash: String): String {
+        synchronized(sweepLock) { touched?.add(hash) }
+        return hash
+    }
 
-    fun tempPath(hash: String): File = File(baseDir, "${checked(hash)}.tmp")
+    fun path(hash: String): File = File(baseDir, touch(checked(hash)))
+
+    fun tempPath(hash: String): File = File(baseDir, "${touch(checked(hash))}$TEMP_SUFFIX")
 
     fun exists(hash: String): Boolean = isValidHash(hash) && path(hash).exists()
 
@@ -54,6 +70,37 @@ class FileStore internal constructor(
 
     fun write(hash: String, bytes: ByteArray) {
         path(hash).writeBytes(bytes)
+    }
+
+    /**
+     * Stores a 0-byte file's blob, which no peer ever has to send: most
+     * builds stream no chunk at all for an empty file, so waiting for one
+     * would wait forever. [hash] must be [EMPTY_FILE_HASH], in whichever
+     * case the entry spells it.
+     */
+    fun storeEmpty(hash: String) {
+        require(hash.equals(EMPTY_FILE_HASH, ignoreCase = true)) { "Not the empty file's hash." }
+        val file = path(hash)
+        if (!file.exists()) file.writeBytes(ByteArray(0))
+    }
+
+    /**
+     * Deletes every blob, and every .tmp a killed process left, whose hash
+     * isn't in [referenced] - bytes no history entry points at any more,
+     * whatever left them behind: an entry deleted or evicted while its bytes
+     * were still arriving, a process killed between the two. Anything this
+     * process has already touched is spared (see [touched]). For startup,
+     * before any peer connects; runs once, later calls do nothing. Returns
+     * how many files went.
+     */
+    fun sweepUnreferenced(referenced: Set<String>): Int = synchronized(sweepLock) {
+        val spared = touched ?: return 0
+        touched = null
+        val files = baseDir.listFiles() ?: return 0
+        files.count { file ->
+            val hash = file.name.removeSuffix(TEMP_SUFFIX)
+            isValidHash(hash) && hash !in referenced && hash !in spared && file.isFile && file.delete()
+        }
     }
 
     /** A blob [importStream] put in the store. */
@@ -82,6 +129,10 @@ class FileStore internal constructor(
         private const val SUBDIR = "cliplink_files"
         private const val BUFFER = 256 * 1024
         private const val IMPORT_PREFIX = "import_"
+        private const val TEMP_SUFFIX = ".tmp"
+
+        /** SHA-256 of no bytes at all - a 0-byte file's hash, on every platform. */
+        const val EMPTY_FILE_HASH = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
         /**
          * A SHA-256 in hex: 64 hex digits. Either case - Windows sends upper

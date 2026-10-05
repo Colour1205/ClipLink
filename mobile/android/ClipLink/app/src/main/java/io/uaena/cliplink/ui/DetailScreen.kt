@@ -44,6 +44,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.engine.SyncedItem
+import io.uaena.cliplink.engine.shortIdOf
 
 @Composable
 fun DetailScreen(
@@ -134,6 +135,17 @@ fun DetailScreen(
 
                 ClipboardEntry.TYPE_FILE -> {
                     val payload = item.filePayload
+                    // An image file shows its picture above its file card.
+                    rememberFileThumbnail(item, 1600)?.let { thumbnail ->
+                        Image(
+                            bitmap = thumbnail,
+                            contentDescription = payload?.fileName ?: "Image",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(24.dp)),
+                        )
+                        Spacer(Modifier.height(12.dp))
+                    }
                     Surface(
                         shape = RoundedCornerShape(24.dp),
                         color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -191,7 +203,7 @@ fun DetailScreen(
 
             Spacer(Modifier.height(20.dp))
             Text(
-                if (item.isOwn) "Sent from this device" else "From ${item.entry.deviceId.take(16)}…",
+                if (item.isOwn) "Sent from this device" else "From ${shortIdOf(item.entry.deviceId)}",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

@@ -1,6 +1,7 @@
 package io.uaena.cliplink.store
 
 import android.content.Context
+import io.uaena.cliplink.net.Protocol
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -8,7 +9,11 @@ import org.json.JSONObject
 data class TrustedDevice(
     val publicKey: String,
     val address: String? = null,
-    /** The latest display name it announced, or null if it never has. */
+    /**
+     * The latest display name it sent in a handshake whose session then
+     * proved itself, or null if none has yet. Never a name heard in a beacon
+     * - see engine/PeerNames.kt.
+     */
     val name: String? = null,
 )
 
@@ -35,7 +40,10 @@ class TrustStore(context: Context) {
                 val publicKey = obj.optString("publicKey", "")
                 if (publicKey.isEmpty()) return@mapNotNull null
                 val address = obj.optString("address", "").takeIf { it.isNotEmpty() }
-                val name = obj.optString("name", "").takeIf { it.isNotEmpty() }
+                // Sanitised on the way out too, so a name stored by a build
+                // that didn't strip control characters yet can't reach the
+                // screen with them.
+                val name = Protocol.normalizeDeviceName(obj.optString("name", ""))
                 TrustedDevice(publicKey, address, name)
             }
         } catch (e: Exception) {
@@ -73,11 +81,14 @@ class TrustStore(context: Context) {
     }
 
     /**
-     * Records the latest name an ALREADY trusted device announced. Never
-     * adds a device - a name heard from a stranger is not a reason to trust
-     * it - never touches the address, and never replaces a known name with
-     * an unknown one. Writes only on an actual change, since this runs for
-     * every beacon. Returns whether anything changed.
+     * Records the latest name an ALREADY trusted device sent in its
+     * handshake, once that connection's first envelope has decrypted - never
+     * one from a beacon, which anyone on the network can forge, nor from a
+     * handshake alone, which can be replayed. Never adds a device - a name
+     * heard from a stranger is not a reason to trust it - never touches the
+     * address, and never replaces a known name with an unknown one. Writes
+     * only on an actual change, since this runs for every connection.
+     * Returns whether anything changed.
      */
     @Synchronized
     fun rememberName(publicKey: String, name: String?): Boolean {

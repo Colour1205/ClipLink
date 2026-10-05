@@ -31,14 +31,22 @@ object Protocol {
         }.toString()
 
     /**
-     * Trimmed and capped at [MAX_DEVICE_NAME_LENGTH] code points, or null
-     * when nothing is left. Applied to our own name before it goes out AND to
-     * every name that comes in - a peer's name is self-claimed and a handshake
-     * line has no length limit of its own. Counted in code points rather than
-     * UTF-16 units so the cut can never split a surrogate pair.
+     * The one sanitiser for device names: control, bidi and zero-width
+     * characters ([FileNames.isUnsafeChar] - the set a received file name
+     * loses too) removed, then trimmed and capped at [MAX_DEVICE_NAME_LENGTH]
+     * code points, or null when nothing is left. Applied to our own name before
+     * it goes out AND to every name that comes in - beacon, handshake and
+     * pairing code alike. A peer's name is self-claimed untrusted text: a
+     * handshake line has no length limit of its own, and a right-to-left
+     * override or a zero-width character is enough to make one name render
+     * as another. Counted in code points rather than UTF-16 units so the cut
+     * can never split a surrogate pair.
      */
     fun normalizeDeviceName(raw: String?): String? {
-        val trimmed = raw?.trim().orEmpty()
+        val cleaned = buildString {
+            raw?.codePoints()?.forEach { if (!FileNames.isUnsafeChar(it)) appendCodePoint(it) }
+        }
+        val trimmed = cleaned.trim()
         if (trimmed.isEmpty()) return null
         if (trimmed.codePointCount(0, trimmed.length) <= MAX_DEVICE_NAME_LENGTH) return trimmed
         return trimmed.substring(0, trimmed.offsetByCodePoints(0, MAX_DEVICE_NAME_LENGTH))
@@ -75,6 +83,14 @@ data class FilePayload(
     val fileHash: String,
     val fileSize: Long,
 ) {
+    /**
+     * A 0-byte file, whose bytes are known without asking anyone - see
+     * [FileStore.storeEmpty]. Its hash as well as its size, so an entry can't
+     * make an empty blob of anything but the one hash an empty file has.
+     */
+    val isEmptyFile: Boolean
+        get() = fileSize == 0L && fileHash.equals(FileStore.EMPTY_FILE_HASH, ignoreCase = true)
+
     fun toJson(): String = JSONObject().apply {
         put("FileName", fileName)
         put("FileHash", fileHash)

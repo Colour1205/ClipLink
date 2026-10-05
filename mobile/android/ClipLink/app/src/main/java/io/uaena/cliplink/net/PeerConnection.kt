@@ -3,6 +3,7 @@ package io.uaena.cliplink.net
 import io.uaena.cliplink.core.AesGcm
 import io.uaena.cliplink.core.B64
 import io.uaena.cliplink.core.DeviceIdentity
+import io.uaena.cliplink.core.toHex
 import io.uaena.cliplink.store.PassphraseKeyStore
 import io.uaena.cliplink.store.TrustStore
 import kotlinx.coroutines.CoroutineScope
@@ -26,6 +27,7 @@ import java.security.MessageDigest
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.X509EncodedKeySpec
 import javax.crypto.KeyAgreement
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -67,9 +69,24 @@ class PeerConnection private constructor(
     private val lastActivityAt = AtomicLong(System.currentTimeMillis())
     private val closed = AtomicBoolean(false)
     private val disconnectFired = AtomicBoolean(false)
+    private val sessionProven = AtomicBoolean(false)
+    private val echoGuard = EchoGuard()
 
     var onMessage: ((String) -> Unit)? = null
     var onDisconnected: (() -> Unit)? = null
+
+    /**
+     * Fires once, on the read loop, the first time a line decrypts with the
+     * session key - a message or a heartbeat - that isn't one of our own
+     * coming back (see [EchoGuard]). Only that proves the peer holds the
+     * identity it claimed: the handshake signature covers just the ephemeral
+     * key, so a recorded handshake replays under any DeviceName, but a
+     * replayer can never produce a line that decrypts. Keep it quick.
+     */
+    var onSessionProven: (() -> Unit)? = null
+
+    /** Whether [onSessionProven] has fired - for a caller whose own setup may have lost the race. */
+    val isSessionProven: Boolean get() = sessionProven.get()
 
     val remoteAddress: String? get() = socket.inetAddress?.hostAddress
 
@@ -82,8 +99,10 @@ class PeerConnection private constructor(
     val isClosed: Boolean get() = closed.get()
 
     suspend fun send(message: String) = withContext(Dispatchers.IO) {
-        val encrypted = AesGcm.encrypt(sessionKey, message)
-        writeLine(encrypted)
+        val packed = AesGcm.encryptPacked(sessionKey, message)
+        // Before the write, so its echo can't arrive ahead of it.
+        if (!sessionProven.get()) echoGuard.sent(packed)
+        writeLine(B64.encode(packed))
     }
 
     /**
@@ -108,15 +127,26 @@ class PeerConnection private constructor(
             while (true) {
                 val line = reader.readLine() ?: break
                 if (line.isEmpty()) continue
-                val decrypted = AesGcm.decrypt(sessionKey, line)
+                // Decoded once, and checked as bytes: the decoder skips
+                // whatever isn't base64, so one line has endless spellings.
+                val packed = B64.decode(line)
+                // Only this loop sets sessionProven, so it can't flip in between.
+                if (!sessionProven.get() && echoGuard.isEcho(packed)) error("our own line came back")
+                val decrypted = AesGcm.decryptPacked(sessionKey, packed)
                 lastActivityAt.set(System.currentTimeMillis())
+                // Before the ping check: a heartbeat proves the key just as well.
+                if (sessionProven.compareAndSet(false, true)) {
+                    echoGuard.clear()
+                    onSessionProven?.invoke()
+                }
                 if (decrypted == PING_SENTINEL) continue // heartbeat, never real data
                 onMessage?.invoke(decrypted)
             }
         } catch (e: Exception) {
             // Clean close, abrupt disconnect, or a corrupt/forged line that
-            // failed to decrypt. All three end the connection, same as the
-            // single catch-all on the other two platforms.
+            // failed to decrypt - or one of our own echoed back. All of them
+            // end the connection, same as the single catch-all on the other
+            // two platforms.
         } finally {
             finish()
         }
@@ -259,6 +289,17 @@ class PeerConnection private constructor(
             writer.flush()
 
             val theirs = HandshakeMessage.parse(reader.readLine() ?: return null) ?: return null
+            // Our own handshake sent back - never a real peer. Two of our own
+            // connections cross-wired that way derive one key, so each would
+            // take the other's lines as proof, out of sight of the per-link
+            // EchoGuard - and our own passcode proof would even vouch for it.
+            if (theirs.identityPublicKey == myIdentityPublicKey) return null
+            // Our own key spelt some other way is still us. B64 skips
+            // anything that isn't base64, so a space or a dot slipped into
+            // our id gets past the text check above and still decodes to our
+            // key - and verifies our signature. So compare the keys, as
+            // Windows does.
+            if (DeviceIdentity.isSameKey(theirs.identityPublicKey, myIdentityPublicKey)) return null
 
             val alreadyTrusted = trustStore.isTrusted(theirs.identityPublicKey)
             val passphraseVerified = !alreadyTrusted && myKey != null &&
@@ -315,5 +356,38 @@ class PeerConnection private constructor(
                 newlyTrustedViaPassphrase = passphraseVerified,
             )
         }
+    }
+}
+
+/**
+ * Spots our own lines coming back before a session is proven. The session
+ * key is one hash of the ECDH secret, the same both ways, so a line we sent
+ * decrypts just as well when it's echoed to us - and a replayer, which can't
+ * make a line of its own, could pass for proven by echoing ours (the history
+ * batch and heartbeats go out unprompted). Kept by nonce, the first 12 of a
+ * line's `nonce(12) || tag(16) || ciphertext` bytes - the decoded bytes, as
+ * Windows keeps them, never the text: B64 skips anything that isn't base64,
+ * so an echo with a space in front would miss a text match and still decrypt.
+ * A plain class so it can be tested off-device.
+ */
+internal class EchoGuard {
+    private val sentNonces: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** [packed] is a line as AesGcm packs it: its bytes, not their base64. */
+    fun sent(packed: ByteArray) {
+        nonceOf(packed)?.let(sentNonces::add)
+    }
+
+    fun isEcho(packed: ByteArray): Boolean = nonceOf(packed)?.let { it in sentNonces } == true
+
+    /** Once the session is proven there's nothing left to guard. */
+    fun clear() = sentNonces.clear()
+
+    // Too short for a nonce is too short to decrypt, too.
+    private fun nonceOf(packed: ByteArray) =
+        if (packed.size >= NONCE_SIZE) packed.copyOf(NONCE_SIZE).toHex() else null
+
+    private companion object {
+        const val NONCE_SIZE = 12
     }
 }

@@ -8,6 +8,7 @@ import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.PublicKey
 import java.security.Signature
+import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.X509EncodedKeySpec
 
@@ -110,6 +111,32 @@ class DeviceIdentity {
             } catch (e: Exception) {
                 false
             }
+        }
+
+        /**
+         * Whether two device ids are one key, however each is spelt. B64
+         * decodes text it doesn't fully understand - it skips anything that
+         * isn't base64 - so comparing ids as strings only proves they're
+         * different text. False when either isn't a P-256 key at all.
+         */
+        fun isSameKey(firstBase64: String, secondBase64: String): Boolean {
+            val first = B64.decodeOrNull(firstBase64) ?: return false
+            val second = B64.decodeOrNull(secondBase64) ?: return false
+            return isSameKey(first, second)
+        }
+
+        /**
+         * [isSameKey] of two SubjectPublicKeyInfo DERs: the same point on the
+         * same curve, so even a DER written another way (explicit curve
+         * parameters, say) is still the key it names.
+         */
+        internal fun isSameKey(firstSpki: ByteArray, secondSpki: ByteArray): Boolean = try {
+            val factory = KeyFactory.getInstance("EC")
+            val first = factory.generatePublic(X509EncodedKeySpec(firstSpki)) as ECPublicKey
+            val second = factory.generatePublic(X509EncodedKeySpec(secondSpki)) as ECPublicKey
+            first.w == second.w && first.params.curve == second.params.curve
+        } catch (e: Exception) {
+            false
         }
     }
 }

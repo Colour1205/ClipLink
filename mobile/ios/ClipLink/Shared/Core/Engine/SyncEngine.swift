@@ -72,6 +72,8 @@ public final class SyncEngine {
     public let config: EngineConfig
     public weak var delegate: SyncEngineDelegate?
     public let ownId: String
+    /// Our key itself, for spotting a re-spelt copy of `ownId`.
+    let ownKey: Data?
 
     let queue = DispatchQueue(label: "cliplink.engine", qos: .userInitiated)
     let identity: IdentitySigner
@@ -129,8 +131,17 @@ public final class SyncEngine {
     // Sync & files
     var incoming: [String: IncomingTransfer] = [:]
     var pendingFiles: [String: PendingFile] = [:]
+    /// Streams to peers, running or queued (see streamFile).
     var streaming: Set<String> = []
+    var streamsRunning: [ObjectIdentifier: Int] = [:]
+    var streamsQueued: [ObjectIdentifier: [OutgoingStream]] = [:]
     var requestedAt: [String: Date] = [:]
+    /// Files we're waiting on whose stream went by unreceived, and when to
+    /// ask for each again (see handleFileChunk, retryStalledFiles).
+    var skippedStreams: [String: Date] = [:]
+    /// How often each file we're waiting on was asked for again with no
+    /// stream of it seen since (see retryStalledFiles).
+    var unansweredRetries: [String: Int] = [:]
     /// Hashes whose completed download is being hash-checked right now.
     var verifying: Set<String> = []
 
@@ -155,6 +166,7 @@ public final class SyncEngine {
         self.identity = identity
         self.secrets = secrets
         self.ownId = identity.publicKeyBase64
+        self.ownKey = WireSignature.canonicalPublicKey(identity.publicKeyBase64)
         try? FileManager.default.createDirectory(at: config.storageDirectory, withIntermediateDirectories: true)
         trust = TrustStore(directory: config.storageDirectory)
         files = FileStore(directory: config.storageDirectory)
@@ -430,6 +442,8 @@ public final class SyncEngine {
         awaitingInbound.removeAll()
         for transfer in incoming.values { transfer.abort() }
         incoming.removeAll()
+        skippedStreams.removeAll()
+        unansweredRetries.removeAll()
     }
 
     /// Timers, UDP and the listener - everything except live links.
@@ -483,7 +497,9 @@ public final class SyncEngine {
                 return
             }
             let id = request.link.peerDeviceId
-            trust.trust(id, address: request.address, name: request.link.peerName ?? peerName(for: id))
+            // Nameless for now: register stores the handshake's name once
+            // this link decrypts a line (the sighting's may be a beacon's).
+            trust.trust(id, address: request.address)
             log("paired: \(DeviceLabel.short(id))")
             register(request.link, acceptedByUser: true)
             notice("Paired.")
@@ -514,11 +530,14 @@ public final class SyncEngine {
 
     /// The Devices tab's "Trust" on a discovered device: trusts it here and
     /// dials it, ignoring the tie-breaker (like Android/HarmonyOS). The other
-    /// side still decides for itself.
+    /// side still decides for itself. Its name is stored once a connection to
+    /// it decrypts a line; until then the beacon's is shown but not stored.
     public func trustDevice(_ deviceId: String) {
         queue.async { [self] in
+            // Never this device itself (PeerLink refuses our own handshake too).
+            guard !isOwnIdentity(deviceId) else { return }
             let address = addressCandidates(for: deviceId).first
-            trust.trust(deviceId, address: address, name: sightings[deviceId]?.name)
+            trust.trust(deviceId, address: address)
             log("trusted \(DeviceLabel.short(deviceId))")
             schedulePublish()
             if let address, links[deviceId] == nil {
@@ -575,6 +594,12 @@ public final class SyncEngine {
             saveSettings()
             schedulePublish()
         }
+    }
+
+    /// This device's own id, however it is spelt (see
+    /// WireSignature.canonicalPublicKey).
+    func isOwnIdentity(_ id: String) -> Bool {
+        id == ownId || (ownKey != nil && WireSignature.canonicalPublicKey(id) == ownKey)
     }
 
     /// The name on the wire: the user's setting, else the OS default.
@@ -725,10 +750,13 @@ public final class SyncEngine {
         nicknames[deviceId] ?? peerName(for: deviceId) ?? DeviceLabel.short(deviceId)
     }
 
-    /// The latest name a peer gave itself: heard this session (beacon or
-    /// handshake), else remembered in the trust store.
+    /// The name a peer gave itself: the one stored from the handshake of a
+    /// connection that decrypted a line, else - for a stranger, or a paired
+    /// device with none stored yet - the latest heard this session (beacon or
+    /// handshake line), which a beacon can change but never overrides a
+    /// stored one.
     func peerName(for deviceId: String) -> String? {
-        sightings[deviceId]?.name ?? trust.device(deviceId)?.name
+        trust.device(deviceId)?.name ?? sightings[deviceId]?.name
     }
 
     public var pairingPayloadAddress: String? {
@@ -758,8 +786,8 @@ public final class SyncEngine {
         s.sweeping = sweeping
         s.nicknames = nicknames
         var names: [String: String] = [:]
-        for device in trust.all { names[device.publicKey] = device.name }
-        for (id, sighting) in sightings where sighting.name != nil { names[id] = sighting.name }
+        // The same rule as the Devices rows: a stored name beats a beacon's.
+        for id in trust.all.map(\.publicKey) + Array(sightings.keys) { names[id] = peerName(for: id) }
         // A pairing prompt names its peer even after the sighting ages out.
         if let pending, names[pending.link.peerDeviceId] == nil { names[pending.link.peerDeviceId] = pending.link.peerName }
         s.deviceNames = names
@@ -833,7 +861,9 @@ struct Sighting {
     var pairing = false
     var pairingSeen = Date.distantPast
     /// The latest name it gave itself (beacon or handshake); a message
-    /// without one never clears it.
+    /// without one never clears it, but a connection that closes without
+    /// decrypting a line takes its handshake's name with it (linkClosed).
+    /// Memory only, for display.
     var name: String?
 }
 
@@ -850,6 +880,14 @@ struct PendingPairing {
 struct PendingFile {
     var entry: ClipboardEntry
     var apply: Bool
+}
+
+/// One file streaming, or waiting its turn to stream, to one peer (see
+/// streamFile).
+struct OutgoingStream {
+    let wireHash: String
+    let link: PeerLink
+    let inFlightKey: String
 }
 
 final class IncomingTransfer {
@@ -883,8 +921,8 @@ final class IncomingTransfer {
 }
 
 /// Human labels for device IDs. Every P-256 SPKI starts with the same 36
-/// base64 characters, so the "first 12 characters" other platforms print are
-/// identical for every device; a hash fingerprint actually tells them apart.
+/// base64 characters, so a prefix can't tell devices apart; every platform
+/// shows this hash fingerprint instead (docs/protocol.md, Fingerprint).
 public enum DeviceLabel {
     public static func fingerprint(_ deviceId: String) -> String {
         let digest = SHA256.hash(data: Data(deviceId.utf8))
