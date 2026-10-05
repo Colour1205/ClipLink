@@ -335,9 +335,12 @@ public sealed partial class ClipLinkEngine
             }
             if (chunkIndex == 0 && FileStore.IsEmptyFileHash(fileHash))
             {
-                // A 0-byte file: one empty, final chunk (as the iOS app
-                // sends), which finishes it for a receiver that asked - one
-                // that doesn't make empty files itself (an older build).
+                // A 0-byte file: one empty, final chunk, as the iOS app
+                // sends (see docs/protocol.md, Empty files). Receivers now
+                // make an empty file themselves and never ask for it; of the
+                // older builds that do ask, Windows, HarmonyOS and iOS finish
+                // it with this chunk, while Android's drop an empty chunk
+                // and go on waiting, as they always have.
                 var emptyChunk = new FileChunkMessage(fileHash, 0, true, "");
                 await conn.Send(JsonSerializer.Serialize(new Envelope("file_chunk", JsonSerializer.Serialize(emptyChunk))));
                 chunkIndex++;
@@ -385,7 +388,8 @@ public sealed partial class ClipLinkEngine
         // A share caches a file's blob before its entry is in history (see
         // ShareFilesAsync). One can only be under way here if it started
         // while Faulted and Retry came mid-share: then tidying waits for the
-        // next start.
+        // next start. (A copy's blob is cached first too - see PublishLocal
+        // - but the clipboard watcher only starts after this.)
         if (!shareGate.Wait(0))
         {
             Console.WriteLine("[file] a share is under way - not tidying stored files this time");
@@ -655,6 +659,7 @@ public sealed partial class ClipLinkEngine
         EnableKeepAlive(client);
 
         PeerConnection? conn;
+        bool answeredAsSelf = false;
         try
         {
             // The token above only covers connecting. Without a timeout here
@@ -663,7 +668,8 @@ public sealed partial class ClipLinkEngine
             // reconnect loop's Task.WhenAll - so no other peer was retried -
             // and kept this peer reserved in connectingTo, blocking beacon
             // dials to it as well.
-            conn = await PeerConnection.CreateAsync(client, identity, trustStore, pairingState.ModeOpen, passphraseKeyStore, deviceName.Current)
+            conn = await PeerConnection.CreateAsync(client, identity, trustStore, pairingState.ModeOpen, passphraseKeyStore, deviceName.Current,
+                    answeredAsSelf: () => answeredAsSelf = true)
                 .WaitAsync(HandshakeTimeout);
         }
         catch
@@ -674,7 +680,21 @@ public sealed partial class ClipLinkEngine
         if (conn == null)
         {
             client.Close();
-            throw new IOException("Handshake failed, or peer is not trusted");
+            // This PC answered (see CreateAsync's answeredAsSelf). If that's
+            // the address stored for the peer - what the off-LAN loop dials -
+            // it's this PC's own now (DHCP gave the peer's old address to
+            // this PC, say, or the peer came in through a loopback forward,
+            // stored as 127.0.0.1): kept, it'd be dialled, a handshake with
+            // itself, every 30 s for good. Only the stored address, though:
+            // a beacon comes from wherever its sender likes, under any id,
+            // so a reflector answering at its address mustn't wipe the
+            // peer's real one.
+            if (answeredAsSelf && trustStore.ForgetAddress(peerDeviceId, address))
+            {
+                Console.WriteLine($"[conn] {address}, stored for {DeviceLabel.ShortId(peerDeviceId)}, is this PC's own - cleared it");
+                NotifyDevicesChanged();
+            }
+            throw new IOException(answeredAsSelf ? $"{address} is this PC" : "Handshake failed, or peer is not trusted");
         }
         if (conn.PeerDeviceId != peerDeviceId)
         {

@@ -1,6 +1,7 @@
 package io.uaena.cliplink
 
 import io.uaena.cliplink.core.ClipboardEntry
+import io.uaena.cliplink.core.DeviceIdentity
 import io.uaena.cliplink.core.DotNetTimestamp
 import io.uaena.cliplink.core.EcdsaDer
 import io.uaena.cliplink.core.Pbkdf2
@@ -666,29 +667,70 @@ class InteropTest {
     @Test
     fun `our own line echoed back is caught by its nonce`() {
         val random = java.security.SecureRandom()
-        val base64 = java.util.Base64.getEncoder()
-        // What AesGcm writes: base64 of nonce(12) || tag(16) || ciphertext.
-        fun line(nonce: ByteArray = ByteArray(12).also(random::nextBytes)): String =
-            base64.encodeToString(nonce + ByteArray(16 + 40).also(random::nextBytes))
+        // What AesGcm packs: nonce(12) || tag(16) || ciphertext.
+        fun packed(nonce: ByteArray = ByteArray(12).also(random::nextBytes)): ByteArray =
+            nonce + ByteArray(16 + 40).also(random::nextBytes)
 
-        val nonce = ByteArray(12).also(random::nextBytes)
-        val ours = line(nonce)
-        // 12 bytes are exactly the first 16 characters - what the guard keys on.
-        assertEquals(base64.encodeToString(nonce), ours.take(16))
-
+        val ours = packed()
         val guard = EchoGuard()
         guard.sent(ours) // say, the history batch
-        guard.sent(line()) // and a heartbeat
+        guard.sent(packed()) // and a heartbeat
         // The key is the same both ways, so this would decrypt - but it's ours.
-        assertTrue(guard.isEcho(ours))
+        assertTrue(guard.isEcho(ours.copyOf()))
         // The peer's own lines carry their own nonces.
-        assertFalse(guard.isEcho(line()))
-        assertFalse(guard.isEcho(ours.take(10)))
-        assertFalse(guard.isEcho(""))
+        assertFalse(guard.isEcho(packed()))
+        // Too short to hold a nonce is too short to decrypt.
+        assertFalse(guard.isEcho(ours.copyOf(10)))
+        assertFalse(guard.isEcho(ByteArray(0)))
 
         // Once the session is proven nothing is held.
         guard.clear()
         assertFalse(guard.isEcho(ours))
+    }
+
+    @Test
+    fun `an echo spelt with junk the decoder skips is still our own line`() {
+        // B64 is android.util.Base64, which skips every character outside
+        // the alphabet - as the JDK's MIME decoder does, so it stands in here.
+        val lenient = java.util.Base64.getMimeDecoder()
+        val random = java.security.SecureRandom()
+        val ours = ByteArray(12 + 16 + 40).also(random::nextBytes)
+        val line = java.util.Base64.getEncoder().encodeToString(ours)
+
+        val guard = EchoGuard()
+        guard.sent(ours)
+        for (respelt in listOf(" $line", ".$line", "${line.take(5)}\t${line.drop(5)}")) {
+            // The first 16 characters, which the guard used to key on, miss...
+            assertFalse(respelt, respelt.take(16) == line.take(16))
+            // ...but each decodes to our very bytes, so it's caught.
+            assertTrue(respelt, guard.isEcho(lenient.decode(respelt)))
+        }
+    }
+
+    // ---- a handshake carrying our own identity -------------------------------
+
+    @Test
+    fun `our own key is recognised however its id is spelt`() {
+        fun keyPair() = KeyPairGenerator.getInstance("EC").run {
+            initialize(ECGenParameterSpec("secp256r1"))
+            generateKeyPair()
+        }
+        val ours = keyPair().public.encoded
+        val id = java.util.Base64.getEncoder().encodeToString(ours)
+        // B64 skips what isn't base64 (see the echo test above), so each of
+        // these decodes to our key while failing a plain text comparison.
+        val lenient = java.util.Base64.getMimeDecoder()
+        for (respelt in listOf(" $id", "${id.take(40)}.${id.drop(40)}", "$id\u0000", "${id.take(1)}\n${id.drop(1)}")) {
+            assertFalse(respelt == id)
+            assertTrue(respelt, DeviceIdentity.isSameKey(lenient.decode(respelt), ours))
+        }
+        assertTrue(DeviceIdentity.isSameKey(ours.copyOf(), ours))
+
+        // Anyone else's key, and anything that isn't a key, is not us.
+        assertFalse(DeviceIdentity.isSameKey(keyPair().public.encoded, ours))
+        assertFalse(DeviceIdentity.isSameKey(ByteArray(0), ours))
+        assertFalse(DeviceIdentity.isSameKey(ours.copyOf(ours.size - 1), ours))
+        assertFalse(DeviceIdentity.isSameKey("not a key".toByteArray(), ours))
     }
 
     // ---- how an id is shown -------------------------------------------------

@@ -39,6 +39,9 @@ const DIRECTORY_UTD = 'general.directory';
 // Names the cache copies apart, even two shares within one millisecond.
 let copySerial: number = 0;
 
+// Why a file couldn't be taken in (see copyFileIn).
+export type CopyRefusal = 'too-large' | 'unreadable' | 'folder' | 'own';
+
 // One shared item:
 //   'file'   - path is this app's own cache copy, which Index.ets moves into
 //              FileStore; fileName is the sanitised name to sync it under.
@@ -51,7 +54,7 @@ export interface SharedIn {
   text?: string;
   path?: string;
   fileName?: string;
-  reason?: 'too-large' | 'unreadable' | 'folder' | 'own';
+  reason?: CopyRefusal;
 }
 
 export function isShareWant(want: Want, launchParam: AbilityConstant.LaunchParam): boolean {
@@ -62,8 +65,20 @@ function copyDir(context: common.UIAbilityContext): string {
   return `${context.cacheDir}/${COPY_DIR}`;
 }
 
+// A fresh path in this app's cache for one file being taken in - shared, or
+// pasted (see ClipboardWatcher). Whatever a process that died left there,
+// sweepShareCopies deletes.
+export function newCopyPath(context: common.UIAbilityContext): string {
+  try {
+    if (!fs.accessSync(copyDir(context))) fs.mkdirSync(copyDir(context));
+  } catch (e) {
+    // copyFileIn reports the file as unreadable
+  }
+  return `${copyDir(context)}/${Date.now()}_${copySerial++}`;
+}
+
 // A folder too: fs.copy copies one whole if that's what a URI names.
-function removeQuietly(path: string): void {
+export function removeQuietly(path: string): void {
   try {
     if (!fs.accessSync(path)) return;
     if (fs.statSync(path).isDirectory()) {
@@ -127,19 +142,20 @@ function endOf(s: string, stops: string[], from: number): number {
   return end;
 }
 
-// Why a shared file:// URI must not be copied, or null when it's fine.
-// ClipLink reads its own sandbox without any grant, so a URI that lands in
-// there would send its private files (keys, trust list, history) to every
-// paired device - and any app can hand EntryAbility such a Want (it's
-// exported), not just the share panel. fs.copy resolves a file URI with
-// app_file_service's FileUri::GetRealPath, which uses the decoded path as it
-// is - in this app's own sandbox - for three authorities: this app's bundle
-// name ('own': ClipLink's own Share action, say - synced already), none at
-// all (file:///data/...), and the file manager's "docs", whose real files
-// all live under /storage (file://docs/data/storage/... would be ClipLink's
-// own). Every other authority is rebased onto a shared or media folder. A
-// ".." segment is refused for all of them: fs.copy resolves it after that
-// rebasing, so it climbs straight back out.
+// Why a shared or pasted file:// URI must not be copied, or null when it's
+// fine. ClipLink reads its own sandbox without any grant, so a URI that
+// lands in there would send its private files (keys, trust list, history)
+// to every paired device - and any app can hand EntryAbility such a Want
+// (it's exported), not just the share panel, or put one on the pasteboard.
+// fs.copy resolves a file URI with app_file_service's FileUri::GetRealPath,
+// which uses the decoded path as it is - in this app's own sandbox - for
+// three authorities: this app's bundle name ('own': ClipLink's own Share
+// action, say, or a received file it put on the clipboard - synced
+// already), none at all (file:///data/...), and the file manager's "docs",
+// whose real files all live under /storage (file://docs/data/storage/...
+// would be ClipLink's own). Every other authority is rebased onto a shared
+// or media folder. A ".." segment is refused for all of them: fs.copy
+// resolves it after that rebasing, so it climbs straight back out.
 function uriProblem(context: common.UIAbilityContext, uri: string): 'own' | 'unreadable' | null {
   const rest: string = uri.substring('file://'.length);
   const authorityEnd: number = endOf(rest, ['/', '?', '#'], 0);
@@ -186,28 +202,26 @@ async function oversizedOrFolder(uri: string): Promise<'too-large' | 'folder' | 
   }
 }
 
-async function copyIn(context: common.UIAbilityContext, uri: string, title: string | undefined,
-  utd: string): Promise<SharedIn> {
-  const fileName: string = sharedFileName(uri, title);
+// Copies the file a file:// URI names to dest (a newCopyPath), or says why
+// it won't - and then nothing is left at dest. A share and a PasteButton
+// paste (see ClipboardWatcher) both bring a URI another app granted, so both
+// take it this way, by the same rules: nothing in ClipLink's own sandbox
+// (see uriProblem), no folder (isFolder: the sender already said so), nothing
+// over MAX_SHARED_FILE_BYTES.
+export async function copyFileIn(context: common.UIAbilityContext, uri: string, dest: string,
+  isFolder: boolean): Promise<CopyRefusal | null> {
+  if (!uri.startsWith('file://')) return 'unreadable';
   const problem: 'own' | 'unreadable' | null = uriProblem(context, uri);
-  if (problem !== null) {
-    return { kind: 'failed', fileName: fileName, reason: problem };
-  }
+  if (problem !== null) return problem;
   // Only files are synced (Windows skips folders too); fs.copy would copy
   // a whole folder.
-  if (utd === FOLDER_UTD || utd === DIRECTORY_UTD) {
-    return { kind: 'failed', fileName: fileName, reason: 'folder' };
-  }
+  if (isFolder) return 'folder';
   const refused: 'too-large' | 'folder' | null = await oversizedOrFolder(uri);
-  if (refused !== null) {
-    return { kind: 'failed', fileName: fileName, reason: refused };
-  }
-  const dest: string = `${copyDir(context)}/${Date.now()}_${copySerial++}`;
+  if (refused !== null) return refused;
   // The copy itself is fs.copy, not a read loop over that open: the
   // file-management copy is the API documented to consume another app's URI
-  // grant (ClipboardWatcher's file branch does the same for a pasteboard
-  // URI). Cancelled as soon as its progress shows the file is over the cap,
-  // rather than filling the cache first.
+  // grant, a pasteboard URI's included. Cancelled as soon as its progress
+  // shows the file is over the cap, rather than filling the cache first.
   const signal: fs.TaskSignal = new fs.TaskSignal();
   let tooLarge: boolean = false;
   const options: fs.CopyOptions = {
@@ -228,17 +242,17 @@ async function copyIn(context: common.UIAbilityContext, uri: string, title: stri
     await fs.copy(uri, destUri, options);
     copied = true;
   } catch (e) {
-    hilog.warn(LOG_DOMAIN, LOG_TAG, 'copying a shared file failed: %{public}s', JSON.stringify(e));
+    hilog.warn(LOG_DOMAIN, LOG_TAG, 'copying a file in failed: %{public}s', JSON.stringify(e));
   }
   if (!copied && !tooLarge) {
-    // Once more the plain way ClipboardWatcher copies - in case the
-    // progress listener is what this URI's copy path objects to. The size
-    // check below still applies.
+    // Once more the plain way, as the PasteButton path always used to copy
+    // - in case the progress listener is what this URI's copy path objects
+    // to. The size check below still applies.
     try {
       await fs.copy(uri, destUri);
       copied = true;
     } catch (e) {
-      hilog.error(LOG_DOMAIN, LOG_TAG, 'copying a shared file failed again: %{public}s', JSON.stringify(e));
+      hilog.error(LOG_DOMAIN, LOG_TAG, 'copying a file in failed again: %{public}s', JSON.stringify(e));
     }
   }
   let folder: boolean = false;
@@ -247,7 +261,7 @@ async function copyIn(context: common.UIAbilityContext, uri: string, title: stri
       const stat: fs.Stat = fs.statSync(dest);
       folder = !stat.isFile();
       if (!folder && stat.size <= MAX_SHARED_FILE_BYTES) {
-        return { kind: 'file', path: dest, fileName: fileName };
+        return null;
       }
       tooLarge = !folder;
     }
@@ -255,7 +269,18 @@ async function copyIn(context: common.UIAbilityContext, uri: string, title: stri
     // stat failed - treated as unreadable
   }
   removeQuietly(dest);
-  return { kind: 'failed', fileName: fileName, reason: folder ? 'folder' : (tooLarge ? 'too-large' : 'unreadable') };
+  return folder ? 'folder' : (tooLarge ? 'too-large' : 'unreadable');
+}
+
+async function copyIn(context: common.UIAbilityContext, uri: string, title: string | undefined,
+  utd: string): Promise<SharedIn> {
+  const fileName: string = sharedFileName(uri, title);
+  const dest: string = newCopyPath(context);
+  const refused: CopyRefusal | null = await copyFileIn(context, uri, dest, utd === FOLDER_UTD || utd === DIRECTORY_UTD);
+  if (refused !== null) {
+    return { kind: 'failed', fileName: fileName, reason: refused };
+  }
+  return { kind: 'file', path: dest, fileName: fileName };
 }
 
 // When getSharedData can't parse the Want (1003703001), the granted file
@@ -285,13 +310,6 @@ export async function intakeShare(context: common.UIAbilityContext, want: Want):
   } catch (e) {
     hilog.warn(LOG_DOMAIN, LOG_TAG, 'getSharedData failed, reading the Want: %{public}s', JSON.stringify(e));
     records = recordsFromWant(want);
-  }
-  if (records.some((r: systemShare.SharedRecord) => r.uri !== undefined && r.uri.startsWith('file://'))) {
-    try {
-      if (!fs.accessSync(copyDir(context))) fs.mkdirSync(copyDir(context));
-    } catch (e) {
-      // copyIn reports each file as unreadable
-    }
   }
   const out: SharedIn[] = [];
   for (let i = 0; i < records.length; i++) {
@@ -327,9 +345,11 @@ export function takePendingShares(): SharedIn[] {
 }
 
 // Cache copies nothing is waiting on any more - left by a process that died
-// between copying a share and syncing it. Called at onCreate, before the
-// new Want's own copies exist.
+// between copying a share (or a paste) and syncing it. Called at onCreate,
+// before the new Want's own copies exist. Also the one copy older builds
+// kept of whatever file was pasted last, which nothing ever deleted.
 export function sweepShareCopies(context: common.UIAbilityContext): void {
+  removeQuietly(`${context.cacheDir}/incoming_clipboard_file`);
   const dir: string = copyDir(context);
   try {
     if (!fs.accessSync(dir)) return;

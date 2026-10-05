@@ -88,6 +88,9 @@ public class ClipboardSync
 
     public void addToQueue(string content, string type = "text") => setContent(content, type);
 
+    // No image is ever saved as a file here, so none is on the clipboard.
+    public string? ImageFileOnClipboard() => null;
+
     public void setContent(string content, string type = "text")
     {
         if (type == "text")

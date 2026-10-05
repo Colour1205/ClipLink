@@ -23,7 +23,9 @@ any more.
 - `Clipboard/`, `Identity/`, `Networking/`, `Storage/`, `Crypto/` — the pieces
   the engine wires together (see `docs/protocol.md` for the wire format).
   `Storage/LocalFiles.cs` is the per-file check and payload (name, size,
-  streamed SHA-256, 1 GB cap) shared by copied files and shared ones.
+  streamed SHA-256, 1 GB cap) shared by copied files and shared ones, and
+  their copy into the FileStore, which refuses a file changed since it was
+  hashed.
 
 Build: `dotnet build -c Debug` here. The iOS interop tests compile these same
 sources for macOS (`mobile/ios/ClipLink/CoreTests/DaemonHarness`), patching a

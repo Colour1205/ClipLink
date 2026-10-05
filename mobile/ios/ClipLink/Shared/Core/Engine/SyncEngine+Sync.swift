@@ -153,8 +153,48 @@ extension SyncEngine {
         guard incoming[key] == nil, !verifying.contains(key), !targets.isEmpty else { return }
         if let last = requestedAt[key], Date().timeIntervalSince(last) < 10 { return }
         requestedAt[key] = Date()
+        // A fresh request: a stream skipped before it no longer counts.
+        skippedStreams[key] = nil
         let json = Envelope(type: Wire.MessageType.fileRequest, payload: FileRequestMessage(fileHash: wireHash).jsonString()).jsonString()
         targets.forEach { $0.send(json) }
+    }
+
+    /// How long a request may go unanswered before it is sent again: every
+    /// sender ignores one for a file it is already streaming (or has queued)
+    /// for us, and a peer without the bytes says nothing.
+    static let fileRetryInterval: TimeInterval = 15
+    /// A skipped stream whose chunks stop coming has died: ask again after this.
+    static let skippedStreamQuiet: TimeInterval = 10
+    /// After a skipped stream's last chunk: long enough for its sender to
+    /// take a new request for that file.
+    static let skippedStreamEndGrace: TimeInterval = 1
+
+    /// Asks again for files we're waiting on whose bytes aren't coming - a
+    /// stream that went by unreceived (see handleFileChunk), or a request
+    /// nobody answered - oldest first, no more at a time than there are
+    /// free slots. Every beacon tick and whenever a transfer finishes. No
+    /// sender ever sends a file again unasked, so without this a share of
+    /// more than `maxConcurrentIncoming` files stalls until the next link.
+    func retryStalledFiles() {
+        skippedStreams = skippedStreams.filter { pendingFiles[$0.key] != nil }
+        guard !config.sendOnly, !links.isEmpty, !pendingFiles.isEmpty else { return }
+        var free = Self.maxConcurrentIncoming - incoming.count
+        let now = Date()
+        for entry in history.entries where entry.type == Wire.EntryType.file {
+            guard free > 0 else { return }
+            guard let payload = FilePayload.parse(entry.content) else { continue }
+            let key = FileStore.key(payload.fileHash)
+            guard pendingFiles[key] != nil, incoming[key] == nil, !verifying.contains(key), !files.exists(key) else { continue }
+            if let retryAt = skippedStreams[key] {
+                // Still going past us: its sender would ignore the request.
+                guard now >= retryAt else { continue }
+            } else if let last = requestedAt[key], now.timeIntervalSince(last) < Self.fileRetryInterval {
+                continue
+            }
+            requestedAt[key] = nil
+            requestFile(payload.fileHash, from: Array(links.values))
+            free -= 1
+        }
     }
 
     /// On every new link: ask for any file whose entry we have but whose bytes
@@ -187,6 +227,7 @@ extension SyncEngine {
         for key in Array(pendingFiles.keys) where !referenced.contains(key) {
             pendingFiles[key] = nil
             requestedAt[key] = nil
+            skippedStreams[key] = nil
         }
         for (key, transfer) in incoming where !referenced.contains(key) {
             transfer.abort()
@@ -204,13 +245,20 @@ extension SyncEngine {
         let owner = ObjectIdentifier(link)
 
         if incoming[key] == nil {
-            // Already have it (a second sender answered the same request), a
-            // stream we didn't see start, one still being verified, or bytes we
-            // never asked for (no entry waiting on them): nothing to do. The
-            // last guard stops a peer filling the disk with unreferenced blobs.
-            guard !files.exists(key), !verifying.contains(key), chunk.chunkIndex == 0,
-                  pendingFiles[key] != nil, incoming.count < Self.maxConcurrentIncoming
-            else { return }
+            // Already have it (a second sender answered the same request), one
+            // still being verified, or bytes we never asked for (no entry
+            // waiting on them): nothing to do. The last guard stops a peer
+            // filling the disk with unreferenced blobs.
+            guard !files.exists(key), !verifying.contains(key), pendingFiles[key] != nil else { return }
+            guard chunk.chunkIndex == 0, incoming.count < Self.maxConcurrentIncoming else {
+                // A file we're waiting on, going past unreceived: no free slot
+                // for it, or a stream we didn't see start (or gave up on).
+                // Its sender won't send it again unasked, and ignores a
+                // request while this stream lasts: asked for again once it
+                // has ended (retryStalledFiles).
+                skippedStreams[key] = Date().addingTimeInterval(chunk.isLast ? Self.skippedStreamEndGrace : Self.skippedStreamQuiet)
+                return
+            }
             let pendingPayload = pendingFiles[key].flatMap { FilePayload.parse($0.entry.content) }
             guard let transfer = IncomingTransfer(
                 wireHash: chunk.fileHash,
@@ -270,6 +318,8 @@ extension SyncEngine {
         guard chunk.isLast else { return }
         incoming[key] = nil
         verifying.insert(key)
+        // A slot is free: a file skipped for want of one can be asked for.
+        retryStalledFiles()
         try? transfer.handle.close()
         let url = transfer.url
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -312,6 +362,7 @@ extension SyncEngine {
     func fulfillPendingFile(_ key: String) {
         guard let pending = pendingFiles.removeValue(forKey: key) else { return }
         requestedAt[key] = nil
+        skippedStreams[key] = nil
         if pending.apply, history.contains(pending.entry) {
             deliverToApp(pending.entry, fileURL: files.url(for: key))
         }
@@ -319,19 +370,54 @@ extension SyncEngine {
 
     // MARK: - Files: sending
 
+    /// At most this many files stream to one peer at once; the rest wait
+    /// their turn, in order. More at once makes none of them faster over one
+    /// link, but each stream holds over a megabyte until the network takes
+    /// its chunk - and the Share extension may send 25 files to several
+    /// peers in about 120 MB. It also stays under a receiver's own limit
+    /// (`maxConcurrentIncoming`; older iOS builds never ask again).
+    static let maxStreamsPerLink = 3
+
     /// Streams a stored blob to one peer in 256 KiB chunks, pacing on the
     /// network stack (each chunk waits for the previous to be handed off) so
-    /// memory stays at one chunk regardless of file size.
+    /// memory stays at one chunk per stream regardless of file size.
     func streamFile(hash wireHash: String, to link: PeerLink) {
         let key = FileStore.key(wireHash)
         // Guards against streaming the same file to the same peer twice at
-        // once - interleaved chunks fail verification at the far end.
+        // once - interleaved chunks fail verification at the far end. One
+        // still waiting its turn counts: it will go.
         let inFlightKey = "\(ObjectIdentifier(link).hashValue)|\(key)"
         guard !streaming.contains(inFlightKey) else { return }
         streaming.insert(inFlightKey)
-        let url = files.url(for: key)
+        let stream = OutgoingStream(wireHash: wireHash, link: link, inFlightKey: inFlightKey)
+        let id = ObjectIdentifier(link)
+        if streamsRunning[id, default: 0] < Self.maxStreamsPerLink {
+            startStream(stream)
+        } else {
+            streamsQueued[id, default: []].append(stream)
+        }
+    }
+
+    /// One stream ended (sent, failed, or its link closed): the next one
+    /// waiting for that link starts - on a closed link it ends at once.
+    private func streamEnded(_ stream: OutgoingStream) {
+        streaming.remove(stream.inFlightKey)
+        let id = ObjectIdentifier(stream.link)
+        streamsRunning[id, default: 1] -= 1
+        if streamsRunning[id] == 0 { streamsRunning[id] = nil }
+        guard var waiting = streamsQueued[id], !waiting.isEmpty else { return }
+        let next = waiting.removeFirst()
+        streamsQueued[id] = waiting.isEmpty ? nil : waiting
+        startStream(next)
+    }
+
+    private func startStream(_ stream: OutgoingStream) {
+        streamsRunning[ObjectIdentifier(stream.link), default: 0] += 1
+        let link = stream.link
+        let wireHash = stream.wireHash
+        let url = files.url(for: FileStore.key(wireHash))
         Task.detached(priority: .utility) { [weak self] in
-            defer { self?.queue.async { self?.streaming.remove(inFlightKey) } }
+            defer { self?.queue.async { self?.streamEnded(stream) } }
             guard let handle = try? FileHandle(forReadingFrom: url) else { return }
             defer { try? handle.close() }
             let total = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 0
@@ -431,6 +517,8 @@ extension SyncEngine {
         return reserved.contains(stem) ? "_" + cleaned : cleaned
     }
 
+    /// Incoming streams at once; any more go past and are asked for again
+    /// as slots free up (retryStalledFiles).
     static let maxConcurrentIncoming = 8
 
     private func finish(_ completion: ((SendResult) -> Void)?, _ result: SendResult) {

@@ -18,6 +18,7 @@ import { TrustStore } from '../identity/TrustStore';
 import { PassphraseKeyStore } from '../identity/PassphraseKeyStore';
 import { deviceFingerprint, normalizeDeviceName } from '../identity/DeviceName';
 import * as AesGcm from '../crypto/AesGcm';
+import { LineFramer } from './LineFramer';
 
 const base64Helper = new util.Base64Helper();
 const decoder = util.TextDecoder.create('utf-8');
@@ -127,6 +128,26 @@ export class TcpSocketConnectionAdapter implements TcpLike {
   }
 }
 
+// A key's bytes written out again as Base64: one spelling for every one
+// the decoder takes. null if it isn't Base64 at all.
+function canonicalBase64(base64: string): string | null {
+  try {
+    return base64Helper.encodeToStringSync(base64Helper.decodeSync(base64));
+  } catch (e) {
+    return null;
+  }
+}
+
+// Whether two IdentityPublicKeys are one key: compared as the bytes they
+// decode to, not just as text, so our own key spelt some other way the
+// decoder still takes (whitespace in it, say) is still ours - as Windows'
+// CreateAsync compares the key it re-exports.
+export function sameIdentityKey(a: string, b: string): boolean {
+  if (a === b) return true;
+  const canonical: string | null = canonicalBase64(a);
+  return canonical !== null && canonical === canonicalBase64(b);
+}
+
 async function sha256(data: Uint8Array): Promise<Uint8Array> {
   const md = cryptoFramework.createMd('SHA256');
   await md.update({ data });
@@ -141,7 +162,9 @@ async function sha256(data: Uint8Array): Promise<Uint8Array> {
 // reuses one StreamReader/StreamWriter throughout.
 class TcpLineChannel {
   private client: TcpLike;
-  private buffer: Uint8Array = new Uint8Array(0);
+  // Splits the socket's bytes into lines - bounded, and linear in what
+  // arrives (see LineFramer).
+  private framer: LineFramer = new LineFramer();
   private pendingLines: string[] = [];
   private waiters: Array<(line: string | null) => void> = [];
   // Notified whenever a line arrives or the socket closes - see
@@ -170,25 +193,26 @@ class TcpLineChannel {
   }
 
   private handleChunk(chunk: ArrayBuffer): void {
-    const bytes = new Uint8Array(chunk);
-    const combined = new Uint8Array(this.buffer.length + bytes.length);
-    combined.set(this.buffer, 0);
-    combined.set(bytes, this.buffer.length);
-    this.buffer = combined;
-    // Before splitting into lines: for waitForActivity, a partial line is
-    // already proof the peer is talking (a big first message can take
-    // seconds to arrive in full over a relayed connection).
-    this.notifyActivity();
-
-    let idx = this.buffer.indexOf(10); // '\n'
-    while (idx !== -1) {
-      const lineBytes = this.buffer.slice(0, idx);
-      this.buffer = this.buffer.slice(idx + 1);
+    const lines: Uint8Array[] | null = this.framer.push(new Uint8Array(chunk));
+    if (lines === null) {
+      // Over the cap before a handshake even arrived - not a ClipLink peer,
+      // or one trying to fill this device's memory. Closed here and now,
+      // whether or not the socket reports its own close.
+      this.closed = true;
+      this.flushWaiters(null);
+      this.notifyActivity();
+      this.close();
+      return;
+    }
+    for (const lineBytes of lines) {
       let line = decoder.decodeToString(lineBytes);
       if (line.endsWith('\r')) line = line.slice(0, -1);
       this.deliverLine(line);
-      idx = this.buffer.indexOf(10);
     }
+    // For waitForActivity, a partial line is already proof the peer is
+    // talking (a big first message can take seconds to arrive in full over
+    // a relayed connection).
+    this.notifyActivity();
   }
 
   private deliverLine(line: string): void {
@@ -257,7 +281,7 @@ class TcpLineChannel {
     return new Promise<PeerVerdict>((resolve) => {
       let timerId = -1;
       const settled = (): boolean => {
-        if (this.pendingLines.length > 0 || this.buffer.length > 0) {
+        if (this.pendingLines.length > 0 || this.framer.bufferedBytes > 0) {
           resolve('accepted');
           return true;
         }
@@ -440,8 +464,9 @@ export class PeerConnection {
       // dialled. Two of our own connections cross-wired that way derive one
       // key, so each would take the other's lines as proof, out of sight of
       // the per-link sentNonces - and our own passcode proof would even
-      // vouch for it. Same check as Android's PeerConnection.handshake.
-      if (theirHandshake.IdentityPublicKey === myIdentityPublicKey) {
+      // vouch for it. Same check as Android's PeerConnection.handshake, on
+      // the key's bytes rather than its text (see sameIdentityKey).
+      if (sameIdentityKey(theirHandshake.IdentityPublicKey, myIdentityPublicKey)) {
         return null;
       }
 

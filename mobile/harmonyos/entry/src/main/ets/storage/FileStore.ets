@@ -17,10 +17,12 @@ const HASH_CHUNK_SIZE = 256 * 1024;
 // SHA-256 of no bytes at all: every empty file's hash.
 export const EMPTY_FILE_HASH: string = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
-// A descriptor for an empty file. Its bytes never stream - a sender has no
-// chunk to send, on any platform - but they're known, so a receiver stores
-// them itself (see SyncManager.handleIncomingFileEntry). The hash in either
-// case: Windows and iOS send uppercase.
+// A descriptor for an empty file. Its bytes are known, so a receiver stores
+// them itself (see SyncManager.handleIncomingFileEntry) rather than asking:
+// older builds send no chunk at all for one, so a request could wait
+// forever. (Senders now send one empty, final chunk - see
+// SyncManager.streamFileToPeer - for receivers that do ask.) The hash in
+// either case: Windows and iOS send uppercase.
 export function isEmptyFile(payload: FilePayload): boolean {
   return payload.FileSize === 0 && typeof payload.FileHash === 'string'
     && payload.FileHash.toLowerCase() === EMPTY_FILE_HASH;
@@ -46,6 +48,14 @@ function checked(hash: string): string {
     throw new Error('Not a file hash (64 hex digits).');
   }
   return hash;
+}
+
+export function removeIfThere(path: string): void {
+  try {
+    fs.unlinkSync(path);
+  } catch (e) {
+    // never there, or gone already
+  }
 }
 
 // Lowercase SHA-256 hex of a file, read in chunks - bounded memory whatever
@@ -77,10 +87,12 @@ export async function sha256File(path: string): Promise<string> {
 
 export class FileStore {
   private baseDir: string;
-  // Lowercase hashes this run has stored, is receiving (see getTempPath) or
+  // Lowercase hashes this run has stored, is receiving (see newTempPath) or
   // has found here and may be about to rely on (see exists) - whatever the
   // history said, deleteUnreferenced leaves these alone.
   private inUse: Set<string> = new Set<string>();
+  // Names each newTempPath apart.
+  private tempSerial: number = 0;
 
   constructor(context: common.UIAbilityContext) {
     this.baseDir = `${context.filesDir}/${SUBDIR}`;
@@ -93,11 +105,14 @@ export class FileStore {
     return `${this.baseDir}/${checked(hash)}`;
   }
 
-  // Where an incoming transfer writes before its bytes are verified - and
-  // renamed to getPath(hash), so both count as in use from here on.
-  getTempPath(hash: string): string {
+  // Where one incoming transfer writes before its bytes are verified - and
+  // renamed to getPath(hash), so both count as in use from here on. A new
+  // path every call (<hash>.<n>.tmp): two peers can stream the same file at
+  // once, and a stream can start while an earlier one's file is still being
+  // checked, so no two transfers may share one.
+  newTempPath(hash: string): string {
     this.inUse.add(checked(hash).toLowerCase());
-    return `${this.baseDir}/${hash}${TEMP_SUFFIX}`;
+    return `${this.baseDir}/${hash}.${this.tempSerial++}${TEMP_SUFFIX}`;
   }
 
   exists(hash: string): boolean {
@@ -158,7 +173,9 @@ export class FileStore {
     let deleted = 0;
     for (const name of names) {
       const isTemp: boolean = name.endsWith(TEMP_SUFFIX);
-      const hash: string = isTemp ? name.substring(0, name.length - TEMP_SUFFIX.length) : name;
+      // <hash>.<n>.tmp (see newTempPath), or an older build's <hash>.tmp.
+      const stem: string = isTemp ? name.substring(0, name.length - TEMP_SUFFIX.length) : name;
+      const hash: string = isTemp && stem.indexOf('.') >= 0 ? stem.substring(0, stem.indexOf('.')) : stem;
       if (!isValidFileHash(hash)) continue;
       const key: string = hash.toLowerCase();
       if (this.inUse.has(key) || (!isTemp && referenced.has(key))) continue;
@@ -174,24 +191,48 @@ export class FileStore {
 
   // Takes over a file this app already holds its own copy of (something
   // shared to ClipLink - see share/ShareIntake.ets): hashes it in chunks and
-  // moves it in under that hash, rather than reading it all into memory the
-  // way the PasteButton path does. Returns the hash. The source is gone
-  // afterwards: moved in, or deleted when these bytes are already stored.
+  // moves it in under that hash (see adopt), rather than reading it all into
+  // memory. Returns the hash; throws if it couldn't be stored.
   async importFile(path: string): Promise<string> {
     const hash = await sha256File(path);
-    if (this.exists(hash)) {
-      fs.unlinkSync(path);
-      return hash;
+    if (!this.adopt(path, hash)) {
+      throw new Error('could not store the file');
     }
-    this.inUse.add(hash);
+    return hash;
+  }
+
+  // Moves in a file of this app's own - a share's or a paste's cache copy -
+  // as the blob for `hash`, which the caller has just worked out from it
+  // (sha256File), or deletes it when these bytes are already stored. False
+  // if it couldn't be stored, and then nothing is left under the hash: a
+  // cut-short blob would pass exists() for the whole file. The source is
+  // gone afterwards either way.
+  adopt(path: string, hash: string): boolean {
+    if (!isValidFileHash(hash)) {
+      removeIfThere(path);
+      return false;
+    }
+    if (this.exists(hash)) {
+      removeIfThere(path);
+      return true;
+    }
+    const dest: string = this.getPath(hash);
+    this.inUse.add(hash.toLowerCase());
     try {
-      fs.moveFileSync(path, this.getPath(hash));
+      fs.moveFileSync(path, dest);
+      return true;
     } catch (e) {
       // cacheDir and filesDir share a partition, so the move is a rename;
       // copy + delete only in case some device mounts them apart.
-      fs.copyFileSync(path, this.getPath(hash));
-      fs.unlinkSync(path);
     }
-    return hash;
+    try {
+      fs.copyFileSync(path, dest);
+      return true;
+    } catch (e) {
+      removeIfThere(dest);
+      return false;
+    } finally {
+      removeIfThere(path);
+    }
   }
 }

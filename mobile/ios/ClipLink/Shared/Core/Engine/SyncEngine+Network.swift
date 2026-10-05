@@ -61,7 +61,10 @@ extension SyncEngine {
         guard tickTimer == nil, reconnectTimer == nil else { return }
         let tick = DispatchSource.makeTimerSource(queue: queue)
         tick.schedule(deadline: .now() + Self.tickInterval, repeating: Self.tickInterval)
-        tick.setEventHandler { [weak self] in self?.beaconTick() }
+        tick.setEventHandler { [weak self] in
+            self?.beaconTick()
+            self?.retryStalledFiles()
+        }
         tick.resume()
         tickTimer = tick
 
@@ -219,8 +222,8 @@ extension SyncEngine {
     func onBeacon(_ beacon: Beacon) {
         let id = beacon.deviceId
         // Our own broadcast, looped back - or replayed: it carries our own
-        // passcode proof, which must never trust our own id.
-        guard id != ownId else { return }
+        // passcode proof, which must never trust our own id. Re-spelt too.
+        guard !isOwnIdentity(id) else { return }
         // Spoof resistance: a never-seen id must at least be a real P-256 key.
         if sightings[id] == nil, !trust.isTrusted(id), !WireSignature.isValidPublicKey(id) { return }
         var sighting = sightings[id] ?? Sighting(lastSeen: Date())
@@ -391,7 +394,7 @@ extension SyncEngine {
     /// verified, so storing a name is register's job, once a link proves it
     /// holds the session key.
     func noteSighting(_ id: String, address: String?, name: String? = nil) {
-        guard id != ownId else { return }
+        guard !isOwnIdentity(id) else { return }
         var sighting = sightings[id] ?? Sighting(lastSeen: Date())
         sighting.lastSeen = Date()
         if let address, Self.isPeerAddress(address) { sighting.addresses[address] = Date() }
@@ -886,7 +889,7 @@ extension SyncEngine {
 
         if let info = PairingInfo.parse(trimmed) {
             let key = info.publicKey
-            if key == ownId { return completion(.ownCode) }
+            if isOwnIdentity(key) { return completion(.ownCode) }
             if links[key] != nil {
                 return completion(.connected(addressCandidates(for: key).first ?? displayName(for: key)))
             }

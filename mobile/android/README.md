@@ -52,6 +52,11 @@ app therefore offers three honest paths instead:
   them into app storage while it still holds the read grant, toasts the
   result and finishes; ClipLink itself never opens.
 
+The first two take a copied file the same way - another app's `content://`
+URI only, streamed into app storage, up to 1 GB. A copied image up to 4096 px
+a side goes as an inline PNG, like the other platforms send; a bigger one goes
+as the file it is.
+
 Writing to the clipboard is unrestricted, so *receiving* works normally.
 
 **The foreground service is `connectedDevice`, not `dataSync`.** Since Android

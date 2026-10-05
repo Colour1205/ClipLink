@@ -24,9 +24,9 @@ import { image } from '@kit.ImageKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { util } from '@kit.ArkTS';
 import fs from '@ohos.file.fs';
-import fileUri from '@ohos.file.fileuri';
 import { common } from '@kit.AbilityKit';
-import { EMPTY_FILE_HASH } from '../storage/FileStore';
+import { sha256File } from '../storage/FileStore';
+import { copyFileIn, CopyRefusal, newCopyPath, removeQuietly } from '../share/ShareIntake';
 
 const base64Helper = new util.Base64Helper();
 
@@ -34,9 +34,15 @@ export type ClipboardContentType = 'text' | 'image' | 'file' | 'unsupported';
 
 export interface ClipboardChange {
   type: ClipboardContentType;
-  content: string; // text; base64 PNG for images; base64 raw bytes for files
+  content: string; // text; base64 PNG for images; '' for files (see path)
   hash: string;
   fileName?: string; // only set for type 'file'
+  // Type 'file': this app's own cache copy of it, for FileStore.adopt to
+  // take over (or the caller to delete), and its size in bytes.
+  path?: string;
+  size?: number;
+  // Type 'unsupported': a file the paste wouldn't take, and why.
+  refused?: CopyRefusal;
   detail?: string; // e.g. the unsupported mime type list, or an error message
 }
 
@@ -138,6 +144,13 @@ export class ClipboardWatcher {
     return this.listening;
   }
 
+  // For a caller that couldn't sync what readCurrentClipboard just returned
+  // (couldn't store the file, say): the next read returns the same content
+  // again, rather than null for "unchanged since last sync".
+  forget(): void {
+    this.lastKnownHash = null;
+  }
+
   // Only valid to call from inside a PasteButton onClick handler, in the
   // window after a SUCCESS result — that's what grants the temporary
   // pasteboard read privilege this needs. context is only used for the
@@ -169,34 +182,30 @@ export class ClipboardWatcher {
         // (fs.copy) actually consume the transient cross-app read grant
         // the pasteboard service holds for that URI. Per the official
         // "使用系统剪贴板实现复制粘贴" guide: copy it into our own sandbox
-        // first via fs.copy, THEN read the local copy normally. Reads the
-        // whole file into memory as base64 afterward, same tradeoff the
-        // image branch above already makes - fine for the file sizes this
-        // is meant for, not for anything huge.
+        // first via fs.copy - the way a file shared to ClipLink is copied,
+        // and by the same rules (see ShareIntake's copyFileIn): nothing of
+        // ClipLink's own (a received file it put on the clipboard itself, or
+        // a private file another app named), no folder, nothing over 1 GB.
+        // The copy is hashed in chunks and handed over as a path for
+        // FileStore to move in - never read into memory whole.
         const uri = data.getPrimaryUri();
+        const path: string = newCopyPath(context);
         try {
           const fileName = decodeURIComponent(uri.split('/').pop() ?? 'file');
-          const tempPath = `${context.cacheDir}/incoming_clipboard_file`;
-          await fs.copy(uri, fileUri.getUriFromPath(tempPath));
-
-          const file = fs.openSync(tempPath, fs.OpenMode.READ_ONLY);
-          let buffer: ArrayBuffer;
-          try {
-            const size = fs.statSync(file.fd).size;
-            buffer = new ArrayBuffer(size);
-            if (size > 0) fs.readSync(file.fd, buffer);
-          } finally {
-            fs.closeSync(file);
+          const refused: CopyRefusal | null = await copyFileIn(context, uri, path, false);
+          if (refused !== null) {
+            return { type: 'unsupported', content: '', hash: '', refused, detail: `file not taken (${refused})` };
           }
-          // An empty file is still a file, with nothing to read, hash or
-          // encode - none of which is asked of an empty buffer: its hash is
-          // known and its content is ''.
-          const bytes = new Uint8Array(buffer);
-          const hash = bytes.length > 0 ? await sha256Hex(bytes) : EMPTY_FILE_HASH;
-          if (hash === this.lastKnownHash) return null;
+          const size: number = fs.statSync(path).size;
+          const hash: string = await sha256File(path);
+          if (hash === this.lastKnownHash) {
+            removeQuietly(path);
+            return null;
+          }
           this.lastKnownHash = hash;
-          return { type: 'file', content: bytes.length > 0 ? arrayBufferToBase64(buffer) : '', hash, fileName };
+          return { type: 'file', content: '', hash, fileName, path, size };
         } catch (e) {
+          removeQuietly(path);
           return { type: 'unsupported', content: '', hash: '', detail: `could not read file: ${e}` };
         }
       } else {

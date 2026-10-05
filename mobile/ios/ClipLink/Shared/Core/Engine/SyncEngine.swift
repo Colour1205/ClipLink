@@ -72,6 +72,8 @@ public final class SyncEngine {
     public let config: EngineConfig
     public weak var delegate: SyncEngineDelegate?
     public let ownId: String
+    /// Our key itself, for spotting a re-spelt copy of `ownId`.
+    let ownKey: Data?
 
     let queue = DispatchQueue(label: "cliplink.engine", qos: .userInitiated)
     let identity: IdentitySigner
@@ -129,8 +131,14 @@ public final class SyncEngine {
     // Sync & files
     var incoming: [String: IncomingTransfer] = [:]
     var pendingFiles: [String: PendingFile] = [:]
+    /// Streams to peers, running or queued (see streamFile).
     var streaming: Set<String> = []
+    var streamsRunning: [ObjectIdentifier: Int] = [:]
+    var streamsQueued: [ObjectIdentifier: [OutgoingStream]] = [:]
     var requestedAt: [String: Date] = [:]
+    /// Files we're waiting on whose stream went by unreceived, and when to
+    /// ask for each again (see handleFileChunk, retryStalledFiles).
+    var skippedStreams: [String: Date] = [:]
     /// Hashes whose completed download is being hash-checked right now.
     var verifying: Set<String> = []
 
@@ -155,6 +163,7 @@ public final class SyncEngine {
         self.identity = identity
         self.secrets = secrets
         self.ownId = identity.publicKeyBase64
+        self.ownKey = WireSignature.canonicalPublicKey(identity.publicKeyBase64)
         try? FileManager.default.createDirectory(at: config.storageDirectory, withIntermediateDirectories: true)
         trust = TrustStore(directory: config.storageDirectory)
         files = FileStore(directory: config.storageDirectory)
@@ -430,6 +439,7 @@ public final class SyncEngine {
         awaitingInbound.removeAll()
         for transfer in incoming.values { transfer.abort() }
         incoming.removeAll()
+        skippedStreams.removeAll()
     }
 
     /// Timers, UDP and the listener - everything except live links.
@@ -521,7 +531,7 @@ public final class SyncEngine {
     public func trustDevice(_ deviceId: String) {
         queue.async { [self] in
             // Never this device itself (PeerLink refuses our own handshake too).
-            guard deviceId != ownId else { return }
+            guard !isOwnIdentity(deviceId) else { return }
             let address = addressCandidates(for: deviceId).first
             trust.trust(deviceId, address: address)
             log("trusted \(DeviceLabel.short(deviceId))")
@@ -580,6 +590,12 @@ public final class SyncEngine {
             saveSettings()
             schedulePublish()
         }
+    }
+
+    /// This device's own id, however it is spelt (see
+    /// WireSignature.canonicalPublicKey).
+    func isOwnIdentity(_ id: String) -> Bool {
+        id == ownId || (ownKey != nil && WireSignature.canonicalPublicKey(id) == ownKey)
     }
 
     /// The name on the wire: the user's setting, else the OS default.
@@ -860,6 +876,14 @@ struct PendingPairing {
 struct PendingFile {
     var entry: ClipboardEntry
     var apply: Bool
+}
+
+/// One file streaming, or waiting its turn to stream, to one peer (see
+/// streamFile).
+struct OutgoingStream {
+    let wireHash: String
+    let link: PeerLink
+    let inFlightKey: String
 }
 
 final class IncomingTransfer {

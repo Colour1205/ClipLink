@@ -10,7 +10,10 @@ internal sealed record ShareSummary(string Title, string Message, bool IsError)
 {
     // The likely ones first.
     private static readonly FileSkipReason[] ReasonOrder =
-        { FileSkipReason.Folder, FileSkipReason.TooLarge, FileSkipReason.NotFound, FileSkipReason.Unreadable };
+    {
+        FileSkipReason.Folder, FileSkipReason.TooLarge, FileSkipReason.NotFound, FileSkipReason.Unreadable,
+        FileSkipReason.Changed, FileSkipReason.NotStored,
+    };
 
     public static ShareSummary Of(ShareResult result, int connectedDevices)
     {
@@ -42,6 +45,13 @@ internal sealed record ShareSummary(string Title, string Message, bool IsError)
                     ? $"{name} is over {Format.Size(LocalFiles.MaxFileBytes)}, too big to share."
                     : $"{count} files are over {Format.Size(LocalFiles.MaxFileBytes)}, too big to share.",
                 FileSkipReason.NotFound => count == 1 ? $"Couldn't find {name}." : $"Couldn't find {count} files.",
+                FileSkipReason.Changed => count == 1
+                    ? $"{name} changed while it was being shared - share it again once it's saved."
+                    : $"{count} files changed while they were being shared - share them again once they're saved.",
+                // Read fine, so the reason is this PC's (the disk is full,
+                // say) - and only the error says what it is.
+                FileSkipReason.NotStored => (count == 1 ? $"Couldn't store {name} to send it" : $"Couldn't store {count} files to send them")
+                    + (group.First().Error is string error ? $": {error}" : "."),
                 _ => count == 1 ? $"Couldn't read {name}." : $"Couldn't read {count} files.",
             });
         }

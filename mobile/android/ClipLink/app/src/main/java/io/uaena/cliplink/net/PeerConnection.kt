@@ -3,6 +3,7 @@ package io.uaena.cliplink.net
 import io.uaena.cliplink.core.AesGcm
 import io.uaena.cliplink.core.B64
 import io.uaena.cliplink.core.DeviceIdentity
+import io.uaena.cliplink.core.toHex
 import io.uaena.cliplink.store.PassphraseKeyStore
 import io.uaena.cliplink.store.TrustStore
 import kotlinx.coroutines.CoroutineScope
@@ -98,10 +99,10 @@ class PeerConnection private constructor(
     val isClosed: Boolean get() = closed.get()
 
     suspend fun send(message: String) = withContext(Dispatchers.IO) {
-        val encrypted = AesGcm.encrypt(sessionKey, message)
+        val packed = AesGcm.encryptPacked(sessionKey, message)
         // Before the write, so its echo can't arrive ahead of it.
-        if (!sessionProven.get()) echoGuard.sent(encrypted)
-        writeLine(encrypted)
+        if (!sessionProven.get()) echoGuard.sent(packed)
+        writeLine(B64.encode(packed))
     }
 
     /**
@@ -126,9 +127,12 @@ class PeerConnection private constructor(
             while (true) {
                 val line = reader.readLine() ?: break
                 if (line.isEmpty()) continue
+                // Decoded once, and checked as bytes: the decoder skips
+                // whatever isn't base64, so one line has endless spellings.
+                val packed = B64.decode(line)
                 // Only this loop sets sessionProven, so it can't flip in between.
-                if (!sessionProven.get() && echoGuard.isEcho(line)) error("our own line came back")
-                val decrypted = AesGcm.decrypt(sessionKey, line)
+                if (!sessionProven.get() && echoGuard.isEcho(packed)) error("our own line came back")
+                val decrypted = AesGcm.decryptPacked(sessionKey, packed)
                 lastActivityAt.set(System.currentTimeMillis())
                 // Before the ping check: a heartbeat proves the key just as well.
                 if (sessionProven.compareAndSet(false, true)) {
@@ -290,6 +294,12 @@ class PeerConnection private constructor(
             // take the other's lines as proof, out of sight of the per-link
             // EchoGuard - and our own passcode proof would even vouch for it.
             if (theirs.identityPublicKey == myIdentityPublicKey) return null
+            // Our own key spelt some other way is still us. B64 skips
+            // anything that isn't base64, so a space or a dot slipped into
+            // our id gets past the text check above and still decodes to our
+            // key - and verifies our signature. So compare the keys, as
+            // Windows does.
+            if (DeviceIdentity.isSameKey(theirs.identityPublicKey, myIdentityPublicKey)) return null
 
             val alreadyTrusted = trustStore.isTrusted(theirs.identityPublicKey)
             val passphraseVerified = !alreadyTrusted && myKey != null &&
@@ -354,25 +364,30 @@ class PeerConnection private constructor(
  * key is one hash of the ECDH secret, the same both ways, so a line we sent
  * decrypts just as well when it's echoed to us - and a replayer, which can't
  * make a line of its own, could pass for proven by echoing ours (the history
- * batch and heartbeats go out unprompted). Kept by nonce: a line is base64 of
- * `nonce(12) || tag(16) || ciphertext`, and 12 bytes are exactly its first 16
- * characters. A plain class so it can be tested off-device.
+ * batch and heartbeats go out unprompted). Kept by nonce, the first 12 of a
+ * line's `nonce(12) || tag(16) || ciphertext` bytes - the decoded bytes, as
+ * Windows keeps them, never the text: B64 skips anything that isn't base64,
+ * so an echo with a space in front would miss a text match and still decrypt.
+ * A plain class so it can be tested off-device.
  */
 internal class EchoGuard {
     private val sentNonces: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-    fun sent(line: String) {
-        sentNonces.add(nonceOf(line))
+    /** [packed] is a line as AesGcm packs it: its bytes, not their base64. */
+    fun sent(packed: ByteArray) {
+        nonceOf(packed)?.let(sentNonces::add)
     }
 
-    fun isEcho(line: String): Boolean = nonceOf(line) in sentNonces
+    fun isEcho(packed: ByteArray): Boolean = nonceOf(packed)?.let { it in sentNonces } == true
 
     /** Once the session is proven there's nothing left to guard. */
     fun clear() = sentNonces.clear()
 
-    private fun nonceOf(line: String) = line.take(NONCE_BASE64_LENGTH)
+    // Too short for a nonce is too short to decrypt, too.
+    private fun nonceOf(packed: ByteArray) =
+        if (packed.size >= NONCE_SIZE) packed.copyOf(NONCE_SIZE).toHex() else null
 
     private companion object {
-        const val NONCE_BASE64_LENGTH = 16
+        const val NONCE_SIZE = 12
     }
 }

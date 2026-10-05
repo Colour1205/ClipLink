@@ -86,6 +86,23 @@ public class TrustStore
         }
     }
 
+    // Clears a trusted peer's stored address if it's still address (compared
+    // ignoring case) - one found to be useless for it - leaving its trust and
+    // name alone. Unlike Trust(publicKey, null), never trusts a device again
+    // that was untrusted meanwhile, nor clears an address learned since.
+    // Returns whether it cleared it.
+    public bool ForgetAddress(string publicKey, string address)
+    {
+        lock (gate)
+        {
+            if (!trustedDevices.TryGetValue(publicKey, out var existing)
+                || !string.Equals(existing.Address, address, StringComparison.OrdinalIgnoreCase)) return false;
+            trustedDevices[publicKey] = existing with { Address = null };
+            saveTrustStore();
+            return true;
+        }
+    }
+
     public void Untrust(string key)
     {
         lock (gate)

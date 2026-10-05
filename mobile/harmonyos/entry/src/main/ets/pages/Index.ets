@@ -41,7 +41,7 @@ import { deviceFingerprint, effectiveDeviceName, getLocalDeviceName, normalizeDe
 import { FileStore } from '../storage/FileStore';
 import { FilePayload } from '../storage/FilePayload';
 import { safeFileName } from '../storage/FileNames';
-import { SHARED_IN_EVENT, SharedIn, takePendingShares } from '../share/ShareIntake';
+import { CopyRefusal, SHARED_IN_EVENT, SharedIn, removeQuietly, takePendingShares } from '../share/ShareIntake';
 import { entryKey } from '../storage/DeletedEntries';
 import { Discovery, PeerBeacon } from '../networking/Discovery';
 import { TcpServer, connectTcp } from '../networking/TcpTransport';
@@ -332,6 +332,15 @@ function shareOutcomeMessage(files: number, texts: number, tooLarge: number, fol
   if (unreadable > 0) parts.push(`Couldn't add ${plural(unreadable, 'item')}.`);
   if (own > 0) parts.push(own === 1 && parts.length === 0 ? 'That is already in ClipLink.' : `${plural(own, 'item')} already in ClipLink.`);
   return parts.length > 0 ? parts.join(' ') : 'Nothing to share.';
+}
+
+// The toast for a pasted file the watcher wouldn't take (see
+// ShareIntake's copyFileIn) - the same rules as a share, said the same way.
+function pasteRefusalMessage(refused: CopyRefusal): string {
+  if (refused === 'too-large') return 'That file is over 1 GB — too large to sync.';
+  if (refused === 'folder') return 'Only files can be synced, not folders.';
+  if (refused === 'own') return 'That is already in ClipLink.';
+  return "Couldn't read that file.";
 }
 
 // Full-text view for the synced-item long-press menu's "Select text" option.
@@ -1260,6 +1269,11 @@ struct Index {
     // Before the record (and the name it may hold) is gone.
     const label: string = this.peerLabel(deviceId);
     await this.trustStore.untrust(context, deviceId);
+    // Its live connection goes too, as on Windows: left open, it kept
+    // receiving everything sent from here, and could still ask for any
+    // stored file. So does a pairing request from it, should one be waiting.
+    this.syncManager?.disconnect(deviceId);
+    if (this.pendingPairingConn?.peerDeviceId === deviceId) this.rejectPairing();
     await this.refreshTrustedDevices();
     // Explicit confirmation matters here: a just-untrusted device doesn't
     // vanish from the Devices list if it's still actively beaconing (it
@@ -1740,7 +1754,9 @@ struct Index {
       return;
     }
     if (change.type === 'unsupported') {
-      promptAction.showToast({ message: `Unsupported clipboard content: ${change.detail}` });
+      promptAction.showToast({
+        message: change.refused !== undefined ? pasteRefusalMessage(change.refused) : `Unsupported clipboard content: ${change.detail}`,
+      });
       return;
     }
 
@@ -1752,27 +1768,43 @@ struct Index {
     let entryContent = change.content;
     if (change.type === 'file') {
       const fileStore = this.fileStore;
+      const path: string = change.path ?? '';
       if (fileStore === null) {
-        promptAction.showToast({ message: 'File store not ready yet — try again.' });
+        removeQuietly(path);
+        this.pasteFailed('File store not ready yet — try again.');
         return;
       }
-      // An empty file's content is '' (see ClipboardWatcher) - stored as
-      // an empty blob all the same, so its entry is an ordinary one.
-      const bytes = change.content.length > 0 ? base64Helper.decodeSync(change.content) : new Uint8Array(0);
-      if (!fileStore.exists(change.hash) && !fileStore.write(change.hash, bytes)) {
+      // The watcher's cache copy moves in, already hashed (an empty file's
+      // too: its hash is the known constant - see sha256File).
+      if (!fileStore.adopt(path, change.hash)) {
         this.log('could not store the pasted file');
+        this.pasteFailed('Could not save the file — try again.');
         return;
       }
-      const payload: FilePayload = { FileName: safeFileName(change.fileName, 'file'), FileHash: change.hash, FileSize: bytes.byteLength };
+      const payload: FilePayload = { FileName: safeFileName(change.fileName, 'file'), FileHash: change.hash, FileSize: change.size ?? 0 };
       entryContent = JSON.stringify(payload);
     }
 
-    await this.recordLocalEntry(change.type, entryContent);
+    try {
+      await this.recordLocalEntry(change.type, entryContent);
+    } catch (e) {
+      this.log(`could not sync the paste (${e})`);
+      this.pasteFailed('Could not sync that — try again.');
+      return;
+    }
 
     const count = this.syncManager?.connectionCount ?? 0;
     promptAction.showToast({
       message: count > 0 ? `Synced ${change.type} to ${count} device(s).` : `Captured ${change.type} — no devices connected yet.`,
     });
+  }
+
+  // A paste that was read but couldn't be synced: says so, and has the
+  // watcher forget the read, so the next tap tries again rather than finding
+  // the clipboard "unchanged since last sync".
+  private pasteFailed(message: string): void {
+    this.watcher.forget();
+    promptAction.showToast({ message: message });
   }
 
   // Something this device originated - a PasteButton read, or something

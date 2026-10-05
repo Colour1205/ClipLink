@@ -1,5 +1,6 @@
 package io.uaena.cliplink
 
+import io.uaena.cliplink.clipboard.sharedCopyOf
 import io.uaena.cliplink.net.FileChunkMessage
 import io.uaena.cliplink.net.FilePayload
 import io.uaena.cliplink.net.FileRequestMessage
@@ -190,6 +191,19 @@ class ShareTest {
         assertEquals("notes.txt", sharedFileName("notes.txt", null, "bin"))
         // An extension that isn't one is ignored.
         assertEquals("1234", sharedFileName(null, "1234", "../x"))
+    }
+
+    @Test
+    fun `two files with one name get a shared copy each`() {
+        val shared = temp.newFolder("shared")
+        val first = File(temp.root, hash)
+        val second = File(temp.root, "a".repeat(64))
+        // Same name - and say the same length: still two copies, never the first one's bytes twice.
+        assertEquals(File(shared, "$hash/id_ed25519"), sharedCopyOf(shared, first, "id_ed25519"))
+        assertEquals(File(shared, "${"a".repeat(64)}/id_ed25519"), sharedCopyOf(shared, second, "id_ed25519"))
+        // And a peer's name still only ever names a file in that folder.
+        assertEquals(File(shared, "$hash/passwd"), sharedCopyOf(shared, first, "../../etc/passwd"))
+        assertEquals(File(shared, "$hash/file"), sharedCopyOf(shared, first, ".."))
     }
 
     // ---- file hashes ------------------------------------------------------

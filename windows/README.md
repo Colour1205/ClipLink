@@ -48,7 +48,10 @@ it to ship it). Run it from anywhere; nothing is installed.
   the new top-level menu only takes packaged apps. Each file goes to your
   devices exactly like a copied file (a file entry in Synced, streamed to
   them; images stay files), without touching this PC's clipboard; folders
-  and files over 1 GB are skipped. ClipLink says what it shared in its
+  and files over 1 GB are skipped. A file another app has open (a Word
+  document you're editing) shares as it was last saved; one that changes
+  while it's being shared (still downloading, say) is skipped — share it
+  again once it's done. ClipLink says what it shared in its
   window, or as a notification from the tray icon. If ClipLink isn't
   running, sharing starts it (in the tray). As with copies, Synced keeps
   the latest 25 items on every device, so a device that connects after a
@@ -73,7 +76,8 @@ it to ship it). Run it from anywhere; nothing is installed.
   `devicenamedefault.txt`, `filestoredefault\` (synced files by hash) and
   `ReceivedFiles\` (files and images put on the clipboard; received images
   are named by their content, `ClipLink image <hash>.png`, only the newest 50
-  are kept, and **Clear synced history** deletes them; a copy started with
+  are kept, and **Clear synced history** deletes them — all but the one on
+  the clipboard right then, so it still pastes into a folder; a copy started with
   another `--label` keeps its received images in `receivedimages<label>\`
   instead, so it never touches these). The app's own
   preferences: `%LOCALAPPDATA%\ClipLink\settings.json`. Files opened from

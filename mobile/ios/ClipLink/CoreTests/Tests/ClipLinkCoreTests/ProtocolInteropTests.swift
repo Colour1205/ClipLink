@@ -50,6 +50,54 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertFalse(WireSignature.verify(publicKeyBase64: id, data: Data(), rawSignature: Data(count: 70)))
     }
 
+    /// Ids are compared as text everywhere else, but our own must be spotted
+    /// however a copy of it is spelt: .NET skips whitespace, Java needs no
+    /// padding, and a padding character's spare bits decode either way.
+    func testSameKeyIsFoundHoweverTheIdIsSpelt() throws {
+        let id = SoftwareIdentity().publicKeyBase64
+        let key = try XCTUnwrap(WireSignature.canonicalPublicKey(id))
+        XCTAssertEqual(key.count, 64, "the raw point")
+        XCTAssertTrue(WireSignature.isSameKey(id, id))
+
+        let wrapped = stride(from: 0, to: id.count, by: 40).map { start -> String in
+            let from = id.index(id.startIndex, offsetBy: start)
+            return String(id[from..<id.index(from, offsetBy: min(40, id.count - start))])
+        }.joined(separator: "\r\n")
+        let respelt = [
+            wrapped,
+            " " + id + "\n",
+            String(id.dropLast(2)), // no padding
+            id.replacingOccurrences(of: "A", with: "A "),
+        ]
+        for copy in respelt {
+            XCTAssertNotEqual(copy, id)
+            XCTAssertEqual(WireSignature.canonicalPublicKey(copy), key, copy.debugDescription)
+            XCTAssertTrue(WireSignature.isSameKey(copy, id), copy.debugDescription)
+            XCTAssertTrue(WireSignature.isSameKey(id, copy), copy.debugDescription)
+        }
+
+        // 91 bytes end in one byte over: its last digit's low 4 bits are
+        // spare. Any decoder that takes them set takes them as our key too.
+        let digits = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+        var chars = Array(id)
+        XCTAssertTrue(id.hasSuffix("=="))
+        let last = chars.count - 3
+        let value = try XCTUnwrap(digits.firstIndex(of: chars[last]))
+        XCTAssertEqual(value & 0x0F, 0)
+        chars[last] = digits[value | 0x05]
+        let spareBits = String(chars)
+        if Data(base64Encoded: spareBits) == Data(base64Encoded: id) {
+            XCTAssertTrue(WireSignature.isSameKey(spareBits, id))
+        }
+
+        // Anyone else's key, or no key at all, isn't ours.
+        XCTAssertFalse(WireSignature.isSameKey(SoftwareIdentity().publicKeyBase64, id))
+        XCTAssertFalse(WireSignature.isSameKey("", id))
+        XCTAssertFalse(WireSignature.isSameKey("not a key", id))
+        XCTAssertFalse(WireSignature.isSameKey(String(id.dropFirst(4)), id))
+        XCTAssertNil(WireSignature.canonicalPublicKey(Data(repeating: 1, count: 91).base64EncodedString()))
+    }
+
     // MARK: handshake / session
 
     func testSessionKeyMatchesOpenSSL() throws {

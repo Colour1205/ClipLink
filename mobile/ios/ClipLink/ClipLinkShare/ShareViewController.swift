@@ -90,9 +90,9 @@ final class ShareModel: ObservableObject {
     private var failures: [String] = []
     private var problems: [String] = []
 
-    /// Inline images bigger than this go as a file instead: every
+    /// Inline images past this many bytes in all go as files instead: every
     /// history_batch re-sends inline images, and the extension has a tight
-    /// memory budget.
+    /// memory budget (see `ItemLoader.shareCaptures`).
     private static let maxInlineImageBytes = 16 * 1024 * 1024
     /// Longest Done waits for the next file to be hashed and stored.
     private static let maxStoreWait: TimeInterval = 30
@@ -122,7 +122,7 @@ final class ShareModel: ObservableObject {
         if !handoff { engine.enterForeground() }
 
         loading = Task {
-            let shared = await ItemLoader.shareCaptures(from: providers, limit: Wire.historyCap)
+            let shared = await ItemLoader.shareCaptures(from: providers, limit: Wire.historyCap, inlineBudget: ShareModel.maxInlineImageBytes)
             guard !cancelled else {
                 shared.captures.forEach(ItemLoader.discard)
                 return
@@ -165,16 +165,8 @@ final class ShareModel: ObservableObject {
         case .text(let text):
             engine.sendText(text, completion: then)
         case .image(let png):
-            guard png.count > Self.maxInlineImageBytes else { return engine.sendImage(png: png, completion: then) }
-            let url = ItemLoader.tempURL(named: "Image.png")
-            guard (try? png.write(to: url)) != nil else {
-                ItemLoader.discardTemp(url)
-                return then(.failed("Couldn't store that image."))
-            }
-            engine.sendFile(at: url, name: "Image.png", moveIntoStore: true) { result in
-                ItemLoader.discardTemp(url)
-                then(result)
-            }
+            // Within maxInlineImageBytes: shareCaptures made any more a file.
+            engine.sendImage(png: png, completion: then)
         case .file(let url, let name):
             engine.sendFile(at: url, name: name, moveIntoStore: true, completion: then)
         }

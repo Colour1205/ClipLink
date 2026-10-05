@@ -580,10 +580,30 @@ public sealed partial class ClipLinkEngine : IDisposable
     // ClipLink" (ShareFilesAsync; how says which, for the log): signed, sent
     // to every connected device and added to history. For a file, content
     // is its FilePayload and sourceFilePath where its bytes are: they're
-    // cached in the FileStore and streamed to those devices (the others ask
-    // for them when they connect and get the entry in the history batch).
+    // cached in the FileStore first and streamed to those devices (the
+    // others ask for them when they connect and get the entry in the history
+    // batch). A file that can't be cached - it changed since it was hashed,
+    // or can't be stored - isn't sent at all: its entry would have nothing
+    // behind it, on every device, for good.
     private void PublishLocal(string content, string type, string? sourceFilePath, string how)
     {
+        FilePayload? payload = null;
+        if (type == "file" && sourceFilePath != null)
+        {
+            try { payload = JsonSerializer.Deserialize<FilePayload>(content); }
+            catch (JsonException) { }
+        }
+        if (payload != null)
+        {
+            Console.WriteLine($"[file] {how}: {payload.FileName} ({payload.FileSize} bytes, {payload.FileHash[..12]}...) - {connectionsByDeviceId.Count} peer(s) connected");
+            if (!fileStore.Exists(payload.FileHash)
+                && !LocalFiles.CopyInto(fileStore, sourceFilePath!, payload.FileHash, out var skip, out string? error))
+            {
+                Console.WriteLine($"[file] couldn't store {payload.FileName} to send it ({skip}{(error != null ? ": " + error : "")}) - not sent");
+                return;
+            }
+        }
+
         var entry = new ClipboardEntry(content, type, ownId, DateTime.UtcNow);
         var signedEntry = SigningService.Sign(entry, identity);
         var envelope = new Envelope("entry", JsonSerializer.Serialize(signedEntry));
@@ -604,40 +624,17 @@ public sealed partial class ClipLinkEngine : IDisposable
             NotifyHistoryChanged();
         }
 
-        if (type == "file" && sourceFilePath != null)
+        if (payload != null && fileStore.Exists(payload.FileHash))
         {
-            FilePayload? payload = null;
-            try { payload = JsonSerializer.Deserialize<FilePayload>(content); }
-            catch (JsonException) { }
-
-            if (payload != null)
+            foreach (var conn in connectionsByDeviceId.Values)
             {
-                Console.WriteLine($"[file] {how}: {payload.FileName} ({payload.FileSize} bytes, {payload.FileHash[..12]}...) - {connectionsByDeviceId.Count} peer(s) connected");
-                if (!fileStore.Exists(payload.FileHash))
-                {
-                    try
-                    {
-                        fileStore.CopyIn(sourceFilePath, payload.FileHash);
-                        NotifyHistoryChanged(); // its bytes are here now
-                    }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                    {
-                        Console.WriteLine($"Could not cache file locally ({ex.Message}) — won't be able to stream it to peers.");
-                    }
-                }
-                if (fileStore.Exists(payload.FileHash))
-                {
-                    foreach (var conn in connectionsByDeviceId.Values)
-                    {
-                        _ = StreamFileToPeer(conn, fileStore.GetPath(payload.FileHash), payload.FileHash);
-                    }
-                    // this exact content might already be something we were
-                    // waiting on from a peer (e.g. this device independently
-                    // captured the same file another connected device just
-                    // applied) — fulfill that now rather than leaving it stuck
-                    TryFulfillPendingEntry(payload.FileHash);
-                }
+                _ = StreamFileToPeer(conn, fileStore.GetPath(payload.FileHash), payload.FileHash);
             }
+            // this exact content might already be something we were
+            // waiting on from a peer (e.g. this device independently
+            // captured the same file another connected device just
+            // applied) — fulfill that now rather than leaving it stuck
+            TryFulfillPendingEntry(payload.FileHash);
         }
     }
 

@@ -599,6 +599,76 @@ final class EngineIntegrationTests: XCTestCase {
         untouched("beacon and trust")
     }
 
+    /// The same for a copy of our id spelt another way - re-wrapped, without
+    /// its padding, padding bits set - which still names our key: refused by
+    /// the key, not the text, even with a passcode proof made for that
+    /// spelling.
+    func testRespeltOwnIdentityIsRefusedToo() throws {
+        let (a, _) = makePair()
+        setPasscode(a, "pw")
+        a.engine.enterForeground()
+        a.engine.setPairingOpen(true)
+        wait("A listening") { a.engine.queue.sync { a.engine.status.listening } }
+        let own = a.engine.ownId
+        let passcode = PassphraseAuth.deriveKey(passphrase: "pw")
+        func untouched(_ step: String) {
+            a.engine.queue.sync {
+                XCTAssertTrue(a.engine.links.isEmpty, step)
+                XCTAssertNil(a.engine.pending, step)
+                XCTAssertTrue(a.engine.trust.all.isEmpty, step)
+                XCTAssertTrue(a.engine.sightings.isEmpty, step)
+            }
+            XCTAssertTrue(TrustStore(directory: a.dir).all.isEmpty, step)
+            XCTAssertNil(a.recorder.pairingRequest, step)
+        }
+
+        var copies = [own.replacingOccurrences(of: "A", with: "A "), String(own.dropLast(2)), own + "\r\n"]
+        // A spare bit set in the last digit, where this decoder takes it.
+        let digits = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+        var chars = Array(own)
+        if let value = digits.firstIndex(of: chars[chars.count - 3]) {
+            chars[chars.count - 3] = digits[value | 0x01]
+            if Data(base64Encoded: String(chars)) == Data(base64Encoded: own) { copies.append(String(chars)) }
+        }
+        for copy in copies {
+            let step = copy.debugDescription
+            XCTAssertNotEqual(copy, own)
+            XCTAssertTrue(a.engine.isOwnIdentity(copy), step)
+
+            // Inbound: our key under that spelling, a valid signature, and
+            // the passcode proof for that spelling.
+            let ephemeral = P256.KeyAgreement.PrivateKey().publicKey.derRepresentation
+            let signature = try a.engine.identity.sign(ephemeral)
+            let line = HandshakeMessage(
+                ephemeralPublicKey: ephemeral.base64EncodedString(),
+                identityPublicKey: copy,
+                signature: signature.base64EncodedString(),
+                passphraseProof: PassphraseAuth.proof(key: passcode, deviceId: copy),
+                deviceName: "Me Again"
+            ).jsonString()
+            let inbound = Reflector(port: a.engine.config.listenPort, handshake: line)
+            wait("A hung up on \(step)") { inbound.closed }
+            XCTAssertEqual(inbound.echoed, 0, "not one session line")
+            inbound.close()
+            untouched("handshake as \(step)")
+
+            // Nor as a beacon with that proof, a pairing code, or Trust.
+            let beacon = Beacon(tcpPort: Int(a.engine.config.listenPort), deviceId: copy, proof: PassphraseAuth.proof(key: passcode, deviceId: copy),
+                                address: nil, pairing: true, name: "Me Again", senderIP: "127.0.0.1")
+            a.engine.queue.sync { a.engine.onBeacon(beacon) }
+            a.engine.trustDevice(copy)
+            let outcome = expectation(description: "pair outcome")
+            var result: PairOutcome?
+            a.engine.pair(with: PairingInfo(publicKey: copy, address: nil).jsonString()) { o in
+                result = o
+                outcome.fulfill()
+            }
+            wait(for: [outcome], timeout: 10)
+            XCTAssertEqual(result, .ownCode, step)
+            untouched("beacon, code and trust as \(step)")
+        }
+    }
+
     func testBackgroundRefreshCatchesUpThenTearsDown() throws {
         let (a, b) = makePair()
         setPasscode(a, "pw")
@@ -800,6 +870,127 @@ final class EngineIntegrationTests: XCTestCase {
         XCTAssertFalse(requested.contains(empty), "never a file_request for an empty file")
         XCTAssertTrue(a.engine.files.exists(empty))
         again.close()
+    }
+
+    /// A peer streams every file of a share at once (Windows, Android and
+    /// HarmonyOS all do). Past `maxConcurrentIncoming`, A lets the rest go
+    /// by - and asks for each again once its stream has ended (a sender
+    /// ignores a request for a file it is still streaming), then once more
+    /// if that goes unanswered. All on the same link: no reconnect needed.
+    func testFilesSkippedForWantOfASlotAreAskedForAgain() throws {
+        let (a, _) = makePair()
+        setPasscode(a, "pw")
+        a.engine.enterForeground()
+        wait("A listening") { a.engine.queue.sync { a.engine.status.listening } }
+
+        let peer = SoftwareIdentity()
+        let link = try handshake(with: a, as: peer, named: "Peer", passcode: PassphraseAuth.deriveKey(passphrase: "pw"))
+        var requested: [String] = []
+        link.onMessage = { _, text in
+            guard let envelope = Envelope.parse(text), envelope.type == Wire.MessageType.fileRequest,
+                  let request = FileRequestMessage.parse(envelope.payload) else { return }
+            requested.append(FileStore.key(request.fileHash))
+        }
+        wait("A registered the peer") { a.recorder.connectedCount == 1 }
+        link.goLive()
+
+        // Two more files than A takes at once, two chunks each, Windows' way.
+        let count = SyncEngine.maxConcurrentIncoming + 2
+        let parts = (0..<count).map { i in [Data("file \(i), part one, ".utf8), Data("part two".utf8)] }
+        let hashes = parts.map { ContentHash.sha256Hex($0[0] + $0[1]).uppercased() }
+        let keys = hashes.map { FileStore.key($0) }
+        func chunk(_ i: Int, _ index: Int) -> String {
+            let message = FileChunkMessage(fileHash: hashes[i], chunkIndex: index, isLast: index == 1, dataBase64: parts[i][index].base64EncodedString())
+            return Envelope(type: Wire.MessageType.fileChunk, payload: message.jsonString()).jsonString()
+        }
+        func stream(_ i: Int) { (0...1).forEach { link.send(chunk(i, $0)) } }
+        func arrived(_ i: Int) -> Bool { a.engine.files.exists(hashes[i]) }
+        func asked(_ i: Int) -> Int { requested.filter { $0 == keys[i] }.count }
+
+        for i in 0..<count {
+            let payload = FilePayload(fileName: "photo-\(i).jpg", fileHash: hashes[i], fileSize: Int64(parts[i][0].count + parts[i][1].count))
+            let entry = try EntrySigning.sign(content: payload.jsonString(), type: Wire.EntryType.file, identity: peer)
+            link.send(Envelope(type: Wire.MessageType.entry, payload: entry.jsonString()).jsonString())
+        }
+        wait("A asked for each as it came") { (0..<count).allSatisfy { asked($0) == 1 } }
+
+        // Every stream at once: A takes as many as it can, the rest go by.
+        for index in 0...1 {
+            for i in 0..<count { link.send(chunk(i, index)) }
+        }
+        let taken = SyncEngine.maxConcurrentIncoming
+        wait("A has the ones it took") { (0..<taken).allSatisfy(arrived) }
+        XCTAssertFalse(arrived(taken))
+        wait("A asked again for the ones that went by") { (taken..<count).allSatisfy { asked($0) >= 2 } }
+        XCTAssertTrue((0..<taken).allSatisfy { asked($0) == 1 }, "never again for one it has")
+
+        // One is answered. The other request goes unanswered (as by a sender
+        // still busy with it); a while later (backdated here) it is asked
+        // for once more.
+        stream(taken)
+        wait("the first skipped file arrived") { arrived(taken) }
+        let last = count - 1
+        XCTAssertFalse(arrived(last))
+        let before = asked(last)
+        a.engine.queue.sync { a.engine.requestedAt[keys[last]] = Date(timeIntervalSinceNow: -SyncEngine.fileRetryInterval - 1) }
+        wait("asked once more") { asked(last) > before }
+        stream(last)
+        wait("every file delivered") { a.recorder.receivedEntries.filter { $0.0.type == Wire.EntryType.file && $0.1 != nil }.count == count }
+        XCTAssertTrue((0..<count).allSatisfy(arrived))
+        XCTAssertTrue(a.engine.queue.sync { a.engine.pendingFiles.isEmpty && a.engine.skippedStreams.isEmpty })
+        link.close()
+    }
+
+    /// A streams at most `maxStreamsPerLink` files to one peer at a time
+    /// (each holds over a megabyte in flight; the Share extension has about
+    /// 120 MB), the rest in turn - each whole, and each once.
+    func testFilesStreamToAPeerAFewAtATime() throws {
+        let (a, _) = makePair()
+        setPasscode(a, "pw")
+        a.engine.enterForeground()
+        wait("A listening") { a.engine.queue.sync { a.engine.status.listening } }
+
+        let peer = SoftwareIdentity()
+        let link = try handshake(with: a, as: peer, named: "Peer", passcode: PassphraseAuth.deriveKey(passphrase: "pw"))
+        var received: [String: Data] = [:]
+        var open: Set<String> = []
+        var mostOpen = 0
+        link.onMessage = { _, text in
+            guard let envelope = Envelope.parse(text), envelope.type == Wire.MessageType.fileChunk,
+                  let chunk = FileChunkMessage.parse(envelope.payload), let bytes = Data(base64Encoded: chunk.dataBase64) else { return }
+            let key = FileStore.key(chunk.fileHash)
+            if chunk.chunkIndex == 0 {
+                XCTAssertNil(received[key], "each file streamed once")
+                received[key] = Data()
+                open.insert(key)
+                mostOpen = max(mostOpen, open.count)
+            }
+            received[key]?.append(bytes)
+            if chunk.isLast { open.remove(key) }
+        }
+        wait("A registered the peer") { a.recorder.connectedCount == 1 }
+        link.goLive()
+
+        // Shared all at once, a few chunks each.
+        let count = SyncEngine.maxStreamsPerLink * 2 + 1
+        let sources = (0..<count).map { i in Data(repeating: UInt8(i), count: Wire.fileChunkSize * 2 + 100 * i + 1) }
+        var sent: [XCTestExpectation] = []
+        for (i, bytes) in sources.enumerated() {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("src-\(UUID().uuidString).bin")
+            try bytes.write(to: url)
+            let done = expectation(description: "file \(i) sent")
+            a.engine.sendFile(at: url, name: "file-\(i).bin", moveIntoStore: true) { result in
+                if case .sent = result { done.fulfill() } else { XCTFail("\(result)") }
+            }
+            sent.append(done)
+        }
+        wait(for: sent, timeout: 20)
+        let keys = sources.map { ContentHash.sha256Hex($0) }
+        wait("the peer has every file", timeout: 60) { keys.allSatisfy { received[$0] != nil && !open.contains($0) } }
+        for (key, bytes) in zip(keys, sources) { XCTAssertEqual(received[key], bytes) }
+        XCTAssertLessThanOrEqual(mostOpen, SyncEngine.maxStreamsPerLink)
+        wait("A's streams all ended") { a.engine.queue.sync { a.engine.streaming.isEmpty && a.engine.streamsRunning.isEmpty && a.engine.streamsQueued.isEmpty } }
+        link.close()
     }
 }
 

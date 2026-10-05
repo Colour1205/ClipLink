@@ -300,7 +300,8 @@ final class PeerLink {
             // a real peer, in either direction. Two of our own connections
             // wired together derive one key, so each would take the other's
             // lines as proof, and our own passcode proof would vouch for it.
-            if theirs.identityPublicKey == ownId {
+            // By the key itself: a re-spelt copy of our id still verifies.
+            if WireSignature.isSameKey(theirs.identityPublicKey, ownId) {
                 finish(.failure(.selfConnection))
                 return
             }

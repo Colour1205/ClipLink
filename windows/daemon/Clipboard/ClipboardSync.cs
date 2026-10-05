@@ -18,6 +18,12 @@ public class ClipboardSync
     private string? _lastKnownHash;
     private volatile bool _stopRequested;
 
+    // The received image's file (ReceivedFiles) this last put on the
+    // clipboard with the picture, and the clipboard's sequence number right
+    // after - see ImageFileOnClipboard.
+    private sealed record ImageFileWrite(string Path, uint Sequence);
+    private volatile ImageFileWrite? _imageFileWrite;
+
     // sourceFilePath is only ever set for type == "file" — it's the local path
     // to read the actual bytes from when streaming to peers. ClipLinkEngine uses
     // it; nothing else in this class needs it once the event has fired.
@@ -194,6 +200,17 @@ public class ClipboardSync
         _pendingSets.Add((content, type, 0));
     }
 
+    // The received image's file the clipboard refers to right now - the one
+    // this put there with the picture (see setContent), while nothing else
+    // has been copied since - or null. Any thread. "Clear synced history"
+    // keeps that one (ReceivedFiles.DeleteImages): a clear never touches the
+    // clipboard, and pasting the picture into a folder needs its file.
+    public string? ImageFileOnClipboard()
+    {
+        var written = _imageFileWrite;
+        return written != null && GetClipboardSequenceNumber() == written.Sequence ? written.Path : null;
+    }
+
     public void setContent(String content, string type = "text")
     {
         if (type == "text")
@@ -211,7 +228,9 @@ public class ClipboardSync
             // its content, so applying it again reuses the file (see
             // ReceivedFiles.SaveImage). If it can't be saved, the picture
             // still goes on, without the file.
-            SetImageAndFile(imageBytes, ReceivedFiles.SaveImage(imageBytes, label));
+            string? imageFile = ReceivedFiles.SaveImage(imageBytes, label);
+            SetImageAndFile(imageBytes, imageFile);
+            if (imageFile != null) _imageFileWrite = new ImageFileWrite(imageFile, GetClipboardSequenceNumber());
         }
         else if (type == "file")
         {

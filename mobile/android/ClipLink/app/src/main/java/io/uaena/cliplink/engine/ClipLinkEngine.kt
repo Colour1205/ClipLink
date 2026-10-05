@@ -29,6 +29,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -181,11 +182,15 @@ class ClipLinkEngine(context: Context) {
         started = true
 
         scope.launch {
-            // Before the TCP server starts, so no transfer is under way yet.
-            tidyFileStore()
             withContext(Dispatchers.IO) { identity.ensureKey() }
             val id = withContext(Dispatchers.IO) { identity.publicKeyBase64() }
             _ownDeviceId.value = id
+            // After the id - a capture waits for that (see readyOwnId), so
+            // this mustn't hold it up - but before the TCP server starts and
+            // before the first refreshItems, so a 0-byte file's blob is there
+            // for it. A dial onForeground makes meanwhile is safe: the sweep
+            // spares every file this process has touched.
+            tidyFileStore()
             _tailscaleIp.value = deviceSettings.tailscaleIp
             _deviceNameOverride.value = deviceSettings.deviceNameOverride
             _defaultDeviceName.value = deviceSettings.systemDeviceName()
@@ -217,6 +222,7 @@ class ClipLinkEngine(context: Context) {
         }
         syncManager.onLog = { message -> log(message) }
         syncManager.onEntryApplied = { entry -> onEntryReceived(entry) }
+        syncManager.onFileStored = { refreshItems() }
         syncManager.onSessionProven = { conn -> rememberProvenName(conn) }
         syncManager.onConnectionClosed = { conn -> forgetUnprovenName(conn) }
     }
@@ -687,13 +693,19 @@ class ClipLinkEngine(context: Context) {
             // HarmonyOS and Windows do, so a stray space on one device can't
             // silently derive a different key.
             val key = passphraseKeyStore.deriveKey(passphrase.trim())
-            val stored = synchronized(passphraseStateLock) {
-                (generation == passphraseGeneration).also { current ->
-                    if (current) passphraseKeyStore.saveKey(key)
+            // Saved and refreshed together even when the caller is cancelled
+            // meanwhile - its activity recreated by a rotation mid-derivation.
+            // Otherwise the key would be stored while the Me screen and the
+            // beacons' proof still showed the old passcode, or none.
+            withContext(NonCancellable) {
+                val stored = synchronized(passphraseStateLock) {
+                    (generation == passphraseGeneration).also { current ->
+                        if (current) passphraseKeyStore.saveKey(key)
+                    }
                 }
+                if (stored) refreshPassphraseState()
+                stored
             }
-            if (stored) refreshPassphraseState()
-            stored
         } finally {
             synchronized(passphraseStateLock) {
                 derivationsInFlight--
@@ -777,14 +789,16 @@ class ClipLinkEngine(context: Context) {
      */
     fun captureAndBroadcast(quiet: Boolean = false) {
         scope.launch {
-            when (val capture = clipboard.capture()) {
+            // On IO: a copied file is streamed into the FileStore right here.
+            when (val capture = withContext(Dispatchers.IO) { clipboard.capture() }) {
                 // `quiet` is for the automatic on-open capture: an unprompted
                 // "nothing to sync" every time the app opens is noise, but the
                 // same message after a deliberate button press is the answer.
                 null -> if (!quiet) showToast("Nothing on the clipboard to sync.")
                 is Capture.Text -> broadcastText(capture.text, quiet)
                 is Capture.Image -> broadcastImage(capture.pngBytes, quiet)
-                is Capture.Payload -> broadcastFile(capture.fileName, capture.bytes, quiet)
+                is Capture.Payload -> broadcastFile(capture, quiet)
+                is Capture.TooLarge -> if (!quiet) showToast("${capture.fileName} is over 1 GB, too big to sync.")
                 Capture.Ours -> alreadySynced(quiet)
             }
         }
@@ -836,9 +850,8 @@ class ClipLinkEngine(context: Context) {
         if (stored.isEmpty() && sharedText == null) return outcome
 
         // A cold start via the share sheet gets here while start() may still
-        // be creating the identity key - an entry signed before then would
-        // carry an empty device id.
-        val ownId = withTimeoutOrNull(READY_TIMEOUT_MS) { _ownDeviceId.first { it.isNotEmpty() } }
+        // be creating the identity key - see readyOwnId.
+        val ownId = readyOwnId()
         if (ownId == null) {
             stored.forEach { historyStore.releaseBlobIfUnused(it.hash) }
             return ShareOutcome(failed = true)
@@ -878,38 +891,56 @@ class ClipLinkEngine(context: Context) {
         return entry
     }
 
+    /**
+     * This device's id, once start() has it - or null if it never comes. A
+     * paste, the on-open capture or a share can all come first on a cold
+     * start, and an entry signed with an empty id is shown as another
+     * device's and dropped by every peer.
+     */
+    private suspend fun readyOwnId(): String? =
+        withTimeoutOrNull(READY_TIMEOUT_MS) { _ownDeviceId.first { it.isNotEmpty() } }
+
+    /** A capture [readyOwnId] gave up on - before its hash was noted, so trying again works. */
+    private fun notReady(quiet: Boolean) {
+        if (!quiet) showToast("ClipLink is still starting - try again in a moment.")
+    }
+
     private suspend fun broadcastText(text: String, quiet: Boolean = false) {
         val hash = FileStore.hashOf(text.toByteArray(Charsets.UTF_8))
         if (hash == clipboard.lastKnownHash) return alreadySynced(quiet)
+        val ownId = readyOwnId() ?: return notReady(quiet)
         clipboard.noteLocalHash(hash)
-        broadcast(Signing.sign(identity, text, ClipboardEntry.TYPE_TEXT, _ownDeviceId.value))
+        broadcast(Signing.sign(identity, text, ClipboardEntry.TYPE_TEXT, ownId))
         if (!quiet) showToast("Synced text.")
     }
 
     private suspend fun broadcastImage(pngBytes: ByteArray, quiet: Boolean = false) {
         val hash = FileStore.hashOf(pngBytes)
         if (hash == clipboard.lastKnownHash) return alreadySynced(quiet)
+        val ownId = readyOwnId() ?: return notReady(quiet)
         clipboard.noteLocalHash(hash)
         // Images travel inline as base64 in the entry itself, matching the
         // other two platforms - they are NOT sent through the file-chunk path.
         val content = B64.encode(pngBytes)
-        broadcast(Signing.sign(identity, content, ClipboardEntry.TYPE_IMAGE, _ownDeviceId.value))
+        broadcast(Signing.sign(identity, content, ClipboardEntry.TYPE_IMAGE, ownId))
         if (!quiet) showToast("Synced image.")
     }
 
-    private suspend fun broadcastFile(fileName: String, bytes: ByteArray, quiet: Boolean = false) {
-        val hash = FileStore.hashOf(bytes)
+    // A copy that goes no further here is left in the store for the next
+    // start's sweep (FileStore.sweepUnreferenced) rather than deleted now: a
+    // share of the same file may be about to record an entry for it.
+    private suspend fun broadcastFile(file: Capture.Payload, quiet: Boolean = false) {
+        val hash = file.hash
         if (hash == clipboard.lastKnownHash) return alreadySynced(quiet)
+        val ownId = readyOwnId() ?: return notReady(quiet)
         clipboard.noteLocalHash(hash)
-        // The bytes must be in the store BEFORE the entry goes out: the
-        // receiver broadcasts a file_request the instant it sees an entry it
-        // has no bytes for, and that request can come back before this
-        // coroutine would otherwise have written them.
-        withContext(Dispatchers.IO) { fileStore.write(hash, bytes) }
-        val payload = FilePayload(fileName, hash, bytes.size.toLong()).toJson()
-        broadcast(Signing.sign(identity, payload, ClipboardEntry.TYPE_FILE, _ownDeviceId.value))
+        // The bytes are in the store already (see ClipboardBridge.capture),
+        // BEFORE the entry goes out: the receiver broadcasts a file_request
+        // the instant it sees an entry it has no bytes for.
+        val payload = FilePayload(file.fileName, hash, file.size).toJson()
+        broadcast(Signing.sign(identity, payload, ClipboardEntry.TYPE_FILE, ownId))
         syncManager.tryFulfillPendingEntry(hash)
-        if (!quiet) showToast("Synced $fileName.")
+        if (!quiet) showToast("Synced ${file.fileName}.")
     }
 
     /**

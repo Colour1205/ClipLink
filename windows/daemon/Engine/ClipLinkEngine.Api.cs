@@ -480,15 +480,16 @@ public sealed partial class ClipLinkEngine
     // "Clear synced history" - every current entry is remembered as deleted,
     // so it stays cleared when peers reconnect. Every copy opened from here
     // (GetFileToOpen) but the ones the user has edited, and every image this
-    // label received and saved for the clipboard (see ReceivedFiles), goes
-    // too - best effort: one an app still has open stays. ("clear_history")
+    // label received and saved for the clipboard (see ReceivedFiles) but the
+    // one on the clipboard now, goes too - best effort: one an app still has
+    // open stays. The clipboard is left alone. ("clear_history")
     public void ClearHistory()
     {
         RequireStores();
         var removed = historyAccess.clearHistory();
         ForgetPendingApplies(removed);
         DeleteOpenCopies(OpenCopiesRoot());
-        ReceivedFiles.DeleteImages(label);
+        ReceivedFiles.DeleteImages(label, keep: clipboardSync.ImageFileOnClipboard());
         NotifyHistoryChanged();
     }
 
@@ -502,11 +503,12 @@ public sealed partial class ClipLinkEngine
     // its bytes in the FileStore, sent to every connected device and to the
     // others when they next connect - but this PC's clipboard is never
     // touched, and an image file stays a file. Folders, missing files, files
-    // over LocalFiles.MaxFileBytes and files that can't be read are skipped
-    // (see ShareResult); a path given twice is shared once. Hashing and
-    // caching a big file takes a while, so this runs off the caller's
-    // thread. Works while Faulted too: the entries wait in history for the
-    // next connection.
+    // over LocalFiles.MaxFileBytes, files that can't be read, files that
+    // change while they're read and files that can't be stored here are
+    // skipped (see ShareResult and FileSkipReason); a path given twice is
+    // shared once. Hashing and caching a big file takes a while, so this
+    // runs off the caller's thread. Works while Faulted too: the entries
+    // wait in history for the next connection.
     public async Task<ShareResult> ShareFilesAsync(IEnumerable<string> paths)
     {
         RequireStores();
@@ -529,20 +531,28 @@ public sealed partial class ClipLinkEngine
                         skipped.Add(new SkippedShare(path, skip, error));
                         continue;
                     }
+                    // Its bytes first: one that can't be cached here (disk
+                    // full, say) could never reach the other devices -
+                    // better reported than an entry with nothing behind it.
+                    // PublishLocal finds them there.
+                    if (!fileStore.Exists(payload.FileHash)
+                        && !LocalFiles.CopyInto(fileStore, path, payload.FileHash, out skip, out error))
+                    {
+                        Console.WriteLine($"[share] couldn't store it to send ({skip}{(error != null ? ": " + error : "")}): {path}");
+                        skipped.Add(new SkippedShare(path, skip, error));
+                        continue;
+                    }
                     try
                     {
-                        // Its bytes first: one that can't be cached here
-                        // (disk full, say) could never reach the other
-                        // devices - better reported than an entry with
-                        // nothing behind it. PublishLocal finds them there.
-                        if (!fileStore.Exists(payload.FileHash)) fileStore.CopyIn(path, payload.FileHash);
                         PublishLocal(JsonSerializer.Serialize(payload), "file", path, "shared");
                         shared.Add(path);
                     }
                     catch (Exception ex)
                     {
+                        // Read and stored, but its entry couldn't be (saving
+                        // history failed - disk full, say).
                         Console.WriteLine($"[share] couldn't share {path}: {ex.GetType().Name}: {ex.Message}");
-                        skipped.Add(new SkippedShare(path, FileSkipReason.Unreadable, ex.Message));
+                        skipped.Add(new SkippedShare(path, FileSkipReason.NotStored, ex.Message));
                     }
                 }
                 Console.WriteLine($"[share] shared {shared.Count} file(s), skipped {skipped.Count}");

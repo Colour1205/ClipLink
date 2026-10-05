@@ -7,13 +7,14 @@ import io.uaena.cliplink.engine.shortIdOf
 import io.uaena.cliplink.store.FileStore
 import io.uaena.cliplink.store.HistoryStore
 import io.uaena.cliplink.store.TrustStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.io.File
-import java.io.RandomAccessFile
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 
@@ -31,11 +32,14 @@ class SyncManager(
 
     private val connections = ConcurrentHashMap<String, PeerConnection>()
 
-    /** Open write handles for incoming chunk streams, keyed by file hash. */
-    private val inProgress = ConcurrentHashMap<String, RandomAccessFile>()
+    /** Incoming chunk streams, one sender's per file - see [IncomingFiles]. */
+    private val incoming = IncomingFiles<PeerConnection>(fileStore)
 
     /** Verified entries waiting on bytes that are still streaming in, keyed by hash. */
     private val pendingEntries = ConcurrentHashMap<String, ClipboardEntry>()
+
+    /** How often each file has been asked for again after a transfer of it failed - see [requestAgain]. */
+    private val retries = ConcurrentHashMap<String, Int>()
 
     /**
      * Guards against streaming the same file to the same peer twice at once
@@ -50,6 +54,13 @@ class SyncManager(
         Collections.synchronizedSet(mutableSetOf())
 
     var onEntryApplied: ((ClipboardEntry) -> Unit)? = null
+
+    /**
+     * A file's bytes arrived that no newly received entry was waiting on -
+     * an older item's, asked for again (see [requestMissingFiles]). Its item
+     * can stop saying it's still transferring.
+     */
+    var onFileStored: ((String) -> Unit)? = null
     var onLog: ((String) -> Unit)? = null
     var onConnectionsChanged: ((Int) -> Unit)? = null
 
@@ -76,10 +87,18 @@ class SyncManager(
      * every two seconds forever, and no clipboard data ever moves.
      */
     fun registerConnection(conn: PeerConnection) {
-        conn.onMessage = { message -> scope.launch { handleMessage(message, conn) } }
+        // One coroutine handles this connection's messages, one at a time and
+        // in the order they arrived. A coroutine per message, as this used to
+        // be, let a file's chunks overtake each other on their way to the
+        // disk - and the file then failed its hash check.
+        val inbox = Channel<String>(Channel.UNLIMITED)
+        conn.onMessage = { message -> inbox.trySend(message) }
+        scope.launch { handleInOrder(inbox, conn) }
         // Off the read loop - what comes of it is a trust-store write.
         conn.onSessionProven = { scope.launch(Dispatchers.IO) { onSessionProven?.invoke(conn) } }
         conn.onDisconnected = {
+            // Whatever it delivered before it went is still handled.
+            inbox.close()
             onConnectionClosed?.invoke(conn)
             // Evict only if the map still points at THIS connection. Removing
             // by device id alone meant a stale link's teardown deleted the
@@ -102,11 +121,17 @@ class SyncManager(
         // idempotent). This connection is simply dead - bail out before
         // touching the map at all, so whatever was already registered for
         // this peer (if anything) is left exactly as it was.
-        if (conn.isClosed) return
+        if (conn.isClosed) {
+            inbox.close()
+            return
+        }
 
         val previous = connections.put(conn.peerDeviceId, conn)
         onConnectionsChanged?.invoke(connections.size)
-        scope.launch { sendHistoryBatch(conn) }
+        scope.launch {
+            sendHistoryBatch(conn)
+            requestMissingFiles(conn)
+        }
 
         if (previous != null && previous !== conn) {
             // A second connection to this same peer just replaced the first
@@ -141,6 +166,39 @@ class SyncManager(
         connections.values.toList().forEach { it.close() }
         connections.clear()
         onConnectionsChanged?.invoke(0)
+    }
+
+    /** [registerConnection]'s consumer: [conn]'s messages, in order, until it closes and they're all handled. */
+    private suspend fun handleInOrder(inbox: Channel<String>, conn: PeerConnection) {
+        try {
+            for (message in inbox) {
+                try {
+                    handleMessage(message, conn)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // One bad message mustn't stop the ones after it.
+                    onLog?.invoke("couldn't handle a message from ${shortIdOf(conn.peerDeviceId)} ($e)")
+                }
+            }
+        } finally {
+            // Only now: the last chunks of a file it finished sending may
+            // still have been queued when the link went.
+            abandonTransfersFrom(conn)
+        }
+    }
+
+    /**
+     * The files [conn] was still sending can't be resumed, only started
+     * over - by another peer that has them, or by this one once it's back
+     * (see [requestMissingFiles]).
+     */
+    private fun abandonTransfersFrom(conn: PeerConnection) {
+        val abandoned = incoming.abandonAll(conn)
+        if (abandoned.isEmpty()) return
+        onLog?.invoke("${abandoned.size} file transfer(s) from ${shortIdOf(conn.peerDeviceId)} broke off")
+        val others = connections.values.filter { it !== conn }
+        abandoned.forEach { requestAgain(it, others) }
     }
 
     private suspend fun sendHistoryBatch(conn: PeerConnection) {
@@ -230,12 +288,14 @@ class SyncManager(
             // Every FileHash below has passed FileStore.isValidHash - the
             // parsers refuse anything else - so a peer can only ever name a
             // blob in the FileStore, never a path to one of this app's files.
-            Protocol.TYPE_FILE_CHUNK -> handleFileChunk(envelope.payload)
+            Protocol.TYPE_FILE_CHUNK -> handleFileChunk(envelope.payload, conn)
 
             Protocol.TYPE_FILE_REQUEST -> {
                 val request = FileRequestMessage.parse(envelope.payload) ?: return
                 if (fileStore.exists(request.fileHash)) {
-                    streamFileToPeer(conn, fileStore.path(request.fileHash), request.fileHash)
+                    // On its own coroutine: this peer's messages are handled
+                    // in order, and none should wait for a whole file to go.
+                    scope.launch { streamFileToPeer(conn, fileStore.path(request.fileHash), request.fileHash) }
                 }
                 // If we don't have it either, stay silent - the requester
                 // broadcast to everyone, someone else may have it.
@@ -285,11 +345,59 @@ class SyncManager(
             return
         }
         pendingEntries[payload.fileHash] = entry
-        val json = Protocol.envelope(
-            Protocol.TYPE_FILE_REQUEST,
-            FileRequestMessage(payload.fileHash).toJson(),
-        )
-        connections.values.forEach { conn -> scope.launch { runCatching { conn.send(json) } } }
+        sendFileRequest(payload.fileHash, connections.values)
+    }
+
+    private fun sendFileRequest(fileHash: String, to: Collection<PeerConnection>) {
+        val json = Protocol.envelope(Protocol.TYPE_FILE_REQUEST, FileRequestMessage(fileHash).toJson())
+        to.forEach { conn -> scope.launch { runCatching { conn.send(json) } } }
+    }
+
+    /**
+     * Asks a peer that just connected for every file this device is still
+     * missing: a newly received item's that broke off or failed, and any
+     * older item's whose bytes never came - the app killed mid-transfer, say.
+     * Nothing else would ever ask for them again, and the item would say
+     * "Transferring…" until it was evicted.
+     */
+    private fun requestMissingFiles(conn: PeerConnection) {
+        (pendingEntries.filterValues { !history.isDeleted(it) }.keys + missingFiles())
+            .filter { !fileStore.exists(it) && !incoming.isReceiving(it) }
+            .forEach { sendFileRequest(it, listOf(conn)) }
+    }
+
+    /** Whether an item still waits on [fileHash]'s bytes - one just received, or an older one (see [missingFiles]). */
+    private fun isWanted(fileHash: String): Boolean =
+        pendingEntries[fileHash]?.let { !history.isDeleted(it) } == true || fileHash in missingFiles()
+
+    /**
+     * The files history entries point at whose bytes aren't here. A 0-byte
+     * one is never missing - see [FileStore.storeEmpty].
+     */
+    private fun missingFiles(): Set<String> = history.all().mapNotNullTo(HashSet()) { entry ->
+        if (entry.type != ClipboardEntry.TYPE_FILE) return@mapNotNullTo null
+        FilePayload.parse(entry.content)
+            ?.takeIf { !it.isEmptyFile && !fileStore.exists(it.fileHash) }
+            ?.fileHash
+    }
+
+    /**
+     * Asks [from] for a file again after a transfer of it came to nothing -
+     * failed its hash check, broke off, or was turned away - while an item
+     * still wants it and nobody is sending it. Only [MAX_RETRIES] times
+     * between successes: a sender whose copy is bad would otherwise be asked
+     * forever. A peer connecting asks once more anyway (see [requestMissingFiles]).
+     */
+    private fun requestAgain(fileHash: String, from: Collection<PeerConnection>) {
+        val live = from.filterNot { it.isClosed }
+        if (live.isEmpty() || fileStore.exists(fileHash) || incoming.isReceiving(fileHash)) return
+        if (!isWanted(fileHash)) return
+        val tries = retries.merge(fileHash, 1, Int::plus) ?: 1
+        if (tries > MAX_RETRIES) {
+            if (tries == MAX_RETRIES + 1) onLog?.invoke("giving up on a file until a device reconnects")
+            return
+        }
+        sendFileRequest(fileHash, live)
     }
 
     /** Reads incrementally so memory stays bounded to one chunk regardless of file size. */
@@ -342,67 +450,55 @@ class SyncManager(
         }
     }
 
-    private suspend fun handleFileChunk(payload: String) = withContext(Dispatchers.IO) {
+    private suspend fun handleFileChunk(payload: String, conn: PeerConnection) = withContext(Dispatchers.IO) {
         val chunk = FileChunkMessage.parse(payload) ?: return@withContext
         // Empty is a chunk too: iOS ends an empty file - or one that shrank
         // while it was sending - with one.
         val bytes = if (chunk.dataBase64.isEmpty()) ByteArray(0) else B64.decodeOrNull(chunk.dataBase64)
         if (bytes == null) return@withContext
 
-        val handle = inProgress.getOrPut(chunk.fileHash) {
-            val temp = fileStore.tempPath(chunk.fileHash)
-            temp.parentFile?.mkdirs()
-            temp.delete()
-            RandomAccessFile(temp, "rw")
+        when (val result = incoming.receive(conn, chunk, bytes)) {
+            IncomingFiles.Result.Written -> Unit
+            IncomingFiles.Result.Stored -> {
+                retries.remove(chunk.fileHash)
+                if (!tryFulfillPendingEntry(chunk.fileHash)) onFileStored?.invoke(chunk.fileHash)
+            }
+            // Corrupted in transit, tampered with, or a stream with a gap.
+            // The entry still waits: ask again, since another peer's copy -
+            // or this one's next stream - may be intact.
+            is IncomingFiles.Result.Failed -> {
+                onLog?.invoke("${result.reason} - discarding")
+                requestAgain(chunk.fileHash, connections.values)
+            }
+            // The end of a stream this device couldn't use - one already
+            // under way when another sender's copy failed, say. With nobody
+            // else sending it now, this one may as well start over.
+            IncomingFiles.Result.Ignored -> if (chunk.isLast) requestAgain(chunk.fileHash, listOf(conn))
         }
-
-        try {
-            handle.write(bytes)
-        } catch (e: Exception) {
-            onLog?.invoke("failed writing file chunk ($e) - abandoning this transfer")
-            inProgress.remove(chunk.fileHash)
-            runCatching { handle.close() }
-            return@withContext
-        }
-
-        if (!chunk.isLast) return@withContext
-
-        inProgress.remove(chunk.fileHash)
-        runCatching { handle.close() }
-
-        val temp = fileStore.tempPath(chunk.fileHash)
-        val actualHash = FileStore.hashOf(temp)
-        if (!actualHash.equals(chunk.fileHash, ignoreCase = true)) {
-            // Corrupted in transit or tampered with. The hash inside the
-            // SIGNED entry is what's trusted here, never whatever bytes
-            // actually turned up.
-            onLog?.invoke("file transfer failed hash verification - discarding")
-            temp.delete()
-            pendingEntries.remove(chunk.fileHash)
-            return@withContext
-        }
-
-        temp.renameTo(fileStore.path(chunk.fileHash))
-        tryFulfillPendingEntry(chunk.fileHash)
     }
 
     /**
      * A blob can become available more than one way - a completed chunk
      * stream, or this device capturing the same file locally. Whichever it
-     * was, an entry waiting on that hash should now be applied.
+     * was, an entry waiting on that hash should now be applied. False when
+     * none was waiting.
      */
-    fun tryFulfillPendingEntry(fileHash: String) {
-        val entry = pendingEntries.remove(fileHash) ?: return
+    fun tryFulfillPendingEntry(fileHash: String): Boolean {
+        val entry = pendingEntries.remove(fileHash) ?: return false
         // Deleted while its bytes were still on the way: it must not land on
         // the clipboard now, and the bytes that just arrived are nobody's.
         if (history.isDeleted(entry)) {
             history.releaseBlobIfUnused(fileHash)
-            return
+            return true
         }
         onEntryApplied?.invoke(entry)
+        return true
     }
 
     private companion object {
         const val CHUNK_SIZE = 256 * 1024
+
+        /** See [requestAgain]. */
+        const val MAX_RETRIES = 3
     }
 }

@@ -67,13 +67,17 @@ enum ItemLoader {
     /// being marked up, a picture held by a web view) as an inline image,
     /// like a copy; and text or a link only when nothing else came with it -
     /// the caption or page link an app attaches to what it shares isn't the
-    /// thing being shared. At most `limit` items are read: the history holds
-    /// no more, and the first ones would be evicted - their bytes deleted -
-    /// before a peer could fetch them. Cancelling the task stops it after
-    /// the item being read.
-    static func shareCaptures(from providers: [NSItemProvider], limit: Int) async -> SharedItems {
+    /// thing being shared. Then every text and link goes, as one text: an
+    /// app sharing a caption and a link passes them separately. Inline
+    /// images are all held until every item is read, so past `inlineBudget`
+    /// bytes in all, the rest go as image files. At most `limit` items are
+    /// read: the history holds no more, and the first ones would be
+    /// evicted - their bytes deleted - before a peer could fetch them.
+    /// Cancelling the task stops it after the item being read.
+    static func shareCaptures(from providers: [NSItemProvider], limit: Int, inlineBudget: Int) async -> SharedItems {
         var items = SharedItems()
-        var text: Capture?
+        var texts: [String] = []
+        var inlineBytes = 0
         for provider in providers {
             if Task.isCancelled { break }
             guard items.captures.count < limit else {
@@ -93,8 +97,16 @@ enum ItemLoader {
             case .notAFile:
                 let loaded = await capture(from: [provider])
                 switch loaded {
-                case .some(.text):
-                    if text == nil { text = loaded }
+                case .some(.text(let text)):
+                    // Each once: a caption often carries the link shared with it.
+                    guard !texts.contains(where: { $0.contains(text) }) else { break }
+                    texts.removeAll { text.contains($0) }
+                    texts.append(text)
+                case .some(.image(let png)) where inlineBytes + png.count > inlineBudget:
+                    if let written = imageFile(png) { items.captures.append(written) } else { items.unreadable += 1 }
+                case .some(.image(let png)):
+                    inlineBytes += png.count
+                    items.captures.append(.image(png: png))
                 case .some(let other):
                     items.captures.append(other)
                 case .none:
@@ -102,8 +114,18 @@ enum ItemLoader {
                 }
             }
         }
-        if items.captures.isEmpty, let text { items.captures = [text] }
+        if items.captures.isEmpty, !texts.isEmpty { items.captures = [.text(texts.joined(separator: "\n"))] }
         return items
+    }
+
+    /// An image held in memory, written out to go as a file instead.
+    private static func imageFile(_ png: Data) -> Capture? {
+        let url = tempURL(named: "Image.png")
+        guard (try? png.write(to: url)) != nil else {
+            discardTemp(url)
+            return nil
+        }
+        return .file(url, name: "Image.png")
     }
 
     private enum SharedFile {

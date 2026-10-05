@@ -71,9 +71,12 @@ public static class ReceivedFiles
         }
     }
 
-    // "Clear synced history": every image `label` received goes too. Best
+    // "Clear synced history": every image `label` received goes too - but
+    // keep, the one the clipboard refers to now (ClipboardSync.
+    // ImageFileOnClipboard): a clear leaves the clipboard alone, and pasting
+    // it into a folder needs the file. Trimmed like any other later. Best
     // effort - one an app still has open stays.
-    public static void DeleteImages(string label)
+    public static void DeleteImages(string label, string? keep)
     {
         string dir = ImagesPath(label);
         try
@@ -81,6 +84,7 @@ public static class ReceivedFiles
             if (!Directory.Exists(dir)) return;
             foreach (var file in Images(dir).ToList())
             {
+                if (keep != null && string.Equals(file.FullName, Path.GetFullPath(keep), StringComparison.OrdinalIgnoreCase)) continue;
                 TryDelete(file.FullName);
             }
         }
