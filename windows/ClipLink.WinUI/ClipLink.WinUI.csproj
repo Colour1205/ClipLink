@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ClipLink.exe, the Windows app, in WinUI 3 (Windows App SDK): Mica, the
+       native Fluent controls and DirectManipulation touchpad scrolling. The
+       sync engine (../daemon, ClipLinkEngine) runs in-process.
+       Unpackaged and self-contained: `dotnet build` for development;
+       ../publish.ps1 makes the folder that the installer packs. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <Platforms>x64</Platforms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>ClipLink</AssemblyName>
+    <RootNamespace>ClipLink</RootNamespace>
+    <Product>ClipLink</Product>
+    <Version>1.0.0</Version>
+    <ApplicationIcon>..\ClipLink.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <!-- Program.Main is the entry point (the single-instance check runs
+         before WinUI starts). -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <DebugType>embedded</DebugType>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\daemon\ClipboardDaemon.csproj" />
+  </ItemGroup>
+
+</Project>
