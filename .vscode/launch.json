@@ -6,7 +6,7 @@
             "type": "coreclr",
             "request": "launch",
             "preLaunchTask": "build-cliplink",
-            "program": "${workspaceFolder}/windows/ClipLink/bin/Debug/net10.0-windows/win-x64/ClipLink.dll",
+            "program": "${workspaceFolder}/windows/ClipLink/bin/Debug/net10.0-windows10.0.19041.0/win-x64/ClipLink.exe",
             "args": [],
             "cwd": "${workspaceFolder}/windows/ClipLink",
             "console": "internalConsole",

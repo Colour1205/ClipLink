@@ -1,7 +1,7 @@
 using System.ComponentModel;
-using System.Windows.Media;
 using ClipboardDaemon.Engine;
-using Wpf.Ui.Controls;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 
 namespace ClipLink;
 
@@ -34,17 +34,20 @@ public sealed class HistoryCard : Observable
 
     public string KindText => IsLink ? "Link" : IsText ? "Text" : IsImage ? "Image" : IsFile ? "File" : "Item";
 
-    public SymbolRegular KindIcon => IsLink ? SymbolRegular.Link24
-        : IsText ? SymbolRegular.TextDescription24
-        : IsImage ? SymbolRegular.Image24
-        : IsFile ? SymbolRegular.Document24
-        : SymbolRegular.DocumentQuestionMark24;
+    public Symbol KindSymbol => IsLink ? Symbol.Link
+        : IsText ? Symbol.Font
+        : IsImage ? Symbol.Pictures
+        : IsFile ? Symbol.Document
+        : Symbol.Help;
 
     // Names come from other devices: only ever through DeviceLabel.Of.
     public string Source => Item.FromThisDevice ? "This PC" : DeviceLabel.Of(Item.DeviceId, Item.DeviceName);
 
     public string When => Format.When(Item.TimestampUtc, DateTime.UtcNow);
     public string WhenExactly => Format.Exactly(Item.TimestampUtc);
+
+    // "Text  ·  5 min ago  ·  Pixel 8": what the list card's top line says.
+    public string Summary => $"{KindText}  ·  {When}  ·  {Source}";
 
     // The text as sent (untrusted, shown as plain text only), without the
     // blank lines around it.
@@ -75,15 +78,24 @@ public sealed class HistoryCard : Observable
     public ImageSource? Thumbnail
     {
         get => thumbnail;
-        set { thumbnail = value; Raise(nameof(Thumbnail), nameof(ImageDetail), nameof(ThumbnailWidth), nameof(ThumbnailHeight), nameof(AspectRatio)); }
+        set
+        {
+            thumbnail = value;
+            Raise(nameof(Thumbnail), nameof(HasThumbnail), nameof(NoThumbnail), nameof(ImageDetail), nameof(ThumbnailWidth), nameof(ThumbnailHeight), nameof(AspectRatio));
+        }
     }
+
+    public bool HasThumbnail => thumbnail != null;
+    public bool NoThumbnail => thumbnail == null;
 
     private bool thumbnailFailed;
     public bool ThumbnailFailed
     {
         get => thumbnailFailed;
-        set { thumbnailFailed = value; Raise(nameof(ThumbnailFailed), nameof(ImageDetail)); }
+        set { thumbnailFailed = value; Raise(nameof(ThumbnailFailed), nameof(PlaceholderSymbol), nameof(ImageDetail)); }
     }
+
+    public Symbol PlaceholderSymbol => thumbnailFailed ? Symbol.Cancel : Symbol.Pictures;
 
     public bool ThumbnailRequested { get; set; }
 
@@ -137,12 +149,12 @@ public sealed class HistoryCard : Observable
     {
         if (item == Item) return;
         Item = item;
-        Raise(nameof(Item), nameof(Source), nameof(Text), nameof(PreviewText), nameof(GridPreviewText), nameof(FileName), nameof(FileDetail), nameof(ImageDetail),
+        Raise(nameof(Item), nameof(Source), nameof(Summary), nameof(Text), nameof(PreviewText), nameof(GridPreviewText), nameof(FileName), nameof(FileDetail), nameof(ImageDetail),
             nameof(CanCopy), nameof(CanOpen), nameof(AutomationName), nameof(Origin));
     }
 
     // The relative time moved on.
-    public void Tick() => Raise(nameof(When), nameof(AutomationName));
+    public void Tick() => Raise(nameof(When), nameof(Summary), nameof(AutomationName));
 
     // What UI Automation calls the list item.
     public override string ToString() => AutomationName;
@@ -186,6 +198,9 @@ public sealed class DeviceRow : Observable
 
     public string AutomationName => $"{Title}, {Details}";
 
+    public string RemoveLabel => $"Remove {Title}";
+    public string TrustLabel => $"Trust {Title}";
+
     public override string ToString() => AutomationName;
 
     public void Update(DeviceListing listing)
@@ -197,6 +212,7 @@ public sealed class DeviceRow : Observable
             return;
         }
         Listing = listing;
-        Raise(nameof(Listing), nameof(Trusted), nameof(Connected), nameof(Title), nameof(Status), nameof(Details), nameof(AutomationName));
+        Raise(nameof(Listing), nameof(Trusted), nameof(Connected), nameof(Title), nameof(Status), nameof(Details), nameof(AutomationName),
+            nameof(IdToolTip), nameof(RemoveLabel), nameof(TrustLabel));
     }
 }

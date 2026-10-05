@@ -1,5 +1,5 @@
 // Step 4 of the build order in ../../../../README.md: local persistence.
-// Mirrors windows/daemon/Storage/FileStore.cs — content-addressed blob
+// Mirrors windows/ClipLink/Engine/Storage/FileStore.cs — content-addressed blob
 // storage keyed by SHA-256 hex hash. Descriptor-only by design: this class
 // never embeds file bytes in any message, matching FilePayload.cs's own
 // comment to that effect. Chunked streaming (build order step 10) will

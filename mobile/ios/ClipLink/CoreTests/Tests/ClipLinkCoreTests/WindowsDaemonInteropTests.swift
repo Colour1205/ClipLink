@@ -6,7 +6,7 @@ import ImageIO
 import XCTest
 @testable import ClipLinkCore
 
-/// The iOS engine against the REAL Windows daemon code (windows/daemon, built
+/// The iOS engine against the REAL Windows daemon code (windows/ClipLink/Engine, built
 /// for macOS with only platform shims - see CoreTests/DaemonHarness). Every
 /// byte the daemon sends or checks comes from its own PeerConnection,
 /// SigningService, PassphraseAuth, Discovery, HistoryAccess and

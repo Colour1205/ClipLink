@@ -1,5 +1,5 @@
 // Step 4 of the build order in ../../../../README.md: local persistence.
-// Mirrors windows/daemon/Identity/TrustStore.cs. Preferences only stores
+// Mirrors windows/ClipLink/Engine/Identity/TrustStore.cs. Preferences only stores
 // flat ValueType entries (no nested objects/arrays), so the whole trusted-
 // device list is kept as one JSON-serialized string under a single key —
 // same tradeoff the Windows version makes with a single JSON file, and

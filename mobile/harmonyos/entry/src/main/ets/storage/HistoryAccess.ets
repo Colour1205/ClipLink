@@ -1,5 +1,5 @@
 // Step 8 of the build order in ../../../../README.md: full sync.
-// Mirrors windows/daemon/Storage/HistoryAccess.cs — same 25-item cap,
+// Mirrors windows/ClipLink/Engine/Storage/HistoryAccess.cs — same 25-item cap,
 // oldest-first eviction, same file-blob cleanup on eviction for file-type
 // entries. Preferences only stores flat ValueType entries, so (same
 // tradeoff as TrustStore.ets) the whole history is kept as one

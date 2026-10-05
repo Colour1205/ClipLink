@@ -12,7 +12,7 @@ namespace ClipLink;
 // Explorer's "Share to ClipLink" - sends one message here and exits.
 // Commands: "activate" (show the window), "share" (Paths: files to send) and
 // "unregister" (ClipLink.exe --unregister: take "Share to ClipLink" out of
-// File Explorer and turn its setting off). This pipe is the app's only one:
+// File Explorer and turn its setting off) and "quit" (ClipLink.exe --quit). This pipe is the app's only one:
 // the engine has no control pipe, and this one can't reach it.
 // CurrentUserOnly, so other users' processes can't connect; the name carries
 // the session id because pipe names are machine-wide while the mutex is per
@@ -28,6 +28,7 @@ internal static class InstancePipe
     public const string Activate = "activate";
     public const string Share = "share";
     public const string Unregister = "unregister";
+    public const string Quit = "quit";
 
     // One JSON line; anything longer isn't one of ours. (Send To's command
     // line tops out around 32,000 characters.)

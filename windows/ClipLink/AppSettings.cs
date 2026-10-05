@@ -19,6 +19,9 @@ internal sealed class AppSettings
     // The Synced page shows its cards as a grid rather than a list.
     public bool SyncedGridView { get; set; }
 
+    // The navigation pane is collapsed to icons only.
+    public bool NavPaneCollapsed { get; set; }
+
     // "Show 'Share to ClipLink' in File Explorer" (ShellIntegration). Null
     // until the user chooses: on for the real ClipLink, off for a test copy
     // (another --label) - see ExplorerShareMenuOn.

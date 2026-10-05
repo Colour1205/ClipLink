@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Builds a macOS-runnable copy of the REAL Windows engine for interop tests.
 
-Copies windows/daemon/**/*.cs (the ClipLinkEngine library the Windows app
+Copies windows/ClipLink/Engine/**/*.cs (the ClipLinkEngine the Windows app
 runs in-process) verbatim into <out>/src and applies only platform shims -
 nothing that touches networking, crypto, JSON, history, trust or
 file-transfer logic:
@@ -18,7 +18,11 @@ Usage: prepare.py <repo-root> <out-dir>
 import os, re, shutil, sys
 
 repo, out = sys.argv[1], sys.argv[2]
-daemon = os.path.join(repo, "windows", "daemon")
+# The engine's files are in windows/ClipLink/Engine: ClipLinkEngine*.cs and a few
+# others at its top, the rest in Clipboard/, Crypto/, Identity/, Networking/ and
+# Storage/. Here they go to src/Engine/ (top-level ones) and src/<folder>/, which
+# is the layout the patches below name.
+daemon = os.path.join(repo, "windows", "ClipLink", "Engine")
 src = os.path.join(out, "src")
 shutil.rmtree(out, ignore_errors=True)
 for root, dirs, files in os.walk(daemon):
@@ -26,6 +30,8 @@ for root, dirs, files in os.walk(daemon):
     for f in files:
         if f.endswith(".cs"):
             rel = os.path.relpath(os.path.join(root, f), daemon)
+            if os.path.dirname(rel) == "":
+                rel = os.path.join("Engine", rel)
             os.makedirs(os.path.join(src, os.path.dirname(rel)), exist_ok=True)
             shutil.copy(os.path.join(root, f), os.path.join(src, rel))
 here = os.path.dirname(os.path.abspath(__file__))

@@ -1,5 +1,5 @@
 // Step 4 of the build order in ../../../../README.md: local persistence.
-// Mirrors windows/daemon/Identity/DeviceIdentity.cs, but the private key
+// Mirrors windows/ClipLink/Engine/Identity/DeviceIdentity.cs, but the private key
 // never leaves HUKS (Hardware Universal Keystore) — no exportable bytes
 // exist at all, unlike the Windows version's DPAPI-encrypted file. The
 // public key format (X.509 SubjectPublicKeyInfo DER, base64) matches

@@ -1,29 +1,30 @@
 using System.Reflection;
-using System.Windows;
-using System.Windows.Threading;
 using ClipboardDaemon.Engine;
-using Wpf.Ui.Appearance;
-using Wpf.Ui.Controls;
-using WinForms = System.Windows.Forms;
+using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
+using Microsoft.Win32;
 
 namespace ClipLink;
 
 // The app: the engine, the tray icon and the window, all in one process.
 // Lives in the tray from start to Quit - the window comes and goes (closing
-// it only hides it); only Settings > Quit ends it.
+// it only hides it); only Quit (tray menu or Settings) ends it.
 public partial class App : Application
 {
     private readonly AppOptions options;
     private readonly CancellationTokenSource quitting = new();
+    private readonly DispatcherQueue dispatcher = DispatcherQueue.GetForCurrentThread();
     private AppSettings settings = new();
     private EngineHost? host;
-    private WinForms.NotifyIcon? tray;
+    private Tray? tray;
     private MainWindow? window;
     private ShareBatcher? shares;
 
     internal App(AppOptions options)
     {
         this.options = options;
+        InitializeComponent();
+        UnhandledException += OnUnhandledUiException;
     }
 
     internal static App Instance => (App)Current;
@@ -33,34 +34,40 @@ public partial class App : Application
     internal static MainWindow MainAppWindow => Instance.window ?? throw new InvalidOperationException("The window isn't set up yet.");
 
     public static bool IsQuitting { get; private set; }
+    public static int ExitCode { get; private set; }
 
     public static string Version { get; } =
         typeof(App).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0]
         ?? typeof(App).Assembly.GetName().Version?.ToString(3) ?? "";
 
-    protected override void OnStartup(StartupEventArgs e)
+    // --theme light|dark, for testing; otherwise the app follows Windows.
+    internal static ElementTheme ThemeOverride => Options.Theme switch
     {
-        base.OnStartup(e);
-        DispatcherUnhandledException += OnUnhandledUiException;
-        AppDomain.CurrentDomain.UnhandledException += (_, args) => Console.WriteLine($"[app] fatal error: {args.ExceptionObject}");
-        TaskScheduler.UnobservedTaskException += (_, args) =>
+        "light" => ElementTheme.Light,
+        "dark" => ElementTheme.Dark,
+        _ => ElementTheme.Default,
+    };
+
+    protected override void OnLaunched(LaunchActivatedEventArgs args)
+    {
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => Console.WriteLine($"[app] fatal error: {e.ExceptionObject}");
+        TaskScheduler.UnobservedTaskException += (_, e) =>
         {
-            Console.WriteLine($"[app] unobserved task error: {args.Exception.GetBaseException()}");
-            args.SetObserved();
+            Console.WriteLine($"[app] unobserved task error: {e.Exception.GetBaseException()}");
+            e.SetObserved();
         };
 
-        ApplyTheme();
         settings = AppSettings.Load(options);
 
         // Files to share arrive one by one (File Explorer starts a ClipLink
         // per selected file) - gathered, then shared together on this thread.
-        shares = new ShareBatcher(paths => Dispatcher.BeginInvoke(() => ShareNow(paths)));
+        shares = new ShareBatcher(paths => dispatcher.TryEnqueue(() => ShareNow(paths)));
 
         // Listening before anything slow, so a second launch right now
         // gets through sooner (it keeps trying for a while).
-        _ = InstancePipe.ListenAsync(options.Label, message => Dispatcher.BeginInvoke(() => OnInstanceMessage(message)), quitting.Token);
+        _ = InstancePipe.ListenAsync(options.Label, message => dispatcher.TryEnqueue(() => OnInstanceMessage(message)), quitting.Token);
 
-        host = new EngineHost(Dispatcher);
+        host = new EngineHost(dispatcher);
         bool running;
         try
         {
@@ -71,15 +78,16 @@ public partial class App : Application
             // The stores couldn't be loaded (e.g. the data folder can't be
             // written) - nothing works without them.
             Console.WriteLine($"[app] couldn't start the engine: {ex}");
-            System.Windows.MessageBox.Show($"ClipLink couldn't start.\n\n{ex.Message}", "ClipLink",
-                System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
-            Shutdown(1);
+            ExitCode = 1;
+            Program.ShowError($"ClipLink couldn't start.\n\n{ex.Message}");
+            Exit();
             return;
         }
 
-        CreateTrayIcon();
+        tray = new Tray(options.IsDefaultLabel ? "ClipLink" : $"ClipLink ({options.Label})", ShowMainWindow, Quit);
         SetUpSignInStartup();
         SetUpShellIntegration();
+        SystemEvents.SessionEnding += (_, e) => dispatcher.TryEnqueue(Quit); // signing out or shutting down
 
         window = new MainWindow(host);
         // A share that found no ClipLink running started this one: it stays
@@ -91,66 +99,11 @@ public partial class App : Application
         else if (!running)
         {
             // Started at sign-in with nobody looking: say so from the tray.
-            tray!.ShowBalloonTip(10_000, "ClipLink can't sync", host.Status.Error ?? "Open ClipLink to see why.", WinForms.ToolTipIcon.Warning);
+            tray.Notify("ClipLink can't sync", host.Status.Error ?? "Open ClipLink to see why.", warning: true);
         }
 
         // With whatever other launches forward meanwhile.
         if (options.SharePaths is { Count: > 0 } paths) OnShare(paths);
-    }
-
-    private void ApplyTheme()
-    {
-        // Before applying, so the first theme is tuned too; SystemThemeWatcher
-        // switching later raises it again.
-        ApplicationThemeManager.Changed += (theme, _) => TuneSecondaryText(theme);
-        if (options.Theme == null)
-        {
-            ApplicationThemeManager.ApplySystemTheme(updateAccent: true);
-        }
-        else
-        {
-            ApplicationThemeManager.Apply(options.Theme == "light" ? ApplicationTheme.Light : ApplicationTheme.Dark,
-                WindowBackdropType.Mica, updateAccent: true);
-        }
-        TuneSecondaryText(ApplicationThemeManager.GetAppTheme());
-    }
-
-    // WPF draws small text on Mica (grayscale antialiasing) noticeably
-    // lighter than WinUI does: in light theme the Fluent secondary text
-    // colour (#9E000000) came out around #8C8C8C - about 3.3:1 on a card,
-    // under the 4.5:1 that captions and descriptions need. A darker brush
-    // here renders as that token looks in Windows' own apps (about #626262).
-    // Dark theme renders brighter than its token, so it keeps Wpf.Ui's.
-    private void TuneSecondaryText(ApplicationTheme theme)
-    {
-        const string key = "TextFillColorSecondaryBrush";
-        if (theme == ApplicationTheme.Light)
-        {
-            var brush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromArgb(0xC4, 0, 0, 0));
-            brush.Freeze();
-            // App-level keys win over the merged theme dictionaries.
-            Resources[key] = brush;
-        }
-        else
-        {
-            Resources.Remove(key);
-        }
-    }
-
-    private void CreateTrayIcon()
-    {
-        tray = new WinForms.NotifyIcon
-        {
-            Icon = AppIcon.Tray,
-            Text = options.IsDefaultLabel ? "ClipLink" : $"ClipLink ({options.Label})",
-            Visible = true,
-            // No ContextMenuStrip, on purpose: a right click does nothing.
-        };
-        tray.MouseClick += (_, e) =>
-        {
-            if (e.Button == WinForms.MouseButtons.Left) ShowMainWindow();
-        };
-        tray.BalloonTipClicked += (_, _) => ShowMainWindow();
     }
 
     // On by default the first time the real ClipLink runs; after that it's
@@ -220,9 +173,7 @@ public partial class App : Application
     public void ShowMainWindow()
     {
         if (window == null || IsQuitting) return;
-        window.Show();
-        if (window.WindowState == WindowState.Minimized) window.WindowState = WindowState.Normal;
-        window.Activate();
+        window.Present();
     }
 
     private void OnInstanceMessage(InstancePipe.Message message)
@@ -247,6 +198,10 @@ public partial class App : Application
                 {
                     Console.WriteLine($"[shell] couldn't remove \"Share to ClipLink\": {ex.Message}");
                 }
+                break;
+            case InstancePipe.Quit:
+                Console.WriteLine("[instance] another launch asked to quit");
+                Quit();
                 break;
             default:
                 Console.WriteLine($"[instance] unknown command \"{message.Command}\" - ignored");
@@ -287,21 +242,19 @@ public partial class App : Application
     // behind it.
     private void Notify(ShareSummary summary)
     {
-        if (window is { IsVisible: true, IsActive: true } && window.WindowState != WindowState.Minimized)
+        if (window is { IsInFront: true })
         {
             if (summary.IsError) window.ToastError(summary.Title, summary.Message);
             else window.Toast(summary.Title, summary.Message);
         }
         else
         {
-            // (Windows cuts a notification's text at 255 characters.)
             string text = summary.Message.Length > 0 ? summary.Message : summary.Title;
-            if (text.Length > 250) text = text[..249] + "…";
-            tray?.ShowBalloonTip(5000, summary.Title, text, summary.IsError ? WinForms.ToolTipIcon.Warning : WinForms.ToolTipIcon.Info);
+            tray?.Notify(summary.Title, text, summary.IsError);
         }
     }
 
-    // Settings > Quit - the only way out.
+    // Quit (the tray menu or Settings) - the only way out.
     public void Quit()
     {
         if (IsQuitting) return;
@@ -311,24 +264,14 @@ public partial class App : Application
         shares?.Dispose();
         // First, so peers see this device go right away.
         host?.Stop();
-        if (tray != null)
-        {
-            // Or its icon lingers in the tray until the mouse passes over it.
-            tray.Visible = false;
-            tray.Dispose();
-        }
+        // Or its icon lingers in the tray until the mouse passes over it.
+        tray?.Dispose();
         window?.Close();
-        Shutdown();
-    }
-
-    protected override void OnSessionEnding(SessionEndingCancelEventArgs e)
-    {
-        base.OnSessionEnding(e);
-        if (!e.Cancel) Quit(); // signing out or shutting down
+        Exit();
     }
 
     // A bug in the UI mustn't take the engine (and syncing) down with it.
-    private void OnUnhandledUiException(object sender, DispatcherUnhandledExceptionEventArgs e)
+    private void OnUnhandledUiException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
     {
         Console.WriteLine($"[app] unexpected error (kept running): {e.Exception}");
         e.Handled = true;

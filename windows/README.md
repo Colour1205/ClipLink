@@ -3,40 +3,66 @@
 Windows implementation: one app, `ClipLink.exe` — a tray icon and a window —
 with the always-on P2P node running inside it.
 
-- `daemon/` — the engine library (`ClipLinkEngine`): discovery, peer
-  connections, clipboard watcher, history store, trust and pairing. See
-  `daemon/README.md`.
-- `ClipLink/` — the app (WPF + [WPF-UI](https://github.com/lepoco/wpfui)):
-  the tray icon and the Fluent window (synced history, devices and pairing,
-  settings), running the engine in-process.
-- `ClipLink.slnx` — both projects, for Visual Studio / `dotnet build`.
-- `publish.ps1` — builds the release exe into `dist/` (git-ignored).
-- `ClipLink.ico` — the app icon, shared by the projects.
+- `ClipLink/` — the app: WinUI 3 (Windows App SDK) with Mica and the native
+  Fluent controls — the tray icon and the window (synced history, devices and
+  pairing, settings).
+  - `ClipLink/Engine/` — the sync engine (`ClipLinkEngine`): discovery, peer
+    connections, clipboard watcher, history store, trust and pairing, running
+    in-process. See `ClipLink/Engine/README.md`.
+- `installer/ClipLink.iss` — the installer script (Inno Setup).
+- `ClipLink.slnx` — the solution, for Visual Studio / `dotnet build`.
+- `publish.ps1` — builds the app folder and the installer into `dist/`
+  (git-ignored).
+- `ClipLink.ico` — the app icon.
 
-Stack: .NET 10 (C#) — Win32 clipboard access through WinForms, plain sockets.
+Stack: .NET 10 (C#) — WinUI 3, Win32 clipboard access through WinForms, plain
+sockets.
 
 ## Build, publish, run
 
-Needs the .NET 10 SDK (NuGet packages download on the first build).
+Needs the .NET 10 SDK (NuGet packages download on the first build). No Visual
+Studio needed.
 
 ```powershell
 dotnet build windows\ClipLink.slnx                                  # development build
-powershell -ExecutionPolicy Bypass -File windows\publish.ps1        # -> windows\dist\ClipLink.exe
+dotnet run --project windows\ClipLink\ClipLink.csproj               # build and run it
+powershell -ExecutionPolicy Bypass -File windows\publish.ps1        # -> windows\dist\
 ```
 
-`dist\ClipLink.exe` is the whole app: one self-contained file (~155 MB, the
-.NET runtime included, uncompressed on purpose — see `ClipLink.csproj`; zip
-it to ship it). Run it from anywhere; nothing is installed.
+`publish.ps1` makes two things in `windows\dist\`:
+
+- `ClipLink\` — the app: `ClipLink.exe` plus the .NET and Windows App SDK
+  runtime it needs (self-contained: nothing to install first). It runs from
+  anywhere, so it can be copied to another PC as it is.
+- `ClipLink-Setup-<version>.exe` — the installer. It installs for the current
+  user only (`%LOCALAPPDATA%\Programs\ClipLink`, no administrator prompt; the
+  setup offers "all users" too), adds a Start menu entry (and, if ticked, a
+  desktop shortcut) and an uninstall entry, and asks a running ClipLink to
+  quit before replacing or removing its files, so installing over an older
+  version just updates it. Your settings, pairings and history are kept when
+  updating and uninstalling. Uninstalling also removes "Share to ClipLink"
+  from File Explorer (and turns that setting off, so it's on again only once
+  you switch it back on in Settings), and the "start when I sign in" entry —
+  but only if that entry starts the installed copy.
+
+`publish.ps1 -SkipInstaller` only does the app folder. The installer is built
+with Inno Setup's compiler, fetched once from NuGet into `windows\.tools`
+(or the installed Inno Setup is used); nothing is installed on the build PC.
+Quit ClipLink first if it's running from `windows\dist`: its files are locked.
 
 - Double-click: the window opens. Closing the window keeps ClipLink running
-  in the notification area — left-click its icon to bring the window back
-  (the icon has no right-click menu). **Settings > Quit ClipLink** is the only
-  way to stop it.
+  in the notification area — left-click its icon to bring the window back;
+  right-click it for **Open** and **Quit**. **Settings > Quit** also stops it.
 - Starting it again while it runs just brings up the running one's window.
+- The sidebar can be collapsed to icons only (the button at its top); it's
+  remembered.
 - **Synced** shows the history as a list or a grid (the switch next to the
   title; remembered in `settings.json`). Select a card — click it, or Enter —
   to see it in full (all of the text, the whole image); Escape goes back.
   Right-click or Shift+F10 on a card for Copy / Open / Show in folder / Delete.
+- Scrolling: a touchpad scrolls by exactly the distance you move your fingers
+  (WinUI's own touchpad handling); a mouse wheel scrolls Windows' "lines per
+  notch" with a short, quick animation.
 - First run turns on **Start ClipLink when I sign in** (Settings): an
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value "ClipLink"
   starting it with `--background` (tray icon only). If the value points at
@@ -65,12 +91,12 @@ it to ship it). Run it from anywhere; nothing is installed.
     ~32,000-character command line — about 280 files). No admin rights.
   - Settings > **Show 'Share to ClipLink' in File Explorer** (on by default)
     turns both on or off. While it's on, every start re-creates them if
-    they're missing or point at another `ClipLink.exe`, so moving the exe
-    fixes itself — but **before deleting ClipLink.exe, run
+    they're missing or point at another `ClipLink.exe`, so moving the app
+    fixes itself — but **before deleting a copy that wasn't installed, run
     `ClipLink.exe --unregister`** (or turn the setting off), or the menu
-    entries stay behind pointing at nothing.
-- Data: `%APPDATA%\ClipboardDaemon` — the same files the old daemon used, so
-  an existing identity, trusted devices and history carry over:
+    entries stay behind pointing at nothing. (The uninstaller does this.)
+- Data: `%APPDATA%\ClipboardDaemon` — the same files the older Windows builds
+  used, so an existing identity, trusted devices and history carry over:
   `identitydefault.key`, `truststoredefault.json`, `historydefault.json`,
   `deleteddefault.json` (deleted items), `passphrasekeydefault.key`,
   `devicenamedefault.txt`, `filestoredefault\` (synced files by hash) and
@@ -89,9 +115,10 @@ it to ship it). Run it from anywhere; nothing is installed.
   `cliplink.1.log` at 5 MB (Settings > About > Open log folder).
 - The first run from a new location may bring up a Windows Firewall prompt
   (ClipLink listens on TCP and UDP port 49000): allow private networks.
-- Coming from the old `ClipboardDaemon.exe` + `ClipboardTray.exe`: quit both
-  first. While the old daemon holds port 49000 ClipLink shows "Can't listen
-  for other devices…" with a **Try again** button, and syncs nothing.
+- Coming from an older ClipLink (the WPF build, or the separate
+  `ClipboardDaemon.exe` + `ClipboardTray.exe`): quit it first. While it holds
+  port 49000 the new one shows "Can't listen for other devices…" with a
+  **Try again** button, and syncs nothing.
 
 ### Command line
 
@@ -100,6 +127,7 @@ it to ship it). Run it from anywhere; nothing is installed.
 | `--background` | Start hidden in the tray (how the sign-in entry starts it). |
 | `--share <path>...` | Share these files (what File Explorer's "Share to ClipLink" and Send To run; everything after it is a path). Handed to the running copy, or — if none is running — this one starts in the tray and shares them. |
 | `--unregister` | Remove "Share to ClipLink" and Send To > ClipLink from File Explorer, turn that setting off (a running copy is told), and exit. No window. |
+| `--quit` | Ask the running copy to quit (what the installer does before replacing files), and exit. |
 
 For testing, a second, separate ClipLink can run next to the real one —
 it touches none of the real one's data, and with `--loopback-only` and

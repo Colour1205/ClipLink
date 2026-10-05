@@ -1,83 +1,62 @@
 <Page x:Class="ClipLink.SyncedPage"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
-      xmlns:local="clr-namespace:ClipLink"
-      Title="Synced"
-      Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-      FontFamily="{DynamicResource ContentControlThemeFontFamily}"
-      ScrollViewer.CanContentScroll="False">
-    <!-- CanContentScroll False: NavigationView doesn't wrap the page in a
-         ScrollViewer of its own - the header stays put and only the
-         content below it scrolls. -->
+      xmlns:local="using:ClipLink"
+      xmlns:controls="using:CommunityToolkit.WinUI.Controls"
+      NavigationCacheMode="Required"
+      KeyboardAcceleratorPlacementMode="Hidden"
+      PointerPressed="Page_PointerPressed">
+    <Page.KeyboardAccelerators>
+        <KeyboardAccelerator Key="Escape" Invoked="Back_Invoked" />
+        <KeyboardAccelerator Key="Left" Modifiers="Menu" Invoked="Back_Invoked" />
+    </Page.KeyboardAccelerators>
+
     <Page.Resources>
         <!-- ==== What's inside a card, by kind: list view ==== -->
-        <DataTemplate x:Key="TextContent" DataType="{x:Type local:HistoryCard}">
-            <TextBlock Text="{Binding PreviewText, Mode=OneWay}"
-                       Style="{StaticResource BodyText}"
-                       LineStackingStrategy="BlockLineHeight"
-                       TextWrapping="Wrap"
-                       TextTrimming="CharacterEllipsis"
-                       MaxHeight="80" />
+        <DataTemplate x:Key="TextContent" x:DataType="local:HistoryCard">
+            <TextBlock Text="{x:Bind PreviewText, Mode=OneWay}"
+                       Style="{StaticResource BodyTextBlockStyle}"
+                       TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxLines="4" />
         </DataTemplate>
 
-        <!-- While an image is decoding, or if it can't be. -->
-        <Style x:Key="ThumbnailPlaceholder" TargetType="Border">
-            <Setter Property="CornerRadius" Value="4" />
-            <Setter Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}" />
-            <Setter Property="Visibility" Value="Collapsed" />
-            <Style.Triggers>
-                <DataTrigger Binding="{Binding Thumbnail}" Value="{x:Null}">
-                    <Setter Property="Visibility" Value="Visible" />
-                </DataTrigger>
-            </Style.Triggers>
-        </Style>
-        <Style x:Key="ThumbnailPlaceholderIcon" TargetType="ui:SymbolIcon">
-            <Setter Property="FontSize" Value="24" />
-            <Setter Property="Foreground" Value="{DynamicResource TextFillColorTertiaryBrush}" />
-            <Setter Property="Symbol" Value="Image24" />
-            <Style.Triggers>
-                <DataTrigger Binding="{Binding ThumbnailFailed}" Value="True">
-                    <Setter Property="Symbol" Value="ImageOff24" />
-                </DataTrigger>
-            </Style.Triggers>
-        </Style>
-
-        <DataTemplate x:Key="ImageContent" DataType="{x:Type local:HistoryCard}">
+        <DataTemplate x:Key="ImageContent" x:DataType="local:HistoryCard">
             <StackPanel>
                 <Grid HorizontalAlignment="Left">
                     <!-- Rounded corners: the image is the border's background. -->
-                    <Border Width="{Binding ThumbnailWidth}" Height="{Binding ThumbnailHeight}"
-                            CornerRadius="4"
-                            BorderThickness="1"
-                            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
-                            Visibility="{Binding Thumbnail, Converter={StaticResource VisibleIfSet}}">
+                    <Border Width="{x:Bind ThumbnailWidth, Mode=OneWay}" Height="{x:Bind ThumbnailHeight, Mode=OneWay}"
+                            CornerRadius="4" BorderThickness="1"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            Visibility="{x:Bind HasThumbnail, Mode=OneWay}">
                         <Border.Background>
-                            <ImageBrush ImageSource="{Binding Thumbnail}" Stretch="UniformToFill" />
+                            <ImageBrush ImageSource="{x:Bind Thumbnail, Mode=OneWay}" Stretch="UniformToFill" />
                         </Border.Background>
                     </Border>
-                    <Border Width="160" Height="90" Style="{StaticResource ThumbnailPlaceholder}">
-                        <ui:SymbolIcon Style="{StaticResource ThumbnailPlaceholderIcon}" />
+                    <!-- While an image is decoding, or if it can't be. -->
+                    <Border Width="160" Height="90" CornerRadius="4"
+                            Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                            Visibility="{x:Bind NoThumbnail, Mode=OneWay}">
+                        <SymbolIcon Symbol="{x:Bind PlaceholderSymbol, Mode=OneWay}"
+                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
                     </Border>
                 </Grid>
-                <TextBlock Text="{Binding ImageDetail}" Style="{StaticResource CaptionText}" Margin="0,8,0,0" />
+                <TextBlock Text="{x:Bind ImageDetail, Mode=OneWay}" Style="{StaticResource CaptionSecondary}" Margin="0,8,0,0" />
             </StackPanel>
         </DataTemplate>
 
-        <DataTemplate x:Key="FileContent" DataType="{x:Type local:HistoryCard}">
-            <Grid>
+        <DataTemplate x:Key="FileContent" x:DataType="local:HistoryCard">
+            <Grid ColumnSpacing="12">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
                 <Border Width="40" Height="40" CornerRadius="4" VerticalAlignment="Top"
-                        Background="{DynamicResource SubtleFillColorSecondaryBrush}">
-                    <ui:SymbolIcon Symbol="Document24" FontSize="20" />
+                        Background="{ThemeResource SubtleFillColorSecondaryBrush}">
+                    <SymbolIcon Symbol="Document" />
                 </Border>
-                <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
-                    <TextBlock Text="{Binding FileName}" Style="{StaticResource BodyStrongText}" TextTrimming="CharacterEllipsis"
-                               ToolTip="{Binding FileName}" />
-                    <TextBlock Text="{Binding FileDetail}" Style="{StaticResource CaptionText}" />
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    <TextBlock Text="{x:Bind FileName, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis"
+                               ToolTipService.ToolTip="{x:Bind FileName, Mode=OneWay}" />
+                    <TextBlock Text="{x:Bind FileDetail, Mode=OneWay}" Style="{StaticResource CaptionSecondary}" />
                 </StackPanel>
             </Grid>
         </DataTemplate>
@@ -88,58 +67,47 @@
                                       FileTemplate="{StaticResource FileContent}" />
 
         <!-- ==== ... grid view: more text, the image across the card ==== -->
-        <DataTemplate x:Key="GridTextContent" DataType="{x:Type local:HistoryCard}">
-            <TextBlock Text="{Binding GridPreviewText, Mode=OneWay}"
-                       Style="{StaticResource BodyText}"
-                       LineStackingStrategy="BlockLineHeight"
-                       TextWrapping="Wrap"
-                       TextTrimming="CharacterEllipsis"
-                       MaxHeight="200" />
+        <DataTemplate x:Key="GridTextContent" x:DataType="local:HistoryCard">
+            <TextBlock Text="{x:Bind GridPreviewText, Mode=OneWay}"
+                       Style="{StaticResource BodyTextBlockStyle}"
+                       TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxLines="10" />
         </DataTemplate>
 
-        <local:AspectHeightConverter x:Key="ThumbnailHeight" MaxHeight="320" Placeholder="120" />
-        <DataTemplate x:Key="GridImageContent" DataType="{x:Type local:HistoryCard}">
+        <DataTemplate x:Key="GridImageContent" x:DataType="local:HistoryCard">
             <Grid>
                 <!-- As wide as the card, as high as the image (a very tall
                      one cropped at 320). -->
-                <Border x:Name="Thumb"
-                        CornerRadius="4"
-                        BorderThickness="1"
-                        BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
-                        Visibility="{Binding Thumbnail, Converter={StaticResource VisibleIfSet}}">
-                    <Border.Height>
-                        <MultiBinding Converter="{StaticResource ThumbnailHeight}">
-                            <Binding Path="ActualWidth" RelativeSource="{RelativeSource Self}" />
-                            <Binding Path="AspectRatio" />
-                        </MultiBinding>
-                    </Border.Height>
-                    <Border.Background>
-                        <ImageBrush ImageSource="{Binding Thumbnail}" Stretch="UniformToFill" />
-                    </Border.Background>
+                <Border CornerRadius="4" BorderThickness="1" MaxHeight="320"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        Visibility="{x:Bind HasThumbnail, Mode=OneWay}"
+                        SizeChanged="GridThumb_SizeChanged">
+                    <Image Source="{x:Bind Thumbnail, Mode=OneWay}" Stretch="UniformToFill" />
                 </Border>
-                <Border Height="120" Style="{StaticResource ThumbnailPlaceholder}">
-                    <ui:SymbolIcon Style="{StaticResource ThumbnailPlaceholderIcon}" />
+                <Border Height="120" CornerRadius="4"
+                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                        Visibility="{x:Bind NoThumbnail, Mode=OneWay}">
+                    <SymbolIcon Symbol="{x:Bind PlaceholderSymbol, Mode=OneWay}"
+                                Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
                 </Border>
             </Grid>
         </DataTemplate>
 
-        <DataTemplate x:Key="GridFileContent" DataType="{x:Type local:HistoryCard}">
-            <Grid>
+        <DataTemplate x:Key="GridFileContent" x:DataType="local:HistoryCard">
+            <Grid ColumnSpacing="12">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
                 <Border Width="40" Height="40" CornerRadius="4" VerticalAlignment="Top"
-                        Background="{DynamicResource SubtleFillColorSecondaryBrush}">
-                    <ui:SymbolIcon Symbol="Document24" FontSize="20" />
+                        Background="{ThemeResource SubtleFillColorSecondaryBrush}">
+                    <SymbolIcon Symbol="Document" />
                 </Border>
                 <!-- A narrow card: the name gets two lines. -->
-                <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
-                    <TextBlock Text="{Binding FileName}" Style="{StaticResource BodyStrongText}"
-                               TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxHeight="40"
-                               LineStackingStrategy="BlockLineHeight"
-                               ToolTip="{Binding FileName}" />
-                    <TextBlock Text="{Binding FileDetail}" Style="{StaticResource CaptionText}" />
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    <TextBlock Text="{x:Bind FileName, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}"
+                               TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxLines="2"
+                               ToolTipService.ToolTip="{x:Bind FileName, Mode=OneWay}" />
+                    <TextBlock Text="{x:Bind FileDetail, Mode=OneWay}" Style="{StaticResource CaptionSecondary}" />
                 </StackPanel>
             </Grid>
         </DataTemplate>
@@ -150,143 +118,106 @@
                                       FileTemplate="{StaticResource GridFileContent}" />
 
         <!-- A card's Copy / Open / Delete buttons (the same in both views). -->
-        <DataTemplate x:Key="CardActions" DataType="{x:Type local:HistoryCard}">
-            <StackPanel Orientation="Horizontal">
-                <ui:Button Style="{StaticResource IconButton}" Icon="{ui:SymbolIcon Copy24}"
-                           ToolTip="Copy to this PC's clipboard" AutomationProperties.Name="Copy"
-                           Visibility="{Binding CanCopy, Converter={StaticResource VisibleIf}}"
-                           Click="Copy_Click" />
-                <ui:Button Style="{StaticResource IconButton}" Icon="{ui:SymbolIcon Open24}"
-                           ToolTip="Open" AutomationProperties.Name="Open"
-                           Visibility="{Binding CanOpen, Converter={StaticResource VisibleIf}}"
-                           Click="Open_Click" Margin="4,0,0,0" />
-                <ui:Button Style="{StaticResource IconButton}" Icon="{ui:SymbolIcon Delete24}"
-                           ToolTip="Delete" AutomationProperties.Name="Delete"
-                           Click="Delete_Click" Margin="4,0,0,0" />
+        <DataTemplate x:Key="CardActions" x:DataType="local:HistoryCard">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+                <Button Style="{StaticResource IconButton}"
+                        ToolTipService.ToolTip="Copy to this PC's clipboard" AutomationProperties.Name="Copy"
+                        Visibility="{x:Bind CanCopy, Mode=OneWay}"
+                        Click="Copy_Click">
+                    <SymbolIcon Symbol="Copy" />
+                </Button>
+                <Button Style="{StaticResource IconButton}"
+                        ToolTipService.ToolTip="Open" AutomationProperties.Name="Open"
+                        Visibility="{x:Bind CanOpen, Mode=OneWay}"
+                        Click="Open_Click">
+                    <SymbolIcon Symbol="OpenFile" />
+                </Button>
+                <Button Style="{StaticResource IconButton}"
+                        ToolTipService.ToolTip="Delete" AutomationProperties.Name="Delete"
+                        Click="Delete_Click">
+                    <SymbolIcon Symbol="Delete" />
+                </Button>
             </StackPanel>
         </DataTemplate>
 
         <!-- ==== A card ==== -->
         <!-- List: what it is, when, where from, and the buttons along the
              top; the content under them. -->
-        <DataTemplate x:Key="ListCard" DataType="{x:Type local:HistoryCard}">
-            <Border Padding="16,10,8,14">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
+        <DataTemplate x:Key="ListCard" x:DataType="local:HistoryCard">
+            <ItemContainer CornerRadius="4" AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}">
+            <Border Style="{StaticResource CardBorder}" Padding="16,10,8,14"
+                        AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
 
-                    <!-- The device last: a long name is what gets cut short, never the time. -->
-                    <ui:SymbolIcon Symbol="{Binding KindIcon}" FontSize="16"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                   VerticalAlignment="Center" Margin="0,0,8,0" />
-                    <TextBlock Grid.Column="1" Style="{StaticResource CaptionText}"
-                               VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
-                               ToolTip="{Binding Origin, Mode=OneWay}">
-                        <Run Text="{Binding KindText, Mode=OneWay}" /><Run Text="  ·  " /><Run Text="{Binding When, Mode=OneWay}" /><Run Text="  ·  " /><Run Text="{Binding Source, Mode=OneWay}" />
-                    </TextBlock>
-                    <ContentPresenter Grid.Column="2" Margin="8,0,0,0" ContentTemplate="{StaticResource CardActions}" />
+                        <!-- The device last: a long name is what gets cut short, never the time. -->
+                        <SymbolIcon Symbol="{x:Bind KindSymbol, Mode=OneWay}"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    VerticalAlignment="Center" Margin="0,0,10,0" />
+                        <TextBlock Grid.Column="1" Style="{StaticResource CaptionSecondary}"
+                                   Text="{x:Bind Summary, Mode=OneWay}"
+                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                                   ToolTipService.ToolTip="{x:Bind Origin, Mode=OneWay}" />
+                        <ContentControl Grid.Column="2" Margin="8,0,0,0" Content="{x:Bind}"
+                                        ContentTemplate="{StaticResource CardActions}"
+                                        HorizontalContentAlignment="Stretch" IsTabStop="False" />
 
-                    <ContentControl Grid.Row="1" Grid.ColumnSpan="3"
-                                    Content="{Binding}"
-                                    ContentTemplateSelector="{StaticResource ContentSelector}"
-                                    Focusable="False"
-                                    Margin="0,6,8,0" />
-                </Grid>
-            </Border>
+                        <ContentControl Grid.Row="1" Grid.ColumnSpan="3" Margin="0,6,8,0"
+                                        Content="{x:Bind}"
+                                        ContentTemplateSelector="{StaticResource ContentSelector}"
+                                        HorizontalContentAlignment="Stretch" IsTabStop="False" />
+                    </Grid>
+                </Border>
+            </ItemContainer>
         </DataTemplate>
 
         <!-- Grid: the content first (a card's job is showing it), then when
              and where from, and the buttons, along the bottom. -->
-        <DataTemplate x:Key="GridCard" DataType="{x:Type local:HistoryCard}">
-            <Border Padding="12,12,6,6">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
+        <DataTemplate x:Key="GridCard" x:DataType="local:HistoryCard">
+            <ItemContainer CornerRadius="4" AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}">
+            <Border Style="{StaticResource CardBorder}" Padding="12,12,6,6"
+                        AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
 
-                    <ContentControl Grid.ColumnSpan="3"
-                                    Content="{Binding}"
-                                    ContentTemplateSelector="{StaticResource GridContentSelector}"
-                                    Focusable="False"
-                                    Margin="0,0,6,6" />
+                        <ContentControl Grid.ColumnSpan="3" Margin="0,0,6,6"
+                                        Content="{x:Bind}"
+                                        ContentTemplateSelector="{StaticResource GridContentSelector}"
+                                        HorizontalContentAlignment="Stretch" IsTabStop="False" />
 
-                    <ui:SymbolIcon Grid.Row="1" Symbol="{Binding KindIcon}" FontSize="16"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                   ToolTip="{Binding KindText, Mode=OneWay}"
-                                   VerticalAlignment="Center" Margin="0,0,8,0" />
-                    <!-- When over where from: a narrow card has no room for both on one line. -->
-                    <StackPanel Grid.Row="1" Grid.Column="1" VerticalAlignment="Center"
-                                ToolTip="{Binding Origin, Mode=OneWay}">
-                        <TextBlock Text="{Binding When, Mode=OneWay}" Style="{StaticResource CaptionText}" TextTrimming="CharacterEllipsis" />
-                        <TextBlock Text="{Binding Source, Mode=OneWay}" Style="{StaticResource CaptionText}" TextTrimming="CharacterEllipsis" />
-                    </StackPanel>
-                    <ContentPresenter Grid.Row="1" Grid.Column="2" Margin="4,0,0,0" ContentTemplate="{StaticResource CardActions}" />
-                </Grid>
-            </Border>
+                        <SymbolIcon Grid.Row="1" Symbol="{x:Bind KindSymbol, Mode=OneWay}"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    ToolTipService.ToolTip="{x:Bind KindText, Mode=OneWay}"
+                                    VerticalAlignment="Center" Margin="0,0,10,0" />
+                        <!-- When over where from: a narrow card has no room for both on one line. -->
+                        <StackPanel Grid.Row="1" Grid.Column="1" VerticalAlignment="Center"
+                                    ToolTipService.ToolTip="{x:Bind Origin, Mode=OneWay}">
+                            <TextBlock Text="{x:Bind When, Mode=OneWay}" Style="{StaticResource CaptionSecondary}" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{x:Bind Source, Mode=OneWay}" Style="{StaticResource CaptionSecondary}" TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                        <ContentControl Grid.Row="1" Grid.Column="2" Margin="4,0,0,0" Content="{x:Bind}"
+                                        ContentTemplate="{StaticResource CardActions}"
+                                        HorizontalContentAlignment="Stretch" IsTabStop="False" />
+                    </Grid>
+                </Border>
+            </ItemContainer>
         </DataTemplate>
-
-        <!-- One column (list) or as many as fit (grid). -->
-        <ItemsPanelTemplate x:Key="ListPanel">
-            <local:MasonryPanel MaxColumns="1" Spacing="8" />
-        </ItemsPanelTemplate>
-        <ItemsPanelTemplate x:Key="GridPanel">
-            <local:MasonryPanel MinColumnWidth="260" Spacing="12" />
-        </ItemsPanelTemplate>
-
-        <!-- A card's actions on right-click or Shift+F10 (the mobile apps'
-             long-press menu). One menu for every card: it takes the card
-             it opens on as its DataContext. -->
-        <ContextMenu x:Key="CardMenu"
-                     DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
-            <MenuItem Header="View" Icon="{ui:SymbolIcon Eye24}" Click="View_Click" />
-            <MenuItem Header="Copy" Icon="{ui:SymbolIcon Copy24}" Click="Copy_Click"
-                      Visibility="{Binding CanCopy, Converter={StaticResource VisibleIf}}" />
-            <MenuItem Header="Open" Icon="{ui:SymbolIcon Open24}" Click="Open_Click"
-                      Visibility="{Binding CanOpen, Converter={StaticResource VisibleIf}}" />
-            <MenuItem Header="Show in folder" Icon="{ui:SymbolIcon FolderOpen24}" Click="ShowInFolder_Click"
-                      Visibility="{Binding CanOpen, Converter={StaticResource VisibleIf}}" />
-            <Separator />
-            <MenuItem Header="Delete" Icon="{ui:SymbolIcon Delete24}" Click="Delete_Click" />
-        </ContextMenu>
-
-        <!-- The list / grid switch: two segments, the chosen one filled in. -->
-        <Style x:Key="ViewSegment" TargetType="RadioButton">
-            <Setter Property="Width" Value="36" />
-            <Setter Property="Height" Value="28" />
-            <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
-            <Setter Property="FocusVisualStyle" Value="{DynamicResource DefaultControlFocusVisualStyle}" />
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="RadioButton">
-                        <Border x:Name="Segment" Background="Transparent" CornerRadius="3">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Segment" Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}" />
-                            </Trigger>
-                            <Trigger Property="IsChecked" Value="True">
-                                <Setter TargetName="Segment" Property="Background" Value="{DynamicResource SubtleFillColorTertiaryBrush}" />
-                                <Setter Property="Foreground" Value="{DynamicResource AccentTextFillColorPrimaryBrush}" />
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
     </Page.Resources>
 
     <Grid>
@@ -296,7 +227,7 @@
         </Grid.RowDefinitions>
 
         <!-- Header: stays put while the list scrolls. -->
-        <Grid Margin="36,12,36,4">
+        <Grid Margin="{StaticResource PageMargin}">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" MaxWidth="{StaticResource PageMaxWidth}" />
             </Grid.ColumnDefinitions>
@@ -306,187 +237,132 @@
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <TextBlock x:Name="ListTitle" Text="Synced" Style="{StaticResource TitleText}" />
+                    <TextBlock x:Name="ListTitle" Text="Synced" Style="{StaticResource TitleTextBlockStyle}" />
                     <!-- One item in full: "Synced > Text", Synced going back. -->
-                    <StackPanel x:Name="DetailTitle" Orientation="Horizontal" Visibility="Collapsed">
-                        <ui:Button x:Name="BackToList"
-                                   Appearance="Transparent" BorderThickness="0"
-                                   Padding="4,0,4,2" Margin="-4,0,0,0"
-                                   ToolTip="Back to Synced"
-                                   AutomationProperties.Name="Back to Synced"
-                                   Click="BackToList_Click">
-                            <TextBlock Text="Synced" Style="{StaticResource TitleText}"
-                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-                        </ui:Button>
-                        <ui:SymbolIcon Symbol="ChevronRight20" FontSize="16" Margin="8,4,8,0"
-                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-                        <TextBlock x:Name="DetailKind" Style="{StaticResource TitleText}" />
-                    </StackPanel>
+                    <BreadcrumbBar x:Name="DetailTitle" Style="{StaticResource PageBreadcrumb}" Visibility="Collapsed" ItemClicked="DetailTitle_ItemClicked" />
 
                     <!-- List or grid, as on the phones. -->
-                    <Border x:Name="ViewSwitch" Grid.Column="1"
-                            VerticalAlignment="Center" Margin="12,0,0,0" Padding="2"
-                            CornerRadius="4" BorderThickness="1"
-                            Background="{DynamicResource ControlFillColorDefaultBrush}"
-                            BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}"
-                            KeyboardNavigation.TabNavigation="Once"
-                            KeyboardNavigation.DirectionalNavigation="Cycle">
-                        <StackPanel Orientation="Horizontal">
-                            <RadioButton x:Name="ListViewButton" GroupName="SyncedView" Style="{StaticResource ViewSegment}"
-                                         ToolTip="List view" AutomationProperties.Name="List view"
-                                         Checked="ViewButton_Checked">
-                                <ui:SymbolIcon Symbol="List24" FontSize="16"
-                                               Filled="{Binding IsChecked, RelativeSource={RelativeSource AncestorType=RadioButton}}" />
-                            </RadioButton>
-                            <RadioButton x:Name="GridViewButton" GroupName="SyncedView" Style="{StaticResource ViewSegment}"
-                                         ToolTip="Grid view" AutomationProperties.Name="Grid view"
-                                         Margin="2,0,0,0" Checked="ViewButton_Checked">
-                                <ui:SymbolIcon Symbol="Grid24" FontSize="16"
-                                               Filled="{Binding IsChecked, RelativeSource={RelativeSource AncestorType=RadioButton}}" />
-                            </RadioButton>
-                        </StackPanel>
-                    </Border>
+                    <controls:Segmented x:Name="ViewSwitch" Grid.Column="1" SelectionMode="Single"
+                                        VerticalAlignment="Center" Margin="12,0,0,0"
+                                        AutomationProperties.Name="View"
+                                        SelectionChanged="ViewSwitch_SelectionChanged">
+                        <controls:SegmentedItem ToolTipService.ToolTip="List view" AutomationProperties.Name="List view">
+                            <controls:SegmentedItem.Icon>
+                                <FontIcon Glyph="&#xE8FD;" />
+                            </controls:SegmentedItem.Icon>
+                        </controls:SegmentedItem>
+                        <controls:SegmentedItem ToolTipService.ToolTip="Grid view" AutomationProperties.Name="Grid view">
+                            <controls:SegmentedItem.Icon>
+                                <FontIcon Glyph="&#xF0E2;" />
+                            </controls:SegmentedItem.Icon>
+                        </controls:SegmentedItem>
+                    </controls:Segmented>
                 </Grid>
-                <TextBlock x:Name="ListSubtitle" Text="{Binding ConnectionSummary}" Style="{StaticResource BodyText}"
-                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,2,0,0" />
-                <TextBlock x:Name="DetailOrigin" Style="{StaticResource BodyText}" TextTrimming="CharacterEllipsis"
-                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,2,0,0"
+                <TextBlock x:Name="ListSubtitle" Text="{x:Bind host.ConnectionSummary, Mode=OneWay}"
+                           Style="{StaticResource BodyTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="0,2,0,0" />
+                <TextBlock x:Name="DetailOrigin" Style="{StaticResource BodyTextBlockStyle}" TextTrimming="CharacterEllipsis"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="0,2,0,0"
                            Visibility="Collapsed" />
-                <local:Banner x:Name="StatusBanner" Margin="0,12,0,0" />
+                <InfoBar x:Name="StatusBanner" Margin="0,12,0,0" />
+                <!-- First run without a passcode: a nudge, not a nag (closable). -->
+                <InfoBar x:Name="PasscodeTip" IsOpen="False" IsClosable="True" Severity="Informational" Margin="0,12,0,0"
+                         Title="Set a passcode"
+                         Message="Your devices with the same passcode pair with each other automatically - no code to scan."
+                         CloseButtonClick="PasscodeTip_Closed">
+                    <InfoBar.ActionButton>
+                        <Button Content="Set passcode" Click="PasscodeTip_Action" />
+                    </InfoBar.ActionButton>
+                </InfoBar>
             </StackPanel>
         </Grid>
 
-        <ScrollViewer x:Name="CardsView" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
-            <Grid Margin="36,12,36,32">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" MaxWidth="{StaticResource PageMaxWidth}" />
-                </Grid.ColumnDefinitions>
-                <StackPanel>
-                    <!-- First run without a passcode: a nudge, not a nag (closable). -->
-                    <local:Banner x:Name="PasscodeTip"
-                                  Severity="Informational"
-                                  Title="Set a passcode"
-                                  Message="Your devices with the same passcode pair with each other automatically - no code to scan."
-                                  ActionText="Set passcode"
-                                  IsClosable="True"
-                                  ActionClick="PasscodeTip_Action"
-                                  Closed="PasscodeTip_Closed"
-                                  Margin="0,0,0,12" />
+        <!-- A ListBox-like view of the cards: each takes keyboard focus (arrow
+             keys between cards, Enter shows it in full, Shift+F10 its menu)
+             and screen readers get a real list of items. Its layout and card
+             template (list or grid) are set in code. -->
+        <ItemsView x:Name="Cards" Grid.Row="1"
+                   Padding="36,12,36,32"
+                   SelectionMode="None"
+                   IsItemInvokedEnabled="True"
+                   ItemInvoked="Cards_ItemInvoked"
+                   ContextRequested="Cards_ContextRequested"
+                   AutomationProperties.Name="Synced items" />
 
-                    <!-- A ListBox (drawing only the cards) rather than a plain
-                         list: each card takes keyboard focus (arrow keys
-                         between cards, Enter shows it in full, Shift+F10 its
-                         menu) and screen readers get a real list of items.
-                         Its panel and card template (list or grid) are set
-                         in code. -->
-                    <ListBox x:Name="Cards"
-                             ItemsSource="{Binding History}"
-                             ItemsPanel="{StaticResource ListPanel}"
-                             ItemTemplate="{StaticResource ListCard}"
-                             AutomationProperties.Name="Synced items"
-                             KeyboardNavigation.TabNavigation="Once"
-                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                             Focusable="False">
-                        <ListBox.Template>
-                            <ControlTemplate TargetType="ListBox">
-                                <ItemsPresenter />
-                            </ControlTemplate>
-                        </ListBox.Template>
-                        <ListBox.ItemContainerStyle>
-                            <Style TargetType="ListBoxItem">
-                                <Setter Property="AutomationProperties.Name" Value="{Binding AutomationName}" />
-                                <Setter Property="ContextMenu" Value="{StaticResource CardMenu}" />
-                                <Setter Property="FocusVisualStyle" Value="{DynamicResource DefaultControlFocusVisualStyle}" />
-                                <Setter Property="Template">
-                                    <Setter.Value>
-                                        <ControlTemplate TargetType="ListBoxItem">
-                                            <!-- The card's surface; the card template draws inside it. -->
-                                            <Border x:Name="Surface"
-                                                    CornerRadius="4" BorderThickness="1"
-                                                    Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
-                                                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
-                                                <ContentPresenter />
-                                            </Border>
-                                            <ControlTemplate.Triggers>
-                                                <!-- Clicking a card shows it in full: it lights up
-                                                     under the mouse like any clickable card. -->
-                                                <Trigger Property="IsMouseOver" Value="True">
-                                                    <Setter TargetName="Surface" Property="Background" Value="{DynamicResource ControlFillColorSecondaryBrush}" />
-                                                </Trigger>
-                                            </ControlTemplate.Triggers>
-                                        </ControlTemplate>
-                                    </Setter.Value>
-                                </Setter>
-                                <EventSetter Event="MouseLeftButtonUp" Handler="Card_MouseLeftButtonUp" />
-                                <EventSetter Event="KeyDown" Handler="Card_KeyDown" />
-                            </Style>
-                        </ListBox.ItemContainerStyle>
-                    </ListBox>
-
-                    <!-- Nothing yet. -->
-                    <StackPanel Visibility="{Binding HistoryIsEmpty, Converter={StaticResource VisibleIf}}"
-                                HorizontalAlignment="Center" MaxWidth="380" Margin="0,56,0,0">
-                        <ui:SymbolIcon Symbol="ClipboardPaste24" FontSize="48" HorizontalAlignment="Center"
-                                       Foreground="{DynamicResource TextFillColorTertiaryBrush}" />
-                        <TextBlock Text="Nothing synced yet" Style="{StaticResource SubtitleText}"
-                                   HorizontalAlignment="Center" Margin="0,16,0,4" />
-                        <TextBlock Style="{StaticResource BodyText}" TextWrapping="Wrap" TextAlignment="Center"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                   Text="Copy something on this PC or on one of your paired devices, and it shows up here." />
-                    </StackPanel>
-                </StackPanel>
-            </Grid>
-        </ScrollViewer>
+        <!-- Nothing yet. -->
+        <StackPanel x:Name="EmptyState" Grid.Row="1" Visibility="{x:Bind host.HistoryIsEmpty, Mode=OneWay}"
+                    HorizontalAlignment="Center" VerticalAlignment="Top" MaxWidth="380" Margin="0,56,0,0">
+            <SymbolIcon Symbol="Paste" HorizontalAlignment="Center"
+                        RenderTransformOrigin="0.5,0.5"
+                        Foreground="{ThemeResource TextFillColorTertiaryBrush}">
+                <SymbolIcon.RenderTransform>
+                    <ScaleTransform ScaleX="2.4" ScaleY="2.4" />
+                </SymbolIcon.RenderTransform>
+            </SymbolIcon>
+            <TextBlock Text="Nothing synced yet" Style="{StaticResource SubtitleTextBlockStyle}"
+                       HorizontalAlignment="Center" Margin="0,24,0,4" />
+            <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap" TextAlignment="Center"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       Text="Copy something on this PC or on one of your paired devices, and it shows up here." />
+        </StackPanel>
 
         <!-- One item in full - the phones' item screen: all of the text
              (selectable), the image as big as fits, and every action. -->
-        <ScrollViewer x:Name="DetailView" Grid.Row="1" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
-            <Grid Margin="36,12,36,32">
+        <ScrollViewer x:Name="DetailView" Grid.Row="1" Visibility="Collapsed" SizeChanged="DetailView_SizeChanged">
+            <Grid Margin="{StaticResource PageContentMargin}">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" MaxWidth="{StaticResource PageMaxWidth}" />
                 </Grid.ColumnDefinitions>
                 <StackPanel>
-                    <WrapPanel>
-                        <ui:Button x:Name="DetailCopy" Appearance="Primary" Icon="{ui:SymbolIcon Copy24}" Content="Copy"
-                                   ToolTip="Copy to this PC's clipboard" MinWidth="96" Margin="0,0,8,8"
-                                   Click="DetailCopy_Click" />
-                        <ui:Button x:Name="DetailOpen" Icon="{ui:SymbolIcon Open24}" Content="Open"
-                                   MinWidth="96" Margin="0,0,8,8" Click="DetailOpen_Click" />
-                        <ui:Button x:Name="DetailShowInFolder" Icon="{ui:SymbolIcon FolderOpen24}" Content="Show in folder"
-                                   Margin="0,0,8,8" Click="DetailShowInFolder_Click" />
-                        <ui:Button x:Name="DetailDelete" Icon="{ui:SymbolIcon Delete24}" Content="Delete"
-                                   MinWidth="96" Margin="0,0,8,8" Click="DetailDelete_Click" />
-                    </WrapPanel>
+                    <controls:WrapPanel Orientation="Horizontal" HorizontalSpacing="8" VerticalSpacing="8">
+                        <Button x:Name="DetailCopy" Style="{StaticResource AccentButtonStyle}" MinWidth="96"
+                                ToolTipService.ToolTip="Copy to this PC's clipboard" Click="DetailCopy_Click">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <SymbolIcon Symbol="Copy" />
+                                <TextBlock Text="Copy" />
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="DetailOpen" MinWidth="96" Click="DetailOpen_Click">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <SymbolIcon Symbol="OpenFile" />
+                                <TextBlock Text="Open" />
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="DetailShowInFolder" Click="DetailShowInFolder_Click">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <SymbolIcon Symbol="Folder" />
+                                <TextBlock Text="Show in folder" />
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="DetailDelete" MinWidth="96" Click="DetailDelete_Click">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <SymbolIcon Symbol="Delete" />
+                                <TextBlock Text="Delete" />
+                            </StackPanel>
+                        </Button>
+                    </controls:WrapPanel>
 
-                    <Border Style="{StaticResource Card}" Margin="0,4,0,0">
+                    <Border Style="{StaticResource CardBorder}" Margin="0,12,0,0">
                         <Grid>
                             <!-- Plain read-only text: select some of it, or Copy for all. -->
-                            <TextBox x:Name="DetailText"
-                                     Style="{x:Null}"
-                                     IsReadOnly="True"
-                                     TextWrapping="Wrap"
-                                     BorderThickness="0"
-                                     Padding="0"
-                                     Background="Transparent"
-                                     Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                                     CaretBrush="{DynamicResource TextFillColorPrimaryBrush}"
-                                     SelectionBrush="{DynamicResource AccentFillColorDefaultBrush}"
-                                     FontFamily="{DynamicResource ContentControlThemeFontFamily}"
-                                     FontSize="14"
-                                     AutomationProperties.Name="Text"
-                                     Visibility="Collapsed" />
+                            <TextBlock x:Name="DetailText"
+                                       Style="{StaticResource BodyTextBlockStyle}"
+                                       TextWrapping="Wrap"
+                                       IsTextSelectionEnabled="True"
+                                       AutomationProperties.Name="Text"
+                                       Visibility="Collapsed" />
                             <Image x:Name="DetailImage"
-                                   Stretch="Uniform" StretchDirection="DownOnly"
+                                   Stretch="Uniform"
                                    HorizontalAlignment="Center" MaxHeight="640"
                                    AutomationProperties.Name="Synced image"
                                    Visibility="Collapsed" />
                             <ContentControl x:Name="DetailFile"
                                             ContentTemplate="{StaticResource FileContent}"
-                                            Focusable="False"
+                                            HorizontalContentAlignment="Stretch" IsTabStop="False"
                                             Visibility="Collapsed" />
                         </Grid>
                     </Border>
-                    <TextBlock x:Name="DetailFacts" Style="{StaticResource CaptionText}" TextWrapping="Wrap" Margin="1,8,0,0" />
+                    <TextBlock x:Name="DetailFacts" Style="{StaticResource CaptionSecondary}" TextWrapping="Wrap" Margin="1,8,0,0" />
                 </StackPanel>
             </Grid>
         </ScrollViewer>

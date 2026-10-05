@@ -1,10 +1,11 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
-using Wpf.Ui.Controls;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 
 namespace ClipLink;
 
@@ -12,12 +13,12 @@ namespace ClipLink;
 // every paired device and this PC - in a list or a grid, as on the phones.
 // Copy / Open / Delete on each; selecting a card shows it in full (all of
 // its text, the image as big as fits), as tapping one does on the phones.
-public partial class SyncedPage : Page
+public sealed partial class SyncedPage : Page
 {
     private readonly EngineHost host = App.Host;
     // The card shown in full, if any.
     private HistoryCard? detail;
-    private Window? window;
+    private bool wheelAttached;
 
     // A text is shown in full up to this long (Copy copies all of it).
     private const int MaxDetailChars = 100_000;
@@ -25,8 +26,9 @@ public partial class SyncedPage : Page
     public SyncedPage()
     {
         InitializeComponent();
-        DataContext = host;
-        StatusBanner.TrackEngine(host);
+        Cards.ItemsSource = host.History;
+        EngineBanner.Track(StatusBanner, host);
+        WheelScroll.Attach(DetailView);
         host.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName == nameof(EngineHost.HasPasscode)) UpdatePasscodeTip();
@@ -37,49 +39,33 @@ public partial class SyncedPage : Page
         {
             if (detail != null && !host.History.Contains(detail)) ShowList();
         };
+        // Navigated to another page: back to the cards for next time.
+        Unloaded += (_, _) => ShowList();
+        // New items arrive at the top: the view must stay where it is, not
+        // follow the card that used to be first (the default anchoring).
         Loaded += (_, _) =>
         {
-            // At the window, so Escape works even while nothing on the page
-            // has keyboard focus (as when the tray icon has just opened it).
-            window = Window.GetWindow(this);
-            if (window != null)
-            {
-                window.KeyDown += Window_KeyDown;
-                window.MouseUp += Window_MouseUp;
-            }
+            if (wheelAttached || Cards.ScrollView is not { } scroll) return;
+            scroll.VerticalAnchorRatio = double.NaN;
+            WheelScroll.Attach(scroll);
+            wheelAttached = true;
         };
-        Unloaded += (_, _) =>
-        {
-            if (window != null)
-            {
-                window.KeyDown -= Window_KeyDown;
-                window.MouseUp -= Window_MouseUp;
-            }
-            // Navigated to another page: back to the cards for next time.
-            ShowList();
-        };
-        // A whole image fits in the view, under the buttons.
-        DetailView.SizeChanged += (_, e) => DetailImage.MaxHeight = Math.Max(160, e.NewSize.Height - 120);
         ShowAsGrid(App.Settings.SyncedGridView);
         UpdatePasscodeTip();
     }
 
     // Escape, Alt+Left or the mouse's back button: from one item back to
-    // the cards. Not a key pressed in a dialog (dialogs aren't on the page).
-    private void Window_KeyDown(object sender, KeyEventArgs e)
+    // the cards.
+    private void Back_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        bool back = e.Key == Key.Escape || (e.Key == Key.System && e.SystemKey == Key.Left && Keyboard.Modifiers == ModifierKeys.Alt);
-        if (!back || e.Handled || detail == null || !IsVisible) return;
-        if (e.OriginalSource == window || (e.OriginalSource is DependencyObject source && IsAncestorOf(source)))
-        {
-            ShowList();
-            e.Handled = true;
-        }
+        if (detail == null) return;
+        ShowList();
+        args.Handled = true;
     }
 
-    private void Window_MouseUp(object sender, MouseButtonEventArgs e)
+    private void Page_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        if (e.ChangedButton != MouseButton.XButton1 || detail == null || !IsVisible) return;
+        if (detail == null || !e.GetCurrentPoint(this).Properties.IsXButton1Pressed) return;
         ShowList();
         e.Handled = true;
     }
@@ -88,57 +74,89 @@ public partial class SyncedPage : Page
 
     private void ShowAsGrid(bool grid)
     {
-        Cards.ItemsPanel = (ItemsPanelTemplate)FindResource(grid ? "GridPanel" : "ListPanel");
-        Cards.ItemTemplate = (DataTemplate)FindResource(grid ? "GridCard" : "ListCard");
-        // (Raises ViewButton_Checked, which then has nothing to change.)
-        (grid ? GridViewButton : ListViewButton).IsChecked = true;
+        // The list is at most as wide as the other pages' content; the grid
+        // takes as many columns as fit.
+        Cards.Layout = grid
+            ? new MasonryLayout { MinColumnWidth = 260, Spacing = 12 }
+            : new MasonryLayout { MaxColumns = 1, Spacing = 8, MaxWidth = (double)Application.Current.Resources["PageMaxWidth"] };
+        Cards.ItemTemplate = (DataTemplate)Resources[grid ? "GridCard" : "ListCard"];
+        ViewSwitch.SelectedIndex = grid ? 1 : 0;
     }
 
-    private void ViewButton_Checked(object sender, RoutedEventArgs e)
+    private void ViewSwitch_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        bool grid = sender == GridViewButton;
-        if (Cards.ItemTemplate == FindResource(grid ? "GridCard" : "ListCard")) return;
+        bool grid = ViewSwitch.SelectedIndex == 1;
+        if (ViewSwitch.SelectedIndex < 0 || Cards.ItemTemplate == Resources[grid ? "GridCard" : "ListCard"]) return;
         ShowAsGrid(grid);
         App.Settings.SyncedGridView = grid;
         App.Settings.Save();
     }
 
     private void UpdatePasscodeTip() =>
-        PasscodeTip.Visibility = host.HasPasscode || App.Settings.PasscodeTipDismissed ? Visibility.Collapsed : Visibility.Visible;
+        PasscodeTip.IsOpen = !(host.HasPasscode || App.Settings.PasscodeTipDismissed);
 
     private void PasscodeTip_Action(object sender, RoutedEventArgs e) => App.MainAppWindow.Navigate(typeof(SettingsPage));
 
-    private void PasscodeTip_Closed(object sender, RoutedEventArgs e)
+    private void PasscodeTip_Closed(InfoBar sender, object args)
     {
         App.Settings.PasscodeTipDismissed = true;
         App.Settings.Save();
         UpdatePasscodeTip();
     }
 
+    // The grid's thumbnail: as wide as the card, as high as the image (a
+    // very tall one cropped at the border's MaxHeight, like the phones' grid).
+    private void GridThumb_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (sender is not Border { DataContext: HistoryCard { AspectRatio: > 0 } card } border) return;
+        double height = Math.Min(border.MaxHeight, Math.Round(e.NewSize.Width * card.AspectRatio));
+        if (double.IsNaN(border.Height) || Math.Abs(border.Height - height) > 0.5) border.Height = height;
+    }
+
     private static HistoryCard? CardOf(object sender) => (sender as FrameworkElement)?.DataContext as HistoryCard;
 
     // ---- a card -------------------------------------------------------------
 
-    // A click on the card itself (its buttons handle their own clicks).
-    private void Card_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    // A click on the card itself, or Enter / Space on it (its buttons handle
+    // their own clicks).
+    private void Cards_ItemInvoked(ItemsView sender, ItemsViewItemInvokedEventArgs args)
     {
-        if (CardOf(sender) is { } card) ShowDetail(card);
+        if (args.InvokedItem is HistoryCard card) ShowDetail(card);
     }
 
-    private void Card_KeyDown(object sender, KeyEventArgs e)
+    // Right-click or Shift+F10 on a card - the mobile apps' long-press menu.
+    private void Cards_ContextRequested(UIElement sender, ContextRequestedEventArgs args)
     {
-        // Only when the card itself has focus, not one of its buttons.
-        if (e.OriginalSource != sender || e.Key is not (Key.Enter or Key.Space)) return;
-        if (CardOf(sender) is { } card)
+        DependencyObject? at = args.OriginalSource as DependencyObject;
+        HistoryCard? card = null;
+        while (at != null && card == null)
         {
-            e.Handled = true;
-            ShowDetail(card);
+            card = (at as FrameworkElement)?.DataContext as HistoryCard;
+            at = VisualTreeHelper.GetParent(at);
         }
+        if (card == null) return;
+
+        var flyout = new MenuFlyout();
+        flyout.Items.Add(MenuItem("View", Symbol.View, () => ShowDetail(card)));
+        if (card.CanCopy) flyout.Items.Add(MenuItem("Copy", Symbol.Copy, () => Copy(card)));
+        if (card.CanOpen)
+        {
+            flyout.Items.Add(MenuItem("Open", Symbol.OpenFile, () => _ = OpenAsync(card, showInFolder: false)));
+            flyout.Items.Add(MenuItem("Show in folder", Symbol.Folder, () => _ = OpenAsync(card, showInFolder: true)));
+        }
+        flyout.Items.Add(new MenuFlyoutSeparator());
+        flyout.Items.Add(MenuItem("Delete", Symbol.Delete, () => _ = DeleteAsync(card)));
+
+        if (args.TryGetPosition(sender, out var position)) flyout.ShowAt(sender, new FlyoutShowOptions { Position = position });
+        else flyout.ShowAt((FrameworkElement)sender);
+        args.Handled = true;
     }
 
-    private void View_Click(object sender, RoutedEventArgs e)
+    private static MenuFlyoutItem MenuItem(string text, Symbol symbol, Action click)
     {
-        if (CardOf(sender) is { } card) ShowDetail(card);
+        var item = new MenuFlyoutItem { Text = text, Icon = new SymbolIcon(symbol) };
+        item.Click += (_, _) => click();
+        return item;
     }
 
     private void Copy_Click(object sender, RoutedEventArgs e)
@@ -149,11 +167,6 @@ public partial class SyncedPage : Page
     private async void Open_Click(object sender, RoutedEventArgs e)
     {
         if (CardOf(sender) is { } card) await OpenAsync(card, showInFolder: false);
-    }
-
-    private async void ShowInFolder_Click(object sender, RoutedEventArgs e)
-    {
-        if (CardOf(sender) is { } card) await OpenAsync(card, showInFolder: true);
     }
 
     private async void Delete_Click(object sender, RoutedEventArgs e)
@@ -169,7 +182,7 @@ public partial class SyncedPage : Page
         detail = card;
         card.PropertyChanged += Detail_PropertyChanged;
 
-        DetailKind.Text = card.KindText;
+        DetailTitle.ItemsSource = new[] { "Synced", card.KindText };
         DetailOrigin.Text = card.Origin;
         DetailText.Visibility = card.IsImage || card.IsFile ? Visibility.Collapsed : Visibility.Visible;
         DetailImage.Visibility = card.IsImage ? Visibility.Visible : Visibility.Collapsed;
@@ -189,15 +202,16 @@ public partial class SyncedPage : Page
         }
         UpdateDetail();
 
-        ListTitle.Visibility = ListSubtitle.Visibility = ViewSwitch.Visibility = CardsView.Visibility = Visibility.Collapsed;
+        ListTitle.Visibility = ListSubtitle.Visibility = ViewSwitch.Visibility = Cards.Visibility = PasscodeTip.Visibility = Visibility.Collapsed;
+        EmptyState.Visibility = Visibility.Collapsed;
         DetailTitle.Visibility = DetailOrigin.Visibility = DetailView.Visibility = Visibility.Visible;
-        DetailView.ScrollToTop();
+        DetailView.ChangeView(null, 0, null, disableAnimation: true);
         // Keyboard users land on the first action.
-        Dispatcher.BeginInvoke(() => (DetailCopy.IsVisible ? DetailCopy : (Control)DetailDelete).Focus(),
-            System.Windows.Threading.DispatcherPriority.Loaded);
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+            () => (DetailCopy.Visibility == Visibility.Visible ? DetailCopy : DetailDelete).Focus(FocusState.Programmatic));
     }
 
-    // Back to the cards, with the one that was open focused again.
+    // Back to the cards.
     private void ShowList()
     {
         if (detail is not { } card) return;
@@ -208,11 +222,14 @@ public partial class SyncedPage : Page
         DetailFile.Content = null;
 
         DetailTitle.Visibility = DetailOrigin.Visibility = DetailView.Visibility = Visibility.Collapsed;
-        ListTitle.Visibility = ListSubtitle.Visibility = ViewSwitch.Visibility = CardsView.Visibility = Visibility.Visible;
-        Dispatcher.BeginInvoke(() =>
-        {
-            if (Cards.ItemContainerGenerator.ContainerFromItem(card) is ListBoxItem item && IsVisible) item.Focus();
-        }, System.Windows.Threading.DispatcherPriority.Loaded);
+        ListTitle.Visibility = ListSubtitle.Visibility = ViewSwitch.Visibility = Cards.Visibility = PasscodeTip.Visibility = Visibility.Visible;
+        EmptyState.Visibility = host.HistoryIsEmpty ? Visibility.Visible : Visibility.Collapsed;
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => Cards.Focus(FocusState.Programmatic));
+    }
+
+    private void DetailTitle_ItemClicked(BreadcrumbBar sender, BreadcrumbBarItemClickedEventArgs args)
+    {
+        if (args.Index == 0) ShowList();
     }
 
     // A file's bytes arriving, a device's new name, ...
@@ -236,11 +253,15 @@ public partial class SyncedPage : Page
     {
         // The card's thumbnail at once, then the full-size decode.
         DetailImage.Source = card.Thumbnail;
+        // Shrunk to fit, never enlarged past its own size.
+        DetailImage.MaxWidth = card.PixelWidth > 0 ? card.PixelWidth : double.PositiveInfinity;
         var image = await host.LoadImageAsync(card.Key);
         if (detail == card && image != null) DetailImage.Source = image;
     }
 
-    private void BackToList_Click(object sender, RoutedEventArgs e) => ShowList();
+    // A whole image fits in the view, under the buttons.
+    private void DetailView_SizeChanged(object sender, SizeChangedEventArgs e) =>
+        DetailImage.MaxHeight = Math.Max(160, e.NewSize.Height - 120);
 
     private void DetailCopy_Click(object sender, RoutedEventArgs e)
     {
@@ -322,19 +343,13 @@ public partial class SyncedPage : Page
         if (!showInFolder && FileOpener.IsProgram(path))
         {
             // Opening a program or script runs it - never without asking.
-            var dialog = new ContentDialog(window.DialogHost)
+            var dialog = new ContentDialog
             {
                 Title = $"Open {Path.GetFileName(path)}?",
-                Content = new System.Windows.Controls.TextBlock
-                {
-                    // (The source ends the clause, not the sentence: a short id ends in "…".)
-                    Text = $"It's a program or script from {(card.Item.FromThisDevice ? "this PC" : card.Source)} - opening it runs it on this PC. Only do that if you trust it.",
-                    TextWrapping = TextWrapping.Wrap,
-                    Style = (Style)FindResource("BodyText"),
-                },
-                PrimaryButtonText = "Open",
+                // (The source ends the clause, not the sentence: a short id ends in "…".)
+                Content = MainWindow.Paragraph($"It's a program or script from {(card.Item.FromThisDevice ? "this PC" : card.Source)} - opening it runs it on this PC. Only do that if you trust it."),
                 // Not the accent colour: opening isn't the suggested choice here.
-                PrimaryButtonAppearance = ControlAppearance.Secondary,
+                PrimaryButtonText = "Open",
                 SecondaryButtonText = "Show in folder",
                 CloseButtonText = "Cancel",
                 DefaultButton = ContentDialogButton.Close,
@@ -365,10 +380,12 @@ public sealed class HistoryContentSelector : DataTemplateSelector
     public DataTemplate? ImageTemplate { get; set; }
     public DataTemplate? FileTemplate { get; set; }
 
-    public override DataTemplate? SelectTemplate(object item, DependencyObject container) => item switch
+    protected override DataTemplate? SelectTemplateCore(object item) => item switch
     {
         HistoryCard { IsImage: true } => ImageTemplate,
         HistoryCard { IsFile: true } => FileTemplate,
         _ => TextTemplate,
     };
+
+    protected override DataTemplate? SelectTemplateCore(object item, DependencyObject container) => SelectTemplateCore(item);
 }
