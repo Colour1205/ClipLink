@@ -1,0 +1,724 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "点对点剪贴板同步"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "ClipLink 主入口"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "ClipLink"
+    },
+    {
+      "name": "passcode_length_hint",
+      "value": "口令越长，越难被猜到。"
+    },
+    {
+      "name": "device_fingerprint_label",
+      "value": "指纹"
+    },
+    {
+      "name": "device_fingerprint_hint",
+      "value": "你的其他设备会在来自这台设备的配对请求中显示此指纹。接受前请核对是否一致。"
+    },
+    {
+      "name": "common_cancel",
+      "value": "取消"
+    },
+    {
+      "name": "common_close",
+      "value": "关闭"
+    },
+    {
+      "name": "common_accept",
+      "value": "接受"
+    },
+    {
+      "name": "common_reject",
+      "value": "拒绝"
+    },
+    {
+      "name": "common_clear",
+      "value": "清除"
+    },
+    {
+      "name": "common_save",
+      "value": "保存"
+    },
+    {
+      "name": "common_saving",
+      "value": "正在保存…"
+    },
+    {
+      "name": "common_on",
+      "value": "开"
+    },
+    {
+      "name": "common_off",
+      "value": "关"
+    },
+    {
+      "name": "tab_synced",
+      "value": "已同步"
+    },
+    {
+      "name": "tab_devices",
+      "value": "设备"
+    },
+    {
+      "name": "tab_me",
+      "value": "我的"
+    },
+    {
+      "name": "action_copy",
+      "value": "复制"
+    },
+    {
+      "name": "action_share",
+      "value": "分享"
+    },
+    {
+      "name": "action_open",
+      "value": "打开"
+    },
+    {
+      "name": "action_delete",
+      "value": "删除"
+    },
+    {
+      "name": "action_save_to_gallery",
+      "value": "保存到相册"
+    },
+    {
+      "name": "action_save_file",
+      "value": "保存文件"
+    },
+    {
+      "name": "kind_text",
+      "value": "文本"
+    },
+    {
+      "name": "kind_image",
+      "value": "图片"
+    },
+    {
+      "name": "kind_file",
+      "value": "文件"
+    },
+    {
+      "name": "item_image",
+      "value": "图片"
+    },
+    {
+      "name": "item_file",
+      "value": "文件"
+    },
+    {
+      "name": "item_encoded_data",
+      "value": "编码数据"
+    },
+    {
+      "name": "theme_navy",
+      "value": "海军蓝"
+    },
+    {
+      "name": "theme_teal",
+      "value": "青绿"
+    },
+    {
+      "name": "theme_green",
+      "value": "绿色"
+    },
+    {
+      "name": "theme_orange",
+      "value": "橙色"
+    },
+    {
+      "name": "theme_rose",
+      "value": "玫瑰红"
+    },
+    {
+      "name": "theme_violet",
+      "value": "紫罗兰"
+    },
+    {
+      "name": "dialog_save_image_prompt",
+      "value": "要将此图片保存到相册吗？"
+    },
+    {
+      "name": "dialog_pairing_request_title",
+      "value": "配对请求"
+    },
+    {
+      "name": "dialog_clear_passcode_title",
+      "value": "清除口令？"
+    },
+    {
+      "name": "dialog_clear_passcode_message",
+      "value": "新设备将不再自动信任此设备。已配对的设备仍保持配对。"
+    },
+    {
+      "name": "dialog_clear_history_title",
+      "value": "清除已同步历史记录？"
+    },
+    {
+      "name": "dialog_clear_history_message",
+      "value": "将从此设备移除所有已同步的项目及其保存的文件。已配对的设备会保留各自的副本，但不会再把这些内容发回来。"
+    },
+    {
+      "name": "dialog_delete_item_title",
+      "value": "删除此项目？"
+    },
+    {
+      "name": "dialog_delete_item_message",
+      "value": "将从此设备移除该项目及其保存的文件。已配对的设备会保留各自的副本，但不会再把它发回来。"
+    },
+    {
+      "name": "pairing_request_named",
+      "value": "“%1$s”请求与此设备配对。"
+    },
+    {
+      "name": "pairing_request_unnamed",
+      "value": "有设备请求与此设备配对。"
+    },
+    {
+      "name": "pairing_request_id_line",
+      "value": "ID：%1$s"
+    },
+    {
+      "name": "pairing_request_address_line",
+      "value": "地址：%1$s"
+    },
+    {
+      "name": "pairing_request_warning",
+      "value": "仅在你确实预期此请求时才接受——正是因为你打开了配对页面，这个请求才能送达。"
+    },
+    {
+      "name": "toast_pairing_cancelled",
+      "value": "对方设备已取消配对请求，请重试。"
+    },
+    {
+      "name": "toast_paired",
+      "value": "已配对。"
+    },
+    {
+      "name": "toast_removed_device",
+      "value": "已移除 %1$s"
+    },
+    {
+      "name": "toast_passcode_cleared",
+      "value": "口令已清除。"
+    },
+    {
+      "name": "toast_passcode_clear_failed",
+      "value": "清除口令失败：%1$s"
+    },
+    {
+      "name": "toast_history_cleared",
+      "value": "历史记录已清除。"
+    },
+    {
+      "name": "toast_item_deleted",
+      "value": "项目已删除。"
+    },
+    {
+      "name": "toast_tailscale_saved",
+      "value": "Tailscale IP 已保存。"
+    },
+    {
+      "name": "toast_tailscale_cleared",
+      "value": "Tailscale IP 已清除。"
+    },
+    {
+      "name": "toast_save_failed",
+      "value": "保存失败：%1$s"
+    },
+    {
+      "name": "toast_device_name_saved",
+      "value": "设备名称已保存。"
+    },
+    {
+      "name": "toast_device_name_system",
+      "value": "将使用系统设备名称。"
+    },
+    {
+      "name": "toast_passcode_empty",
+      "value": "请先输入口令。"
+    },
+    {
+      "name": "toast_passcode_set",
+      "value": "口令已设置——口令相同的设备将自动互相信任。"
+    },
+    {
+      "name": "toast_passcode_set_failed",
+      "value": "设置口令失败：%1$s"
+    },
+    {
+      "name": "toast_address_empty",
+      "value": "请先输入地址。"
+    },
+    {
+      "name": "toast_pairing_info_copied",
+      "value": "配对信息已复制——请粘贴到 Windows 的“信任设备”对话框中。"
+    },
+    {
+      "name": "toast_device_id_copied",
+      "value": "设备 ID 已复制。"
+    },
+    {
+      "name": "toast_copy_failed",
+      "value": "无法复制，请重试。"
+    },
+    {
+      "name": "toast_copied",
+      "value": "已复制到剪贴板。"
+    },
+    {
+      "name": "toast_paste_not_granted",
+      "value": "未获得访问授权，请重试。"
+    },
+    {
+      "name": "toast_clipboard_unchanged",
+      "value": "剪贴板自上次同步后没有变化。"
+    },
+    {
+      "name": "toast_unsupported_clipboard",
+      "value": "不支持的剪贴板内容：%1$s"
+    },
+    {
+      "name": "toast_file_store_not_ready_yet",
+      "value": "文件存储尚未就绪，请重试。"
+    },
+    {
+      "name": "toast_file_store_not_ready",
+      "value": "文件存储尚未就绪，请重试。"
+    },
+    {
+      "name": "toast_paste_save_failed",
+      "value": "无法保存该文件，请重试。"
+    },
+    {
+      "name": "toast_paste_sync_failed",
+      "value": "无法同步该内容，请重试。"
+    },
+    {
+      "name": "toast_synced_to_devices",
+      "value": "已将%1$s同步到%2$s。"
+    },
+    {
+      "name": "toast_captured_no_devices",
+      "value": "已获取%1$s——尚无已连接的设备。"
+    },
+    {
+      "name": "toast_self_test_passed",
+      "value": "自检通过——身份、签名和信任库均工作正常。"
+    },
+    {
+      "name": "toast_self_test_failed",
+      "value": "自检失败：%1$s"
+    },
+    {
+      "name": "toast_not_a_file",
+      "value": "该项目不是文件。"
+    },
+    {
+      "name": "toast_file_not_downloaded",
+      "value": "文件尚未下载完成。"
+    },
+    {
+      "name": "toast_no_app_to_open",
+      "value": "此设备上没有可打开 %1$s 的应用。"
+    },
+    {
+      "name": "toast_open_file_failed",
+      "value": "无法打开文件（%1$d）。"
+    },
+    {
+      "name": "toast_share_sheet_failed",
+      "value": "无法打开分享面板。"
+    },
+    {
+      "name": "toast_save_not_authorized",
+      "value": "保存未获授权。"
+    },
+    {
+      "name": "toast_saved_to_gallery",
+      "value": "已保存到相册。"
+    },
+    {
+      "name": "toast_save_image_failed",
+      "value": "无法保存图片。"
+    },
+    {
+      "name": "toast_file_saved",
+      "value": "文件已保存。"
+    },
+    {
+      "name": "toast_save_file_failed",
+      "value": "无法保存文件。"
+    },
+    {
+      "name": "item_already_in_cliplink",
+      "value": "该内容已在 ClipLink 中。"
+    },
+    {
+      "name": "refuse_too_large",
+      "value": "该文件超过 1 GB，太大，无法同步。"
+    },
+    {
+      "name": "refuse_folder",
+      "value": "只能同步文件，不能同步文件夹。"
+    },
+    {
+      "name": "refuse_unreadable",
+      "value": "无法读取该文件。"
+    },
+    {
+      "name": "share_what_text",
+      "value": "文本"
+    },
+    {
+      "name": "share_shared",
+      "value": "已将%1$s分享到%2$s。"
+    },
+    {
+      "name": "share_added",
+      "value": "已添加%1$s——尚无已连接的设备。"
+    },
+    {
+      "name": "share_nothing",
+      "value": "没有可分享的内容。"
+    },
+    {
+      "name": "share_join",
+      "value": "%1$s%2$s"
+    },
+    {
+      "name": "address_or",
+      "value": "%1$s 或 %2$s"
+    },
+    {
+      "name": "scan_empty",
+      "value": "扫描到的二维码为空"
+    },
+    {
+      "name": "scan_no_address",
+      "value": "%1$s 的二维码中没有地址——如果它在同一网络中，只需保持此页面打开，它发出的广播会自动触发配对。"
+    },
+    {
+      "name": "scan_connecting",
+      "value": "正在连接 %1$s…"
+    },
+    {
+      "name": "scan_failed",
+      "value": "扫描失败：%1$s"
+    },
+    {
+      "name": "outcome_connected",
+      "value": "已与 %1$s 配对，并已连接。"
+    },
+    {
+      "name": "outcome_passcode",
+      "value": "已通过口令与 %1$s 配对。"
+    },
+    {
+      "name": "outcome_prompt",
+      "value": "已连上 %1$s——请在两台设备上接受配对提示以完成配对。"
+    },
+    {
+      "name": "outcome_awaiting_other",
+      "value": "已连上 %1$s——请在对方设备上接受请求以完成配对。"
+    },
+    {
+      "name": "outcome_busy",
+      "value": "此处已有另一个配对请求在等待——请先接受或拒绝它。"
+    },
+    {
+      "name": "outcome_refused",
+      "value": "%1$s 有响应，但未接受此设备。请在两台设备上设置相同的口令，或打开对方的配对页面（并先处理完那里的其他配对请求），然后重试。"
+    },
+    {
+      "name": "outcome_silent",
+      "value": "%1$s 已接受连接，但那里的 ClipLink 没有响应——请尝试在该设备上重启 ClipLink。"
+    },
+    {
+      "name": "outcome_unreachable",
+      "value": "无法连接到 %1$s。请确认那里的 ClipLink 正在运行，且两台设备都已接入 Tailscale（或处于同一网络）。"
+    },
+    {
+      "name": "synced_empty_title",
+      "value": "暂无已同步内容"
+    },
+    {
+      "name": "synced_empty_detail",
+      "value": "在此设备或其他已信任的设备上复制内容后，会显示在这里。"
+    },
+    {
+      "name": "synced_view_grid",
+      "value": "网格视图"
+    },
+    {
+      "name": "synced_view_list",
+      "value": "列表视图"
+    },
+    {
+      "name": "synced_new_item",
+      "value": "有新内容 →"
+    },
+    {
+      "name": "synced_this_device",
+      "value": "本设备"
+    },
+    {
+      "name": "synced_byline",
+      "value": "%1$s · %2$s"
+    },
+    {
+      "name": "devices_unknown_address",
+      "value": "地址未知"
+    },
+    {
+      "name": "devices_status_connected",
+      "value": "已连接"
+    },
+    {
+      "name": "devices_status_trusted",
+      "value": "已信任 · 未连接"
+    },
+    {
+      "name": "devices_status_discovered",
+      "value": "在附近发现"
+    },
+    {
+      "name": "devices_trust",
+      "value": "信任"
+    },
+    {
+      "name": "devices_remove",
+      "value": "移除"
+    },
+    {
+      "name": "devices_none_connected",
+      "value": "没有已连接的设备"
+    },
+    {
+      "name": "devices_empty",
+      "value": "已信任的设备以及同一网络中的附近设备会显示在这里。"
+    },
+    {
+      "name": "me_section_device",
+      "value": "设备"
+    },
+    {
+      "name": "me_section_sync",
+      "value": "同步"
+    },
+    {
+      "name": "me_section_appearance",
+      "value": "外观"
+    },
+    {
+      "name": "me_section_pairing",
+      "value": "配对"
+    },
+    {
+      "name": "me_section_support",
+      "value": "支持"
+    },
+    {
+      "name": "me_section_data",
+      "value": "数据"
+    },
+    {
+      "name": "me_device_id_label",
+      "value": "你的设备 ID"
+    },
+    {
+      "name": "me_generating_identity",
+      "value": "正在生成身份…"
+    },
+    {
+      "name": "me_device_name",
+      "value": "设备名称"
+    },
+    {
+      "name": "me_not_set",
+      "value": "未设置"
+    },
+    {
+      "name": "me_copy_device_id",
+      "value": "复制设备 ID"
+    },
+    {
+      "name": "me_auto_copy_title",
+      "value": "自动复制收到的内容"
+    },
+    {
+      "name": "me_auto_copy_subtitle",
+      "value": "收到的内容会直接放入此设备的剪贴板。"
+    },
+    {
+      "name": "me_notice_title",
+      "value": "提示新复制的内容"
+    },
+    {
+      "name": "me_notice_subtitle",
+      "value": "HarmonyOS 只允许 ClipLink 在你点按“粘贴”时读取剪贴板，因此当你复制了新内容（包括 ClipLink 未打开期间复制的内容）时，会高亮提示“粘贴”按钮。"
+    },
+    {
+      "name": "me_theme",
+      "value": "主题"
+    },
+    {
+      "name": "me_bottom_glow_title",
+      "value": "底部光晕"
+    },
+    {
+      "name": "me_bottom_glow_subtitle",
+      "value": "在每个页面底部叠加一抹柔和的主题色。"
+    },
+    {
+      "name": "me_card_transparency",
+      "value": "卡片透明度"
+    },
+    {
+      "name": "me_qr_scan",
+      "value": "二维码与扫描"
+    },
+    {
+      "name": "me_passcode_auto_trust",
+      "value": "口令自动信任"
+    },
+    {
+      "name": "me_tailscale_ip",
+      "value": "Tailscale IP"
+    },
+    {
+      "name": "me_diagnostics",
+      "value": "诊断"
+    },
+    {
+      "name": "me_activity_log",
+      "value": "活动日志"
+    },
+    {
+      "name": "me_clear_history",
+      "value": "清除已同步历史记录"
+    },
+    {
+      "name": "pairing_title",
+      "value": "配对"
+    },
+    {
+      "name": "pairing_open_title",
+      "value": "此页面打开时才可配对。"
+    },
+    {
+      "name": "pairing_open_detail",
+      "value": "只有在此页面打开期间，配对请求才能送达此设备，并且只有在你点按此处的“接受”后才会完成——配对时请在两台设备上同时保持此页面打开。离开此页面即关闭配对窗口；不会有任何设备在后台悄悄完成配对。"
+    },
+    {
+      "name": "pairing_scan_hint",
+      "value": "在另一台设备上（并打开其配对页面）扫描此二维码，即可找到本设备。"
+    },
+    {
+      "name": "pairing_scan_button",
+      "value": "扫描设备的二维码"
+    },
+    {
+      "name": "pairing_by_address_title",
+      "value": "通过地址配对"
+    },
+    {
+      "name": "pairing_by_address_hint",
+      "value": "对方设备没有摄像头（例如 Windows）？请改为在此输入或粘贴它的地址，或粘贴它在下方复制的配对文本。"
+    },
+    {
+      "name": "pairing_address_placeholder",
+      "value": "例如 100.x.x.x 或粘贴的配对文本"
+    },
+    {
+      "name": "pairing_connecting",
+      "value": "正在连接…"
+    },
+    {
+      "name": "pairing_by_address_button",
+      "value": "通过地址配对"
+    },
+    {
+      "name": "pairing_info_title",
+      "value": "此设备的配对信息"
+    },
+    {
+      "name": "pairing_info_hint",
+      "value": "复制此信息并发送到另一台设备（例如粘贴到它上方的“通过地址配对”输入框中），让它知道如何找到这台设备。"
+    },
+    {
+      "name": "pairing_copy_info",
+      "value": "复制配对信息"
+    },
+    {
+      "name": "passcode_intro",
+      "value": "输入相同口令的设备会自动互相信任。"
+    },
+    {
+      "name": "passcode_is_set",
+      "value": "此设备已设置口令。"
+    },
+    {
+      "name": "passcode_change",
+      "value": "更改口令"
+    },
+    {
+      "name": "passcode_placeholder_new",
+      "value": "输入新的共享口令"
+    },
+    {
+      "name": "passcode_placeholder",
+      "value": "输入共享口令"
+    },
+    {
+      "name": "passcode_setting",
+      "value": "正在设置…"
+    },
+    {
+      "name": "passcode_set",
+      "value": "设置口令"
+    },
+    {
+      "name": "network_intro",
+      "value": "HarmonyOS 无法自动检测此项——请从 Tailscale 应用中复制你的 tailnet IP 并粘贴到这里，这样其他设备才能在本地网络之外访问这台设备。"
+    },
+    {
+      "name": "network_ip_placeholder",
+      "value": "例如 100.x.x.x"
+    },
+    {
+      "name": "devicename_intro",
+      "value": "其他设备会显示此名称，而不是此设备的 ID。留空则使用系统设置中的名称。"
+    },
+    {
+      "name": "diag_run_self_test",
+      "value": "运行自检"
+    },
+    {
+      "name": "diag_immersive_material",
+      "value": "沉浸光感"
+    },
+    {
+      "name": "diag_supported",
+      "value": "支持"
+    },
+    {
+      "name": "diag_not_supported",
+      "value": "不支持"
+    },
+    {
+      "name": "log_empty",
+      "value": "暂无日志。"
+    }
+  ]
+}
