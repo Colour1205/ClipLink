@@ -1,0 +1,108 @@
+{
+  "plural": [
+    {
+      "name": "devices_connected_count",
+      "value": [
+        {
+          "quantity": "one",
+          "value": "%d device connected"
+        },
+        {
+          "quantity": "other",
+          "value": "%d devices connected"
+        }
+      ]
+    },
+    {
+      "name": "devices_count",
+      "value": [
+        {
+          "quantity": "one",
+          "value": "%d device"
+        },
+        {
+          "quantity": "other",
+          "value": "%d devices"
+        }
+      ]
+    },
+    {
+      "name": "share_what_files",
+      "value": [
+        {
+          "quantity": "one",
+          "value": "%d file"
+        },
+        {
+          "quantity": "other",
+          "value": "%d files"
+        }
+      ]
+    },
+    {
+      "name": "share_what_files_and_text",
+      "value": [
+        {
+          "quantity": "one",
+          "value": "%d file and text"
+        },
+        {
+          "quantity": "other",
+          "value": "%d files and text"
+        }
+      ]
+    },
+    {
+      "name": "share_too_large",
+      "value": [
+        {
+          "quantity": "one",
+          "value": "%d file over 1 GB skipped."
+        },
+        {
+          "quantity": "other",
+          "value": "%d files over 1 GB skipped."
+        }
+      ]
+    },
+    {
+      "name": "share_folders_skipped",
+      "value": [
+        {
+          "quantity": "one",
+          "value": "%d folder skipped — only files can be shared."
+        },
+        {
+          "quantity": "other",
+          "value": "%d folders skipped — only files can be shared."
+        }
+      ]
+    },
+    {
+      "name": "share_unreadable",
+      "value": [
+        {
+          "quantity": "one",
+          "value": "Couldn't add %d item."
+        },
+        {
+          "quantity": "other",
+          "value": "Couldn't add %d items."
+        }
+      ]
+    },
+    {
+      "name": "share_own_items",
+      "value": [
+        {
+          "quantity": "one",
+          "value": "%d item already in ClipLink."
+        },
+        {
+          "quantity": "other",
+          "value": "%d items already in ClipLink."
+        }
+      ]
+    }
+  ]
+}
