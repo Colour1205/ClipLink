@@ -1,6 +1,5 @@
 package io.uaena.cliplink.ui
 
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -39,7 +39,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.uaena.cliplink.core.ClipboardEntry
@@ -114,15 +113,13 @@ fun DetailScreen(
             when (item.type) {
                 ClipboardEntry.TYPE_IMAGE -> {
                     val bitmap = remember(item.id) {
-                        ImageCache.fromBase64(item.id, item.entry.content, 1600)
+                        ImageCache.fromBase64(item.id, item.entry.content, DETAIL_IMAGE_EDGE)
                     }
                     if (bitmap != null) {
-                        Image(
+                        ZoomableImage(
                             bitmap = bitmap,
                             contentDescription = "Synced image",
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(24.dp)),
+                            modifier = Modifier.fillMaxWidth(),
                         )
                     } else {
                         Text(
@@ -136,13 +133,11 @@ fun DetailScreen(
                 ClipboardEntry.TYPE_FILE -> {
                     val payload = item.filePayload
                     // An image file shows its picture above its file card.
-                    rememberFileThumbnail(item, 1600)?.let { thumbnail ->
-                        Image(
+                    rememberFileThumbnail(item, DETAIL_IMAGE_EDGE)?.let { thumbnail ->
+                        ZoomableImage(
                             bitmap = thumbnail,
                             contentDescription = payload?.fileName ?: "Image",
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(24.dp)),
+                            modifier = Modifier.fillMaxWidth(),
                         )
                         Spacer(Modifier.height(12.dp))
                     }
@@ -164,22 +159,25 @@ fun DetailScreen(
                                 Icon(style.icon, contentDescription = null, tint = style.onContainer)
                             }
                             Spacer(Modifier.width(16.dp))
-                            Column {
-                                Text(
-                                    payload?.fileName ?: "File",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                )
-                                Text(
-                                    if (!item.fileAvailable) {
-                                        "Still transferring…"
-                                    } else {
-                                        formatSize(payload?.fileSize ?: 0L)
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
+                            // Selectable, so a file name can be copied out.
+                            SelectionContainer {
+                                Column {
+                                    Text(
+                                        payload?.fileName ?: "File",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    Text(
+                                        if (!item.fileAvailable) {
+                                            "Still transferring…"
+                                        } else {
+                                            formatSize(payload?.fileSize ?: 0L)
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                             }
                         }
                     }
@@ -191,12 +189,18 @@ fun DetailScreen(
                         color = MaterialTheme.colorScheme.surfaceContainerLow,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text(
-                            item.entry.content,
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.padding(20.dp),
-                        )
+                        // Long-press to select, then the system toolbar's Copy /
+                        // Select all / Share - for taking part of a long text
+                        // rather than all of it (the Copy button below takes
+                        // all of it).
+                        SelectionContainer {
+                            Text(
+                                item.entry.content,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(20.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -239,3 +243,11 @@ fun DetailScreen(
         )
     }
 }
+
+/**
+ * The longest side a picture is decoded to for the detail view - well past the
+ * 1600 it used to be, so pinching in shows real detail rather than a
+ * magnified blur. A square picture at this size is ~23 MB, so it is the most
+ * a single decode here is allowed to cost (the cache's budget is 24 MB).
+ */
+private const val DETAIL_IMAGE_EDGE = 2400
