@@ -1,6 +1,5 @@
 package io.uaena.cliplink.ui
 
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -39,8 +39,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.engine.SyncedItem
@@ -57,6 +59,18 @@ fun DetailScreen(
     modifier: Modifier = Modifier,
 ) {
     val style = typeStyleOf(item)
+    val payload = item.filePayload
+    val origin = if (item.isOwn) "Sent from this device" else "From ${shortIdOf(item.entry.deviceId)}"
+    // The item's picture, if it has one: an inline image, or the picture of an
+    // image file once its bytes are here (a file card until then).
+    val picture = when (item.type) {
+        ClipboardEntry.TYPE_IMAGE -> remember(item.id) {
+            ImageCache.fromBase64(item.id, item.entry.content, DETAIL_IMAGE_EDGE)
+        }
+
+        ClipboardEntry.TYPE_FILE -> rememberFileThumbnail(item, DETAIL_IMAGE_EDGE)
+        else -> null
+    }
     var menuOpen by remember { mutableStateOf(false) }
     var confirmingDelete by remember { mutableStateOf(false) }
 
@@ -105,108 +119,151 @@ fun DetailScreen(
             }
         }
 
-        Column(
-            Modifier
-                .weight(1f)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-        ) {
-            when (item.type) {
-                ClipboardEntry.TYPE_IMAGE -> {
-                    val bitmap = remember(item.id) {
-                        ImageCache.fromBase64(item.id, item.entry.content, 1600)
-                    }
-                    if (bitmap != null) {
-                        Image(
-                            bitmap = bitmap,
-                            contentDescription = "Synced image",
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(24.dp)),
+        if (picture != null) {
+            // The picture is the whole point of an image item, so it gets
+            // everything between the top bar and the buttons - edge to edge,
+            // fitted and centred, no card or margins around it. Only the system
+            // bars' side insets are kept (they matter in landscape).
+            val direction = LocalLayoutDirection.current
+            val left = contentPadding.calculateLeftPadding(direction)
+            val right = contentPadding.calculateRightPadding(direction)
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(
+                        start = if (direction == LayoutDirection.Ltr) left else right,
+                        end = if (direction == LayoutDirection.Ltr) right else left,
+                    ),
+            ) {
+                ZoomableImage(
+                    bitmap = picture,
+                    contentDescription = payload?.fileName ?: "Synced image",
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            ) {
+                if (payload != null) {
+                    // The file card, as two lines under the picture: the card
+                    // itself would take a good part of the room the picture is
+                    // meant to have.
+                    SelectionContainer {
+                        Text(
+                            payload.fileName,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
-                    } else {
+                    }
+                    Text(
+                        "${formatSize(payload.fileSize)} · $origin",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    Text(
+                        origin,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        } else {
+            Column(
+                Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+            ) {
+                when (item.type) {
+                    ClipboardEntry.TYPE_IMAGE -> {
+                        // No picture: it didn't decode.
                         Text(
                             "This image couldn't be decoded.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.error,
                         )
                     }
-                }
 
-                ClipboardEntry.TYPE_FILE -> {
-                    val payload = item.filePayload
-                    // An image file shows its picture above its file card.
-                    rememberFileThumbnail(item, 1600)?.let { thumbnail ->
-                        Image(
-                            bitmap = thumbnail,
-                            contentDescription = payload?.fileName ?: "Image",
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(24.dp)),
-                        )
-                        Spacer(Modifier.height(12.dp))
-                    }
-                    Surface(
-                        shape = RoundedCornerShape(24.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerLow,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Row(
-                            Modifier.padding(20.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+                    ClipboardEntry.TYPE_FILE -> {
+                        // A file with no picture of it (yet): just its card.
+                        Surface(
+                            shape = RoundedCornerShape(24.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerLow,
+                            modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Box(
-                                Modifier
-                                    .size(56.dp)
-                                    .background(style.container, RoundedCornerShape(18.dp)),
-                                contentAlignment = Alignment.Center,
+                            Row(
+                                Modifier.padding(20.dp),
+                                verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Icon(style.icon, contentDescription = null, tint = style.onContainer)
+                                Box(
+                                    Modifier
+                                        .size(56.dp)
+                                        .background(style.container, RoundedCornerShape(18.dp)),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(style.icon, contentDescription = null, tint = style.onContainer)
+                                }
+                                Spacer(Modifier.width(16.dp))
+                                // Selectable, so a file name can be copied out.
+                                SelectionContainer {
+                                    Column {
+                                        Text(
+                                            payload?.fileName ?: "File",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                        )
+                                        Text(
+                                            if (!item.fileAvailable) {
+                                                "Still transferring…"
+                                            } else {
+                                                formatSize(payload?.fileSize ?: 0L)
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
                             }
-                            Spacer(Modifier.width(16.dp))
-                            Column {
+                        }
+                    }
+
+                    else -> {
+                        Surface(
+                            shape = RoundedCornerShape(24.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerLow,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            // Long-press to select, then the system toolbar's Copy /
+                            // Select all / Share - for taking part of a long text
+                            // rather than all of it (the Copy button below takes
+                            // all of it).
+                            SelectionContainer {
                                 Text(
-                                    payload?.fileName ?: "File",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.SemiBold,
+                                    item.entry.content,
+                                    style = MaterialTheme.typography.bodyLarge,
                                     color = MaterialTheme.colorScheme.onSurface,
-                                )
-                                Text(
-                                    if (!item.fileAvailable) {
-                                        "Still transferring…"
-                                    } else {
-                                        formatSize(payload?.fileSize ?: 0L)
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(20.dp),
                                 )
                             }
                         }
                     }
                 }
 
-                else -> {
-                    Surface(
-                        shape = RoundedCornerShape(24.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerLow,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            item.entry.content,
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.padding(20.dp),
-                        )
-                    }
-                }
+                Spacer(Modifier.height(20.dp))
+                Text(
+                    origin,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
-
-            Spacer(Modifier.height(20.dp))
-            Text(
-                if (item.isOwn) "Sent from this device" else "From ${shortIdOf(item.entry.deviceId)}",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
 
         Row(
@@ -239,3 +296,11 @@ fun DetailScreen(
         )
     }
 }
+
+/**
+ * The longest side a picture is decoded to for the detail view - well past the
+ * 1600 it used to be, so pinching in shows real detail rather than a
+ * magnified blur. A square picture at this size is ~23 MB, so it is the most
+ * a single decode here is allowed to cost (the cache's budget is 24 MB).
+ */
+private const val DETAIL_IMAGE_EDGE = 2400
