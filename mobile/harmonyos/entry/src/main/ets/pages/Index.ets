@@ -165,7 +165,10 @@ interface SyncedItem {
   type: string;
   preview: string;
   content: string; // full, untruncated - what "Copy content"/"Select text" act on
-  source: string;
+  // The device it came from. Its label is looked up when the byline is drawn
+  // (sourceLabelFor), not stored: a name that arrives or changes later then
+  // shows up on the items already in the list.
+  deviceId: string;
   time: string;
   fromPeer: boolean;
 }
@@ -2386,7 +2389,7 @@ struct Index {
       type: entry.Type,
       preview: previewFor(entry),
       content: entry.Content,
-      source: this.sourceLabelFor(entry.DeviceId),
+      deviceId: entry.DeviceId,
       time: entry.Timestamp.slice(11, 16),
       fromPeer,
     };
@@ -2413,17 +2416,16 @@ struct Index {
     this.syncedItems = [...this.syncedItems, ...restored.filter((i: SyncedItem) => !liveIds.has(i.id))].slice(0, 50);
   }
 
-  // Human-readable label for whichever device an item came from. A raw
-  // public key fragment ("MFkwEwYHKoZI...") was being used as the card's
-  // byline, which is both meaningless to read and visually identical for
-  // every peer. Prefer the peer's address, fall back to a plain phrase.
+  // Human-readable label for whichever device an item came from: this
+  // device, else the peer's name (its trust record's, else its beacon's -
+  // see peerLabel), else its short id ("Device XXXX·XXXX", the same label
+  // every platform shows). It used to be the peer's IP address, which says
+  // nothing about which of your devices it was. Called while the byline is
+  // drawn, so the states it reads (trustedDevices, receivedBeacons) keep it
+  // current when a name arrives or changes.
   private sourceLabelFor(deviceId: string): string {
     if (deviceId === this.ownDeviceId) return 'This device';
-    const known = this.trustedDevices.find(d => d.publicKey === deviceId);
-    if (known !== undefined && known.address !== undefined && known.address.length > 0) {
-      return known.address;
-    }
-    return 'Other device';
+    return this.peerLabel(deviceId);
   }
 
   // The app's one accent colour, from the chosen theme. HarmonyOS gives apps
@@ -2731,7 +2733,7 @@ struct Index {
         // (see syncedGridCard), where a half-width cell can't fit
         // "time · source" and truncated it to a meaningless "20:53 · ...".
         // Drop the source in grid; the list has room for it.
-        Text(this.syncedViewMode === 'list' ? `${item.time} · ${item.source}` : item.time)
+        Text(this.syncedViewMode === 'list' ? `${item.time} · ${this.sourceLabelFor(item.deviceId)}` : item.time)
           .fontSize(11)
           .fontColor($r('sys.color.font_secondary'))
           // One line, always - a byline that wraps competes with the
@@ -3058,7 +3060,7 @@ struct Index {
       if (item.type === 'image' || this.imagePreviewUri(item) !== null) {
         Column({ space: 16 }) {
           this.zoomableImage(item.type === 'image' ? `data:image/png;base64,${item.content}` : this.imagePreviewUri(item) as string)
-          Text(`${item.time} · ${item.source}`).fontSize(12).fontColor($r('sys.color.font_secondary'))
+          Text(`${item.time} · ${this.sourceLabelFor(item.deviceId)}`).fontSize(12).fontColor($r('sys.color.font_secondary'))
         }
         .width('100%')
         .height('100%')
@@ -3075,7 +3077,7 @@ struct Index {
         Scroll(this.detailScroller) {
           Column({ space: 16 }) {
             Text(item.content).fontSize(16).fontColor($r('sys.color.font_primary')).copyOption(CopyOptions.LocalDevice)
-            Text(`${item.time} · ${item.source}`).fontSize(12).fontColor($r('sys.color.font_secondary'))
+            Text(`${item.time} · ${this.sourceLabelFor(item.deviceId)}`).fontSize(12).fontColor($r('sys.color.font_secondary'))
           }
           .width('100%')
           .alignItems(HorizontalAlign.Start)
