@@ -50,6 +50,7 @@ import { SyncManager } from '../networking/SyncManager';
 import { connection } from '@kit.NetworkKit';
 import { signEntry, ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
 import { ApplyResult } from '../clipboard/ClipboardApply';
+import { resCount, resText } from '../i18n/Strings';
 import socket from '@ohos.net.socket';
 
 const base64Helper = new util.Base64Helper();
@@ -163,6 +164,9 @@ interface SyncedItem {
   // what Delete tombstones (see DeletedEntries.ets).
   id: string;
   type: string;
+  // What its card shows. Empty for an image, and for a file with no usable
+  // name: those get a word ("Image", "File") from a string resource when
+  // they are drawn (see previewLabel), so it follows the language.
   preview: string;
   content: string; // full, untruncated - what "Copy content"/"Select text" act on
   // The device it came from. Its label is looked up when the byline is drawn
@@ -218,8 +222,8 @@ interface DialResult {
 // With several positional parameters they're passed by value and the
 // switch would keep showing whatever it first rendered with.
 interface SwitchRowOptions {
-  title: string;
-  subtitle: string;
+  title: Resource;
+  subtitle: Resource;
   isOn: boolean;
   icon: Resource;
   onChange: (isOn: boolean) => void;
@@ -229,8 +233,9 @@ interface SwitchRowOptions {
 // settingsRow's single argument - same by-reference reasoning as
 // SwitchRowOptions.
 interface SettingsRowOptions {
-  title: string;
-  value: string;
+  title: Resource;
+  // Empty for "no value"; a Resource for a fixed word (On, Not set).
+  value: ResourceStr;
   navigates: boolean;
   icon: Resource;
   onTap: () => void;
@@ -241,17 +246,17 @@ interface SettingsRowOptions {
 // single-value brand_blue).
 interface ThemeOption {
   key: string;
-  name: string;
+  name: Resource;
   color: Resource;
 }
 
 const THEMES: ThemeOption[] = [
-  { key: 'navy', name: 'Navy', color: $r('app.color.brand_blue') },
-  { key: 'teal', name: 'Teal', color: $r('app.color.theme_teal') },
-  { key: 'green', name: 'Green', color: $r('app.color.theme_green') },
-  { key: 'orange', name: 'Orange', color: $r('app.color.theme_orange') },
-  { key: 'rose', name: 'Rose', color: $r('app.color.theme_rose') },
-  { key: 'violet', name: 'Violet', color: $r('app.color.theme_violet') },
+  { key: 'navy', name: $r('app.string.theme_navy'), color: $r('app.color.brand_blue') },
+  { key: 'teal', name: $r('app.string.theme_teal'), color: $r('app.color.theme_teal') },
+  { key: 'green', name: $r('app.string.theme_green'), color: $r('app.color.theme_green') },
+  { key: 'orange', name: $r('app.string.theme_orange'), color: $r('app.color.theme_orange') },
+  { key: 'rose', name: $r('app.string.theme_rose'), color: $r('app.color.theme_rose') },
+  { key: 'violet', name: $r('app.string.theme_violet'), color: $r('app.color.theme_violet') },
 ];
 
 // Falls back to navy for an unset or no-longer-known stored key.
@@ -301,49 +306,68 @@ function mimeTypeForFileName(fileName: string): string {
   }
 }
 
+// The text a card shows for an entry. An image and a file with no usable
+// name come back empty: the word for them ("Image", "File") is a string
+// resource, added when the card is drawn (see Index's previewLabel), so a
+// stored item never holds a translated string.
 function previewFor(entry: ClipboardEntry): string {
   if (entry.Type === 'text') {
     return entry.Content.length > 80 ? `${entry.Content.slice(0, 80)}...` : entry.Content;
   } else if (entry.Type === 'image') {
-    return 'Image';
+    return '';
   } else if (entry.Type === 'file') {
     try {
       const payload = JSON.parse(entry.Content) as FilePayload;
-      return safeFileName(payload.FileName, 'File');
+      return safeFileName(payload.FileName, '');
     } catch (e) {
-      return 'File';
+      return '';
     }
   }
   return entry.Content;
 }
 
-function plural(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? '' : 's'}`;
-}
-
 // The toast after a share to ClipLink (Index's syncShared): what went out
-// and to how many devices, then anything that was skipped and why.
-function shareOutcomeMessage(files: number, texts: number, tooLarge: number, folders: number, unreadable: number,
-  own: number, connected: number): string {
+// and to how many devices, then anything that was skipped and why. Built
+// from whole-sentence resources (and plural ones for the counts), so a
+// translation can word and order each part its own way.
+function shareOutcomeMessage(context: common.Context, files: number, texts: number, tooLarge: number, folders: number,
+  unreadable: number, own: number, connected: number): string {
   const parts: string[] = [];
   if (files + texts > 0) {
-    const what: string = files === 0 ? 'text' : (texts === 0 ? plural(files, 'file') : `${plural(files, 'file')} and text`);
-    parts.push(connected > 0 ? `Shared ${what} to ${connected} device(s).` : `Added ${what} — no devices connected yet.`);
+    const what: string = files === 0
+      ? resText(context, $r('app.string.share_what_text'))
+      : (texts === 0
+        ? resCount(context, $r('app.plural.share_what_files'), files)
+        : resCount(context, $r('app.plural.share_what_files_and_text'), files));
+    parts.push(connected > 0
+      ? resText(context, $r('app.string.share_shared'), what, resCount(context, $r('app.plural.devices_count'), connected))
+      : resText(context, $r('app.string.share_added'), what));
   }
-  if (tooLarge > 0) parts.push(`${plural(tooLarge, 'file')} over 1 GB skipped.`);
-  if (folders > 0) parts.push(`${plural(folders, 'folder')} skipped — only files can be shared.`);
-  if (unreadable > 0) parts.push(`Couldn't add ${plural(unreadable, 'item')}.`);
-  if (own > 0) parts.push(own === 1 && parts.length === 0 ? 'That is already in ClipLink.' : `${plural(own, 'item')} already in ClipLink.`);
-  return parts.length > 0 ? parts.join(' ') : 'Nothing to share.';
+  if (tooLarge > 0) parts.push(resCount(context, $r('app.plural.share_too_large'), tooLarge));
+  if (folders > 0) parts.push(resCount(context, $r('app.plural.share_folders_skipped'), folders));
+  if (unreadable > 0) parts.push(resCount(context, $r('app.plural.share_unreadable'), unreadable));
+  if (own > 0) {
+    parts.push(own === 1 && parts.length === 0
+      ? resText(context, $r('app.string.item_already_in_cliplink'))
+      : resCount(context, $r('app.plural.share_own_items'), own));
+  }
+  if (parts.length === 0) return resText(context, $r('app.string.share_nothing'));
+  // Pairwise through a resource, rather than parts.join(' '): how sentences
+  // are separated is the language's business too.
+  let message: string = parts[0];
+  for (let i = 1; i < parts.length; i++) {
+    message = resText(context, $r('app.string.share_join'), message, parts[i]);
+  }
+  return message;
 }
 
 // The toast for a pasted file the watcher wouldn't take (see
 // ShareIntake's copyFileIn) - the same rules as a share, said the same way.
-function pasteRefusalMessage(refused: CopyRefusal): string {
-  if (refused === 'too-large') return 'That file is over 1 GB — too large to sync.';
-  if (refused === 'folder') return 'Only files can be synced, not folders.';
-  if (refused === 'own') return 'That is already in ClipLink.';
-  return "Couldn't read that file.";
+function pasteRefusalMessage(context: common.Context, refused: CopyRefusal): string {
+  if (refused === 'too-large') return resText(context, $r('app.string.refuse_too_large'));
+  if (refused === 'folder') return resText(context, $r('app.string.refuse_folder'));
+  if (refused === 'own') return resText(context, $r('app.string.item_already_in_cliplink'));
+  return resText(context, $r('app.string.refuse_unreadable'));
 }
 
 // Full-text view for the synced-item long-press menu's "Select text" option.
@@ -370,7 +394,7 @@ struct SelectTextDialog {
       .width('100%')
       .constraintSize({ maxHeight: 320 })
 
-      Button('Close').fontSize(13).onClick(() => { tapHaptic(); this.controller?.close(); })
+      Button($r('app.string.common_close')).fontSize(13).onClick(() => { tapHaptic(); this.controller?.close(); })
     }
     .width('100%')
     .padding(16)
@@ -390,7 +414,7 @@ struct SaveImageDialog {
 
   build() {
     Column({ space: 16 }) {
-      Text('Save this image to your gallery?').fontSize(14)
+      Text($r('app.string.dialog_save_image_prompt')).fontSize(14)
       SaveButton({ text: SaveDescription.SAVE_TO_GALLERY, buttonType: ButtonType.Capsule })
         .fontSize(14)
         .onClick((event: ClickEvent, result: SaveButtonOnClickResult) => {
@@ -398,7 +422,7 @@ struct SaveImageDialog {
           this.onSave(result);
           this.controller?.close();
         })
-      Button('Cancel').fontSize(13).onClick(() => { tapHaptic(); this.controller?.close(); })
+      Button($r('app.string.common_cancel')).fontSize(13).onClick(() => { tapHaptic(); this.controller?.close(); })
     }
     .width('100%')
     .padding(20)
@@ -425,6 +449,11 @@ struct Index {
   // alpha applied in code (see colorWithAlpha) are resolved from their
   // resources per mode, so they must re-resolve when this flips.
   @StorageProp('colorMode') colorMode: number = -1;
+  // The system language, kept in AppStorage by EntryAbility. Read by str()/
+  // countStr() so text built in code while the page is drawn (a count in a
+  // label) is built again when the language changes. $r(...) text needs
+  // nothing: the framework re-resolves it itself.
+  @StorageProp('language') language: string = '';
   @State currentTabIndex: number = 0;
   @State myPairingPayload: string = '';
   @State hasPassphrase: boolean = false;
@@ -912,6 +941,36 @@ struct Index {
     }
   }
 
+  // Text built in code (toasts, dialog bodies, status lines) - see
+  // i18n/Strings.ets. Resolved when called, in the language then in effect.
+  private str(res: Resource, ...args: Array<string | number>): string {
+    void this.language;
+    return resText(getContext(this), res, ...args);
+  }
+
+  // A plural resource for a count - "1 device" / "3 devices".
+  private countStr(res: Resource, count: number): string {
+    void this.language;
+    return resCount(getContext(this), res, count);
+  }
+
+  // The word for an item's type inside a sentence ("Synced text to ...").
+  private kindWord(type: string): string {
+    if (type === 'image') return this.str($r('app.string.kind_image'));
+    if (type === 'file') return this.str($r('app.string.kind_file'));
+    return this.str($r('app.string.kind_text'));
+  }
+
+  // "a or b or c" - the "or" is the language's. Only ever shown to the user.
+  private joinAddresses(addresses: string[]): string {
+    if (addresses.length === 0) return '';
+    let joined: string = addresses[0];
+    for (let i = 1; i < addresses.length; i++) {
+      joined = this.str($r('app.string.address_or'), joined, addresses[i]);
+    }
+    return joined;
+  }
+
   private async refreshTrustedDevices(): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
     this.trustedDevices = await this.trustStore.getAllTrustedDevices(context);
@@ -967,10 +1026,16 @@ struct Index {
   // holds no line breaks - see normalizeDeviceName).
   private pairingRequestMessage(deviceId: string, name: string | null, address: string | null): string {
     const claimed: string | null = this.peerName(deviceId, name);
-    const who: string = claimed !== null ? `"${claimed}"` : 'A device';
-    let text: string = `${who} wants to pair with this device.\nID: ${deviceFingerprint(deviceId)}`;
-    if (address !== null && address.length > 0) text += `\nAddress: ${address}`;
-    return `${text}\n\nOnly accept if you expect this - your Pairing screen being open is what let this request reach you at all.`;
+    const who: string = claimed !== null
+      ? this.str($r('app.string.pairing_request_named'), claimed)
+      : this.str($r('app.string.pairing_request_unnamed'));
+    // Each line is a resource of its own; only the line breaks between them
+    // are fixed here.
+    let text: string = `${who}\n${this.str($r('app.string.pairing_request_id_line'), deviceFingerprint(deviceId))}`;
+    if (address !== null && address.length > 0) {
+      text += `\n${this.str($r('app.string.pairing_request_address_line'), address)}`;
+    }
+    return `${text}\n\n${this.str($r('app.string.pairing_request_warning'))}`;
   }
 
   // The actual "foreground lifecycle" requirement: connect automatically
@@ -1089,10 +1154,10 @@ struct Index {
     this.pendingPairingPeerId = peerConn.peerDeviceId;
     this.pendingPairingAddress = address ?? '';
     this.getUIContext().showAlertDialog({
-      title: 'Pairing request',
+      title: $r('app.string.dialog_pairing_request_title'),
       message: this.pairingRequestMessage(peerConn.peerDeviceId, peerConn.peerName, address),
-      primaryButton: { value: 'Accept', action: () => { void this.acceptPairing(); } },
-      secondaryButton: { value: 'Reject', action: () => { this.rejectPairing(); } },
+      primaryButton: { value: $r('app.string.common_accept'), action: () => { void this.acceptPairing(); } },
+      secondaryButton: { value: $r('app.string.common_reject'), action: () => { this.rejectPairing(); } },
       cancel: () => { this.rejectPairing(); },
     });
   }
@@ -1106,7 +1171,7 @@ struct Index {
       this.pendingPairingConn = null;
       this.pendingPairingPeerId = '';
       this.pendingPairingAddress = '';
-      promptAction.showToast({ message: 'The other device cancelled the pairing request - try again.' });
+      promptAction.showToast({ message: $r('app.string.toast_pairing_cancelled') });
       return;
     }
     const context = getContext(this) as common.UIAbilityContext;
@@ -1121,7 +1186,7 @@ struct Index {
     this.syncManager?.registerConnection(conn);
     this.rememberNameOnceProven(conn);
     this.log(`paired: ${shortDeviceId(conn.peerDeviceId)}`);
-    promptAction.showToast({ message: 'Paired.' });
+    promptAction.showToast({ message: $r('app.string.toast_paired') });
   }
 
   rejectPairing(): void {
@@ -1290,7 +1355,7 @@ struct Index {
     // with Remove) - without this, tapping Remove on a device that's still
     // on the LAN looks like it silently did nothing.
     this.log(`untrusted ${shortDeviceId(deviceId)}`);
-    promptAction.showToast({ message: `Removed ${label}` });
+    promptAction.showToast({ message: this.str($r('app.string.toast_removed_device'), label) });
   }
 
   // Recomputes the QR/manual pairing payload - called whenever ownDeviceId,
@@ -1378,10 +1443,10 @@ struct Index {
   // Asked first, like Clear synced history.
   private confirmClearPassphrase(): void {
     this.getUIContext().showAlertDialog({
-      title: 'Clear passcode?',
-      message: 'New devices won\'t trust this device automatically any more. Devices already paired stay paired.',
-      primaryButton: { value: 'Cancel', action: () => {} },
-      secondaryButton: { value: 'Clear', fontColor: $r('sys.color.warning'), action: () => { void this.clearPassphrase(); } },
+      title: $r('app.string.dialog_clear_passcode_title'),
+      message: $r('app.string.dialog_clear_passcode_message'),
+      primaryButton: { value: $r('app.string.common_cancel'), action: () => {} },
+      secondaryButton: { value: $r('app.string.common_clear'), fontColor: $r('sys.color.warning'), action: () => { void this.clearPassphrase(); } },
     });
   }
 
@@ -1395,19 +1460,19 @@ struct Index {
       this.passcodeChanging = false;
       this.passphraseInput = '';
       await this.refreshPassphraseState();
-      promptAction.showToast({ message: 'Passcode cleared.' });
+      promptAction.showToast({ message: $r('app.string.toast_passcode_cleared') });
     } catch (e) {
       const be = e as BusinessError;
-      promptAction.showToast({ message: `Failed to clear passcode: ${be.message ?? e}`, duration: 3000 });
+      promptAction.showToast({ message: this.str($r('app.string.toast_passcode_clear_failed'), `${be.message ?? e}`), duration: 3000 });
     }
   }
 
   private confirmClearHistory(): void {
     this.getUIContext().showAlertDialog({
-      title: 'Clear synced history?',
-      message: 'Removes every synced item and any files saved for them from this device. Paired devices keep their own copies, but won\'t send these back.',
-      primaryButton: { value: 'Cancel', action: () => {} },
-      secondaryButton: { value: 'Clear', fontColor: $r('sys.color.warning'), action: () => { void this.clearSyncedHistory(); } },
+      title: $r('app.string.dialog_clear_history_title'),
+      message: $r('app.string.dialog_clear_history_message'),
+      primaryButton: { value: $r('app.string.common_cancel'), action: () => {} },
+      secondaryButton: { value: $r('app.string.common_clear'), fontColor: $r('sys.color.warning'), action: () => { void this.clearSyncedHistory(); } },
     });
   }
 
@@ -1424,17 +1489,17 @@ struct Index {
     const listedKeys: string[] = this.syncedItems.map((i: SyncedItem) => i.id);
     this.syncedItems = [];
     await this.syncManager?.clearHistory(listedKeys);
-    promptAction.showToast({ message: 'History cleared.' });
+    promptAction.showToast({ message: $r('app.string.toast_history_cleared') });
   }
 
   // Asked first, like Clear synced history - Delete also sits in the
   // preview's title bar, where a stray tap is easy.
   private confirmDeleteItem(item: SyncedItem): void {
     this.getUIContext().showAlertDialog({
-      title: 'Delete this item?',
-      message: 'Removes it, and any file saved for it, from this device. Paired devices keep their own copies, but won\'t send this one back.',
-      primaryButton: { value: 'Cancel', action: () => {} },
-      secondaryButton: { value: 'Delete', fontColor: $r('sys.color.warning'), action: () => { void this.deleteItem(item); } },
+      title: $r('app.string.dialog_delete_item_title'),
+      message: $r('app.string.dialog_delete_item_message'),
+      primaryButton: { value: $r('app.string.common_cancel'), action: () => {} },
+      secondaryButton: { value: $r('app.string.action_delete'), fontColor: $r('sys.color.warning'), action: () => { void this.deleteItem(item); } },
     });
   }
 
@@ -1446,7 +1511,7 @@ struct Index {
     if (previewOpen) {
       this.closeItemDetail();
     }
-    promptAction.showToast({ message: 'Item deleted.' });
+    promptAction.showToast({ message: $r('app.string.toast_item_deleted') });
   }
 
   async saveTailscaleIp(): Promise<void> {
@@ -1458,10 +1523,10 @@ struct Index {
       await this.deviceSettings.setTailscaleIp(context, trimmed);
       this.tailscaleIp = trimmed;
       this.refreshPairingPayload();
-      promptAction.showToast({ message: trimmed.length > 0 ? 'Tailscale IP saved.' : 'Tailscale IP cleared.' });
+      promptAction.showToast({ message: trimmed.length > 0 ? $r('app.string.toast_tailscale_saved') : $r('app.string.toast_tailscale_cleared') });
     } catch (e) {
       const be = e as BusinessError;
-      promptAction.showToast({ message: `Failed to save: ${be.message ?? e}`, duration: 3000 });
+      promptAction.showToast({ message: this.str($r('app.string.toast_save_failed'), `${be.message ?? e}`), duration: 3000 });
     } finally {
       this.savingTailscaleIp = false;
     }
@@ -1480,10 +1545,10 @@ struct Index {
       this.deviceNameOverride = saved;
       this.deviceNameInput = saved;
       this.refreshPairingPayload();
-      promptAction.showToast({ message: saved.length > 0 ? 'Device name saved.' : 'Using the system device name.' });
+      promptAction.showToast({ message: saved.length > 0 ? $r('app.string.toast_device_name_saved') : $r('app.string.toast_device_name_system') });
     } catch (e) {
       const be = e as BusinessError;
-      promptAction.showToast({ message: `Failed to save: ${be.message ?? e}`, duration: 3000 });
+      promptAction.showToast({ message: this.str($r('app.string.toast_save_failed'), `${be.message ?? e}`), duration: 3000 });
     } finally {
       this.savingDeviceName = false;
     }
@@ -1512,7 +1577,7 @@ struct Index {
     if (this.settingPassphrase) return; // already running - ignore a double-tap
     const passphrase = this.passphraseInput.trim();
     if (passphrase.length === 0) {
-      promptAction.showToast({ message: 'Enter a passcode first.' });
+      promptAction.showToast({ message: $r('app.string.toast_passcode_empty') });
       return;
     }
     // PassphraseKeyStore.setPassphrase runs PBKDF2 at 210,000 iterations
@@ -1529,10 +1594,10 @@ struct Index {
       this.passphraseInput = '';
       this.passcodeChanging = false;
       await this.refreshPassphraseState();
-      promptAction.showToast({ message: 'Passcode set — matching devices will auto-trust.', duration: 3000 });
+      promptAction.showToast({ message: $r('app.string.toast_passcode_set'), duration: 3000 });
     } catch (e) {
       const be = e as BusinessError;
-      promptAction.showToast({ message: `Failed to set passcode: ${be.message ?? e}`, duration: 3000 });
+      promptAction.showToast({ message: this.str($r('app.string.toast_passcode_set_failed'), `${be.message ?? e}`), duration: 3000 });
     } finally {
       this.settingPassphrase = false;
     }
@@ -1609,7 +1674,7 @@ struct Index {
       }
       if (tried === 'refused' || (tried === 'silent' && outcome === 'unreachable')) outcome = tried;
     }
-    return { address: candidates.join(' or '), outcome: outcome };
+    return { address: this.joinAddresses(candidates), outcome: outcome };
   }
 
   // The pairing screen's feedback for a dial. It used to be one message
@@ -1619,21 +1684,21 @@ struct Index {
   private pairingOutcomeMessage(result: DialResult): string {
     switch (result.outcome) {
       case 'connected':
-        return `Already paired with ${result.address} - connected.`;
+        return this.str($r('app.string.outcome_connected'), result.address);
       case 'passcode':
-        return `Paired with ${result.address} using your passcode.`;
+        return this.str($r('app.string.outcome_passcode'), result.address);
       case 'prompt':
-        return `Reached ${result.address} - accept the pairing prompt on both devices to finish.`;
+        return this.str($r('app.string.outcome_prompt'), result.address);
       case 'awaiting-other':
-        return `Reached ${result.address} - accept the request on that device to finish.`;
+        return this.str($r('app.string.outcome_awaiting_other'), result.address);
       case 'busy':
-        return 'Another pairing request is already waiting here - accept or reject it first.';
+        return this.str($r('app.string.outcome_busy'));
       case 'refused':
-        return `${result.address} answered but didn't accept this device. Set the same passcode on both, or open its Pairing screen (and finish any other pairing request there), then try again.`;
+        return this.str($r('app.string.outcome_refused'), result.address);
       case 'silent':
-        return `${result.address} accepted the connection but ClipLink there didn't respond - try restarting it on that device.`;
+        return this.str($r('app.string.outcome_silent'), result.address);
       default:
-        return `Couldn't connect to ${result.address}. Check ClipLink is running there and both devices are on Tailscale (or the same network).`;
+        return this.str($r('app.string.outcome_unreachable'), result.address);
     }
   }
 
@@ -1650,7 +1715,7 @@ struct Index {
       const scannedKey: string = pairingInfo !== null && typeof pairingInfo.PublicKey === 'string' ? pairingInfo.PublicKey : '';
       const publicKey = scannedKey.length > 0 ? scannedKey : result.originalValue;
       if (publicKey.length === 0) {
-        this.scanStatus = 'scanned code was empty';
+        this.scanStatus = this.str($r('app.string.scan_empty'));
         return;
       }
       const address: string | undefined = pairingInfo !== null && typeof pairingInfo.Address === 'string' ? pairingInfo.Address : undefined;
@@ -1658,11 +1723,11 @@ struct Index {
       const sentName: string | undefined = pairingInfo !== null ? pairingInfo.Name : undefined;
       const scannedName: string | null = typeof sentName === 'string' ? normalizeDeviceName(sentName) : null;
       if (address === undefined) {
-        this.scanStatus = `${this.peerLabel(publicKey, scannedName)} has no address in its code - if it's on the same network, just keep this screen open and its beacon will trigger pairing automatically.`;
+        this.scanStatus = this.str($r('app.string.scan_no_address'), this.peerLabel(publicKey, scannedName));
         return;
       }
       const candidates = this.addressCandidatesFor(publicKey, address);
-      this.scanStatus = `Connecting to ${candidates[0]}...`;
+      this.scanStatus = this.str($r('app.string.scan_connecting'), candidates[0]);
       const dial = await this.connectToFirstReachable(candidates, TCP_PORT);
       this.scanStatus = this.pairingOutcomeMessage(dial);
     } catch (e) {
@@ -1671,7 +1736,7 @@ struct Index {
         // user canceled the scan - routine, not an error
         return;
       }
-      this.scanStatus = `scan failed: ${be.message}`;
+      this.scanStatus = this.str($r('app.string.scan_failed'), `${be.message}`);
     }
   }
 
@@ -1684,7 +1749,7 @@ struct Index {
     if (this.pairingInProgress) return;
     const raw = this.pairByAddressInput.trim();
     if (raw.length === 0) {
-      promptAction.showToast({ message: 'Enter an address first.' });
+      promptAction.showToast({ message: $r('app.string.toast_address_empty') });
       return;
     }
     let address = raw;
@@ -1719,7 +1784,7 @@ struct Index {
     const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.myPairingPayload);
     await pasteboard.getSystemPasteboard().setData(data);
     this.noteOwnClipboardWrite();
-    promptAction.showToast({ message: 'Pairing info copied — paste it into Windows\' Trust a Device dialog.', duration: 3000 });
+    promptAction.showToast({ message: $r('app.string.toast_pairing_info_copied'), duration: 3000 });
   }
 
   async copyDeviceId(): Promise<void> {
@@ -1728,9 +1793,9 @@ struct Index {
       const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.ownDeviceId);
       await pasteboard.getSystemPasteboard().setData(data);
       this.noteOwnClipboardWrite();
-      promptAction.showToast({ message: 'Device ID copied.' });
+      promptAction.showToast({ message: $r('app.string.toast_device_id_copied') });
     } catch (e) {
-      promptAction.showToast({ message: 'Could not copy — try again.' });
+      promptAction.showToast({ message: $r('app.string.toast_copy_failed') });
     }
   }
 
@@ -1751,7 +1816,7 @@ struct Index {
 
   async onPasteButtonClick(result: PasteButtonOnClickResult) {
     if (result !== PasteButtonOnClickResult.SUCCESS) {
-      promptAction.showToast({ message: 'Tap did not grant access — try again.' });
+      promptAction.showToast({ message: $r('app.string.toast_paste_not_granted') });
       return;
     }
     const context = getContext(this) as common.UIAbilityContext;
@@ -1759,12 +1824,14 @@ struct Index {
     this.markClipboardSeen();
     this.pendingChange = false;
     if (change === null) {
-      promptAction.showToast({ message: 'Clipboard unchanged since last sync.' });
+      promptAction.showToast({ message: $r('app.string.toast_clipboard_unchanged') });
       return;
     }
     if (change.type === 'unsupported') {
       promptAction.showToast({
-        message: change.refused !== undefined ? pasteRefusalMessage(change.refused) : `Unsupported clipboard content: ${change.detail}`,
+        message: change.refused !== undefined
+          ? pasteRefusalMessage(getContext(this), change.refused)
+          : this.str($r('app.string.toast_unsupported_clipboard'), `${change.detail}`),
       });
       return;
     }
@@ -1780,14 +1847,14 @@ struct Index {
       const path: string = change.path ?? '';
       if (fileStore === null) {
         removeQuietly(path);
-        this.pasteFailed('File store not ready yet — try again.');
+        this.pasteFailed($r('app.string.toast_file_store_not_ready_yet'));
         return;
       }
       // The watcher's cache copy moves in, already hashed (an empty file's
       // too: its hash is the known constant - see sha256File).
       if (!fileStore.adopt(path, change.hash)) {
         this.log('could not store the pasted file');
-        this.pasteFailed('Could not save the file — try again.');
+        this.pasteFailed($r('app.string.toast_paste_save_failed'));
         return;
       }
       const payload: FilePayload = { FileName: safeFileName(change.fileName, 'file'), FileHash: change.hash, FileSize: change.size ?? 0 };
@@ -1798,20 +1865,22 @@ struct Index {
       await this.recordLocalEntry(change.type, entryContent);
     } catch (e) {
       this.log(`could not sync the paste (${e})`);
-      this.pasteFailed('Could not sync that — try again.');
+      this.pasteFailed($r('app.string.toast_paste_sync_failed'));
       return;
     }
 
     const count = this.syncManager?.connectionCount ?? 0;
     promptAction.showToast({
-      message: count > 0 ? `Synced ${change.type} to ${count} device(s).` : `Captured ${change.type} — no devices connected yet.`,
+      message: count > 0
+        ? this.str($r('app.string.toast_synced_to_devices'), this.kindWord(change.type), this.countStr($r('app.plural.devices_count'), count))
+        : this.str($r('app.string.toast_captured_no_devices'), this.kindWord(change.type)),
     });
   }
 
   // A paste that was read but couldn't be synced: says so, and has the
   // watcher forget the read, so the next tap tries again rather than finding
   // the clipboard "unchanged since last sync".
-  private pasteFailed(message: string): void {
+  private pasteFailed(message: Resource): void {
     this.watcher.forget();
     promptAction.showToast({ message: message });
   }
@@ -1906,7 +1975,7 @@ struct Index {
     netLog(`share: files=${files} texts=${texts} tooLarge=${tooLarge} folders=${folders} unreadable=${unreadable} own=${own}`);
     const count = this.syncManager?.connectionCount ?? 0;
     promptAction.showToast({
-      message: shareOutcomeMessage(files, texts, tooLarge, folders, unreadable, own, count),
+      message: shareOutcomeMessage(getContext(this), files, texts, tooLarge, folders, unreadable, own, count),
       duration: 3000,
     });
     // Show where it went, unless that would pull the user out of pairing.
@@ -1923,10 +1992,10 @@ struct Index {
       await identity.sign(testBytes);
       const context = getContext(this) as common.UIAbilityContext;
       await this.trustStore.isTrusted(context, 'self-test-probe');
-      promptAction.showToast({ message: 'Self-test passed — identity, signing, and trust store all working.' });
+      promptAction.showToast({ message: $r('app.string.toast_self_test_passed') });
     } catch (e) {
       const be = e as BusinessError;
-      promptAction.showToast({ message: `Self-test failed: ${be.message ?? e}` });
+      promptAction.showToast({ message: this.str($r('app.string.toast_self_test_failed'), `${be.message ?? e}`) });
     }
   }
 
@@ -1937,8 +2006,8 @@ struct Index {
   copyItemContent(item: SyncedItem): void {
     const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, item.content);
     pasteboard.getSystemPasteboard().setData(data)
-      .then(() => { this.noteOwnClipboardWrite(); promptAction.showToast({ message: 'Copied to clipboard.' }); })
-      .catch(() => { promptAction.showToast({ message: 'Could not copy — try again.' }); });
+      .then(() => { this.noteOwnClipboardWrite(); promptAction.showToast({ message: $r('app.string.toast_copied') }); })
+      .catch(() => { promptAction.showToast({ message: $r('app.string.toast_copy_failed') }); });
   }
 
   showSelectTextDialog(item: SyncedItem): void {
@@ -1981,18 +2050,18 @@ struct Index {
     const context = getContext(this) as common.UIAbilityContext;
     const fileStore = this.fileStore;
     if (fileStore === null) {
-      promptAction.showToast({ message: 'File store not ready — try again.' });
+      promptAction.showToast({ message: $r('app.string.toast_file_store_not_ready') });
       return;
     }
     let payload: FilePayload;
     try {
       payload = JSON.parse(item.content) as FilePayload;
     } catch (e) {
-      promptAction.showToast({ message: 'That item is not a file.' });
+      promptAction.showToast({ message: $r('app.string.toast_not_a_file') });
       return;
     }
     if (!fileStore.exists(payload.FileHash)) {
-      promptAction.showToast({ message: "File hasn't finished downloading yet." });
+      promptAction.showToast({ message: $r('app.string.toast_file_not_downloaded') });
       return;
     }
     const uri: string = fileUri.getUriFromPath(fileStore.getPath(payload.FileHash));
@@ -2022,9 +2091,9 @@ struct Index {
     } catch (e) {
       const err = e as BusinessError;
       if (err.code === 16000019 || err.code === 16000001) {
-        promptAction.showToast({ message: `No app on this device can open ${fileName}.` });
+        promptAction.showToast({ message: this.str($r('app.string.toast_no_app_to_open'), fileName) });
       } else {
-        promptAction.showToast({ message: `Could not open file (${err.code}).` });
+        promptAction.showToast({ message: this.str($r('app.string.toast_open_file_failed'), err.code) });
       }
     }
   }
@@ -2049,12 +2118,12 @@ struct Index {
       } else {
         const fileStore = this.fileStore;
         if (fileStore === null) {
-          promptAction.showToast({ message: 'File store not ready — try again.' });
+          promptAction.showToast({ message: $r('app.string.toast_file_store_not_ready') });
           return;
         }
         const payload = JSON.parse(item.content) as FilePayload;
         if (!fileStore.exists(payload.FileHash)) {
-          promptAction.showToast({ message: "File hasn't finished downloading yet." });
+          promptAction.showToast({ message: $r('app.string.toast_file_not_downloaded') });
           return;
         }
         uri = fileUri.getUriFromPath(fileStore.getPath(payload.FileHash));
@@ -2064,7 +2133,7 @@ struct Index {
       const controller = new systemShare.ShareController(sharedData);
       await controller.show(context, { previewMode: systemShare.SharePreviewMode.DETAIL });
     } catch (e) {
-      promptAction.showToast({ message: 'Could not open share sheet.' });
+      promptAction.showToast({ message: $r('app.string.toast_share_sheet_failed') });
     }
   }
 
@@ -2082,7 +2151,7 @@ struct Index {
   // SaveButton itself has to be the tapped component (see SaveImageDialog).
   async saveImageOnClick(item: SyncedItem, result: SaveButtonOnClickResult): Promise<void> {
     if (result !== SaveButtonOnClickResult.SUCCESS) {
-      promptAction.showToast({ message: 'Save was not authorized.' });
+      promptAction.showToast({ message: $r('app.string.toast_save_not_authorized') });
       return;
     }
     try {
@@ -2097,9 +2166,9 @@ struct Index {
       } finally {
         fs.closeSync(file);
       }
-      promptAction.showToast({ message: 'Saved to gallery.' });
+      promptAction.showToast({ message: $r('app.string.toast_saved_to_gallery') });
     } catch (e) {
-      promptAction.showToast({ message: 'Could not save image.' });
+      promptAction.showToast({ message: $r('app.string.toast_save_image_failed') });
     }
   }
 
@@ -2110,13 +2179,13 @@ struct Index {
   async saveFileToDocuments(item: SyncedItem): Promise<void> {
     const fileStore = this.fileStore;
     if (fileStore === null) {
-      promptAction.showToast({ message: 'File store not ready — try again.' });
+      promptAction.showToast({ message: $r('app.string.toast_file_store_not_ready') });
       return;
     }
     try {
       const payload = JSON.parse(item.content) as FilePayload;
       if (!fileStore.exists(payload.FileHash)) {
-        promptAction.showToast({ message: "File hasn't finished downloading yet." });
+        promptAction.showToast({ message: $r('app.string.toast_file_not_downloaded') });
         return;
       }
       const context = getContext(this) as common.UIAbilityContext;
@@ -2137,9 +2206,9 @@ struct Index {
         fs.closeSync(srcFile);
         fs.closeSync(destFile);
       }
-      promptAction.showToast({ message: 'File saved.' });
+      promptAction.showToast({ message: $r('app.string.toast_file_saved') });
     } catch (e) {
-      promptAction.showToast({ message: 'Could not save file.' });
+      promptAction.showToast({ message: $r('app.string.toast_save_file_failed') });
     }
   }
 
@@ -2424,8 +2493,25 @@ struct Index {
   // drawn, so the states it reads (trustedDevices, receivedBeacons) keep it
   // current when a name arrives or changes.
   private sourceLabelFor(deviceId: string): string {
-    if (deviceId === this.ownDeviceId) return 'This device';
+    if (deviceId === this.ownDeviceId) return this.str($r('app.string.synced_this_device'));
     return this.peerLabel(deviceId);
+  }
+
+  // "20:53 · This device" - the byline under an item. A Resource built while
+  // the item is drawn, so it is worded in the current language (the time is
+  // HH:MM whatever it is).
+  private bylineText(item: SyncedItem): Resource {
+    return $r('app.string.synced_byline', item.time, this.sourceLabelFor(item.deviceId));
+  }
+
+  // The preview text, or - for an image, or a file with no usable name,
+  // whose preview is empty (see previewFor) - the word for it. A Resource, so
+  // it follows a language change.
+  private previewLabel(item: SyncedItem): ResourceStr {
+    if (item.preview.length > 0) return item.preview;
+    if (item.type === 'image') return $r('app.string.item_image');
+    if (item.type === 'file') return $r('app.string.item_file');
+    return item.preview;
   }
 
   // The app's one accent colour, from the chosen theme. HarmonyOS gives apps
@@ -2440,7 +2526,7 @@ struct Index {
     return themeFor(this.accentTheme).key;
   }
 
-  private selectedThemeName(): string {
+  private selectedThemeName(): Resource {
     return themeFor(this.accentTheme).name;
   }
 
@@ -2582,8 +2668,8 @@ struct Index {
   // List rows get the short preview; grid cells are tall enough to show
   // the real body, which is what the 80-char preview was hiding behind an
   // ellipsis. Capped so one long note cannot blow past itemConstraintSize.
-  private cardBodyText(item: SyncedItem): string {
-    if (this.syncedViewMode === 'list' || item.type !== 'text') return item.preview;
+  private cardBodyText(item: SyncedItem): ResourceStr {
+    if (this.syncedViewMode === 'list' || item.type !== 'text') return this.previewLabel(item);
     const full: string = item.content;
     return full.length > 280 ? `${full.slice(0, 280)}...` : full;
   }
@@ -2626,21 +2712,21 @@ struct Index {
         // no colour field at all, so even a fill-based icon could not be
         // tinted from code. The light/dark resource pair is what makes it
         // adapt.
-        MenuItem({ content: 'Copy', startIcon: $r('app.media.ic_menu_copy') }).onClick(() => { tapHaptic(); this.copyItemContent(item); })
+        MenuItem({ content: $r('app.string.action_copy'), startIcon: $r('app.media.ic_menu_copy') }).onClick(() => { tapHaptic(); this.copyItemContent(item); })
       } else {
-        MenuItem({ content: 'Share', startIcon: $r('app.media.ic_menu_share') }).onClick(() => { tapHaptic(); void this.shareItem(item); })
+        MenuItem({ content: $r('app.string.action_share'), startIcon: $r('app.media.ic_menu_share') }).onClick(() => { tapHaptic(); void this.shareItem(item); })
         if (item.type === 'image') {
-          MenuItem({ content: 'Save to gallery', startIcon: $r('app.media.ic_menu_save_gallery') }).onClick(() => { tapHaptic(); this.showSaveImageDialog(item); })
+          MenuItem({ content: $r('app.string.action_save_to_gallery'), startIcon: $r('app.media.ic_menu_save_gallery') }).onClick(() => { tapHaptic(); this.showSaveImageDialog(item); })
         } else {
           // Same shape as the preview title bar's Open button
           // (sys.symbol.arrow_right_up_and_square), drawn in this menu's
           // stroke style.
-          MenuItem({ content: 'Open', startIcon: $r('app.media.ic_menu_open') }).onClick(() => { tapHaptic(); void this.openFileWithSystem(item); })
-          MenuItem({ content: 'Save file', startIcon: $r('app.media.ic_menu_save_file') }).onClick(() => { tapHaptic(); void this.saveFileToDocuments(item); })
+          MenuItem({ content: $r('app.string.action_open'), startIcon: $r('app.media.ic_menu_open') }).onClick(() => { tapHaptic(); void this.openFileWithSystem(item); })
+          MenuItem({ content: $r('app.string.action_save_file'), startIcon: $r('app.media.ic_menu_save_file') }).onClick(() => { tapHaptic(); void this.saveFileToDocuments(item); })
         }
       }
       // Every type, last. Removes the item from this device only.
-      MenuItem({ content: 'Delete', startIcon: $r('app.media.ic_menu_delete') }).onClick(() => { tapHaptic(); this.confirmDeleteItem(item); })
+      MenuItem({ content: $r('app.string.action_delete'), startIcon: $r('app.media.ic_menu_delete') }).onClick(() => { tapHaptic(); this.confirmDeleteItem(item); })
     }
   }
 
@@ -2696,7 +2782,7 @@ struct Index {
           // Machine noise: label what it is, then show a short fragment
           // rather than two lines of characters nobody can read. The full
           // value is still one tap away in the detail view.
-          Text(item.type === 'file' ? 'File' : 'Encoded data')
+          Text(item.type === 'file' ? $r('app.string.item_file') : $r('app.string.item_encoded_data'))
             .fontSize(14)
             .fontColor($r('sys.color.font_primary'))
             .fontWeight(FontWeight.Medium)
@@ -2733,7 +2819,7 @@ struct Index {
         // (see syncedGridCard), where a half-width cell can't fit
         // "time · source" and truncated it to a meaningless "20:53 · ...".
         // Drop the source in grid; the list has room for it.
-        Text(this.syncedViewMode === 'list' ? `${item.time} · ${this.sourceLabelFor(item.deviceId)}` : item.time)
+        Text(this.syncedViewMode === 'list' ? this.bylineText(item) : item.time)
           .fontSize(11)
           .fontColor($r('sys.color.font_secondary'))
           // One line, always - a byline that wraps competes with the
@@ -2835,7 +2921,7 @@ struct Index {
   syncedGridTextCard(item: SyncedItem) {
     Column({ space: 8 }) {
       if (this.looksLikeOpaqueData(item.preview)) {
-        Text(item.type === 'file' ? 'File' : 'Encoded data')
+        Text(item.type === 'file' ? $r('app.string.item_file') : $r('app.string.item_encoded_data'))
           .fontSize(14)
           .fontColor($r('sys.color.font_primary'))
           .fontWeight(FontWeight.Medium)
@@ -2916,7 +3002,7 @@ struct Index {
           .objectFit(ImageFit.Cover)
           .autoResize(true) // see typeChip
           .borderRadius(12)
-        Text(this.looksLikeOpaqueData(item.preview) ? 'Image' : item.preview)
+        Text(this.looksLikeOpaqueData(item.preview) ? $r('app.string.item_image') : this.previewLabel(item))
           .fontSize(13)
           .fontColor($r('sys.color.font_primary'))
           .fontWeight(FontWeight.Medium)
@@ -3060,7 +3146,7 @@ struct Index {
       if (item.type === 'image' || this.imagePreviewUri(item) !== null) {
         Column({ space: 16 }) {
           this.zoomableImage(item.type === 'image' ? `data:image/png;base64,${item.content}` : this.imagePreviewUri(item) as string)
-          Text(`${item.time} · ${this.sourceLabelFor(item.deviceId)}`).fontSize(12).fontColor($r('sys.color.font_secondary'))
+          Text(this.bylineText(item)).fontSize(12).fontColor($r('sys.color.font_secondary'))
         }
         .width('100%')
         .height('100%')
@@ -3077,7 +3163,7 @@ struct Index {
         Scroll(this.detailScroller) {
           Column({ space: 16 }) {
             Text(item.content).fontSize(16).fontColor($r('sys.color.font_primary')).copyOption(CopyOptions.LocalDevice)
-            Text(`${item.time} · ${this.sourceLabelFor(item.deviceId)}`).fontSize(12).fontColor($r('sys.color.font_secondary'))
+            Text(this.bylineText(item)).fontSize(12).fontColor($r('sys.color.font_secondary'))
           }
           .width('100%')
           .alignItems(HorizontalAlign.Start)
@@ -3182,7 +3268,7 @@ struct Index {
   // These return plain option objects rather than being @Builders: the
   // title bar is data handed to HdsNavDestination.titleBar(), and a method
   // (not a local variable) is how a builder body is allowed to compute it.
-  private hdsTitleBar(title: string, isRoot: boolean, menu: HdsNavigationMenuItemOptions[]): HdsNavigationTitleBarOptions {
+  private hdsTitleBar(title: ResourceStr, isRoot: boolean, menu: HdsNavigationMenuItemOptions[]): HdsNavigationTitleBarOptions {
     return {
       // Every destination ignores the top safe area so content can scroll up
       // behind the status bar - without this the title bar followed it and
@@ -3216,9 +3302,9 @@ struct Index {
   // here so the title bar re-evaluates when it changes.
   private syncedTitleBar(viewMode: string): HdsNavigationTitleBarOptions {
     const toGrid: boolean = viewMode === 'list';
-    return this.hdsTitleBar('Synced', true, [{
+    return this.hdsTitleBar($r('app.string.tab_synced'), true, [{
       content: {
-        label: toGrid ? 'Grid view' : 'List view',
+        label: toGrid ? $r('app.string.synced_view_grid') : $r('app.string.synced_view_list'),
         icon: toGrid ? $r('sys.symbol.square_grid_2x2') : $r('sys.symbol.list_bullet'),
         action: () => {
           tapHaptic();
@@ -3241,7 +3327,7 @@ struct Index {
     if (item === undefined) return this.hdsTitleBar('', false, []);
     const deleteButton: HdsNavigationMenuItemOptions = {
       content: {
-        label: 'Delete',
+        label: $r('app.string.action_delete'),
         icon: $r('sys.symbol.trash'),
         action: () => { tapHaptic(); this.confirmDeleteItem(item); },
       },
@@ -3249,7 +3335,7 @@ struct Index {
     if (item.type === 'text') {
       return this.hdsTitleBar('', false, [{
         content: {
-          label: 'Copy',
+          label: $r('app.string.action_copy'),
           icon: $r('sys.symbol.rectangle_on_rectangle'),
           action: () => { tapHaptic(); this.copyItemContent(item); },
         },
@@ -3257,7 +3343,7 @@ struct Index {
     }
     const share: HdsNavigationMenuItemOptions = {
       content: {
-        label: 'Share',
+        label: $r('app.string.action_share'),
         icon: $r('sys.symbol.share'),
         action: () => { tapHaptic(); void this.shareItem(item); },
       },
@@ -3265,7 +3351,7 @@ struct Index {
     if (item.type === 'file') {
       return this.hdsTitleBar('', false, [{
         content: {
-          label: 'Open',
+          label: $r('app.string.action_open'),
           icon: $r('sys.symbol.arrow_right_up_and_square'),
           action: () => { tapHaptic(); void this.openFileWithSystem(item); },
         },
@@ -3418,7 +3504,7 @@ struct Index {
         // components only get material in title bars and the bottom tab
         // bar), so without a background this label sat bare over the cards.
         // Points at Paste, which is what sends it.
-        Text('New item →')
+        Text($r('app.string.synced_new_item'))
           .fontSize(13)
           .fontWeight(FontWeight.Medium)
           .fontColor($r('sys.color.font_on_primary'))
@@ -3445,7 +3531,7 @@ struct Index {
   // Empty states - a headline plus one line of explanation, centered,
   // rather than a stray line of small gray text against a blank screen.
   @Builder
-  emptyState(headline: string, detail: string, art: Resource) {
+  emptyState(headline: ResourceStr, detail: ResourceStr, art: Resource) {
     Column({ space: 8 }) {
       Image(art)
         .width(120)
@@ -3480,7 +3566,7 @@ struct Index {
   syncedListContent() {
     Stack({ alignContent: Alignment.Bottom }) {
       if (this.syncedItems.length === 0) {
-        this.emptyState('Nothing synced yet', 'Copy something on this or another trusted device and it will appear here.', $r('app.media.ic_empty_synced'))
+        this.emptyState($r('app.string.synced_empty_title'), $r('app.string.synced_empty_detail'), $r('app.media.ic_empty_synced'))
       } else if (this.syncedViewMode === 'list') {
         List({ space: 10, scroller: this.syncedListScroller }) {
           ForEach(this.syncedItems, (item: SyncedItem) => {
@@ -3653,12 +3739,12 @@ struct Index {
         // Every address, LAN first - a peer can legitimately be reachable at
         // both a LAN IP and a Tailscale IP, and which one it is paired on
         // matters when diagnosing a connection.
-        Text(this.liveRow(deviceId).addresses.length > 0 ? this.liveRow(deviceId).addresses.join(' · ') : 'Unknown address')
+        Text(this.liveRow(deviceId).addresses.length > 0 ? this.liveRow(deviceId).addresses.join(' · ') : $r('app.string.devices_unknown_address'))
           .fontSize(12)
           .fontColor($r('sys.color.font_secondary'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(this.liveRow(deviceId).connected ? 'Connected' : this.liveRow(deviceId).trusted ? 'Trusted · not connected' : 'Discovered nearby')
+        Text(this.liveRow(deviceId).connected ? $r('app.string.devices_status_connected') : this.liveRow(deviceId).trusted ? $r('app.string.devices_status_trusted') : $r('app.string.devices_status_discovered'))
           .fontSize(12)
           .fontColor(this.liveRow(deviceId).connected ? $r('sys.color.confirm') : $r('sys.color.font_secondary'))
       }
@@ -3678,7 +3764,7 @@ struct Index {
         // Sized to its label and sitting beside the device, not stretched
         // to the full card width underneath it - a full-width button read
         // as the card's primary action when it's a secondary one.
-        Button('Trust')
+        Button($r('app.string.devices_trust'))
           .fontSize(13)
           .fontColor($r('sys.color.font_on_primary'))
           .backgroundColor(this.accent())
@@ -3692,7 +3778,7 @@ struct Index {
       } else if (this.liveRow(deviceId).trusted) {
         // Destructive, so it stays quiet: a tinted secondary surface
         // rather than a filled brand button competing with Trust.
-        Button('Remove')
+        Button($r('app.string.devices_remove'))
           .fontSize(13)
           .fontColor($r('sys.color.font_secondary'))
           .backgroundColor($r('sys.color.comp_background_tertiary'))
@@ -3733,8 +3819,8 @@ struct Index {
         // Summary line reads as a status, not a stat: the count is the
         // part worth emphasizing, the rest is context.
         Text(this.connectedCount === 0
-          ? 'No devices connected'
-          : `${this.connectedCount} device${this.connectedCount === 1 ? '' : 's'} connected`)
+          ? $r('app.string.devices_none_connected')
+          : this.countStr($r('app.plural.devices_connected_count'), this.connectedCount))
           .fontSize(13)
           .fontColor(this.connectedCount > 0 ? $r('sys.color.confirm') : $r('sys.color.font_secondary'))
           .fontWeight(FontWeight.Medium)
@@ -3747,7 +3833,7 @@ struct Index {
           // container, which inside a ListItem would mean centering
           // within a single row. Plain copy is right for a list that
           // still has its summary line above it.
-          Text('Trusted devices, and nearby devices on the same network, will show up here.')
+          Text($r('app.string.devices_empty'))
             .fontSize(13)
             .fontColor($r('sys.color.font_secondary'))
             .width('100%')
@@ -3824,7 +3910,7 @@ struct Index {
       HdsNavDestination() {
         this.devicesContent()
       }
-      .titleBar(this.hdsTitleBar('Devices', true, []))
+      .titleBar(this.hdsTitleBar($r('app.string.tab_devices'), true, []))
       .titleMode(HdsNavDestinationTitleMode.MINI)
       .bindToScrollable([this.devicesScroller])
       .hideBackButton(true)
@@ -3846,8 +3932,9 @@ struct Index {
   // convention (SubHeader-style) instead of every row/card looking equal
   // weight.
   @Builder
-  sectionHeader(text: string) {
-    Text(text.toUpperCase())
+  sectionHeader(text: ResourceStr) {
+    Text(text)
+      .textCase(TextCase.UpperCase)
       .fontSize(11)
       .fontColor($r('sys.color.font_secondary'))
       .fontWeight(FontWeight.Medium)
@@ -3874,7 +3961,7 @@ struct Index {
         .width(22)
         .height(22)
       Text(opts.title).fontSize(14).layoutWeight(1)
-      if (opts.value.length > 0) {
+      if (opts.value !== '') {
         // Capped so a long value (a device name can be 64 characters)
         // ellipsizes instead of squeezing the title out.
         Text(opts.value).fontSize(13).fontColor($r('sys.color.font_secondary'))
@@ -3904,7 +3991,7 @@ struct Index {
         Image($r('app.media.ic_settings_palette'))
           .width(22)
           .height(22)
-        Text('Theme').fontSize(14).fontColor($r('sys.color.font_primary')).layoutWeight(1)
+        Text($r('app.string.me_theme')).fontSize(14).fontColor($r('sys.color.font_primary')).layoutWeight(1)
         Text(this.selectedThemeName()).fontSize(13).fontColor($r('sys.color.font_secondary'))
       }
       .width('100%')
@@ -3950,7 +4037,7 @@ struct Index {
         Image($r('app.media.ic_settings_cards'))
           .width(22)
           .height(22)
-        Text('Card transparency').fontSize(14).fontColor($r('sys.color.font_primary')).layoutWeight(1)
+        Text($r('app.string.me_card_transparency')).fontSize(14).fontColor($r('sys.color.font_primary')).layoutWeight(1)
         Text(`${Math.round(this.cardTransparency)}%`).fontSize(13).fontColor($r('sys.color.font_secondary'))
       }
       .width('100%')
@@ -3958,7 +4045,7 @@ struct Index {
         .width('100%')
         .selectedColor(this.accent())
         .systemMaterial(new uiMaterial.ImmersiveMaterial())
-        .accessibilityText('Card transparency')
+        .accessibilityText($r('app.string.me_card_transparency'))
         .onChange((value: number, mode: SliderChangeMode) => {
           this.cardTransparency = value;
           if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
@@ -3989,9 +4076,7 @@ struct Index {
         .height(22)
       Column({ space: 2 }) {
         Text(opts.title).fontSize(14).fontColor($r('sys.color.font_primary'))
-        if (opts.subtitle.length > 0) {
-          Text(opts.subtitle).fontSize(12).fontColor($r('sys.color.font_secondary'))
-        }
+        Text(opts.subtitle).fontSize(12).fontColor($r('sys.color.font_secondary'))
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
@@ -4048,7 +4133,7 @@ struct Index {
       HdsNavDestination() {
         this.meMainContent()
       }
-      .titleBar(this.hdsTitleBar('Me', true, []))
+      .titleBar(this.hdsTitleBar($r('app.string.tab_me'), true, []))
       .titleMode(HdsNavDestinationTitleMode.MINI)
       .bindToScrollable([this.meMainScroller])
       .hideBackButton(true)
@@ -4061,7 +4146,7 @@ struct Index {
       HdsNavDestination() {
         this.pairingScreenContent()
       }
-      .titleBar(this.hdsTitleBar('Pairing', false, []))
+      .titleBar(this.hdsTitleBar($r('app.string.pairing_title'), false, []))
       .titleMode(HdsNavDestinationTitleMode.MINI)
       .bindToScrollable([this.pairingScroller])
       .hideBackButton(false)
@@ -4071,7 +4156,7 @@ struct Index {
       HdsNavDestination() {
         this.passcodeScreenContent()
       }
-      .titleBar(this.hdsTitleBar('Passcode auto-trust', false, []))
+      .titleBar(this.hdsTitleBar($r('app.string.me_passcode_auto_trust'), false, []))
       .titleMode(HdsNavDestinationTitleMode.MINI)
       .bindToScrollable([this.passcodeScroller])
       .hideBackButton(false)
@@ -4081,7 +4166,7 @@ struct Index {
       HdsNavDestination() {
         this.networkScreenContent()
       }
-      .titleBar(this.hdsTitleBar('Tailscale IP', false, []))
+      .titleBar(this.hdsTitleBar($r('app.string.me_tailscale_ip'), false, []))
       .titleMode(HdsNavDestinationTitleMode.MINI)
       .bindToScrollable([this.networkScroller])
       .hideBackButton(false)
@@ -4091,7 +4176,7 @@ struct Index {
       HdsNavDestination() {
         this.deviceNameScreenContent()
       }
-      .titleBar(this.hdsTitleBar('Device name', false, []))
+      .titleBar(this.hdsTitleBar($r('app.string.me_device_name'), false, []))
       .titleMode(HdsNavDestinationTitleMode.MINI)
       .bindToScrollable([this.deviceNameScroller])
       .hideBackButton(false)
@@ -4101,7 +4186,7 @@ struct Index {
       HdsNavDestination() {
         this.diagnosticsScreenContent()
       }
-      .titleBar(this.hdsTitleBar('Diagnostics', false, []))
+      .titleBar(this.hdsTitleBar($r('app.string.me_diagnostics'), false, []))
       .titleMode(HdsNavDestinationTitleMode.MINI)
       .bindToScrollable([this.diagnosticsScroller])
       .hideBackButton(false)
@@ -4111,7 +4196,7 @@ struct Index {
       HdsNavDestination() {
         this.activityLogScreenContent()
       }
-      .titleBar(this.hdsTitleBar('Activity log', false, []))
+      .titleBar(this.hdsTitleBar($r('app.string.me_activity_log'), false, []))
       .titleMode(HdsNavDestinationTitleMode.MINI)
       .bindToScrollable([this.logScroller])
       .hideBackButton(false)
@@ -4130,11 +4215,11 @@ struct Index {
         Column({ space: 16 }) {
           // No in-flow page title here - "Me" lives in the HDS title bar
           // (see mePageMap), which this content scrolls underneath.
-          this.sectionHeader('Device')
+          this.sectionHeader($r('app.string.me_section_device'))
           Column() {
             Column({ space: 4 }) {
-              Text('Your device ID').fontSize(12).fontColor($r('sys.color.font_secondary'))
-              Text(this.ownDeviceId.length > 0 ? this.ownDeviceId : 'Generating identity…')
+              Text($r('app.string.me_device_id_label')).fontSize(12).fontColor($r('sys.color.font_secondary'))
+              Text(this.ownDeviceId.length > 0 ? this.ownDeviceId : $r('app.string.me_generating_identity'))
                 .fontSize(11)
                 .fontColor($r('sys.color.font_primary'))
                 .copyOption(CopyOptions.LocalDevice)
@@ -4167,19 +4252,19 @@ struct Index {
             .padding(14)
             Divider().color($r('sys.color.comp_divider'))
             // What other devices list this one as - see DeviceName.ets.
-            this.settingsRow({ title: 'Device name', value: this.ownDeviceName() ?? 'Not set', navigates: true, icon: $r('app.media.ic_device_phone'), onTap: () => { this.deviceNameInput = this.deviceNameOverride; this.setMeScreen('devicename'); } })
+            this.settingsRow({ title: $r('app.string.me_device_name'), value: this.ownDeviceName() ?? $r('app.string.me_not_set'), navigates: true, icon: $r('app.media.ic_device_phone'), onTap: () => { this.deviceNameInput = this.deviceNameOverride; this.setMeScreen('devicename'); } })
             Divider().color($r('sys.color.comp_divider'))
-            this.settingsRow({ title: 'Copy device ID', value: '', navigates: false, icon: $r('app.media.ic_menu_copy'), onTap: () => { void this.copyDeviceId(); } })
+            this.settingsRow({ title: $r('app.string.me_copy_device_id'), value: '', navigates: false, icon: $r('app.media.ic_menu_copy'), onTap: () => { void this.copyDeviceId(); } })
           }
           .width('100%')
           .borderRadius(16)
           .backgroundColor(this.cardFill())
 
-          this.sectionHeader('Sync')
+          this.sectionHeader($r('app.string.me_section_sync'))
           Column() {
             this.settingsSwitchRow({
-              title: 'Copy received items automatically',
-              subtitle: 'Puts whatever arrives straight onto this device\'s clipboard.',
+              title: $r('app.string.me_auto_copy_title'),
+              subtitle: $r('app.string.me_auto_copy_subtitle'),
               isOn: this.autoApply,
               icon: $r('app.media.ic_settings_autocopy'),
               onChange: (isOn: boolean) => { void this.setAutoApply(isOn); },
@@ -4188,8 +4273,8 @@ struct Index {
             // Android's "Send my clipboard when I open ClipLink" can't be
             // ported as-is (see onPageShow) - this is what HarmonyOS allows.
             this.settingsSwitchRow({
-              title: 'Point out new copies',
-              subtitle: 'HarmonyOS only lets ClipLink read the clipboard when you tap Paste, so this highlights Paste when you\'ve copied something new, including while ClipLink was closed.',
+              title: $r('app.string.me_notice_title'),
+              subtitle: $r('app.string.me_notice_subtitle'),
               isOn: this.noticeOnOpen,
               icon: $r('app.media.ic_settings_notice'),
               onChange: (isOn: boolean) => { void this.setNoticeNewCopies(isOn); },
@@ -4205,13 +4290,13 @@ struct Index {
           .borderRadius(16)
           .backgroundColor(this.cardFill())
 
-          this.sectionHeader('Appearance')
+          this.sectionHeader($r('app.string.me_section_appearance'))
           Column() {
             this.themePicker()
             Divider().color($r('sys.color.comp_divider'))
             this.settingsSwitchRow({
-              title: 'Bottom glow',
-              subtitle: 'A soft wash of your theme colour along the bottom of each page.',
+              title: $r('app.string.me_bottom_glow_title'),
+              subtitle: $r('app.string.me_bottom_glow_subtitle'),
               isOn: this.bottomGlowOn,
               icon: $r('app.media.ic_settings_glow'),
               onChange: (isOn: boolean) => { void this.setBottomGlow(isOn); },
@@ -4223,31 +4308,31 @@ struct Index {
           .borderRadius(16)
           .backgroundColor(this.cardFill())
 
-          this.sectionHeader('Pairing')
+          this.sectionHeader($r('app.string.me_section_pairing'))
           Column() {
-            this.settingsRow({ title: 'QR code & scan', value: '', navigates: true, icon: $r('app.media.ic_settings_qr'), onTap: () => { this.setMeScreen('pairing'); } })
+            this.settingsRow({ title: $r('app.string.me_qr_scan'), value: '', navigates: true, icon: $r('app.media.ic_settings_qr'), onTap: () => { this.setMeScreen('pairing'); } })
             Divider().color($r('sys.color.comp_divider'))
-            this.settingsRow({ title: 'Passcode auto-trust', value: this.hasPassphrase ? 'On' : 'Off', navigates: true, icon: $r('app.media.ic_settings_passcode'), onTap: () => { this.setMeScreen('passcode'); } })
+            this.settingsRow({ title: $r('app.string.me_passcode_auto_trust'), value: this.hasPassphrase ? $r('app.string.common_on') : $r('app.string.common_off'), navigates: true, icon: $r('app.media.ic_settings_passcode'), onTap: () => { this.setMeScreen('passcode'); } })
             Divider().color($r('sys.color.comp_divider'))
-            this.settingsRow({ title: 'Tailscale IP', value: this.tailscaleIp.length > 0 ? this.tailscaleIp : 'Not set', navigates: true, icon: $r('app.media.ic_settings_network'), onTap: () => { this.setMeScreen('network'); } })
+            this.settingsRow({ title: $r('app.string.me_tailscale_ip'), value: this.tailscaleIp.length > 0 ? this.tailscaleIp : $r('app.string.me_not_set'), navigates: true, icon: $r('app.media.ic_settings_network'), onTap: () => { this.setMeScreen('network'); } })
           }
           .width('100%')
           .borderRadius(16)
           .backgroundColor(this.cardFill())
 
-          this.sectionHeader('Support')
+          this.sectionHeader($r('app.string.me_section_support'))
           Column() {
-            this.settingsRow({ title: 'Diagnostics', value: '', navigates: true, icon: $r('app.media.ic_settings_diagnostics'), onTap: () => { this.setMeScreen('diagnostics'); } })
+            this.settingsRow({ title: $r('app.string.me_diagnostics'), value: '', navigates: true, icon: $r('app.media.ic_settings_diagnostics'), onTap: () => { this.setMeScreen('diagnostics'); } })
             Divider().color($r('sys.color.comp_divider'))
-            this.settingsRow({ title: 'Activity log', value: `${this.syncLog.length}`, navigates: true, icon: $r('app.media.ic_settings_log'), onTap: () => { this.setMeScreen('log'); } })
+            this.settingsRow({ title: $r('app.string.me_activity_log'), value: `${this.syncLog.length}`, navigates: true, icon: $r('app.media.ic_settings_log'), onTap: () => { this.setMeScreen('log'); } })
           }
           .width('100%')
           .borderRadius(16)
           .backgroundColor(this.cardFill())
 
-          this.sectionHeader('Data')
+          this.sectionHeader($r('app.string.me_section_data'))
           Column() {
-            this.settingsRow({ title: 'Clear synced history', value: '', navigates: false, icon: $r('app.media.ic_settings_trash'), onTap: () => { this.confirmClearHistory(); } })
+            this.settingsRow({ title: $r('app.string.me_clear_history'), value: '', navigates: false, icon: $r('app.media.ic_settings_trash'), onTap: () => { this.confirmClearHistory(); } })
           }
           .width('100%')
           .borderRadius(16)
@@ -4283,8 +4368,8 @@ struct Index {
     Scroll(this.pairingScroller) {
       Column({ space: 16 }) {
         Column({ space: 8 }) {
-          Text('This screen open = pairable.').fontSize(13).fontWeight(FontWeight.Medium)
-          Text('A pairing request only reaches this device while this screen is open, and only completes once you tap Accept here - keep it open on BOTH devices at the same time while pairing. Leaving this screen closes the window; nothing pairs silently in the background.')
+          Text($r('app.string.pairing_open_title')).fontSize(13).fontWeight(FontWeight.Medium)
+          Text($r('app.string.pairing_open_detail'))
             .fontSize(12)
             .fontColor($r('sys.color.font_secondary'))
         }
@@ -4303,8 +4388,8 @@ struct Index {
               .backgroundColor(Color.White)
               .borderRadius(16)
           }
-          Text('Scan this on another device (with its own Pairing screen open) to find it.').fontSize(12).fontColor($r('sys.color.font_secondary'))
-          Button('Scan a Device\'s QR Code').fontSize(14).fontColor(this.accent()).backgroundColor(this.accentTint()).systemMaterial(this.buttonMaterial())
+          Text($r('app.string.pairing_scan_hint')).fontSize(12).fontColor($r('sys.color.font_secondary'))
+          Button($r('app.string.pairing_scan_button')).fontSize(14).fontColor(this.accent()).backgroundColor(this.accentTint()).systemMaterial(this.buttonMaterial())
             .onClick(() => { tapHaptic(); void this.scanToPair(); })
           if (this.scanStatus.length > 0) {
             Text(this.scanStatus).fontSize(12).fontColor($r('sys.color.font_secondary'))
@@ -4322,16 +4407,16 @@ struct Index {
         // decides whether it's actually trusted, same as everything else
         // on this screen.
         Column({ space: 10 }) {
-          Text('Pair by address').fontSize(14).fontWeight(FontWeight.Medium)
-          Text('No camera on the other device (e.g. Windows)? Type or paste its address - or its pairing text copied below - here instead.')
+          Text($r('app.string.pairing_by_address_title')).fontSize(14).fontWeight(FontWeight.Medium)
+          Text($r('app.string.pairing_by_address_hint'))
             .fontSize(12)
             .fontColor($r('sys.color.font_secondary'))
-          TextInput({ placeholder: 'e.g. 100.x.x.x or pasted pairing text', text: this.pairByAddressInput })
+          TextInput({ placeholder: $r('app.string.pairing_address_placeholder'), text: this.pairByAddressInput })
             .type(InputType.Normal)
             .fontSize(14)
             .enabled(!this.pairingInProgress)
             .onChange((value: string) => { this.pairByAddressInput = value; })
-          Button(this.pairingInProgress ? 'Connecting...' : 'Pair by Address')
+          Button(this.pairingInProgress ? $r('app.string.pairing_connecting') : $r('app.string.pairing_by_address_button'))
             .fontSize(14)
             .fontColor(this.accent())
             .backgroundColor(this.accentTint())
@@ -4346,11 +4431,11 @@ struct Index {
         .alignItems(HorizontalAlign.Start)
 
         Column({ space: 10 }) {
-          Text('This device\'s pairing info').fontSize(14).fontWeight(FontWeight.Medium)
-          Text('Copy this and send it to the other device (e.g. paste it into ITS Pair by Address field above) so it knows where to find this one.')
+          Text($r('app.string.pairing_info_title')).fontSize(14).fontWeight(FontWeight.Medium)
+          Text($r('app.string.pairing_info_hint'))
             .fontSize(12)
             .fontColor($r('sys.color.font_secondary'))
-          Button('Copy Pairing Info').fontSize(14).fontColor(this.accent()).backgroundColor(this.accentTint()).systemMaterial(this.buttonMaterial())
+          Button($r('app.string.pairing_copy_info')).fontSize(14).fontColor(this.accent()).backgroundColor(this.accentTint()).systemMaterial(this.buttonMaterial())
             .enabled(this.myPairingPayload.length > 0)
             .onClick(() => { tapHaptic(); void this.copyPairingPayload(); })
         }
@@ -4387,23 +4472,23 @@ struct Index {
     Scroll(this.passcodeScroller) {
       Column({ space: 16 }) {
         Column({ space: 10 }) {
-          Text('Devices entering the same passcode trust each other automatically.').fontSize(12).fontColor($r('sys.color.font_secondary'))
+          Text($r('app.string.passcode_intro')).fontSize(12).fontColor($r('sys.color.font_secondary'))
           if (this.hasPassphrase && !this.passcodeChanging) {
-            Text('Passcode is set on this device.').fontSize(13).fontColor($r('sys.color.confirm'))
+            Text($r('app.string.passcode_is_set')).fontSize(13).fontColor($r('sys.color.confirm'))
             // Change and Clear, as on Android. Clearing only stops this
             // device proving the passcode to new devices - ones it already
             // auto-trusted stay trusted. Both wait for a Set still deriving
             // (leaving this screen mid-Set shows them again) - see
             // passphraseClearGen.
             Row({ space: 10 }) {
-              Button('Change Passcode')
+              Button($r('app.string.passcode_change'))
                 .fontSize(14)
                 .fontColor(this.accent())
                 .backgroundColor(this.accentTint())
                 .systemMaterial(this.buttonMaterial())
                 .enabled(!this.settingPassphrase)
                 .onClick(() => { tapHaptic(); this.passphraseInput = ''; this.passcodeChanging = true; })
-              Button('Clear')
+              Button($r('app.string.common_clear'))
                 .fontSize(14)
                 .fontColor($r('sys.color.font_secondary'))
                 .backgroundColor($r('sys.color.comp_background_tertiary'))
@@ -4411,7 +4496,7 @@ struct Index {
                 .onClick(() => { tapHaptic(); this.confirmClearPassphrase(); })
             }
           } else {
-            TextInput({ placeholder: this.hasPassphrase ? 'Enter a new shared passcode' : 'Enter a shared passcode', text: this.passphraseInput })
+            TextInput({ placeholder: this.hasPassphrase ? $r('app.string.passcode_placeholder_new') : $r('app.string.passcode_placeholder'), text: this.passphraseInput })
               .type(InputType.Password)
               .fontSize(14)
               .enabled(!this.settingPassphrase)
@@ -4419,7 +4504,7 @@ struct Index {
             // Advice only - any non-empty passcode is accepted.
             Text($r('app.string.passcode_length_hint')).fontSize(12).fontColor($r('sys.color.font_secondary'))
             Row({ space: 10 }) {
-              Button(this.settingPassphrase ? 'Setting...' : 'Set Passcode')
+              Button(this.settingPassphrase ? $r('app.string.passcode_setting') : $r('app.string.passcode_set'))
                 .fontSize(14)
                 .fontColor(this.accent())
                 .backgroundColor(this.accentTint())
@@ -4427,7 +4512,7 @@ struct Index {
                 .enabled(!this.settingPassphrase)
                 .onClick(() => { tapHaptic(); void this.setPassphrase(); })
               if (this.passcodeChanging) {
-                Button('Cancel')
+                Button($r('app.string.common_cancel'))
                   .fontSize(14)
                   .fontColor($r('sys.color.font_secondary'))
                   .backgroundColor($r('sys.color.comp_background_tertiary'))
@@ -4471,13 +4556,13 @@ struct Index {
     Scroll(this.networkScroller) {
       Column({ space: 16 }) {
         Column({ space: 10 }) {
-          Text('HarmonyOS can\'t detect this automatically - copy your tailnet IP from the Tailscale app and paste it here so other devices can reach this one off your local network.').fontSize(12).fontColor($r('sys.color.font_secondary'))
-          TextInput({ placeholder: 'e.g. 100.x.x.x', text: this.tailscaleIp })
+          Text($r('app.string.network_intro')).fontSize(12).fontColor($r('sys.color.font_secondary'))
+          TextInput({ placeholder: $r('app.string.network_ip_placeholder'), text: this.tailscaleIp })
             .type(InputType.Normal)
             .fontSize(14)
             .enabled(!this.savingTailscaleIp)
             .onChange((value: string) => { this.tailscaleIp = value; })
-          Button(this.savingTailscaleIp ? 'Saving...' : 'Save')
+          Button(this.savingTailscaleIp ? $r('app.string.common_saving') : $r('app.string.common_save'))
             .fontSize(14)
             .fontColor(this.accent())
             .backgroundColor(this.accentTint())
@@ -4514,13 +4599,13 @@ struct Index {
     Scroll(this.deviceNameScroller) {
       Column({ space: 16 }) {
         Column({ space: 10 }) {
-          Text('Other devices show this name instead of this device\'s ID. Leave it empty to use the name from system settings.').fontSize(12).fontColor($r('sys.color.font_secondary'))
-          TextInput({ placeholder: this.systemDeviceName.length > 0 ? this.systemDeviceName : 'Device name', text: this.deviceNameInput })
+          Text($r('app.string.devicename_intro')).fontSize(12).fontColor($r('sys.color.font_secondary'))
+          TextInput({ placeholder: this.systemDeviceName.length > 0 ? this.systemDeviceName : $r('app.string.me_device_name'), text: this.deviceNameInput })
             .type(InputType.Normal)
             .fontSize(14)
             .enabled(!this.savingDeviceName)
             .onChange((value: string) => { this.deviceNameInput = value; })
-          Button(this.savingDeviceName ? 'Saving...' : 'Save')
+          Button(this.savingDeviceName ? $r('app.string.common_saving') : $r('app.string.common_save'))
             .fontSize(14)
             .fontColor(this.accent())
             .backgroundColor(this.accentTint())
@@ -4555,9 +4640,9 @@ struct Index {
     Scroll(this.diagnosticsScroller) {
       Column({ space: 16 }) {
         Column() {
-          this.settingsRow({ title: 'Run self-test', value: '', navigates: false, icon: $r('app.media.ic_settings_diagnostics'), onTap: () => { void this.runSelfTest(); } })
+          this.settingsRow({ title: $r('app.string.diag_run_self_test'), value: '', navigates: false, icon: $r('app.media.ic_settings_diagnostics'), onTap: () => { void this.runSelfTest(); } })
           Divider().color($r('sys.color.comp_divider'))
-          this.settingsRow({ title: 'Immersive material', value: this.immersiveSupported ? 'Supported' : 'Not supported', navigates: false, icon: $r('app.media.ic_settings_diagnostics'), onTap: () => {} })
+          this.settingsRow({ title: $r('app.string.diag_immersive_material'), value: this.immersiveSupported ? $r('app.string.diag_supported') : $r('app.string.diag_not_supported'), navigates: false, icon: $r('app.media.ic_settings_diagnostics'), onTap: () => {} })
         }
         .width('100%')
         .borderRadius(16)
@@ -4586,7 +4671,7 @@ struct Index {
     Scroll(this.logScroller) {
       Column({ space: 16 }) {
         if (this.syncLog.length === 0) {
-          Text('Nothing logged yet.').fontSize(12).fontColor($r('sys.color.font_secondary'))
+          Text($r('app.string.log_empty')).fontSize(12).fontColor($r('sys.color.font_secondary'))
         } else {
           Column({ space: 6 }) {
             ForEach(this.syncLog, (line: string, index: number) => {
@@ -4627,7 +4712,7 @@ struct Index {
   // Real per-tab icons now, filled when that tab is selected. Every tab
   // previously passed the same sys.media.ohos_icon_mask_svg placeholder,
   // which is why all three rendered as identical blank rounded squares.
-  tabBarStyle(text: string, index: number): BottomTabBarStyle {
+  tabBarStyle(text: ResourceStr, index: number): BottomTabBarStyle {
     // Filled artwork for BOTH states, differentiated only by colour.
     // The outline variants are stroke-only (fill="none"), but the tab bar
     // rasterises icons as filled shapes - so the clipboard's outer rect
@@ -4663,11 +4748,11 @@ struct Index {
       //   fighting that built-in behavior instead of relying on it.
       Tabs({ index: this.currentTabIndex, barPosition: BarPosition.End }) {
         TabContent() { this.syncedTab() }
-          .tabBar(this.tabBarStyle('Synced', 0))
+          .tabBar(this.tabBarStyle($r('app.string.tab_synced'), 0))
         TabContent() { this.devicesTab() }
-          .tabBar(this.tabBarStyle('Devices', 1))
+          .tabBar(this.tabBarStyle($r('app.string.tab_devices'), 1))
         TabContent() { this.meTab() }
-          .tabBar(this.tabBarStyle('Me', 2))
+          .tabBar(this.tabBarStyle($r('app.string.tab_me'), 2))
       }
       // Off: a left/right swipe on the Synced tab is claimed by the zoomed
       // image's pan gesture (see zoomableImage) - if Tabs also treated that

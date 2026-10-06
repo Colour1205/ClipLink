@@ -15,6 +15,10 @@ export default class EntryAbility extends UIAbility {
     // Index.ets resolves a few colour resources in code (to apply an alpha
     // to them), and needs to know when light/dark flips to re-resolve them.
     AppStorage.setOrCreate<number>('colorMode', this.context.config.colorMode);
+    // Likewise for the language: text Index.ets builds in code (not $r
+    // resources, which follow the language by themselves) is built again
+    // when this changes.
+    AppStorage.setOrCreate<string>('language', this.context.config.language ?? '');
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
     sweepShareCopies(this.context);
     this.acceptShare(want, launchParam);
@@ -40,6 +44,9 @@ export default class EntryAbility extends UIAbility {
 
   onConfigurationUpdate(newConfig: Configuration): void {
     AppStorage.setOrCreate<number>('colorMode', newConfig.colorMode);
+    if (newConfig.language !== undefined) {
+      AppStorage.setOrCreate<string>('language', newConfig.language);
+    }
   }
 
   onDestroy(): void {
