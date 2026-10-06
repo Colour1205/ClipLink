@@ -2298,6 +2298,27 @@ struct Index {
     this.syncLog = [`${hh}:${mm}:${ss}  ${message}`, ...this.syncLog].slice(0, 30);
   }
 
+  // Just the ids, in display order: all the Devices list's ForEach needs to
+  // know is which rows exist and where - what a row shows is read live.
+  private deviceRowIds(): string[] {
+    return this.deviceRows().map((r: DeviceRow) => r.deviceId);
+  }
+
+  // The current state of one device, read at the moment a card's attribute
+  // expression runs, so that expression depends on the states deviceRows
+  // reads (trustedDevices, receivedBeacons, ownDeviceId) and re-runs when
+  // they change. connectedCount is read only for that: whether a device is
+  // connected comes from syncManager, which isn't reactive, but its
+  // callback bumps the count on every connect and drop. A row that has
+  // already gone (the list is updated a moment after its card) reads as an
+  // empty one rather than failing.
+  private liveRow(deviceId: string): DeviceRow {
+    void this.connectedCount;
+    const found: DeviceRow | undefined = this.deviceRows().find((r: DeviceRow) => r.deviceId === deviceId);
+    if (found !== undefined) return found;
+    return { deviceId, name: null, addresses: [], address: null, trusted: false, discovered: false, tcpPort: null, connected: false };
+  }
+
   private deviceRows(): DeviceRow[] {
     const rows = new Map<string, DeviceRow>();
     // Accumulates rather than overwrites - see DeviceRow.addresses.
@@ -3602,7 +3623,7 @@ struct Index {
   }
 
   @Builder
-  deviceCard(row: DeviceRow) {
+  deviceCard(deviceId: string) {
     Row({ space: 12 }) {
       // Device glyph with the status dot badged onto it, rather than a
       // bare dot - tells you WHAT the device is, not just that it exists.
@@ -3614,14 +3635,14 @@ struct Index {
           .width(10)
           .height(10)
           .borderRadius(5)
-          .backgroundColor(row.connected ? $r('sys.color.confirm') : $r('sys.color.icon_secondary'))
+          .backgroundColor(this.liveRow(deviceId).connected ? $r('sys.color.confirm') : $r('sys.color.icon_secondary'))
       }
       .width(28)
       .height(28)
 
       Column({ space: 2 }) {
         // The name it gives itself, else its short id.
-        Text(deviceRowTitle(row))
+        Text(deviceRowTitle(this.liveRow(deviceId)))
           .fontSize(15)
           .fontWeight(FontWeight.Medium)
           .fontColor($r('sys.color.font_primary'))
@@ -3630,19 +3651,19 @@ struct Index {
         // Every address, LAN first - a peer can legitimately be reachable at
         // both a LAN IP and a Tailscale IP, and which one it is paired on
         // matters when diagnosing a connection.
-        Text(row.addresses.length > 0 ? row.addresses.join(' · ') : 'Unknown address')
+        Text(this.liveRow(deviceId).addresses.length > 0 ? this.liveRow(deviceId).addresses.join(' · ') : 'Unknown address')
           .fontSize(12)
           .fontColor($r('sys.color.font_secondary'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(row.connected ? 'Connected' : row.trusted ? 'Trusted · not connected' : 'Discovered nearby')
+        Text(this.liveRow(deviceId).connected ? 'Connected' : this.liveRow(deviceId).trusted ? 'Trusted · not connected' : 'Discovered nearby')
           .fontSize(12)
-          .fontColor(row.connected ? $r('sys.color.confirm') : $r('sys.color.font_secondary'))
+          .fontColor(this.liveRow(deviceId).connected ? $r('sys.color.confirm') : $r('sys.color.font_secondary'))
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
 
-      if (!row.trusted && row.discovered) {
+      if (!this.liveRow(deviceId).trusted && this.liveRow(deviceId).discovered) {
         // Deliberately a plain solid button, no systemMaterial: material
         // WOULD render here (it is a CommonMethod attribute, available on
         // every component - see itemDetailView's note correcting the
@@ -3663,10 +3684,10 @@ struct Index {
           .padding({ left: 16, right: 16 })
           .onClick(() => {
             tapHaptic();
-            const beacon = this.receivedBeacons.find(b => b.deviceId === row.deviceId);
+            const beacon = this.receivedBeacons.find(b => b.deviceId === deviceId);
             if (beacon) void this.trustAndConnect(beacon);
           })
-      } else if (row.trusted) {
+      } else if (this.liveRow(deviceId).trusted) {
         // Destructive, so it stays quiet: a tinted secondary surface
         // rather than a filled brand button competing with Trust.
         Button('Remove')
@@ -3675,7 +3696,7 @@ struct Index {
           .backgroundColor($r('sys.color.comp_background_tertiary'))
           .height(34)
           .padding({ left: 16, right: 16 })
-          .onClick(() => { tapHaptic(); void this.untrustDevice(row.deviceId); })
+          .onClick(() => { tapHaptic(); void this.untrustDevice(deviceId); })
       }
     }
     .width('100%')
@@ -3695,6 +3716,17 @@ struct Index {
   @Builder
   devicesContent() {
     List({ space: 10, scroller: this.devicesScroller }) {
+      // The gaps under the floating title bar and above the tab pill are
+      // spacer items, not contentStartOffset/contentEndOffset: with those
+      // set, every relayout of the list (any device card changing) made it
+      // play a scroll animation from its start offset up toward 0 and back
+      // (~0.6 s, y -103 to -3 on a Mate/P60 - measured with onDidScroll),
+      // which showed as the whole list scrolling up each time a device
+      // updated. The cards still slide under the bars, since the list fills
+      // the page. `space` adds 10 after each spacer, hence the - 10.
+      ListItem() {
+        Row().width('100%').height(this.topInsetVp + this.TITLE_BAR_HEIGHT + 8 - 10)
+      }
       ListItem() {
         // Summary line reads as a status, not a stat: the count is the
         // part worth emphasizing, the rest is context.
@@ -3720,17 +3752,22 @@ struct Index {
             .padding({ left: 4, top: 8 })
         }
       } else {
-        ForEach(this.deviceRows(), (row: DeviceRow) => {
-          ListItem() { this.deviceCard(row) }
-          // Key includes connected/trusted/discovered, not just deviceId -
-          // ArkUI's ForEach reuses a child node whenever its key is
-          // unchanged, so a deviceId-only key meant a connect/disconnect
-          // never actually re-invoked deviceCard(row) with the new
-          // status, leaving the card frozen at whatever it was first
-          // rendered with (while the live connectedCount text above kept
-          // updating) - same failure mode already documented on
-          // SyncedItem.id above. The name is in it for the same reason.
-        }, (row: DeviceRow) => `${row.deviceId}:${row.connected}:${row.trusted}:${row.discovered}:${row.addresses.join(',')}:${row.name ?? ''}`)
+        // Keyed by device id alone, and the card reads its row live
+        // (liveRow), so a device connecting, dropping, being named or
+        // changing address updates its card in place instead of destroying
+        // and recreating the ListItem (the key used to carry all of that).
+        // ForEach reuses a node whose key is unchanged without re-running
+        // this builder, so the card must not capture the row (that froze it
+        // before): it looks it up by id inside its own attribute
+        // expressions, which ArkUI re-evaluates in place when
+        // receivedBeacons, trustedDevices or connectedCount change.
+        ForEach(this.deviceRowIds(), (deviceId: string) => {
+          ListItem() { this.deviceCard(deviceId) }
+        }, (deviceId: string) => deviceId)
+      }
+      // The matching clearance under the last card, above the tab pill.
+      ListItem() {
+        Row().width('100%').height(this.bottomInsetVp + this.TAB_PILL_CLEARANCE - 10)
       }
     }
     // Single column, not the old 2-column WaterFlow: this list is
@@ -3741,10 +3778,6 @@ struct Index {
     .width(LayoutPolicy.matchParent)
     .height(LayoutPolicy.matchParent)
     .padding({ left: 16, right: 16 })
-    // See the Synced list's note - offsets, not padding, so device cards
-    // slide under the floating bars instead of being clipped at them.
-    .contentStartOffset(this.topInsetVp + this.TITLE_BAR_HEIGHT + 8)
-    .contentEndOffset(this.bottomInsetVp + this.TAB_PILL_CLEARANCE)
     // Usually only 1-3 devices, so without alwaysEnabled it never bounced.
     .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })    // See syncedListContent's note - page backdrop the card token pairs with.
     .backgroundColor($r('sys.color.background_secondary'))
