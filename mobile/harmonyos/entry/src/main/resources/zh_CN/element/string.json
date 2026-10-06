@@ -262,7 +262,7 @@
     },
     {
       "name": "toast_pairing_info_copied",
-      "value": "配对信息已复制——请粘贴到 Windows 的“信任设备”对话框中。"
+      "value": "配对信息已复制——请在另一台设备的“通过地址配对”中粘贴。"
     },
     {
       "name": "toast_device_id_copied",

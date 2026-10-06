@@ -262,7 +262,7 @@
     },
     {
       "name": "toast_pairing_info_copied",
-      "value": "Pairing info copied — paste it into Windows' Trust a Device dialog."
+      "value": "Pairing info copied — paste it under Pair by address on the other device."
     },
     {
       "name": "toast_device_id_copied",
