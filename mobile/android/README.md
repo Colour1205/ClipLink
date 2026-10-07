@@ -87,15 +87,70 @@ Both, plus PBKDF2 and the .NET round-trip timestamp format, are covered by
 ./gradlew :app:testDebugUnitTest
 ```
 
-## Known cross-implementation bug (not fixed here)
+## Who dials
 
-The connect tie-breaker — only the smaller-public-key side dials — is
-implemented with **ordinal** string comparison here and on HarmonyOS
-(Kotlin's and JavaScript's `<` are both ordinal over UTF-16 code units), but
-the Windows daemon uses culture-sensitive `String.CompareTo`. ICU sorts `'k'`
-before `'Q'`; ordinal does not. For roughly one key pair in six the two sides
-disagree about who should dial, so either both dial or neither does.
+When two devices hear each other's beacons, only one of them connects: the one
+with the **larger** public key (`peer >= own` means "wait to be dialled" in
+`ClipLinkEngine.losesTieBreaker`). The comparison is **ordinal** - Kotlin's
+`String.compareTo` is over UTF-16 code units, the same as HarmonyOS's JS `<` and
+the Windows engine's `string.CompareOrdinal` (which dials when the other key is
+smaller, that is, when its own is larger). The Windows daemon used to use the
+culture-sensitive `String.CompareTo`, which ICU orders differently for some key
+pairs (`'k'` sorts before `'Q'`), so for roughly one pair in six either both
+sides dialled or neither did; that is fixed there, and all three now agree. Do
+not "match" it by going culture-sensitive here.
 
-The fix belongs in `windows/ClipLink/Engine` (`string.CompareOrdinal`). Do **not**
-"match" it by going culture-sensitive here — that would only break this
-against HarmonyOS as well.
+## Staying up when a peer misbehaves
+
+Port 49000 is open to everyone on the network, and the phone has a heap of a
+few hundred MB, so what a peer can make the app hold is capped (`net/Limits.kt`):
+
+- **Lines.** No line is read without a cap (`core/LineReader.kt`; `BufferedReader.readLine`
+  has none). The handshake - the one thing read before anything is trusted - is
+  capped at 8 KB (the real one is under 1.5 KB) and must finish within 10 s in
+  total, not per read. A session line is capped at 64 MB; a longer one is read
+  and dropped, with a log line, and the link goes on. Anything parsed from a peer
+  is parsed with `untrusted { }`, which also catches Errors (a deeply nested JSON
+  document overflows org.json's stack, a huge one runs out of memory; neither is
+  an `Exception`).
+- **Sockets that haven't proved who they are.** At most 8 handshakes run at once
+  and a single address gets at most 20 connections per 10 s (`net/ConnectionGate.kt`);
+  the rest are closed unread.
+- **Coroutines.** Every scope has a `CoroutineExceptionHandler` that logs to the
+  Activity log and keeps the process alive; the loops that must keep going
+  (reconnecting, accepting connections, housekeeping) catch their own failures
+  once per pass. The TCP listener is bound again, with a growing pause, if the
+  port is taken or the socket dies, and `ClipLinkEngine.serverFault` says so
+  while it is down.
+- **Messages.** Each connection hands its messages to one handler through a
+  2-slot inbox, and the read loop waits when it is full, so a handler that is slower
+  than the network slows the sender through TCP instead of queueing a whole
+  file in memory. Any bytes arriving count as the peer being alive (see
+  `Liveness`), so a busy handler can't make the heartbeat misfire, and a dead-peer
+  watchdog runs apart from the pings, so a blocked write can't hide a dead link.
+  The heartbeat intervals and timeouts themselves are unchanged.
+- **Inline images and history.** An entry over 36 M characters of content is
+  dropped on arrival; one over 12 M characters is not repeated in a history_batch
+  (which carries at most 16 M in all, newest first). History is not rebuilt per
+  read: see below.
+- **Files.** A received file may not pass 1 GB, nor the size its signed entry
+  says; at most 8 are received at once (4 per peer); a stream that stops getting
+  chunks is dropped after 5 minutes, and stray `.tmp` files are deleted at
+  start. Blobs are written to a temporary file and renamed, never in place.
+
+## Where things are stored
+
+- **History** is `files/cliplink_history.jsonl`, one entry per line in the
+  wire JSON, parsed once into memory and rewritten atomically (temporary file,
+  fsync, rename) on each change. It used to be a single SharedPreferences
+  string; that is moved to the file the first time it is read, and only then
+  removed from SharedPreferences (the identity key, trust store, passcode key and
+  deleted-entries store are never touched). A line that can't be parsed costs
+  that entry only. The history keeps 25 items and at most 64 M characters of
+  content (oldest evicted first, never the last one).
+- **The passcode key** is wrapped with an AES-GCM key in the Android Keystore; a
+  plain key from an older build is wrapped when it is first read. If the Keystore
+  refuses, the key is stored as before and the log says so.
+- **The Tailscale address** must be an IPv4 address: it goes into the
+  colon-separated beacon, where a stray `:` would shift every field after it.
+  IPv6 would need an encoding the other platforms don't have.
