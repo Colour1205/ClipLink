@@ -67,7 +67,6 @@ import io.uaena.cliplink.engine.displayNameOf
 enum class SyncedLayout { List, Grid }
 
 data class SyncedActions(
-    val onOpen: (SyncedItem) -> Unit,
     val onCopy: (SyncedItem) -> Unit,
     val onShare: (SyncedItem) -> Unit,
     val onDelete: (SyncedItem) -> Unit,
@@ -78,12 +77,14 @@ data class SyncedActions(
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun SyncedScreen(
-    items: List<SyncedItem>,
+    /** Each with its unique list key (see [keyedItems]) - never `SyncedItem.id`, which two items can share. */
+    items: List<KeyedItem>,
     /** What each known device calls itself, by device id; an id missing here (or mapped to null) shows its short id. */
     deviceNames: Map<String, String?>,
     connectedCount: Int,
     discovering: Boolean,
     contentPadding: PaddingValues,
+    onOpen: (KeyedItem) -> Unit,
     actions: SyncedActions,
     layout: SyncedLayout,
     onLayoutChange: (SyncedLayout) -> Unit,
@@ -136,8 +137,14 @@ fun SyncedScreen(
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                         modifier = Modifier.fillMaxSize(),
                     ) {
-                        items(items, key = { it.id }) { item ->
-                            SyncedCard(item, deviceNames[item.entry.deviceId], actions, compact = false)
+                        items(items, key = { it.key }) { keyed ->
+                            SyncedCard(
+                                keyed,
+                                deviceNames[keyed.item.entry.deviceId],
+                                onOpen,
+                                actions,
+                                compact = false,
+                            )
                         }
                     }
 
@@ -148,8 +155,14 @@ fun SyncedScreen(
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         modifier = Modifier.fillMaxSize(),
                     ) {
-                        items(items, key = { it.id }) { item ->
-                            SyncedCard(item, deviceNames[item.entry.deviceId], actions, compact = true)
+                        items(items, key = { it.key }) { keyed ->
+                            SyncedCard(
+                                keyed,
+                                deviceNames[keyed.item.entry.deviceId],
+                                onOpen,
+                                actions,
+                                compact = true,
+                            )
                         }
                     }
                 }
@@ -228,7 +241,14 @@ private fun SyncedHeader(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SyncedCard(item: SyncedItem, senderName: String?, actions: SyncedActions, compact: Boolean) {
+private fun SyncedCard(
+    keyed: KeyedItem,
+    senderName: String?,
+    onOpen: (KeyedItem) -> Unit,
+    actions: SyncedActions,
+    compact: Boolean,
+) {
+    val item = keyed.item
     val style = typeStyleOf(item)
     var menuOpen by remember { mutableStateOf(false) }
     var confirmingDelete by remember { mutableStateOf(false) }
@@ -242,13 +262,13 @@ private fun SyncedCard(item: SyncedItem, senderName: String?, actions: SyncedAct
             Column(
                 Modifier
                     .combinedClickable(
-                        onClick = { actions.onOpen(item) },
+                        onClick = { onOpen(keyed) },
                         onLongClick = { menuOpen = true },
                     )
                     .padding(16.dp),
             ) {
                 when {
-                    item.type == ClipboardEntry.TYPE_IMAGE -> ImagePreview(item, compact)
+                    item.type == ClipboardEntry.TYPE_IMAGE -> ImagePreview(keyed.key, item, compact)
                     item.type == ClipboardEntry.TYPE_FILE -> FileContent(item, style, compact)
                     else -> Text(
                         item.preview,
@@ -338,9 +358,9 @@ private fun SyncedCard(item: SyncedItem, senderName: String?, actions: SyncedAct
 }
 
 @Composable
-private fun ImagePreview(item: SyncedItem, compact: Boolean) {
-    val bitmap = remember(item.id, compact) {
-        ImageCache.fromBase64(item.id, item.entry.content, if (compact) 480 else 900)
+private fun ImagePreview(key: String, item: SyncedItem, compact: Boolean) {
+    val bitmap = remember(key, compact) {
+        ImageCache.fromBase64(key, item.entry.content, if (compact) 480 else 900)
     }
     if (bitmap == null) {
         Text(

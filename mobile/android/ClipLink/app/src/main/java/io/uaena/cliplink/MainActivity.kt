@@ -116,7 +116,6 @@ class MainActivity : ComponentActivity() {
                     pairStatus = pairStatus,
                     actions = AppActions(
                         synced = SyncedActions(
-                            onOpen = {},
                             onCopy = { item ->
                                 if (engine.applyToClipboard(item)) {
                                     engine.showToast("Copied.")

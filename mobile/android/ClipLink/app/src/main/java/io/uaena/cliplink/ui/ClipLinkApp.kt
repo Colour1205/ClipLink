@@ -89,7 +89,10 @@ data class AppActions(
 fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
     var tab by remember { mutableStateOf(Tab.Synced) }
     var pairing by remember { mutableStateOf(false) }
-    var detail by remember { mutableStateOf<SyncedItem?>(null) }
+    // The open item is held by its key and looked up in the live list below,
+    // never as the item itself: a file that finishes arriving while it is open
+    // shows as arrived, and the key is something a Bundle can hold.
+    var detailKey by remember { mutableStateOf<String?>(null) }
     var scanning by remember { mutableStateOf(false) }
     // Hoisted up here rather than remembered inside SyncedScreen itself -
     // that screen gets swapped out of composition entirely (this file's
@@ -104,6 +107,8 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
     // handshake or beacon), and is rebuilt when one arrives, so a byline that
     // read "Device AB12·CD34" gets the name as soon as it is known.
     val deviceNames = remember(state.devices) { state.devices.associate { it.deviceId to it.name } }
+    val items = remember(state.items) { keyedItems(state.items) }
+    val detail = detailKey?.let { key -> items.firstOrNull { it.key == key } }
 
     // Pairing mode is a live signal, not a setting: an untrusted peer can only
     // complete a handshake while this screen is actually open, so it has to be
@@ -120,7 +125,7 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
     BackHandler(enabled = scanning || detail != null || pairing) {
         when {
             scanning -> scanning = false
-            detail != null -> detail = null
+            detail != null -> detailKey = null
             else -> pairing = false
         }
     }
@@ -174,7 +179,7 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
             val exitFade = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
 
             AnimatedContent(
-                targetState = Screen.of(scanning, detail, pairing, tab),
+                targetState = Screen.of(scanning, detail != null, pairing, tab),
                 transitionSpec = {
                     (fadeIn(enterFade) + scaleIn(enterScale, initialScale = 0.96f)) togetherWith
                         (fadeOut(exitFade) + scaleOut(exitFade, targetScale = 1.02f)) using
@@ -186,17 +191,18 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
                     Screen.Detail -> detail?.let { opened ->
                         // The live copy: a file that finishes arriving while
                         // it's open is shown as arrived - its picture too.
-                        val item = state.items.firstOrNull { it.id == opened.id } ?: opened
+                        val item = opened.item
                         DetailScreen(
                             item = item,
+                            key = opened.key,
                             senderName = deviceNames[item.entry.deviceId],
                             contentPadding = padding,
-                            onBack = { detail = null },
+                            onBack = { detailKey = null },
                             onCopy = { actions.synced.onCopy(item) },
                             onShare = { actions.synced.onShare(item) },
                             onDelete = {
                                 actions.synced.onDelete(item)
-                                detail = null
+                                detailKey = null
                             },
                         )
                     }
@@ -220,12 +226,13 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
                     )
 
                     Screen.Synced -> SyncedScreen(
-                        items = state.items,
+                        items = items,
                         deviceNames = deviceNames,
                         connectedCount = state.connectedCount,
                         discovering = state.discovering,
                         contentPadding = padding,
-                        actions = actions.synced.copy(onOpen = { detail = it }),
+                        onOpen = { detailKey = it.key },
+                        actions = actions.synced,
                         layout = syncedLayout,
                         onLayoutChange = { syncedLayout = it },
                     )
@@ -278,9 +285,9 @@ private enum class Screen {
     Scan, Detail, Pairing, Synced, Devices, Me;
 
     companion object {
-        fun of(scanning: Boolean, detail: SyncedItem?, pairing: Boolean, tab: Tab): Screen = when {
+        fun of(scanning: Boolean, hasDetail: Boolean, pairing: Boolean, tab: Tab): Screen = when {
             scanning -> Scan
-            detail != null -> Detail
+            hasDetail -> Detail
             pairing -> Pairing
             tab == Tab.Devices -> Devices
             tab == Tab.Me -> Me

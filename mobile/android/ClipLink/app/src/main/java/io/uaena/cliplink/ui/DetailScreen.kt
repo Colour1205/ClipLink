@@ -51,6 +51,8 @@ import io.uaena.cliplink.engine.displayNameOf
 @Composable
 fun DetailScreen(
     item: SyncedItem,
+    /** The item's unique list key (see [keyedItems]): what its picture is cached under. */
+    key: String,
     /** What the sending device calls itself, or null while no name is known (its short id is shown then). */
     senderName: String?,
     contentPadding: PaddingValues,
@@ -66,8 +68,8 @@ fun DetailScreen(
     // The item's picture, if it has one: an inline image, or the picture of an
     // image file once its bytes are here (a file card until then).
     val picture = when (item.type) {
-        ClipboardEntry.TYPE_IMAGE -> remember(item.id) {
-            ImageCache.fromBase64(item.id, item.entry.content, DETAIL_IMAGE_EDGE)
+        ClipboardEntry.TYPE_IMAGE -> remember(key) {
+            ImageCache.fromBase64(key, item.entry.content, DETAIL_IMAGE_EDGE)
         }
 
         ClipboardEntry.TYPE_FILE -> rememberFileThumbnail(item, DETAIL_IMAGE_EDGE)
