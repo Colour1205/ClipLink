@@ -29,6 +29,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -55,8 +56,13 @@ data class TypeStyle(
 @Composable
 fun typeStyleOf(item: SyncedItem): TypeStyle {
     val colors = MaterialTheme.colorScheme
+    // Worked out once per entry, not on every recomposition: isLink trims a
+    // copy of the whole content and runs a regex over it, and a copied file's
+    // text is megabytes. The signature stands for the content (an entry can't
+    // change under its signature), and is short to compare.
+    val isLink = remember(item.entry.signature ?: item.entry.content) { item.isLink }
     return when {
-        item.isLink -> TypeStyle(
+        isLink -> TypeStyle(
             Icons.Outlined.Link,
             "Link",
             colors.tertiaryContainer,

@@ -271,7 +271,9 @@ private fun SyncedCard(
                     item.type == ClipboardEntry.TYPE_IMAGE -> ImagePreview(keyed.key, item, compact)
                     item.type == ClipboardEntry.TYPE_FILE -> FileContent(item, style, compact)
                     else -> Text(
-                        item.preview,
+                        // Only what the card can show: Text measures all it is
+                        // given, and a multi-megabyte copy is one entry.
+                        previewTextOf(item.preview, CARD_TEXT_LIMIT),
                         style = if (compact) {
                             MaterialTheme.typography.bodyMedium
                         } else {
@@ -359,18 +361,23 @@ private fun SyncedCard(
 
 @Composable
 private fun ImagePreview(key: String, item: SyncedItem, compact: Boolean) {
-    val bitmap = remember(key, compact) {
-        ImageCache.fromBase64(key, item.entry.content, if (compact) 480 else 900)
-    }
-    if (bitmap == null) {
-        Text(
+    // Decoded off the main thread, and a failure remembered (see ImageCache).
+    when (val image = rememberInlineImage(key, item.entry.content, if (compact) 480 else 900)) {
+        ImageState.Loading -> Box(
+            Modifier
+                .fillMaxWidth()
+                .height(if (compact) 120.dp else 180.dp)
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(16.dp)),
+        )
+
+        ImageState.Failed -> Text(
             "Image (couldn't be decoded)",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        return
+
+        is ImageState.Ready -> PreviewImage(image.bitmap, "Synced image", compact)
     }
-    PreviewImage(bitmap, "Synced image", compact)
 }
 
 @Composable
