@@ -57,6 +57,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -67,7 +68,6 @@ import io.uaena.cliplink.engine.displayNameOf
 enum class SyncedLayout { List, Grid }
 
 data class SyncedActions(
-    val onOpen: (SyncedItem) -> Unit,
     val onCopy: (SyncedItem) -> Unit,
     val onShare: (SyncedItem) -> Unit,
     val onDelete: (SyncedItem) -> Unit,
@@ -78,22 +78,30 @@ data class SyncedActions(
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun SyncedScreen(
-    items: List<SyncedItem>,
+    /** Each with its unique list key (see [keyedItems]) - never `SyncedItem.id`, which two items can share. */
+    items: List<KeyedItem>,
     /** What each known device calls itself, by device id; an id missing here (or mapped to null) shows its short id. */
     deviceNames: Map<String, String?>,
     connectedCount: Int,
     discovering: Boolean,
     contentPadding: PaddingValues,
+    onOpen: (KeyedItem) -> Unit,
     actions: SyncedActions,
     layout: SyncedLayout,
     onLayoutChange: (SyncedLayout) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val context = LocalContext.current
+    // Read from the system, not the engine: a denied local-network permission
+    // raises no error anywhere, so the engine can only say "looking".
+    val localNetworkOff = rememberLocalNetworkAccessOff()
     Box(modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             SyncedHeader(
                 connectedCount = connectedCount,
                 discovering = discovering,
+                localNetworkOff = localNetworkOff,
+                onOpenSettings = { openAppSettings(context) },
                 layout = layout,
                 onLayoutChange = onLayoutChange,
                 topPadding = contentPadding.calculateTopPadding(),
@@ -136,8 +144,14 @@ fun SyncedScreen(
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                         modifier = Modifier.fillMaxSize(),
                     ) {
-                        items(items, key = { it.id }) { item ->
-                            SyncedCard(item, deviceNames[item.entry.deviceId], actions, compact = false)
+                        items(items, key = { it.key }) { keyed ->
+                            SyncedCard(
+                                keyed,
+                                deviceNames[keyed.item.entry.deviceId],
+                                onOpen,
+                                actions,
+                                compact = false,
+                            )
                         }
                     }
 
@@ -148,8 +162,14 @@ fun SyncedScreen(
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         modifier = Modifier.fillMaxSize(),
                     ) {
-                        items(items, key = { it.id }) { item ->
-                            SyncedCard(item, deviceNames[item.entry.deviceId], actions, compact = true)
+                        items(items, key = { it.key }) { keyed ->
+                            SyncedCard(
+                                keyed,
+                                deviceNames[keyed.item.entry.deviceId],
+                                onOpen,
+                                actions,
+                                compact = true,
+                            )
                         }
                     }
                 }
@@ -177,6 +197,8 @@ fun SyncedScreen(
 private fun SyncedHeader(
     connectedCount: Int,
     discovering: Boolean,
+    localNetworkOff: Boolean,
+    onOpenSettings: () -> Unit,
     layout: SyncedLayout,
     onLayoutChange: (SyncedLayout) -> Unit,
     topPadding: androidx.compose.ui.unit.Dp,
@@ -199,7 +221,12 @@ private fun SyncedHeader(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            StatusPill(connectedCount, discovering)
+            StatusPill(
+                connectedCount,
+                discovering,
+                localNetworkOff = localNetworkOff,
+                onOpenSettings = onOpenSettings,
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 ToggleButton(
                     checked = layout == SyncedLayout.List,
@@ -228,7 +255,14 @@ private fun SyncedHeader(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SyncedCard(item: SyncedItem, senderName: String?, actions: SyncedActions, compact: Boolean) {
+private fun SyncedCard(
+    keyed: KeyedItem,
+    senderName: String?,
+    onOpen: (KeyedItem) -> Unit,
+    actions: SyncedActions,
+    compact: Boolean,
+) {
+    val item = keyed.item
     val style = typeStyleOf(item)
     var menuOpen by remember { mutableStateOf(false) }
     var confirmingDelete by remember { mutableStateOf(false) }
@@ -242,16 +276,18 @@ private fun SyncedCard(item: SyncedItem, senderName: String?, actions: SyncedAct
             Column(
                 Modifier
                     .combinedClickable(
-                        onClick = { actions.onOpen(item) },
+                        onClick = { onOpen(keyed) },
                         onLongClick = { menuOpen = true },
                     )
                     .padding(16.dp),
             ) {
                 when {
-                    item.type == ClipboardEntry.TYPE_IMAGE -> ImagePreview(item, compact)
+                    item.type == ClipboardEntry.TYPE_IMAGE -> ImagePreview(keyed.key, item, compact)
                     item.type == ClipboardEntry.TYPE_FILE -> FileContent(item, style, compact)
                     else -> Text(
-                        item.preview,
+                        // Only what the card can show: Text measures all it is
+                        // given, and a multi-megabyte copy is one entry.
+                        previewTextOf(item.preview, CARD_TEXT_LIMIT),
                         style = if (compact) {
                             MaterialTheme.typography.bodyMedium
                         } else {
@@ -338,19 +374,24 @@ private fun SyncedCard(item: SyncedItem, senderName: String?, actions: SyncedAct
 }
 
 @Composable
-private fun ImagePreview(item: SyncedItem, compact: Boolean) {
-    val bitmap = remember(item.id, compact) {
-        ImageCache.fromBase64(item.id, item.entry.content, if (compact) 480 else 900)
-    }
-    if (bitmap == null) {
-        Text(
+private fun ImagePreview(key: String, item: SyncedItem, compact: Boolean) {
+    // Decoded off the main thread, and a failure remembered (see ImageCache).
+    when (val image = rememberInlineImage(key, item.entry.content, if (compact) 480 else 900)) {
+        ImageState.Loading -> Box(
+            Modifier
+                .fillMaxWidth()
+                .height(if (compact) 120.dp else 180.dp)
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(16.dp)),
+        )
+
+        ImageState.Failed -> Text(
             "Image (couldn't be decoded)",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        return
+
+        is ImageState.Ready -> PreviewImage(image.bitmap, "Synced image", compact)
     }
-    PreviewImage(bitmap, "Synced image", compact)
 }
 
 @Composable

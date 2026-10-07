@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -25,17 +26,26 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import io.uaena.cliplink.R
 import io.uaena.cliplink.engine.LogLine
 import io.uaena.cliplink.engine.shortIdOf
+
+/** The passcode fields' keyboard: for a password, never corrected, learned or suggested. */
+private val PasscodeKeyboard = KeyboardOptions(
+    keyboardType = KeyboardType.Password,
+    autoCorrectEnabled = false,
+)
 
 data class MeState(
     val ownDeviceId: String,
@@ -74,12 +84,16 @@ fun MeScreen(
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
 ) {
+    // Deliberately NOT saved: a passcode must not end up in the saved-state
+    // Bundle (which can be written to disk when the process is killed), so a
+    // recreation clears these two fields. Everything below is saved.
     var passphrase by remember { mutableStateOf("") }
-    var tailscale by remember(state.tailscaleIp) { mutableStateOf(state.tailscaleIp) }
-    var deviceName by remember(state.deviceNameOverride) { mutableStateOf(state.deviceNameOverride) }
+    var passphraseConfirmation by remember { mutableStateOf("") }
+    var tailscale by rememberSaveable(state.tailscaleIp) { mutableStateOf(state.tailscaleIp) }
+    var deviceName by rememberSaveable(state.deviceNameOverride) { mutableStateOf(state.deviceNameOverride) }
     val shownName = state.deviceNameOverride.ifBlank { state.defaultDeviceName }
-    var confirmingClear by remember { mutableStateOf(false) }
-    var confirmingClearPassphrase by remember { mutableStateOf(false) }
+    var confirmingClear by rememberSaveable { mutableStateOf(false) }
+    var confirmingClearPassphrase by rememberSaveable { mutableStateOf(false) }
 
     LazyColumn(
         contentPadding = PaddingValues(
@@ -251,6 +265,30 @@ fun MeScreen(
                         supportingText = { Text(stringResource(R.string.passcode_length_hint)) },
                         singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
+                        // A password keyboard, with no learning or correcting:
+                        // without it the IME treats this as ordinary text and
+                        // may remember (and suggest) what was typed.
+                        keyboardOptions = PasscodeKeyboard.copy(imeAction = ImeAction.Next),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    // Typed blind, so typed twice: a typo here would otherwise
+                    // set a passcode nobody can reproduce on the other device.
+                    val mismatch = passphraseConfirmation.isNotEmpty() &&
+                        !passcodesMatch(passphrase, passphraseConfirmation)
+                    OutlinedTextField(
+                        value = passphraseConfirmation,
+                        onValueChange = { passphraseConfirmation = it },
+                        label = { Text("Confirm passcode") },
+                        isError = mismatch,
+                        supportingText = if (mismatch) {
+                            { Text("The two passcodes don't match.") }
+                        } else {
+                            null
+                        },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = PasscodeKeyboard.copy(imeAction = ImeAction.Done),
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Spacer(Modifier.height(12.dp))
@@ -258,16 +296,18 @@ fun MeScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        // No minimum length - blank is the only thing refused,
-                        // and the engine trims before deriving the key. Both
-                        // buttons wait out a key that is still being derived,
-                        // so a Change and a Clear can never cross.
+                        // No minimum length - blank is the only thing refused
+                        // (besides the two fields disagreeing), and the engine
+                        // trims before deriving the key. Both buttons wait out
+                        // a key that is still being derived, so a Change and a
+                        // Clear can never cross.
                         Button(
                             onClick = {
                                 actions.onSetPassphrase(passphrase)
                                 passphrase = ""
+                                passphraseConfirmation = ""
                             },
-                            enabled = passphrase.isNotBlank() && !state.passphraseBusy,
+                            enabled = canSetPasscode(passphrase, passphraseConfirmation, state.passphraseBusy),
                         ) {
                             Text(
                                 when {

@@ -129,7 +129,7 @@ private fun DeviceCard(
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
-                        deviceIconFor(device.deviceId),
+                        DeviceIcon,
                         contentDescription = null,
                         tint = onAccent,
                     )

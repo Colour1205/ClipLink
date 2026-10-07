@@ -2,6 +2,7 @@ package io.uaena.cliplink.ui
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,12 +16,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Circle
-import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Description
-import androidx.compose.material.icons.outlined.DevicesOther
+import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Link
-import androidx.compose.material.icons.outlined.Smartphone
 import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -29,10 +28,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -55,8 +57,13 @@ data class TypeStyle(
 @Composable
 fun typeStyleOf(item: SyncedItem): TypeStyle {
     val colors = MaterialTheme.colorScheme
+    // Worked out once per entry, not on every recomposition: isLink trims a
+    // copy of the whole content and runs a regex over it, and a copied file's
+    // text is megabytes. The signature stands for the content (an entry can't
+    // change under its signature), and is short to compare.
+    val isLink = remember(item.entry.signature ?: item.entry.content) { item.isLink }
     return when {
-        item.isLink -> TypeStyle(
+        isLink -> TypeStyle(
             Icons.Outlined.Link,
             "Link",
             colors.tertiaryContainer,
@@ -119,11 +126,23 @@ fun TypeChip(style: TypeStyle, modifier: Modifier = Modifier, showLabel: Boolean
  * different badges.
  */
 @Composable
-fun StatusPill(connectedCount: Int, discovering: Boolean, modifier: Modifier = Modifier) {
+fun StatusPill(
+    connectedCount: Int,
+    discovering: Boolean,
+    modifier: Modifier = Modifier,
+    /**
+     * The local-network permission is off (see [rememberLocalNetworkAccessOff]):
+     * the pill says so - it would otherwise read "Looking for devices…"
+     * for good, as a denial is silent - and a tap goes to [onOpenSettings].
+     */
+    localNetworkOff: Boolean = false,
+    onOpenSettings: () -> Unit = {},
+) {
     val colors = MaterialTheme.colorScheme
     val connected = connectedCount > 0
     val container by animateColorAsState(
         targetValue = when {
+            localNetworkOff -> colors.errorContainer
             connected -> colors.tertiaryContainer
             discovering -> colors.surfaceContainerHigh
             else -> colors.errorContainer
@@ -133,6 +152,7 @@ fun StatusPill(connectedCount: Int, discovering: Boolean, modifier: Modifier = M
     )
     val onContainer by animateColorAsState(
         targetValue = when {
+            localNetworkOff -> colors.onErrorContainer
             connected -> colors.onTertiaryContainer
             discovering -> colors.onSurfaceVariant
             else -> colors.onErrorContainer
@@ -143,7 +163,15 @@ fun StatusPill(connectedCount: Int, discovering: Boolean, modifier: Modifier = M
 
     Row(
         modifier = modifier
-            .background(container, CircleShape)
+            .clip(CircleShape)
+            .background(container)
+            .then(
+                if (localNetworkOff) {
+                    Modifier.clickable(onClickLabel = "Open app settings", role = Role.Button, onClick = onOpenSettings)
+                } else {
+                    Modifier
+                },
+            )
             .padding(horizontal = 12.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(7.dp),
@@ -156,6 +184,7 @@ fun StatusPill(connectedCount: Int, discovering: Boolean, modifier: Modifier = M
         )
         Text(
             text = when {
+                localNetworkOff -> "Local network access is off"
                 connected -> "$connectedCount device${if (connectedCount == 1) "" else "s"} connected"
                 discovering -> "Looking for devices…"
                 else -> "Discovery off"
@@ -163,20 +192,21 @@ fun StatusPill(connectedCount: Int, discovering: Boolean, modifier: Modifier = M
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.Medium,
             color = onContainer,
+            maxLines = 1,
         )
     }
 }
 
-@Composable
-fun deviceIconFor(deviceId: String): ImageVector = when {
-    // Nothing on the wire says what kind of device a peer is, so this is a
-    // deliberate guess rather than a fact - phones on this protocol are the
-    // ones that beacon, and the daemon is always a desktop. Shown as a hint,
-    // never as something the user should rely on.
-    deviceId.isEmpty() -> Icons.Outlined.DevicesOther
-    deviceId.hashCode() % 2 == 0 -> Icons.Outlined.Smartphone
-    else -> Icons.Outlined.Computer
-}
+/**
+ * The icon every device card wears. Nothing on the wire says what kind of
+ * device a peer is - the beacon and the handshake carry an id and a name, not a
+ * type - so there is nothing to pick a phone or a computer from, and one
+ * neutral "devices" icon is the honest answer. (This used to choose between
+ * Smartphone and Computer by `deviceId.hashCode() % 2`: a coin flip per device
+ * under a comment that claimed it was an educated guess, so a PC showed a phone
+ * about half the time.)
+ */
+val DeviceIcon: ImageVector get() = Icons.Outlined.Devices
 
 /** Shared empty state: big soft icon, a headline and one line of guidance. */
 @Composable

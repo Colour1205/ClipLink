@@ -24,6 +24,7 @@ import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -51,6 +52,8 @@ import io.uaena.cliplink.engine.displayNameOf
 @Composable
 fun DetailScreen(
     item: SyncedItem,
+    /** The item's unique list key (see [keyedItems]): what its picture is cached under. */
+    key: String,
     /** What the sending device calls itself, or null while no name is known (its short id is shown then). */
     senderName: String?,
     contentPadding: PaddingValues,
@@ -65,11 +68,14 @@ fun DetailScreen(
     val origin = if (item.isOwn) "Sent from this device" else "From ${displayNameOf(item.entry.deviceId, senderName)}"
     // The item's picture, if it has one: an inline image, or the picture of an
     // image file once its bytes are here (a file card until then).
+    // Both decoded off the main thread: this is the biggest decode in the app.
+    val inlineImage = if (item.type == ClipboardEntry.TYPE_IMAGE) {
+        rememberInlineImage(key, item.entry.content, DETAIL_IMAGE_EDGE)
+    } else {
+        null
+    }
     val picture = when (item.type) {
-        ClipboardEntry.TYPE_IMAGE -> remember(item.id) {
-            ImageCache.fromBase64(item.id, item.entry.content, DETAIL_IMAGE_EDGE)
-        }
-
+        ClipboardEntry.TYPE_IMAGE -> (inlineImage as? ImageState.Ready)?.bitmap
         ClipboardEntry.TYPE_FILE -> rememberFileThumbnail(item, DETAIL_IMAGE_EDGE)
         else -> null
     }
@@ -185,12 +191,18 @@ fun DetailScreen(
             ) {
                 when (item.type) {
                     ClipboardEntry.TYPE_IMAGE -> {
-                        // No picture: it didn't decode.
-                        Text(
-                            "This image couldn't be decoded.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.error,
-                        )
+                        // No picture: still decoding, or it didn't decode.
+                        if (inlineImage == ImageState.Failed) {
+                            Text(
+                                "This image couldn't be decoded.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        } else {
+                            Box(Modifier.fillMaxWidth().padding(vertical = 48.dp), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator()
+                            }
+                        }
                     }
 
                     ClipboardEntry.TYPE_FILE -> {
@@ -247,13 +259,28 @@ fun DetailScreen(
                             // Select all / Share - for taking part of a long text
                             // rather than all of it (the Copy button below takes
                             // all of it).
-                            SelectionContainer {
-                                Text(
-                                    item.entry.content,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    modifier = Modifier.padding(20.dp),
-                                )
+                            val content = item.entry.content
+                            val shown = remember(content) { previewTextOf(content, DETAIL_TEXT_LIMIT) }
+                            Column(Modifier.padding(20.dp)) {
+                                SelectionContainer {
+                                    Text(
+                                        shown,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                }
+                                if (shown.length < content.length) {
+                                    // A text this long can't be laid out in one
+                                    // piece; the button copies the whole of it.
+                                    Spacer(Modifier.height(12.dp))
+                                    Text(
+                                        "Showing the first ${"%,d".format(shown.length)} of " +
+                                            "${"%,d".format(content.length)} characters. " +
+                                            "Copy takes all of it.",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                             }
                         }
                     }

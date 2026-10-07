@@ -1,11 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
-    <!-- Content-addressed blob cache (FileStore). Exposed through
-         FileProvider so received files can be shared, opened, or put on
-         the clipboard as a content:// URI - a file:// URI would throw
-         FileUriExposedException the moment it left this process. -->
-    <files-path name="cliplink_files" path="cliplink_files/" />
-    <!-- Human-named copies handed to other apps (a blob's filename is its
-         hash, which is useless in a share sheet). -->
+    <!-- The ONLY thing FileProvider serves: human-named copies handed to other
+         apps, as a content:// URI (a file:// URI would throw
+         FileUriExposedException the moment it left this process). A blob is
+         stored under its hash, which is useless in a share sheet, so
+         ClipboardBridge.contentUriFor puts a copy named like the file under
+         shared/ and shares that (stale ones are pruned, see
+         ClipboardBridge.pruneSharedCopies). The blob store itself
+         (files/cliplink_files) is deliberately NOT exposed here. -->
     <cache-path name="shared" path="shared/" />
 </paths>

@@ -38,6 +38,17 @@ import kotlinx.coroutines.delay
  * the sending app's task. It copies what was shared while it still holds
  * the read grant, hands it to the engine, says what happened in a toast and
  * finishes - the user never leaves the app they shared from.
+ *
+ * EXPORTED AND SILENT, ON PURPOSE. Being a share target means being exported
+ * (the system's share sheet has to be able to start it), so ANY app on this
+ * phone can fire a SEND intent at it, and whatever it carries is signed with
+ * this phone's key and sent to every paired device - where, with "Copy
+ * received items automatically" on, it also lands on the clipboard - with no
+ * confirmation here. That is the same reach every share target (a messenger,
+ * a notes app) gives every other app, and a prompt on each share would defeat
+ * the one-tap "share to ClipLink" this screen exists for. It is a documented
+ * trade-off, not an oversight: do not "fix" it by un-exporting the activity
+ * (that removes ClipLink from the share sheet altogether).
  */
 class ShareReceiverActivity : ComponentActivity() {
 

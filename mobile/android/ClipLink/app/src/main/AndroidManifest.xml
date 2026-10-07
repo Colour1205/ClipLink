@@ -3,6 +3,8 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Lets the Me screen follow network changes (ConnectivityManager
+         network callback) so its address list doesn't go stale. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!-- targetSdk 37 enforces Local Network Protections: WITHOUT this
@@ -21,7 +23,6 @@
          hold at least one of CHANGE_NETWORK_STATE / CHANGE_WIFI_STATE /
          CHANGE_WIFI_MULTICAST_STATE (etc.) or startForeground throws. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- connectedDevice, NOT dataSync. dataSync is capped at 6 hours per
@@ -42,7 +43,7 @@
 
     <application
         android:name=".ClipLinkApplication"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
