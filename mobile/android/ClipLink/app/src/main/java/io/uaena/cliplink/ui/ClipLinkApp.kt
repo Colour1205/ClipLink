@@ -99,6 +99,11 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
     // view closed and SyncedScreen recomposed fresh. Defaults to Grid.
     var syncedLayout by remember { mutableStateOf(SyncedLayout.Grid) }
     val snackbarHostState = remember { SnackbarHostState() }
+    // Who each item came from, by name: the Devices list already holds the
+    // best name known for every device (trust record, else this session's
+    // handshake or beacon), and is rebuilt when one arrives, so a byline that
+    // read "Device AB12·CD34" gets the name as soon as it is known.
+    val deviceNames = remember(state.devices) { state.devices.associate { it.deviceId to it.name } }
 
     // Pairing mode is a live signal, not a setting: an untrusted peer can only
     // complete a handshake while this screen is actually open, so it has to be
@@ -184,6 +189,7 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
                         val item = state.items.firstOrNull { it.id == opened.id } ?: opened
                         DetailScreen(
                             item = item,
+                            senderName = deviceNames[item.entry.deviceId],
                             contentPadding = padding,
                             onBack = { detail = null },
                             onCopy = { actions.synced.onCopy(item) },
@@ -215,6 +221,7 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
 
                     Screen.Synced -> SyncedScreen(
                         items = state.items,
+                        deviceNames = deviceNames,
                         connectedCount = state.connectedCount,
                         discovering = state.discovering,
                         contentPadding = padding,

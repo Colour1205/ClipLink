@@ -46,11 +46,13 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.engine.SyncedItem
-import io.uaena.cliplink.engine.shortIdOf
+import io.uaena.cliplink.engine.displayNameOf
 
 @Composable
 fun DetailScreen(
     item: SyncedItem,
+    /** What the sending device calls itself, or null while no name is known (its short id is shown then). */
+    senderName: String?,
     contentPadding: PaddingValues,
     onBack: () -> Unit,
     onCopy: () -> Unit,
@@ -60,7 +62,7 @@ fun DetailScreen(
 ) {
     val style = typeStyleOf(item)
     val payload = item.filePayload
-    val origin = if (item.isOwn) "Sent from this device" else "From ${shortIdOf(item.entry.deviceId)}"
+    val origin = if (item.isOwn) "Sent from this device" else "From ${displayNameOf(item.entry.deviceId, senderName)}"
     // The item's picture, if it has one: an inline image, or the picture of an
     // image file once its bytes are here (a file card until then).
     val picture = when (item.type) {

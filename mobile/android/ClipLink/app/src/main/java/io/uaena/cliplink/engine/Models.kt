@@ -100,7 +100,13 @@ fun fingerprintOf(deviceId: String): String {
     return "${hex.take(4)}·${hex.takeLast(4)}"
 }
 
-data class LogLine(val time: String, val message: String)
+/**
+ * One line of the Activity log. [id] is unique per line: the list is keyed by
+ * it, and the time and text alone are not - a connection that flaps logs the
+ * same message twice in one second, and a Lazy list given two equal keys
+ * crashes the app.
+ */
+data class LogLine(val id: Long, val time: String, val message: String)
 
 /**
  * A peer that completed a handshake but isn't trusted yet - awaiting an

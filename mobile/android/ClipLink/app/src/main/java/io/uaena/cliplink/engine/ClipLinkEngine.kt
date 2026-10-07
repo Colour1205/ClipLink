@@ -115,6 +115,9 @@ class ClipLinkEngine(context: Context) {
     private val _log = MutableStateFlow<List<LogLine>>(emptyList())
     val log: StateFlow<List<LogLine>> = _log.asStateFlow()
 
+    /** Numbers the log lines (declared up here so it exists before anything can log); log() runs on network threads too. */
+    private val logSequence = java.util.concurrent.atomic.AtomicLong()
+
     private val _pairingOpen = MutableStateFlow(false)
     val pairingOpen: StateFlow<Boolean> = _pairingOpen.asStateFlow()
 
@@ -1078,13 +1081,12 @@ class ClipLinkEngine(context: Context) {
     fun consumeToast() {
         _toast.value = null
     }
-
     private fun log(message: String) {
         Log.i(TAG, message)
         // Second precision, not minute: two events inside the same minute are
         // indistinguishable otherwise, which is useless for watching a
         // connect/disconnect flap.
-        val line = LogLine(LocalTime.now().format(LOG_TIME_FORMAT), message)
+        val line = LogLine(logSequence.incrementAndGet(), LocalTime.now().format(LOG_TIME_FORMAT), message)
         _log.update { existing -> (listOf(line) + existing).take(MAX_LOG_LINES) }
     }
 
