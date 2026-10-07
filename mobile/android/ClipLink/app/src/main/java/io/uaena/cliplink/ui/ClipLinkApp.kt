@@ -33,6 +33,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
@@ -44,6 +45,7 @@ import io.uaena.cliplink.engine.DeviceRow
 import io.uaena.cliplink.engine.LogLine
 import io.uaena.cliplink.engine.PairingRequest
 import io.uaena.cliplink.engine.SyncedItem
+import kotlinx.coroutines.launch
 
 enum class Tab(val label: String, val selectedIcon: ImageVector, val icon: ImageVector) {
     Synced("Synced", Icons.Filled.ContentPaste, Icons.Outlined.ContentPaste),
@@ -113,6 +115,7 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
     // is swapped out for the scanner and back, and its typed address with it.
     val saveableStateHolder = rememberSaveableStateHolder()
     val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
     // Who each item came from, by name: the Devices list already holds the
     // best name known for every device (trust record, else this session's
     // handshake or beacon), and is rebuilt when one arrives, so a byline that
@@ -246,6 +249,10 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
                             onResult = { text ->
                                 scanning = false
                                 actions.onPair(text)
+                            },
+                            onUnavailable = { message ->
+                                scanning = false
+                                scope.launch { snackbarHostState.showSnackbar(message) }
                             },
                         )
 
