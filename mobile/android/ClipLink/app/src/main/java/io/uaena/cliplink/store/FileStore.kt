@@ -6,6 +6,9 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 
 /**
@@ -68,8 +71,21 @@ class FileStore internal constructor(
         path(hash).delete()
     }
 
+    /**
+     * Stores [bytes] under [hash], all or nothing: written to a temporary file
+     * and renamed into place, so a process killed halfway leaves a stray
+     * temporary file for the next start to delete - never a short file under
+     * the blob's own name, which [exists] would take for the whole thing.
+     */
     fun write(hash: String, bytes: ByteArray) {
-        path(hash).writeBytes(bytes)
+        val target = path(hash)
+        val temp = File.createTempFile(IMPORT_PREFIX, ".part", baseDir)
+        try {
+            temp.outputStream().use { it.write(bytes) }
+            moveIntoPlace(temp, target)
+        } finally {
+            temp.delete() // a no-op once renamed
+        }
     }
 
     /**
@@ -80,26 +96,27 @@ class FileStore internal constructor(
      */
     fun storeEmpty(hash: String) {
         require(hash.equals(EMPTY_FILE_HASH, ignoreCase = true)) { "Not the empty file's hash." }
-        val file = path(hash)
-        if (!file.exists()) file.writeBytes(ByteArray(0))
+        if (!path(hash).exists()) write(hash, ByteArray(0))
     }
 
     /**
-     * Deletes every blob, and every .tmp a killed process left, whose hash
-     * isn't in [referenced] - bytes no history entry points at any more,
-     * whatever left them behind: an entry deleted or evicted while its bytes
-     * were still arriving, a process killed between the two. Anything this
-     * process has already touched is spared (see [touched]). For startup,
-     * before any peer connects; runs once, later calls do nothing. Returns
-     * how many files went.
+     * Deletes every blob whose hash isn't in [referenced] - bytes no history
+     * entry points at any more, whatever left them behind: an entry deleted
+     * or evicted while its bytes were still arriving, a process killed
+     * between the two - and every .tmp a killed process left, referenced or
+     * not: a half-received file is never resumed, only started over, and
+     * nothing is receiving yet. Anything this process has already touched is
+     * spared (see [touched]). For startup, before any peer connects; runs
+     * once, later calls do nothing. Returns how many files went.
      */
     fun sweepUnreferenced(referenced: Set<String>): Int = synchronized(sweepLock) {
         val spared = touched ?: return 0
         touched = null
         val files = baseDir.listFiles() ?: return 0
         files.count { file ->
+            val isTemp = file.name.endsWith(TEMP_SUFFIX)
             val hash = file.name.removeSuffix(TEMP_SUFFIX)
-            isValidHash(hash) && hash !in referenced && hash !in spared && file.isFile && file.delete()
+            isValidHash(hash) && (isTemp || hash !in referenced) && hash !in spared && file.isFile && file.delete()
         }
     }
 
@@ -118,10 +135,23 @@ class FileStore internal constructor(
             val stored = temp.outputStream().use { copyHashed(input, it, maxBytes) } ?: return null
             val target = path(stored.hash)
             // Already here means these exact bytes are already here.
-            if (!target.exists() && !temp.renameTo(target)) throw IOException("couldn't store ${stored.hash}")
+            if (!target.exists()) moveIntoPlace(temp, target)
             return stored
         } finally {
             temp.delete() // a no-op once renamed
+        }
+    }
+
+    /** A finished temporary file becomes the blob in one step, replacing whatever is there. */
+    private fun moveIntoPlace(temp: File, target: File) {
+        try {
+            try {
+                Files.move(temp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            } catch (e: AtomicMoveNotSupportedException) {
+                Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+        } catch (e: IOException) {
+            throw IOException("couldn't store ${target.name}", e)
         }
     }
 
