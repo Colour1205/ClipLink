@@ -2,6 +2,7 @@ package io.uaena.cliplink.ui
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +35,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -125,11 +128,23 @@ fun TypeChip(style: TypeStyle, modifier: Modifier = Modifier, showLabel: Boolean
  * different badges.
  */
 @Composable
-fun StatusPill(connectedCount: Int, discovering: Boolean, modifier: Modifier = Modifier) {
+fun StatusPill(
+    connectedCount: Int,
+    discovering: Boolean,
+    modifier: Modifier = Modifier,
+    /**
+     * The local-network permission is off (see [rememberLocalNetworkAccessOff]):
+     * the pill says so - it would otherwise read "Looking for devices…"
+     * for good, as a denial is silent - and a tap goes to [onOpenSettings].
+     */
+    localNetworkOff: Boolean = false,
+    onOpenSettings: () -> Unit = {},
+) {
     val colors = MaterialTheme.colorScheme
     val connected = connectedCount > 0
     val container by animateColorAsState(
         targetValue = when {
+            localNetworkOff -> colors.errorContainer
             connected -> colors.tertiaryContainer
             discovering -> colors.surfaceContainerHigh
             else -> colors.errorContainer
@@ -139,6 +154,7 @@ fun StatusPill(connectedCount: Int, discovering: Boolean, modifier: Modifier = M
     )
     val onContainer by animateColorAsState(
         targetValue = when {
+            localNetworkOff -> colors.onErrorContainer
             connected -> colors.onTertiaryContainer
             discovering -> colors.onSurfaceVariant
             else -> colors.onErrorContainer
@@ -149,7 +165,15 @@ fun StatusPill(connectedCount: Int, discovering: Boolean, modifier: Modifier = M
 
     Row(
         modifier = modifier
-            .background(container, CircleShape)
+            .clip(CircleShape)
+            .background(container)
+            .then(
+                if (localNetworkOff) {
+                    Modifier.clickable(onClickLabel = "Open app settings", role = Role.Button, onClick = onOpenSettings)
+                } else {
+                    Modifier
+                },
+            )
             .padding(horizontal = 12.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(7.dp),
@@ -162,6 +186,7 @@ fun StatusPill(connectedCount: Int, discovering: Boolean, modifier: Modifier = M
         )
         Text(
             text = when {
+                localNetworkOff -> "Local network access is off"
                 connected -> "$connectedCount device${if (connectedCount == 1) "" else "s"} connected"
                 discovering -> "Looking for devices…"
                 else -> "Discovery off"
@@ -169,6 +194,7 @@ fun StatusPill(connectedCount: Int, discovering: Boolean, modifier: Modifier = M
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.Medium,
             color = onContainer,
+            maxLines = 1,
         )
     }
 }

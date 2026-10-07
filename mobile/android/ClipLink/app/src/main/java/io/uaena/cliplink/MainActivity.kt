@@ -31,6 +31,7 @@ import io.uaena.cliplink.ui.ClipLinkApp
 import io.uaena.cliplink.ui.MeActions
 import io.uaena.cliplink.ui.PairViewModel
 import io.uaena.cliplink.ui.SyncedActions
+import io.uaena.cliplink.ui.rememberLocalAddresses
 import io.uaena.cliplink.ui.theme.ClipLinkTheme
 import kotlinx.coroutines.launch
 
@@ -105,6 +106,9 @@ class MainActivity : ComponentActivity() {
                 val defaultDeviceName by engine.defaultDeviceName.collectAsState()
                 val toast by engine.toast.collectAsState()
                 val log by engine.log.collectAsState()
+                // Follows the network (see rememberLocalAddresses): read once
+                // per device id, it showed the last network's addresses for good.
+                val localAddresses = rememberLocalAddresses(engine::localAddresses)
 
                 var keepAlive by remember { mutableStateOf(engine.deviceSettings.keepAlive) }
                 var autoApply by remember { mutableStateOf(engine.deviceSettings.autoApply) }
@@ -132,7 +136,7 @@ class MainActivity : ComponentActivity() {
                         autoApply = autoApply,
                         autoCapture = autoCapture,
                         dynamicColor = dynamicColor.value,
-                        localAddresses = remember(ownDeviceId) { engine.localAddresses() },
+                        localAddresses = localAddresses,
                         log = log,
                         toast = toast,
                     ),

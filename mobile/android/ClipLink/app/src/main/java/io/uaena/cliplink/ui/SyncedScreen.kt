@@ -57,6 +57,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -90,11 +91,17 @@ fun SyncedScreen(
     onLayoutChange: (SyncedLayout) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val context = LocalContext.current
+    // Read from the system, not the engine: a denied local-network permission
+    // raises no error anywhere, so the engine can only say "looking".
+    val localNetworkOff = rememberLocalNetworkAccessOff()
     Box(modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             SyncedHeader(
                 connectedCount = connectedCount,
                 discovering = discovering,
+                localNetworkOff = localNetworkOff,
+                onOpenSettings = { openAppSettings(context) },
                 layout = layout,
                 onLayoutChange = onLayoutChange,
                 topPadding = contentPadding.calculateTopPadding(),
@@ -190,6 +197,8 @@ fun SyncedScreen(
 private fun SyncedHeader(
     connectedCount: Int,
     discovering: Boolean,
+    localNetworkOff: Boolean,
+    onOpenSettings: () -> Unit,
     layout: SyncedLayout,
     onLayoutChange: (SyncedLayout) -> Unit,
     topPadding: androidx.compose.ui.unit.Dp,
@@ -212,7 +221,12 @@ private fun SyncedHeader(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            StatusPill(connectedCount, discovering)
+            StatusPill(
+                connectedCount,
+                discovering,
+                localNetworkOff = localNetworkOff,
+                onOpenSettings = onOpenSettings,
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 ToggleButton(
                     checked = layout == SyncedLayout.List,
