@@ -14,6 +14,10 @@ import javax.crypto.spec.SecretKeySpec
  * is the whole reason this file is not two one-liners. Getting it wrong
  * produces an AEADBadTagException on every single message, including from a
  * peer that is behaving perfectly.
+ *
+ * The splice is done in place, in the one array that holds the message: a big
+ * inline image goes through here, and each extra full copy of it is memory
+ * the phone may not have.
  */
 object AesGcm {
     private const val NONCE_SIZE = 12
@@ -34,13 +38,16 @@ object AesGcm {
             SecretKeySpec(sessionKey, "AES"),
             GCMParameterSpec(TAG_BITS, nonce),
         )
-        // JCA output is ciphertext || tag.
-        val output = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
-        val cipherTextLength = output.size - TAG_SIZE
-        val packed = ByteArray(NONCE_SIZE + TAG_SIZE + cipherTextLength)
+        val input = plaintext.toByteArray(Charsets.UTF_8)
+        val packed = ByteArray(NONCE_SIZE + cipher.getOutputSize(input.size))
         nonce.copyInto(packed, 0)
-        output.copyInto(packed, NONCE_SIZE, cipherTextLength, output.size) // tag
-        output.copyInto(packed, NONCE_SIZE + TAG_SIZE, 0, cipherTextLength) // ciphertext
+        // JCA output is ciphertext || tag, written straight after the nonce...
+        val written = cipher.doFinal(input, 0, input.size, packed, NONCE_SIZE)
+        val cipherTextLength = written - TAG_SIZE
+        // ...and then the tag moves in front of the ciphertext.
+        val tag = packed.copyOfRange(NONCE_SIZE + cipherTextLength, NONCE_SIZE + written)
+        System.arraycopy(packed, NONCE_SIZE, packed, NONCE_SIZE + TAG_SIZE, cipherTextLength)
+        tag.copyInto(packed, NONCE_SIZE)
         return packed
     }
 
@@ -48,20 +55,25 @@ object AesGcm {
     fun decrypt(sessionKey: ByteArray, packedBase64: String): String =
         decryptPacked(sessionKey, B64.decode(packedBase64))
 
-    /** [decrypt] of a line already decoded from its base64. */
+    /**
+     * [decrypt] of a line already decoded from its base64. [packed] is used as
+     * scratch space - the tag is spliced to the end of it in place - so its
+     * contents are unspecified afterwards; hand it a copy if it's wanted again.
+     */
     fun decryptPacked(sessionKey: ByteArray, packed: ByteArray): String {
         require(packed.size >= NONCE_SIZE + TAG_SIZE) { "packed message too short" }
-        val nonce = packed.copyOfRange(0, NONCE_SIZE)
+        val cipherTextLength = packed.size - NONCE_SIZE - TAG_SIZE
+        // Back to the JCA's own ciphertext || tag ordering, in place.
         val tag = packed.copyOfRange(NONCE_SIZE, NONCE_SIZE + TAG_SIZE)
-        val cipherText = packed.copyOfRange(NONCE_SIZE + TAG_SIZE, packed.size)
+        System.arraycopy(packed, NONCE_SIZE + TAG_SIZE, packed, NONCE_SIZE, cipherTextLength)
+        tag.copyInto(packed, NONCE_SIZE + cipherTextLength)
 
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(
             Cipher.DECRYPT_MODE,
             SecretKeySpec(sessionKey, "AES"),
-            GCMParameterSpec(TAG_BITS, nonce),
+            GCMParameterSpec(TAG_BITS, packed, 0, NONCE_SIZE),
         )
-        // Back to the JCA's own ciphertext || tag ordering.
-        return String(cipher.doFinal(cipherText + tag), Charsets.UTF_8)
+        return String(cipher.doFinal(packed, NONCE_SIZE, cipherTextLength + TAG_SIZE), Charsets.UTF_8)
     }
 }

@@ -1,6 +1,8 @@
 package io.uaena.cliplink.net
 
+import io.uaena.cliplink.core.jsonNestsDeeperThan
 import io.uaena.cliplink.core.optStringOrNull
+import io.uaena.cliplink.core.untrusted
 import io.uaena.cliplink.store.FileNames
 import io.uaena.cliplink.store.FileStore
 import org.json.JSONObject
@@ -56,12 +58,10 @@ object Protocol {
 /** `{Type, Payload}` - Payload is itself a JSON *string*, not a nested object. */
 data class Envelope(val type: String, val payload: String) {
     companion object {
-        fun parse(json: String): Envelope? = try {
+        fun parse(json: String): Envelope? = untrusted {
             val obj = JSONObject(json)
             val type = obj.optString("Type", "")
             if (type.isEmpty()) null else Envelope(type, obj.optString("Payload", ""))
-        } catch (e: Exception) {
-            null
         }
     }
 }
@@ -98,7 +98,7 @@ data class FilePayload(
     }.toString()
 
     companion object {
-        fun parse(json: String): FilePayload? = try {
+        fun parse(json: String): FilePayload? = untrusted {
             val obj = JSONObject(json)
             val hash = obj.optString("FileHash", "")
             if (!FileStore.isValidHash(hash)) {
@@ -110,8 +110,6 @@ data class FilePayload(
                     fileSize = obj.optLong("FileSize", 0L),
                 )
             }
-        } catch (e: Exception) {
-            null
         }
     }
 }
@@ -130,7 +128,7 @@ data class FileChunkMessage(
     }.toString()
 
     companion object {
-        fun parse(json: String): FileChunkMessage? = try {
+        fun parse(json: String): FileChunkMessage? = untrusted {
             val obj = JSONObject(json)
             val hash = obj.optString("FileHash", "")
             if (!FileStore.isValidHash(hash)) {
@@ -143,8 +141,6 @@ data class FileChunkMessage(
                     dataBase64 = obj.optString("DataBase64", ""),
                 )
             }
-        } catch (e: Exception) {
-            null
         }
     }
 }
@@ -154,12 +150,10 @@ data class FileRequestMessage(val fileHash: String) {
     fun toJson(): String = JSONObject().apply { put("FileHash", fileHash) }.toString()
 
     companion object {
-        fun parse(json: String): FileRequestMessage? = try {
+        fun parse(json: String): FileRequestMessage? = untrusted {
             JSONObject(json).optString("FileHash", "")
                 .takeIf(FileStore::isValidHash)
                 ?.let(::FileRequestMessage)
-        } catch (e: Exception) {
-            null
         }
     }
 }
@@ -190,7 +184,17 @@ data class HandshakeMessage(
     }.toString()
 
     companion object {
-        fun parse(json: String): HandshakeMessage? = try {
+        /** The real handshake is flat. Anything nested deeper than this is refused before org.json recurses into it. */
+        private const val MAX_NESTING = 8
+
+        /**
+         * Null for anything that isn't a handshake - and never throws, Errors
+         * included: this runs on a line from a stranger, before any trust
+         * check, and a StackOverflowError from deeply nested JSON would not be
+         * caught by `catch (e: Exception)`.
+         */
+        fun parse(json: String): HandshakeMessage? = untrusted {
+            if (jsonNestsDeeperThan(json, MAX_NESTING)) return@untrusted null
             val obj = JSONObject(json)
             val ephemeral = obj.optString("EphemeralPublicKey", "")
             val identity = obj.optString("IdentityPublicKey", "")
@@ -206,8 +210,6 @@ data class HandshakeMessage(
                     deviceName = Protocol.normalizeDeviceName(obj.optStringOrNull("DeviceName")),
                 )
             }
-        } catch (e: Exception) {
-            null
         }
     }
 }
@@ -237,7 +239,7 @@ data class PairingInfo(val publicKey: String, val address: String?, val name: St
         fun parse(raw: String): PairingInfo? {
             val trimmed = raw.trim()
             if (trimmed.isEmpty()) return null
-            return try {
+            return untrusted {
                 val obj = JSONObject(trimmed)
                 val key = obj.optString("PublicKey", "")
                 if (key.isEmpty()) {
@@ -249,8 +251,6 @@ data class PairingInfo(val publicKey: String, val address: String?, val name: St
                         Protocol.normalizeDeviceName(obj.optStringOrNull("Name")),
                     )
                 }
-            } catch (e: Exception) {
-                null
             }
         }
     }
