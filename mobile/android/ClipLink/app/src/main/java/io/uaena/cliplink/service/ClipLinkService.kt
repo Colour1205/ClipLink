@@ -8,7 +8,6 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.os.Build
 import android.os.IBinder
 import io.uaena.cliplink.ClipLinkApplication
 import io.uaena.cliplink.MainActivity
@@ -53,9 +52,36 @@ class ClipLinkService : Service() {
             return START_NOT_STICKY
         }
 
-        startForegroundCompat(buildNotification("Starting…"))
+        // First, before anything slow: a startForegroundService() call is a
+        // promise to call startForeground() within a few seconds, or the
+        // system kills the app ("did not then call Service.startForeground()").
+        //
+        // And it can be refused. After the system kills the process, START_STICKY
+        // redelivers this command - with a null intent - while the app is in
+        // the background, and from Android 12 starting a foreground service
+        // from there throws ForegroundServiceStartNotAllowedException, here, in
+        // the system's own restart: the app crashed on its own revival. A
+        // missing permission for the service type throws SecurityException
+        // the same way. Either way there is nothing to keep alive: stop, and
+        // do not ask to be restarted - the next time the app is opened with
+        // keep-alive on it starts the service again, from the foreground.
+        try {
+            startForegroundCompat(buildNotification("Starting…"))
+        } catch (e: Exception) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         val engine = ClipLinkApplication.engine()
+        if (!engine.deviceSettings.keepAlive) {
+            // Keep-alive was switched off since this start was queued (an on
+            // and an off in quick succession), or this is the sticky revival of
+            // a service the user has since turned off. The foreground call above
+            // kept the start promise; now undo it.
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
         engine.start()
 
         notificationJob?.cancel()
@@ -83,16 +109,13 @@ class ClipLinkService : Service() {
         super.onDestroy()
     }
 
+    /** The type is passed explicitly and has to match the manifest's `connectedDevice`. minSdk is 31, so it always can be. */
     private fun startForegroundCompat(notification: Notification) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
+        startForeground(
+            NOTIFICATION_ID,
+            notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+        )
     }
 
     private fun buildNotification(text: String): Notification {
@@ -144,13 +167,21 @@ class ClipLinkService : Service() {
         private const val NOTIFICATION_ID = 1001
         const val ACTION_STOP = "io.uaena.cliplink.STOP"
 
-        fun start(context: Context) {
-            val intent = Intent(context, ClipLinkService::class.java)
-            context.startForegroundService(intent)
+        /**
+         * Starts the service. False when the system refuses - the app is not in
+         * a state that may start one - rather than an exception: this runs in
+         * onCreate, and an uncaught one there crashes the app on launch.
+         */
+        fun start(context: Context): Boolean = try {
+            context.startForegroundService(Intent(context, ClipLinkService::class.java))
+            true
+        } catch (e: Exception) {
+            false
         }
 
+        /** Stops the service; nothing to do - and nothing thrown - if it isn't running. */
         fun stop(context: Context) {
-            context.stopService(Intent(context, ClipLinkService::class.java))
+            runCatching { context.stopService(Intent(context, ClipLinkService::class.java)) }
         }
     }
 }
