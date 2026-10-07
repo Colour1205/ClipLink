@@ -16,8 +16,18 @@ data class SyncedItem(
     val fileAvailable: Boolean,
     /** Where a file entry's bytes are once they're here - null until then, and for every other type. */
     val file: File? = null,
+    /**
+     * A key no other item in the same list has, and the same for this item
+     * across refreshes: the entry's signature text (see
+     * [ClipboardEntry.deletionKey]), with "#2", "#3"... after a repeat of one
+     * that really is a repeat. Key a list, an image cache or a selection by
+     * this, never by [ClipboardEntry.key]: that is device, timestamp and type,
+     * which two different entries of one device can share.
+     */
+    val uniqueKey: String = entry.deletionKey,
 ) {
-    val id: String get() = entry.key
+    /** [uniqueKey] - what every list and cache here keys an item by. */
+    val id: String get() = uniqueKey
     val type: String get() = entry.type
 
     val filePayload: FilePayload?
@@ -47,6 +57,24 @@ data class SyncedItem(
     }
 }
 
+/**
+ * [SyncedItem.uniqueKey] for each of [entries], in order: the entry's
+ * signature text, and for a second (third...) entry that comes out the same,
+ * that with "#2" ("#3"...) added. Signatures are what tells two entries of one
+ * device apart when device, timestamp and type don't - and are the same
+ * every time, so the keys survive a refresh; only entries that share a
+ * signature at all (which a verified entry can't) ever need the suffix.
+ */
+internal fun uniqueKeysFor(entries: List<ClipboardEntry>): List<String> {
+    val seen = HashMap<String, Int>()
+    return entries.map { entry ->
+        val base = entry.deletionKey
+        val count = (seen[base] ?: 0) + 1
+        seen[base] = count
+        if (count == 1) base else "$base#$count"
+    }
+}
+
 /** One row in the Devices tab - a trusted device, a discovered one, or both. */
 data class DeviceRow(
     val deviceId: String,
@@ -58,8 +86,28 @@ data class DeviceRow(
     val addresses: List<String>,
     /** The peer says its own pairing screen is open right now. */
     val pairing: Boolean,
+    /**
+     * When this device's beacon was last heard. Not part of the row's
+     * identity ([equals] leaves it out): it changes with every beacon, every
+     * two seconds per peer, and a row that differs each time recomposes the
+     * whole Devices screen for nothing.
+     */
     val lastSeenAtMs: Long?,
 ) {
+    override fun equals(other: Any?): Boolean =
+        other is DeviceRow && deviceId == other.deviceId && name == other.name && trusted == other.trusted &&
+            connected == other.connected && addresses == other.addresses && pairing == other.pairing
+
+    override fun hashCode(): Int {
+        var result = deviceId.hashCode()
+        result = 31 * result + (name?.hashCode() ?: 0)
+        result = 31 * result + trusted.hashCode()
+        result = 31 * result + connected.hashCode()
+        result = 31 * result + addresses.hashCode()
+        result = 31 * result + pairing.hashCode()
+        return result
+    }
+
     val shortId: String get() = shortIdOf(deviceId)
 
     /** The row's title: its name, else the shortened id. */
