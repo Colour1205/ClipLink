@@ -25,6 +25,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -74,12 +75,15 @@ fun MeScreen(
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
 ) {
+    // Deliberately NOT saved: a passcode must not end up in the saved-state
+    // Bundle (which can be written to disk when the process is killed), so a
+    // recreation clears these two fields. Everything below is saved.
     var passphrase by remember { mutableStateOf("") }
-    var tailscale by remember(state.tailscaleIp) { mutableStateOf(state.tailscaleIp) }
-    var deviceName by remember(state.deviceNameOverride) { mutableStateOf(state.deviceNameOverride) }
+    var tailscale by rememberSaveable(state.tailscaleIp) { mutableStateOf(state.tailscaleIp) }
+    var deviceName by rememberSaveable(state.deviceNameOverride) { mutableStateOf(state.deviceNameOverride) }
     val shownName = state.deviceNameOverride.ifBlank { state.defaultDeviceName }
-    var confirmingClear by remember { mutableStateOf(false) }
-    var confirmingClearPassphrase by remember { mutableStateOf(false) }
+    var confirmingClear by rememberSaveable { mutableStateOf(false) }
+    var confirmingClearPassphrase by rememberSaveable { mutableStateOf(false) }
 
     LazyColumn(
         contentPadding = PaddingValues(

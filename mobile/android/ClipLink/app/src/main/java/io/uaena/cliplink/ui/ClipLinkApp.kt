@@ -33,6 +33,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -87,20 +89,29 @@ data class AppActions(
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
-    var tab by remember { mutableStateOf(Tab.Synced) }
-    var pairing by remember { mutableStateOf(false) }
+    // All of this is rememberSaveable: the Activity is destroyed and rebuilt
+    // for a rotation, a dark-mode or a language switch, and everything held in
+    // plain remember went back to the Synced tab, closed the open item and the
+    // pairing screen - and, through the pairing effect below, rejected a
+    // pairing request somebody was in the middle of.
+    var tab by rememberSaveable { mutableStateOf(Tab.Synced) }
+    var pairing by rememberSaveable { mutableStateOf(false) }
     // The open item is held by its key and looked up in the live list below,
     // never as the item itself: a file that finishes arriving while it is open
     // shows as arrived, and the key is something a Bundle can hold.
-    var detailKey by remember { mutableStateOf<String?>(null) }
-    var scanning by remember { mutableStateOf(false) }
+    var detailKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var scanning by rememberSaveable { mutableStateOf(false) }
     // Hoisted up here rather than remembered inside SyncedScreen itself -
     // that screen gets swapped out of composition entirely (this file's
     // single AnimatedContent below only ever has ONE of Detail/Pairing/
     // Synced/... mounted at a time), so a locally-remembered layout choice
     // was getting reset back to its default every time a card's detail
     // view closed and SyncedScreen recomposed fresh. Defaults to Grid.
-    var syncedLayout by remember { mutableStateOf(SyncedLayout.Grid) }
+    var syncedLayout by rememberSaveable { mutableStateOf(SyncedLayout.Grid) }
+    // Keeps each screen's own rememberSaveable state (typed text, dialogs,
+    // scroll position) while another screen is on show - the pairing screen
+    // is swapped out for the scanner and back, and its typed address with it.
+    val saveableStateHolder = rememberSaveableStateHolder()
     val snackbarHostState = remember { SnackbarHostState() }
     // Who each item came from, by name: the Devices list already holds the
     // best name known for every device (trust record, else this session's
@@ -112,8 +123,20 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
 
     // Pairing mode is a live signal, not a setting: an untrusted peer can only
     // complete a handshake while this screen is actually open, so it has to be
-    // flipped on the way in and off on every way out.
-    LaunchedEffect(pairing) { actions.onPairingOpenChange(pairing) }
+    // flipped on the way in and off on every way out (leaving the app is
+    // MainActivity's: no composition runs while it is stopped).
+    //
+    // Only real transitions are reported. The first composition of a fresh
+    // Activity (after a rotation, say) used to report "closed" whenever the
+    // screen wasn't open, and closing is what rejects a pending pairing
+    // request and drops its connection - for nothing having changed. An open
+    // screen is still reported at once: that is a recreation restoring it.
+    var reportedPairing by remember { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(pairing) {
+        val before = reportedPairing
+        reportedPairing = pairing
+        if (pairing || before != null) actions.onPairingOpenChange(pairing)
+    }
 
     LaunchedEffect(state.toast) {
         state.toast?.let {
@@ -187,82 +210,84 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
                 },
                 label = "screen",
             ) { screen ->
-                when (screen) {
-                    Screen.Detail -> detail?.let { opened ->
-                        // The live copy: a file that finishes arriving while
-                        // it's open is shown as arrived - its picture too.
-                        val item = opened.item
-                        DetailScreen(
-                            item = item,
-                            key = opened.key,
-                            senderName = deviceNames[item.entry.deviceId],
+                saveableStateHolder.SaveableStateProvider(screen.name) {
+                    when (screen) {
+                        Screen.Detail -> detail?.let { opened ->
+                            // The live copy: a file that finishes arriving while
+                            // it's open is shown as arrived - its picture too.
+                            val item = opened.item
+                            DetailScreen(
+                                item = item,
+                                key = opened.key,
+                                senderName = deviceNames[item.entry.deviceId],
+                                contentPadding = padding,
+                                onBack = { detailKey = null },
+                                onCopy = { actions.synced.onCopy(item) },
+                                onShare = { actions.synced.onShare(item) },
+                                onDelete = {
+                                    actions.synced.onDelete(item)
+                                    detailKey = null
+                                },
+                            )
+                        }
+
+                        Screen.Pairing -> PairScreen(
+                            payload = state.pairingPayload,
+                            status = pairStatus,
                             contentPadding = padding,
-                            onBack = { detailKey = null },
-                            onCopy = { actions.synced.onCopy(item) },
-                            onShare = { actions.synced.onShare(item) },
-                            onDelete = {
-                                actions.synced.onDelete(item)
-                                detailKey = null
+                            onBack = { pairing = false },
+                            onPair = actions.onPair,
+                            onScan = { scanning = true },
+                        )
+
+                        Screen.Scan -> ScanScreen(
+                            contentPadding = padding,
+                            onBack = { scanning = false },
+                            onResult = { text ->
+                                scanning = false
+                                actions.onPair(text)
                             },
                         )
+
+                        Screen.Synced -> SyncedScreen(
+                            items = items,
+                            deviceNames = deviceNames,
+                            connectedCount = state.connectedCount,
+                            discovering = state.discovering,
+                            contentPadding = padding,
+                            onOpen = { detailKey = it.key },
+                            actions = actions.synced,
+                            layout = syncedLayout,
+                            onLayoutChange = { syncedLayout = it },
+                        )
+
+                        Screen.Devices -> DevicesScreen(
+                            devices = state.devices,
+                            contentPadding = padding,
+                            onTrust = actions.onTrust,
+                            onUntrust = actions.onUntrust,
+                            onAdd = { pairing = true },
+                        )
+
+                        Screen.Me -> MeScreen(
+                            state = MeState(
+                                ownDeviceId = state.ownDeviceId,
+                                deviceNameOverride = state.deviceNameOverride,
+                                defaultDeviceName = state.defaultDeviceName,
+                                hasPassphrase = state.hasPassphrase,
+                                passphraseBusy = state.passphraseBusy,
+                                tailscaleIp = state.tailscaleIp,
+                                keepAlive = state.keepAlive,
+                                autoApply = state.autoApply,
+                                autoCapture = state.autoCapture,
+                                dynamicColor = state.dynamicColor,
+                                localAddresses = state.localAddresses,
+                                log = state.log,
+                            ),
+                            actions = actions.me,
+                            contentPadding = padding,
+                        )
                     }
-
-                    Screen.Pairing -> PairScreen(
-                        payload = state.pairingPayload,
-                        status = pairStatus,
-                        contentPadding = padding,
-                        onBack = { pairing = false },
-                        onPair = actions.onPair,
-                        onScan = { scanning = true },
-                    )
-
-                    Screen.Scan -> ScanScreen(
-                        contentPadding = padding,
-                        onBack = { scanning = false },
-                        onResult = { text ->
-                            scanning = false
-                            actions.onPair(text)
-                        },
-                    )
-
-                    Screen.Synced -> SyncedScreen(
-                        items = items,
-                        deviceNames = deviceNames,
-                        connectedCount = state.connectedCount,
-                        discovering = state.discovering,
-                        contentPadding = padding,
-                        onOpen = { detailKey = it.key },
-                        actions = actions.synced,
-                        layout = syncedLayout,
-                        onLayoutChange = { syncedLayout = it },
-                    )
-
-                    Screen.Devices -> DevicesScreen(
-                        devices = state.devices,
-                        contentPadding = padding,
-                        onTrust = actions.onTrust,
-                        onUntrust = actions.onUntrust,
-                        onAdd = { pairing = true },
-                    )
-
-                    Screen.Me -> MeScreen(
-                        state = MeState(
-                            ownDeviceId = state.ownDeviceId,
-                            deviceNameOverride = state.deviceNameOverride,
-                            defaultDeviceName = state.defaultDeviceName,
-                            hasPassphrase = state.hasPassphrase,
-                            passphraseBusy = state.passphraseBusy,
-                            tailscaleIp = state.tailscaleIp,
-                            keepAlive = state.keepAlive,
-                            autoApply = state.autoApply,
-                            autoCapture = state.autoCapture,
-                            dynamicColor = state.dynamicColor,
-                            localAddresses = state.localAddresses,
-                            log = state.log,
-                        ),
-                        actions = actions.me,
-                        contentPadding = padding,
-                    )
                 }
             }
 

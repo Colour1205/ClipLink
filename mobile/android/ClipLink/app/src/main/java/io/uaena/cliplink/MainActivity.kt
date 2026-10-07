@@ -6,12 +6,14 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -27,6 +29,7 @@ import io.uaena.cliplink.ui.AppActions
 import io.uaena.cliplink.ui.AppState
 import io.uaena.cliplink.ui.ClipLinkApp
 import io.uaena.cliplink.ui.MeActions
+import io.uaena.cliplink.ui.PairViewModel
 import io.uaena.cliplink.ui.SyncedActions
 import io.uaena.cliplink.ui.theme.ClipLinkTheme
 import kotlinx.coroutines.launch
@@ -35,17 +38,33 @@ class MainActivity : ComponentActivity() {
 
     private val engine: ClipLinkEngine by lazy { ClipLinkApplication.engine() }
 
+    /** What the Pair screen's Connect is doing - in a ViewModel so a rotation neither cancels nor loses it. */
+    private val pairModel: PairViewModel by viewModels()
+
+    /** Whether the UI has the Pair screen on show; [onStart] turns pairing mode back on if so. */
+    private var pairScreenOpen = false
+
+    private val uiPrefs by lazy { getSharedPreferences("cliplink_ui", MODE_PRIVATE) }
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { granted ->
         // ACCESS_LOCAL_NETWORK being denied doesn't produce an error anywhere -
         // UDP sends fail with EPERM and TCP dials just hang - so it has to be
-        // called out here or it presents as "no devices exist".
-        if (granted[Manifest.permission.ACCESS_LOCAL_NETWORK] == false) {
-            engine.showToast(
-                "Local network access is off, so ClipLink can't find your devices. " +
-                    "Turn it on in App info → Permissions → Nearby devices.",
-            )
+        // called out here or it presents as "no devices exist". Said once, not
+        // on every launch for as long as it stays denied (the Synced screen's
+        // status pill keeps saying it, and opens the settings).
+        when (granted[Manifest.permission.ACCESS_LOCAL_NETWORK]) {
+            false -> if (!uiPrefs.getBoolean(KEY_LOCAL_NETWORK_NOTICE, false)) {
+                uiPrefs.edit().putBoolean(KEY_LOCAL_NETWORK_NOTICE, true).apply()
+                engine.showToast(
+                    "Local network access is off, so ClipLink can't find your devices. " +
+                        "Turn it on in App info → Permissions → Nearby devices.",
+                )
+            }
+
+            true -> uiPrefs.edit().putBoolean(KEY_LOCAL_NETWORK_NOTICE, false).apply()
+            null -> Unit
         }
     }
 
@@ -62,7 +81,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         engine.start()
-        requestPermissions()
+        // Only for a fresh launch. A recreation (rotation, dark mode, language)
+        // has already asked; asking again re-fired the callback at once for a
+        // permission that is permanently denied, and so its "off" notice, on
+        // every rotation.
+        if (savedInstanceState == null) requestPermissions()
         if (engine.deviceSettings.keepAlive) ClipLinkService.start(this)
 
         setContent {
@@ -86,7 +109,7 @@ class MainActivity : ComponentActivity() {
                 var keepAlive by remember { mutableStateOf(engine.deviceSettings.keepAlive) }
                 var autoApply by remember { mutableStateOf(engine.deviceSettings.autoApply) }
                 var autoCapture by remember { mutableStateOf(engine.deviceSettings.autoCapture) }
-                var pairStatus by remember { mutableStateOf("") }
+                val pairStatus by pairModel.status.collectAsState()
 
                 ClipLinkApp(
                     state = AppState(
@@ -172,15 +195,11 @@ class MainActivity : ComponentActivity() {
                         onTrust = { engine.trustDevice(it.deviceId) },
                         onUntrust = { engine.untrustDevice(it.deviceId) },
                         onPairingOpenChange = { open ->
+                            pairScreenOpen = open
                             engine.setPairingOpen(open)
-                            if (!open) pairStatus = ""
+                            if (!open) pairModel.clear()
                         },
-                        onPair = { raw ->
-                            lifecycleScope.launch {
-                                pairStatus = "Connecting…"
-                                pairStatus = engine.pairWith(raw)
-                            }
-                        },
+                        onPair = { raw -> pairModel.pair(raw, engine::pairWith) },
                         onAcceptPairing = engine::acceptPairing,
                         onRejectPairing = engine::rejectPairing,
                         onToastShown = engine::consumeToast,
@@ -188,6 +207,24 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Back from the background with the Pair screen still up: it is live
+        // again (see onStop).
+        if (pairScreenOpen) engine.setPairingOpen(true)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Pairing mode means "an untrusted peer may complete a handshake", and
+        // the Pair screen's own on/off follows in-app navigation only. Left on
+        // here, a phone with keep-alive on kept beaconing pairing=1 and taking
+        // untrusted handshakes after the user went Home from that screen. Not
+        // for a recreation, though: it is the same screen, a moment later, and
+        // closing would reject a pairing request somebody is looking at.
+        if (!isChangingConfigurations) engine.setPairingOpen(false)
     }
 
     override fun onResume() {
@@ -206,6 +243,13 @@ class MainActivity : ComponentActivity() {
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             wanted += Manifest.permission.POST_NOTIFICATIONS
+        }
+        // Only what isn't granted yet: asking for a granted one is a pointless
+        // round trip, and every launch asked.
+        wanted.removeAll { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
+        // Granted since the notice was shown: say it again if it is taken away.
+        if (Manifest.permission.ACCESS_LOCAL_NETWORK !in wanted) {
+            uiPrefs.edit().putBoolean(KEY_LOCAL_NETWORK_NOTICE, false).apply()
         }
         if (wanted.isNotEmpty()) {
             permissionLauncher.launch(wanted.toTypedArray())
@@ -261,5 +305,10 @@ class MainActivity : ComponentActivity() {
     private fun copyPlainText(text: String) {
         val manager = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         manager.setPrimaryClip(ClipData.newPlainText("ClipLink", text))
+    }
+
+    private companion object {
+        /** Set once the "local network access is off" toast has been shown; cleared when it is granted. */
+        const val KEY_LOCAL_NETWORK_NOTICE = "local_network_notice_shown"
     }
 }

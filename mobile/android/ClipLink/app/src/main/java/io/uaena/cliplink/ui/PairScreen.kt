@@ -30,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,7 +51,8 @@ fun PairScreen(
     onScan: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var typed by remember { mutableStateOf("") }
+    // Saved: a rotation, or a detour through the scanner, keeps what was typed.
+    var typed by rememberSaveable { mutableStateOf("") }
 
     Column(
         modifier
