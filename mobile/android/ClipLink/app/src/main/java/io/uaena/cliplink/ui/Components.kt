@@ -16,12 +16,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Circle
-import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Description
-import androidx.compose.material.icons.outlined.DevicesOther
+import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Link
-import androidx.compose.material.icons.outlined.Smartphone
 import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -199,16 +197,16 @@ fun StatusPill(
     }
 }
 
-@Composable
-fun deviceIconFor(deviceId: String): ImageVector = when {
-    // Nothing on the wire says what kind of device a peer is, so this is a
-    // deliberate guess rather than a fact - phones on this protocol are the
-    // ones that beacon, and the daemon is always a desktop. Shown as a hint,
-    // never as something the user should rely on.
-    deviceId.isEmpty() -> Icons.Outlined.DevicesOther
-    deviceId.hashCode() % 2 == 0 -> Icons.Outlined.Smartphone
-    else -> Icons.Outlined.Computer
-}
+/**
+ * The icon every device card wears. Nothing on the wire says what kind of
+ * device a peer is - the beacon and the handshake carry an id and a name, not a
+ * type - so there is nothing to pick a phone or a computer from, and one
+ * neutral "devices" icon is the honest answer. (This used to choose between
+ * Smartphone and Computer by `deviceId.hashCode() % 2`: a coin flip per device
+ * under a comment that claimed it was an educated guess, so a PC showed a phone
+ * about half the time.)
+ */
+val DeviceIcon: ImageVector get() = Icons.Outlined.Devices
 
 /** Shared empty state: big soft icon, a headline and one line of guidance. */
 @Composable
