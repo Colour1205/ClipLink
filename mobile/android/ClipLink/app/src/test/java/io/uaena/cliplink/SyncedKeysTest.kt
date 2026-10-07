@@ -33,8 +33,10 @@ class SyncedKeysTest {
         val first = item("one", signature = "sig-one")
         val second = item("two", signature = "sig-two")
         // The collision this guards against: same device, same timestamp
-        // text, same type - the id is all three.
-        assertEquals(first.id, second.id)
+        // text, same type - the entry key is all three. (SyncedItem.id used to
+        // be this key; the engine now makes it unique too, so the raw entry key
+        // is what shows the collision, whichever way id is built.)
+        assertEquals(first.entry.key, second.entry.key)
 
         val keys = keyedItems(listOf(first, second)).map { it.key }
 
