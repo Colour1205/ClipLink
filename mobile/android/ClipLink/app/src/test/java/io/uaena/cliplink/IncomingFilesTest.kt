@@ -167,4 +167,117 @@ class IncomingFilesTest {
         assertArrayEquals(bytes, store.path(hash).readBytes())
         assertArrayEquals(other, store.path(otherHash).readBytes())
     }
+
+    // ---- limits on what a peer may make this device store -------------------------
+
+    private class FakeClock(var now: Long = 1_000L)
+
+    @Test
+    fun `a file bigger than the cap is refused as it grows, not after it is on disk`() {
+        incoming = IncomingFiles(store, maxFileBytes = 10_000)
+        assertEquals(Result.Written, incoming.receive("A", chunk(0), chunks[0])) // 4096
+        assertEquals(Result.Written, incoming.receive("A", chunk(1), chunks[1])) // 8192
+        val result = incoming.receive("A", chunk(2), chunks[2]) // 12288 > 10000
+        assertTrue(result is Result.Failed)
+        assertFalse(incoming.isReceiving(hash))
+        assertEquals(emptyList<String>(), base.list()!!.toList()) // the .tmp went too
+    }
+
+    @Test
+    fun `an entry that claims more than the cap is refused before any byte is written`() {
+        incoming = IncomingFiles(store, sizeHint = { 5_000_000_000L }, maxFileBytes = 1L shl 30)
+        val result = incoming.receive("A", chunk(0), chunks[0])
+        assertTrue(result is Result.Failed)
+        assertEquals(emptyList<String>(), base.list()!!.toList())
+    }
+
+    @Test
+    fun `a file that is not the size its entry says is refused even if it hashes right`() {
+        // The right bytes under a wrong claimed size: not the file the sender vouched for.
+        incoming = IncomingFiles(store, sizeHint = { bytes.size.toLong() + 1 })
+        val result = stream("A")
+        assertEquals(Result.Failed("file size doesn't match its entry"), result)
+        assertFalse(store.exists(hash))
+        assertEquals(emptyList<String>(), base.list()!!.toList())
+    }
+
+    @Test
+    fun `a file may not run past the size its entry says`() {
+        incoming = IncomingFiles(store, sizeHint = { 5_000L })
+        assertEquals(Result.Written, incoming.receive("A", chunk(0), chunks[0])) // 4096 <= 5000
+        val result = incoming.receive("A", chunk(1), chunks[1]) // 8192 > 5000
+        assertTrue(result is Result.Failed)
+        assertEquals(emptyList<String>(), base.list()!!.toList())
+    }
+
+    @Test
+    fun `a file of exactly the stated size is stored`() {
+        incoming = IncomingFiles(store, sizeHint = { bytes.size.toLong() })
+        assertEquals(Result.Stored, stream("A"))
+        assertStored()
+    }
+
+    @Test
+    fun `an entry that doesn't say a size is no bar`() {
+        incoming = IncomingFiles(store, sizeHint = { null })
+        assertEquals(Result.Stored, stream("A"))
+        assertStored()
+    }
+
+    @Test
+    fun `only so many files are received at once, and one peer only so many`() {
+        incoming = IncomingFiles(store, maxStreams = 3, maxStreamsPerOwner = 2)
+        fun hashOf(n: Int) = n.toString(16).padStart(64, '0')
+        fun start(owner: String, n: Int) = incoming.receive(owner, FileChunkMessage(hashOf(n), 0, false, "-"), chunks[0])
+
+        assertEquals(Result.Written, start("A", 1))
+        assertEquals(Result.Written, start("A", 2))
+        // A third from the same peer: over its share. Turned away, not failed.
+        assertEquals(Result.Ignored, start("A", 3))
+        assertEquals(Result.Written, start("B", 4)) // another peer is fine: 3 in all
+        assertEquals(Result.Ignored, start("C", 5)) // and now the total is reached
+        assertEquals(3, base.list()!!.size) // only the three .tmp files exist
+
+        // One ends: a place frees up.
+        incoming.abandonAll("B")
+        assertEquals(Result.Written, start("C", 5))
+        assertFalse(incoming.isReceiving(hashOf(3)))
+    }
+
+    @Test
+    fun `a stream that stops getting chunks is let go, and its file with it`() {
+        val clock = FakeClock()
+        incoming = IncomingFiles(store, idleMs = 60_000, clock = { clock.now })
+        incoming.receive("A", chunk(0), chunks[0])
+        clock.now += 30_000
+        incoming.receive("A", chunk(1), chunks[1]) // still going: its idle time starts over
+
+        clock.now += 59_000
+        assertEquals(emptyList<String>(), incoming.dropStale())
+        assertTrue(incoming.isReceiving(hash))
+
+        clock.now += 2_000
+        assertEquals(listOf(hash), incoming.dropStale())
+        assertFalse(incoming.isReceiving(hash))
+        assertEquals(emptyList<String>(), base.list()!!.toList())
+        // Another sender can now send it whole.
+        assertEquals(Result.Stored, stream("B"))
+        assertStored()
+    }
+
+    @Test
+    fun `dropping a stale stream late never deletes a newer stream's file`() {
+        val clock = FakeClock()
+        incoming = IncomingFiles(store, idleMs = 1_000, clock = { clock.now })
+        incoming.receive("A", chunk(0), chunks[0])
+        clock.now += 5_000
+        incoming.dropStale()
+        // B starts the same file; A's late chunks must not touch B's temp file.
+        incoming.receive("B", chunk(0), chunks[0])
+        assertEquals(Result.Ignored, incoming.receive("A", chunk(1), chunks[1]))
+        assertTrue(incoming.isReceiving(hash))
+        assertEquals(listOf("$hash.tmp"), base.list()!!.toList())
+        assertEquals(Result.Stored, stream("B", from = 1))
+        assertStored()
+    }
 }

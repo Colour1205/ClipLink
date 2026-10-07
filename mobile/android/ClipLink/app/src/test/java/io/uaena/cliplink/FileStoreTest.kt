@@ -170,4 +170,66 @@ class FileStoreTest {
         assertTrue(ImageFiles.looksLikeImage("photo.png", text)) // the name is enough to try
         assertFalse(ImageFiles.looksLikeImage("gone", File(base, "missing")))
     }
+
+    // ---- atomic writes and stale temporary files ------------------------------
+
+    @Test
+    fun `a write puts the whole file under its name or nothing, and leaves no temporary file`() {
+        val base = temp.newFolder("cliplink_files")
+        val store = store(base)
+        val bytes = ByteArray(5000) { (it % 251).toByte() }
+        val hash = FileStore.hashOf(bytes)
+
+        store.write(hash, bytes)
+
+        assertTrue(store.exists(hash))
+        assertEquals(bytes.toList(), store.path(hash).readBytes().toList())
+        assertEquals(listOf(hash), base.list()!!.toList())
+
+        // Writing again replaces it in one step.
+        val newer = ByteArray(10) { 9 }
+        store.write(hash, newer)
+        assertEquals(newer.toList(), store.path(hash).readBytes().toList())
+        assertEquals(listOf(hash), base.list()!!.toList())
+    }
+
+    @Test
+    fun `a write that fails leaves no short file under the blob's name`() {
+        val base = temp.newFolder("cliplink_files")
+        val store = store(base)
+        val hash = "c".repeat(64)
+        // The blob's name is taken by a non-empty folder: the final step can't succeed.
+        File(base, hash).mkdirs()
+        File(base, hash).resolve("occupied").writeText("x")
+
+        try {
+            store.write(hash, ByteArray(100))
+            org.junit.Assert.fail("the write should have failed")
+        } catch (e: java.io.IOException) {
+            // right
+        }
+        // Nothing half-written was left beside it.
+        assertEquals(listOf(hash), base.list()!!.toList())
+    }
+
+    @Test
+    fun `an import a killed process left halfway is cleared at the next start`() {
+        val base = temp.newFolder("cliplink_files")
+        File(base, "import_123.part").writeText("half")
+        store(base)
+        assertEquals(emptyList<String>(), base.list()!!.toList())
+    }
+
+    @Test
+    fun `the startup sweep removes every half-received file, referenced or not`() {
+        val base = temp.newFolder("cliplink_files")
+        val referenced = "f".repeat(64)
+        File(base, referenced).writeText("complete")
+        File(base, "$referenced.tmp").writeText("half") // a transfer that never reached its last chunk
+        val orphan = "9".repeat(64)
+        File(base, "$orphan.tmp").writeText("half")
+
+        assertEquals(2, store(base).sweepUnreferenced(setOf(referenced)))
+        assertEquals(setOf(referenced), base.list()!!.toSet())
+    }
 }

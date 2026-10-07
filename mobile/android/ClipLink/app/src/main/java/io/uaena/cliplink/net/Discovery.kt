@@ -1,5 +1,8 @@
 package io.uaena.cliplink.net
 
+import io.uaena.cliplink.core.Ipv4
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -68,7 +71,12 @@ class Discovery {
             bind(InetSocketAddress("0.0.0.0", Protocol.UDP_PORT))
         }
         socket = udp
-        val discoveryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        // An unexpected throw in either loop is reported, not fatal: the loops
+        // catch what they expect, and this is for what they don't.
+        val discoveryScope = CoroutineScope(
+            SupervisorJob() + Dispatchers.IO +
+                CoroutineExceptionHandler { _, error -> onError?.invoke("loop", error) },
+        )
         scope = discoveryScope
 
         discoveryScope.launch { receiveLoop(udp) }
@@ -83,7 +91,9 @@ class Discovery {
                 udp.receive(packet)
                 val text = String(packet.data, packet.offset, packet.length, Charsets.UTF_8)
                 parse(text, packet.address?.hostAddress ?: "")?.let { onPeer?.invoke(it) }
-            } catch (e: Exception) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
                 if (udp.isClosed) return
                 // A transient receive error must not kill discovery for the
                 // rest of the session. That exact failure mode - one throw,
@@ -112,7 +122,9 @@ class Discovery {
                 val bytes = message.toByteArray(Charsets.UTF_8)
                 udp.send(DatagramPacket(bytes, bytes.size, broadcast, Protocol.UDP_PORT))
                 alreadyReported = false
-            } catch (e: Exception) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
                 if (udp.isClosed) return
                 // On targetSdk 37 an EPERM here almost always means
                 // ACCESS_LOCAL_NETWORK was denied, not that the network is
@@ -147,9 +159,22 @@ class Discovery {
         private const val BROADCAST_ADDRESS = "255.255.255.255"
         private const val SEND_INTERVAL_MS = 2000L
 
+        /** Longest a device id, a proof and an address may be in a beacon - the real ones are 124, 44 and 15 characters. */
+        const val MAX_ID_LENGTH = 256
+        const val MAX_PROOF_LENGTH = 128
+        const val MAX_ADDRESS_LENGTH = 64
+
         /**
          * Always writes all six fields, the pairing one included even when
          * it's "-": the name is only findable because it is always at index 5.
+         *
+         * Every field is made safe for the format first: a ':' in any of them
+         * would shift every field after it, and every receiver would then
+         * read the pairing flag and the name from the wrong place. So none
+         * may contain one (or whitespace or a control character), and each
+         * has a cap. The address goes out only if it is an IPv4 address
+         * ([Ipv4]) - anything else is "-" - and the name is base64, which has
+         * no colon to begin with.
          */
         fun build(
             tcpPort: Int,
@@ -160,28 +185,43 @@ class Discovery {
             name: String?,
         ): String = buildString {
             append(tcpPort).append(':')
-            append(deviceId).append(':')
-            append(proof ?: "-").append(':')
-            append(address ?: "-").append(':')
+            append(field(deviceId, MAX_ID_LENGTH) ?: "-").append(':')
+            append(field(proof, MAX_PROOF_LENGTH) ?: "-").append(':')
+            append(Ipv4.normalize(address) ?: "-").append(':')
             append(if (pairing) "1" else "-").append(':')
             append(encodeName(name))
         }
 
+        /** [value] with whatever would break a beacon field removed, cut to [max]; null when nothing is left. */
+        private fun field(value: String?, max: Int): String? =
+            value?.filter { it != ':' && !it.isWhitespace() && !it.isISOControl() }?.take(max)?.takeIf { it.isNotEmpty() }
+
         fun parse(text: String, senderIp: String): Beacon? {
             val parts = text.split(':')
             if (parts.size < 3) return null // malformed or older-format beacon
-            val port = parts[0].toIntOrNull() ?: return null
-            if (parts[1].isEmpty()) return null
+            val port = parts[0].toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
+            if (parts[1].isEmpty() || parts[1].length > MAX_ID_LENGTH) return null
             return Beacon(
                 tcpPort = port,
                 deviceId = parts[1],
-                proof = parts[2].takeIf { it != "-" && it.isNotEmpty() },
-                address = parts.getOrNull(3)?.takeIf { it != "-" && it.isNotEmpty() },
+                proof = parts[2].takeIf { it != "-" && it.isNotEmpty() && it.length <= MAX_PROOF_LENGTH },
+                address = parts.getOrNull(3)?.takeIf { it != "-" && isPlausibleAddress(it) },
                 pairing = parts.getOrNull(4) == "1",
                 name = decodeName(parts.getOrNull(5)),
                 senderIp = senderIp,
             )
         }
+
+        /**
+         * A beacon's address ends up dialled and stored for a trusted device,
+         * and it came from anyone on the network. Whatever platform sent it,
+         * it is an IPv4 address or, from a build that allows one, a host name:
+         * letters, digits, '.', '-' and '_', and not long. (IPv6 can't be in a
+         * colon-separated beacon at all.)
+         */
+        internal fun isPlausibleAddress(text: String): Boolean =
+            text.isNotEmpty() && text.length <= MAX_ADDRESS_LENGTH &&
+                text.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '.' || it == '-' || it == '_' }
 
         /**
          * Standard padded base64 of the UTF-8 name - a name can contain ":"

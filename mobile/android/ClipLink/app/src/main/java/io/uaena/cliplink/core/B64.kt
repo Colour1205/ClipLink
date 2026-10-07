@@ -2,6 +2,12 @@ package io.uaena.cliplink.core
 
 import android.util.Base64
 
+/** Base64 as a stores' dependency, so tests can stand a plain-JVM codec in for android.util.Base64. */
+interface Base64Codec {
+    fun encode(bytes: ByteArray): String
+    fun decodeOrNull(text: String?): ByteArray?
+}
+
 /**
  * Base64 for everything that crosses the wire.
  *
@@ -17,13 +23,19 @@ import android.util.Base64
  * pads, and a device ID is compared as a raw string against what Windows and
  * HarmonyOS produce.
  */
-object B64 {
-    fun encode(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP)
+object B64 : Base64Codec {
+    override fun encode(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP)
+
+    /** [encode]'s ASCII bytes, without the String in between - for the big lines of a session. */
+    fun encodeToBytes(bytes: ByteArray): ByteArray = Base64.encode(bytes, Base64.NO_WRAP)
 
     fun decode(text: String): ByteArray = Base64.decode(text, Base64.NO_WRAP)
 
+    /** [decode] of a line as it was read: bytes, with no String made of it first. Throws on bad base64. */
+    fun decode(ascii: ByteArray): ByteArray = Base64.decode(ascii, Base64.NO_WRAP)
+
     /** Returns null instead of throwing, for anything a hostile peer supplied. */
-    fun decodeOrNull(text: String?): ByteArray? {
+    override fun decodeOrNull(text: String?): ByteArray? {
         if (text.isNullOrEmpty()) return null
         return try {
             Base64.decode(text, Base64.NO_WRAP)

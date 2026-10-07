@@ -27,6 +27,11 @@ internal class PeerNames {
         if (name != null) fromBeacons[deviceId] = name
     }
 
+    /** A device left the beacon book - its beacon name goes with it, so nothing here outlives its device. */
+    fun forgetBeacon(deviceId: String) {
+        fromBeacons.remove(deviceId)
+    }
+
     fun heardInHandshake(deviceId: String, name: String?) {
         if (name != null) fromHandshakes[deviceId] = name
     }
