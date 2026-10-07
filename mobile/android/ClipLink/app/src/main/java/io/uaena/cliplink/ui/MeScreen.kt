@@ -338,7 +338,7 @@ fun MeScreen(
                 SettingRow(title = "Nothing yet", subtitle = "Connection events will appear here.")
             }
         } else {
-            items(state.log, key = { "${it.time}-${it.message}" }) { line ->
+            items(state.log, key = { it.id }) { line ->
                 Row(
                     Modifier
                         .fillMaxWidth()

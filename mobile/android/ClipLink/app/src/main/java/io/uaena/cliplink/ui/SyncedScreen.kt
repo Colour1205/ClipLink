@@ -62,6 +62,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.engine.SyncedItem
+import io.uaena.cliplink.engine.displayNameOf
 
 enum class SyncedLayout { List, Grid }
 
@@ -78,6 +79,8 @@ data class SyncedActions(
 @Composable
 fun SyncedScreen(
     items: List<SyncedItem>,
+    /** What each known device calls itself, by device id; an id missing here (or mapped to null) shows its short id. */
+    deviceNames: Map<String, String?>,
     connectedCount: Int,
     discovering: Boolean,
     contentPadding: PaddingValues,
@@ -134,7 +137,7 @@ fun SyncedScreen(
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         items(items, key = { it.id }) { item ->
-                            SyncedCard(item, actions, compact = false)
+                            SyncedCard(item, deviceNames[item.entry.deviceId], actions, compact = false)
                         }
                     }
 
@@ -146,7 +149,7 @@ fun SyncedScreen(
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         items(items, key = { it.id }) { item ->
-                            SyncedCard(item, actions, compact = true)
+                            SyncedCard(item, deviceNames[item.entry.deviceId], actions, compact = true)
                         }
                     }
                 }
@@ -225,7 +228,7 @@ private fun SyncedHeader(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SyncedCard(item: SyncedItem, actions: SyncedActions, compact: Boolean) {
+private fun SyncedCard(item: SyncedItem, senderName: String?, actions: SyncedActions, compact: Boolean) {
     val style = typeStyleOf(item)
     var menuOpen by remember { mutableStateOf(false) }
     var confirmingDelete by remember { mutableStateOf(false) }
@@ -279,8 +282,12 @@ private fun SyncedCard(item: SyncedItem, actions: SyncedActions, compact: Boolea
                     )
                     Spacer(Modifier.weight(1f))
                     if (!item.isOwn) {
+                        // The sender's name (its short id while none is known).
+                        // Grid cards are narrow, so there the name stands alone:
+                        // with "from " in front it was cut to "from ...".
+                        val sender = displayNameOf(item.entry.deviceId, senderName)
                         Text(
-                            "from a device",
+                            if (compact) sender else "from $sender",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
