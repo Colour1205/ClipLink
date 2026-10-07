@@ -15,6 +15,7 @@ import io.uaena.cliplink.net.Discovery
 import io.uaena.cliplink.net.FilePayload
 import io.uaena.cliplink.net.PairingInfo
 import io.uaena.cliplink.net.PeerConnection
+import io.uaena.cliplink.net.PeerLink
 import io.uaena.cliplink.net.Protocol
 import io.uaena.cliplink.net.SyncManager
 import io.uaena.cliplink.share.ShareIntake
@@ -225,6 +226,7 @@ class ClipLinkEngine(context: Context) {
         }
         syncManager.onLog = { message -> log(message) }
         syncManager.onEntryApplied = { entry -> onEntryReceived(entry) }
+        syncManager.onHistoryChanged = { refreshItems() }
         syncManager.onFileStored = { refreshItems() }
         syncManager.onSessionProven = { conn -> rememberProvenName(conn) }
         syncManager.onConnectionClosed = { conn -> forgetUnprovenName(conn) }
@@ -545,7 +547,7 @@ class ClipLinkEngine(context: Context) {
      * has been renamed since we last heard from it, and fills in the name a
      * new pairing was stored without. Never adds a device.
      */
-    private fun rememberProvenName(conn: PeerConnection) {
+    private fun rememberProvenName(conn: PeerLink) {
         if (trustStore.rememberName(conn.peerDeviceId, conn.peerName)) refreshDevices()
     }
 
@@ -555,7 +557,7 @@ class ClipLinkEngine(context: Context) {
      * off the screen with it. Otherwise a replayed handshake would leave its
      * name on a device that has none stored, ahead of anything its beacons say.
      */
-    private fun forgetUnprovenName(conn: PeerConnection) {
+    private fun forgetUnprovenName(conn: PeerLink) {
         if (conn.isSessionProven) return
         if (peerNames.forgetHandshake(conn.peerDeviceId, conn.peerName)) refreshDevices()
     }
@@ -774,6 +776,9 @@ class ClipLinkEngine(context: Context) {
     fun untrustDevice(deviceId: String) {
         val label = displayNameOf(deviceId, knownNameOf(deviceId)) // before the record goes
         trustStore.untrust(deviceId)
+        // And its link with it: a removed device must not keep receiving what
+        // is copied here, asking for files, or showing as connected.
+        syncManager.close(deviceId, "removed")
         refreshDevices()
         // Explicit confirmation matters: a just-untrusted device that is still
         // beaconing doesn't vanish from the list, it reappears as "discovered"

@@ -17,6 +17,11 @@ data class TrustedDevice(
     val name: String? = null,
 )
 
+/** The one question the sync code asks the trust store - a seam, so message handling can be tested with a fake. */
+fun interface TrustCheck {
+    fun isTrusted(deviceId: String): Boolean
+}
+
 /**
  * The list of devices allowed to send this one clipboard data. Mirrors the
  * Windows daemon's TrustStore.cs and the HarmonyOS port's TrustStore.ets,
@@ -25,13 +30,22 @@ data class TrustedDevice(
  * "fixing" it on one platform only would make the three implementations
  * diverge for no security gain.
  */
-class TrustStore(context: Context) {
+class TrustStore(context: Context) : TrustCheck {
 
     private val prefs = context.applicationContext
         .getSharedPreferences("cliplink_trust_store", Context.MODE_PRIVATE)
 
+    /**
+     * Parsed once, then kept in step with every write: [isTrusted] runs for
+     * every message a peer sends - a big file is thousands of them - and
+     * re-parsing the JSON each time bought nothing.
+     */
+    private var cached: List<TrustedDevice>? = null
+
     @Synchronized
-    fun all(): List<TrustedDevice> {
+    fun all(): List<TrustedDevice> = cached ?: load().also { cached = it }
+
+    private fun load(): List<TrustedDevice> {
         val json = prefs.getString(DEVICES_KEY, "[]") ?: "[]"
         return try {
             val array = JSONArray(json)
@@ -66,6 +80,7 @@ class TrustStore(context: Context) {
             )
         }
         prefs.edit().putString(DEVICES_KEY, array.toString()).commit()
+        cached = devices
     }
 
     /**
@@ -100,7 +115,7 @@ class TrustStore(context: Context) {
     @Synchronized
     fun untrust(publicKey: String) = save(all().filterNot { it.publicKey == publicKey })
 
-    fun isTrusted(publicKey: String): Boolean = all().any { it.publicKey == publicKey }
+    override fun isTrusted(deviceId: String): Boolean = all().any { it.publicKey == deviceId }
 
     fun withAddress(): List<TrustedDevice> = all().filter { !it.address.isNullOrEmpty() }
 
