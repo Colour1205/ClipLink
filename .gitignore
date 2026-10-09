@@ -31,3 +31,4 @@ mobile/ios/**/.build/
 mobile/ios/**/xcuserdata/
 mobile/ios/**/*.xcuserstate
 mobile/ios/**/DerivedData/
+/mobile/android/ClipLink/app/release
