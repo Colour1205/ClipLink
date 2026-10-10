@@ -54,6 +54,14 @@ public struct EngineConfig {
     /// `maxLineBytes` with it; oversized lines are skipped without being
     /// buffered.
     public var sendOnly = false
+    /// Let an untrusted device that dials us finish the handshake as a
+    /// pairing request - held, with the user asked - even while our pairing
+    /// screen is closed. Off for the Share extension: it has no UI to ask in.
+    public var acceptPairingRequests = true
+    /// At most `requestBudget` requests out of the blue per
+    /// `requestBudgetWindow`: a flood is dropped without a prompt.
+    public var requestBudget = 6
+    public var requestBudgetWindow: TimeInterval = 10 * 60
     /// Mirrors every log line (e.g. to os.Logger).
     public var logSink: ((String) -> Void)?
 
@@ -79,6 +87,8 @@ public final class SyncEngine {
     let identity: IdentitySigner
     let secrets: SecretStore
     let trust: TrustStore
+    /// Devices the user blocked (see BlockStore).
+    let blocks: BlockStore
     public let files: FileStore
     let history: HistoryStore
     /// Items deleted or cleared here: never taken back from a peer.
@@ -116,7 +126,12 @@ public final class SyncEngine {
     // Pairing & trust
     var pairingOpen = false
     var pairingTargetKey: String?
-    var pending: PendingPairing?
+    /// Everyone asking to pair, oldest first (see maxPendingRequests).
+    var pendingRequests: [PendingPairing] = []
+    /// The request the user is looking at (the oldest).
+    var pending: PendingPairing? { pendingRequests.first }
+    /// When requests out of the blue were last let through, for the budget.
+    var requestTimes: [Date] = []
     var passphraseKey: Data?
     var cachedProof: String?
     var tailscaleIP = ""
@@ -169,6 +184,7 @@ public final class SyncEngine {
         self.ownKey = WireSignature.canonicalPublicKey(identity.publicKeyBase64)
         try? FileManager.default.createDirectory(at: config.storageDirectory, withIntermediateDirectories: true)
         trust = TrustStore(directory: config.storageDirectory)
+        blocks = BlockStore(directory: config.storageDirectory)
         files = FileStore(directory: config.storageDirectory)
         history = HistoryStore(directory: config.storageDirectory, fileStore: files)
         deleted = DeletedStore(directory: config.storageDirectory)
@@ -394,6 +410,7 @@ public final class SyncEngine {
     /// added history, trust or a passcode while this one was suspended.
     func reloadFromDisk() {
         trust.reload()
+        blocks.reload()
         history.reload()
         deleted.reload()
         let settings = settingsFile.read() as? [String: Any] ?? [:]
@@ -487,36 +504,102 @@ public final class SyncEngine {
         }
     }
 
+    /// Trusts the request the prompt is showing (the oldest) and puts its
+    /// connection to work.
     public func acceptPairing() {
         queue.async { [self] in
-            guard let request = pending else { return }
-            pending = nil
-            if request.link.isClosed {
-                notice("The other device cancelled the pairing request - try again.")
-                schedulePublish()
-                return
-            }
-            let id = request.link.peerDeviceId
-            // Nameless for now: register stores the handshake's name once
-            // this link decrypts a line (the sighting's may be a beacon's).
-            trust.trust(id, address: request.address)
-            log("paired: \(DeviceLabel.short(id))")
-            register(request.link, acceptedByUser: true)
-            notice("Paired.")
-            schedulePublish()
+            guard let first = pendingRequests.first else { return }
+            acceptLocked(first.link.peerDeviceId)
         }
     }
 
+    public func acceptPairing(deviceId: String) {
+        queue.async { [self] in acceptLocked(deviceId) }
+    }
+
+    private func acceptLocked(_ id: String) {
+        guard !blocks.isBlocked(id), let index = pendingRequests.firstIndex(where: { $0.link.peerDeviceId == id }) else { return }
+        let request = pendingRequests.remove(at: index)
+        if request.link.isClosed {
+            notice("The other device cancelled the pairing request - try again.")
+            schedulePublish()
+            return
+        }
+        // Nameless for now: register stores the handshake's name once this
+        // link decrypts a line (the sighting's may be a beacon's).
+        trust.trust(id, address: request.address)
+        log("paired: \(DeviceLabel.short(id))")
+        register(request.link, acceptedByUser: true)
+        notice("Paired with \(displayName(for: id)).")
+        schedulePublish()
+    }
+
+    /// "Ignore": closes the oldest request. Not a block, and no cooldown - the
+    /// device may ask again whenever it likes (Block is the way to stop it).
     public func rejectPairing() {
         queue.async { [self] in
-            rejectPendingLocked()
+            guard let first = pendingRequests.first else { return }
+            ignoreLocked(first.link.peerDeviceId)
+        }
+    }
+
+    public func ignorePairing(deviceId: String) {
+        queue.async { [self] in ignoreLocked(deviceId) }
+    }
+
+    private func ignoreLocked(_ id: String) {
+        guard let index = pendingRequests.firstIndex(where: { $0.link.peerDeviceId == id }) else { return }
+        let request = pendingRequests.remove(at: index)
+        request.link.close()
+        log("ignored pairing request from \(DeviceLabel.short(id))")
+        schedulePublish()
+    }
+
+    /// Closes every waiting request: the pairing screen closing, the app going
+    /// to the background - not the user's decision.
+    func rejectPendingLocked() {
+        let waiting = pendingRequests
+        pendingRequests.removeAll()
+        waiting.forEach { $0.link.close() }
+    }
+
+    static let maxPendingRequests = 3
+
+    /// May an untrusted device that dials us become a request right now?
+    var acceptsRequests: Bool {
+        guard config.acceptPairingRequests, !config.sendOnly, pendingRequests.count < Self.maxPendingRequests else { return false }
+        let cutoff = Date().addingTimeInterval(-config.requestBudgetWindow)
+        requestTimes.removeAll { $0 < cutoff }
+        return requestTimes.count < config.requestBudget
+    }
+
+    // MARK: - Blocking
+
+    /// Blocks a device: untrusts it, closes whatever is open with it, and
+    /// from now on refuses its handshakes and requests (a matching passcode
+    /// included), never dials it and no longer beacons to it. Local only.
+    public func blockDevice(_ deviceId: String) {
+        queue.async { [self] in
+            guard !isOwnIdentity(deviceId) else { return }
+            blocks.block(deviceId, name: peerName(for: deviceId))
+            trust.untrust(deviceId)
+            if let link = links.removeValue(forKey: deviceId) { link.close() }
+            for request in pendingRequests where request.link.peerDeviceId == deviceId { request.link.close() }
+            pendingRequests.removeAll { $0.link.peerDeviceId == deviceId }
+            backoff[deviceId] = nil
+            awaitingInbound[deviceId] = nil
+            log("blocked \(DeviceLabel.short(deviceId))")
             schedulePublish()
         }
     }
 
-    func rejectPendingLocked() {
-        pending?.link.close()
-        pending = nil
+    /// Lets a blocked device ask again. Does not trust it.
+    public func unblockDevice(_ deviceId: String) {
+        queue.async { [self] in
+            blocks.unblock(deviceId)
+            log("unblocked \(DeviceLabel.short(deviceId))")
+            schedulePublish()
+        }
     }
 
     /// Dials a scanned QR payload or a typed address/pairing text. Never writes
@@ -532,11 +615,19 @@ public final class SyncEngine {
     /// dials it, ignoring the tie-breaker (like Android/HarmonyOS). The other
     /// side still decides for itself. Its name is stored once a connection to
     /// it decrypts a line; until then the beacon's is shown but not stored.
-    public func trustDevice(_ deviceId: String) {
+    /// `address` is where a request came from, for a request whose connection
+    /// is already gone (a notification's Trust action, long after).
+    public func trustDevice(_ deviceId: String, address: String? = nil) {
         queue.async { [self] in
-            // Never this device itself (PeerLink refuses our own handshake too).
-            guard !isOwnIdentity(deviceId) else { return }
-            let address = addressCandidates(for: deviceId).first
+            // Never this device itself (PeerLink refuses our own handshake too),
+            // and never a device the user blocked.
+            guard !isOwnIdentity(deviceId), !blocks.isBlocked(deviceId) else { return }
+            // A live request from it: accept THAT, so its connection is used.
+            if pendingRequests.contains(where: { $0.link.peerDeviceId == deviceId }) {
+                acceptLocked(deviceId)
+                return
+            }
+            let address = addressCandidates(for: deviceId).first ?? address
             trust.trust(deviceId, address: address)
             log("trusted \(DeviceLabel.short(deviceId))")
             schedulePublish()
@@ -555,7 +646,6 @@ public final class SyncEngine {
             backoff[deviceId] = nil
             awaitingInbound[deviceId] = nil
             log("untrusted \(DeviceLabel.short(deviceId))")
-            notice("Removed \(displayName(for: deviceId)).")
             schedulePublish()
         }
     }
@@ -755,8 +845,40 @@ public final class SyncEngine {
     /// device with none stored yet - the latest heard this session (beacon or
     /// handshake line), which a beacon can change but never overrides a
     /// stored one.
+    /// Every address we know for a device and why, the connection's first.
+    private func addressDetails(for id: String, connectionAddress: String?) -> [DeviceAddress] {
+        var sources: [String: [DeviceAddress.Source]] = [:]
+        var seenAt: [String: Date] = [:]
+        func note(_ ip: String?, _ source: DeviceAddress.Source, at date: Date? = nil) {
+            guard let ip, !ip.isEmpty else { return }
+            if sources[ip]?.contains(source) != true { sources[ip, default: []].append(source) }
+            if let date, date > (seenAt[ip] ?? .distantPast) { seenAt[ip] = date }
+        }
+        if let sighting = sightings[id] {
+            for (ip, date) in sighting.addresses { note(ip, .heard, at: date) }
+            note(sighting.advertisedAddress, .advertised)
+        }
+        note(trust.device(id)?.address, .stored)
+        note(connectionAddress, .reached, at: links[id]?.connectedAt)
+        func rank(_ a: DeviceAddress) -> Int {
+            if a.inUse { return 0 }
+            switch a.kind {
+            case .lan: return 1
+            case .tailscale: return 2
+            case .other: return 3
+            }
+        }
+        return sources.map { DeviceAddress(ip: $0.key, inUse: $0.key == connectionAddress, sources: $0.value, lastSeen: seenAt[$0.key]) }
+            .sorted {
+                let (x, y) = (rank($0), rank($1))
+                if x != y { return x < y }
+                if $0.lastSeen != $1.lastSeen { return ($0.lastSeen ?? .distantPast) > ($1.lastSeen ?? .distantPast) }
+                return $0.ip < $1.ip
+            }
+    }
+
     func peerName(for deviceId: String) -> String? {
-        trust.device(deviceId)?.name ?? sightings[deviceId]?.name
+        trust.device(deviceId)?.name ?? sightings[deviceId]?.name ?? blocks.device(deviceId)?.name
     }
 
     public var pairingPayloadAddress: String? {
@@ -774,7 +896,9 @@ public final class SyncEngine {
         s.network = status
         s.log = logLines
         s.pairingOpen = pairingOpen
-        s.pairingRequest = pending.map { PairingRequest(deviceId: $0.link.peerDeviceId, address: $0.address, name: $0.link.peerName) }
+        s.pairingRequests = pendingRequests.map {
+            PairingRequest(deviceId: $0.link.peerDeviceId, address: $0.address, name: $0.link.peerName, date: $0.date, initiatedByUs: $0.link.direction == .outbound)
+        }
         s.hasPassphrase = passphraseKey != nil
         s.tailscaleIP = tailscaleIP
         s.localAddresses = NetworkInterfaces.displayAddresses()
@@ -789,7 +913,8 @@ public final class SyncEngine {
         // The same rule as the Devices rows: a stored name beats a beacon's.
         for id in trust.all.map(\.publicKey) + Array(sightings.keys) { names[id] = peerName(for: id) }
         // A pairing prompt names its peer even after the sighting ages out.
-        if let pending, names[pending.link.peerDeviceId] == nil { names[pending.link.peerDeviceId] = pending.link.peerName }
+        for request in pendingRequests where names[request.link.peerDeviceId] == nil { names[request.link.peerDeviceId] = request.link.peerName }
+        for device in blocks.all where names[device.publicKey] == nil { names[device.publicKey] = device.name }
         s.deviceNames = names
         s.deviceName = ownDeviceName ?? ""
         s.deviceNameOverride = deviceNameOverride
@@ -813,7 +938,9 @@ public final class SyncEngine {
     }
 
     private func buildDeviceRows() -> [DeviceRow] {
-        var ids: [String] = trust.all.map(\.publicKey)
+        // Paired devices and blocked ones always have a row; strangers only
+        // while they've been heard from recently.
+        var ids: [String] = trust.all.map(\.publicKey) + blocks.all.map(\.publicKey)
         var seen = Set(ids)
         let now = Date()
         for (id, sighting) in sightings where id != ownId && !seen.contains(id) && now.timeIntervalSince(sighting.lastSeen) < 300 {
@@ -833,6 +960,7 @@ public final class SyncEngine {
                 addresses.append(a)
             }
             let lastSeen = [sighting?.lastSeen, links[id]?.connectedAt].compactMap { $0 }.max()
+            let connectionAddress = links[id]?.remoteAddress.flatMap { $0.isEmpty ? nil : $0 }
             return DeviceRow(
                 deviceId: id,
                 name: nicknames[id] ?? peerName(for: id),
@@ -841,7 +969,10 @@ public final class SyncEngine {
                 addresses: addresses,
                 pairing: sighting?.pairing == true && now.timeIntervalSince(sighting?.pairingSeen ?? .distantPast) < 10,
                 lastSeen: lastSeen,
-                nearby: links[id] != nil || (sighting.map { now.timeIntervalSince($0.lastSeen) < 30 } ?? false)
+                nearby: links[id] != nil || (sighting.map { now.timeIntervalSince($0.lastSeen) < 30 } ?? false),
+                blocked: blocks.isBlocked(id),
+                connectionAddress: connectionAddress,
+                addressDetails: addressDetails(for: id, connectionAddress: connectionAddress)
             )
         }
         // Stable: sorting by connection state and last-seen time made a row
@@ -875,6 +1006,7 @@ struct Backoff {
 struct PendingPairing {
     let link: PeerLink
     let address: String?
+    let date = Date()
 }
 
 struct PendingFile {

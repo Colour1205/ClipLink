@@ -90,14 +90,73 @@ enum BackgroundSync {
     }
 }
 
-/// Local notifications for items that arrive while ClipLink is in the
-/// background (opt-in).
+/// Local notifications: items that arrive while ClipLink is in the
+/// background (opt-in), and pairing requests that can't be asked on screen.
 enum Notifier {
     static func requestAuthorization(_ completion: @escaping (Bool) -> Void) {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
             DispatchQueue.main.async { completion(granted) }
         }
     }
+
+    // MARK: Pairing requests
+
+    static let pairingCategory = "io.uaena.ClipLink.pairingRequest"
+    static let trustAction = "io.uaena.ClipLink.trust"
+    static let ignoreAction = "io.uaena.ClipLink.ignore"
+    static let requestIdKey = "deviceId"
+    static let requestAddressKey = "address"
+    static let requestNameKey = "name"
+
+    /// Trust or Ignore - never "deny": the device may still ask again later
+    /// (blocking it is a deliberate step in the Devices tab). Trust needs
+    /// the phone unlocked: it's a security decision.
+    static func registerCategories() {
+        let trust = UNNotificationAction(identifier: trustAction, title: "Trust", options: [.authenticationRequired])
+        let ignore = UNNotificationAction(identifier: ignoreAction, title: "Ignore", options: [])
+        let category = UNNotificationCategory(
+            identifier: pairingCategory,
+            actions: [trust, ignore],
+            intentIdentifiers: [],
+            hiddenPreviewsBodyPlaceholder: "Pairing request",
+            options: []
+        )
+        UNUserNotificationCenter.current().setNotificationCategories([category])
+    }
+
+    /// Asks permission the first time someone opens the pairing screen - the
+    /// moment they expect a request - and never again if they said no.
+    static func requestPairingAuthorizationIfNeeded() {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            guard settings.authorizationStatus == .notDetermined else { return }
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        }
+    }
+
+    static func notifyPairingRequest(_ request: PairingRequest, name: String) {
+        let code = DeviceLabel.short(request.deviceId)
+        let content = UNMutableNotificationContent()
+        content.title = "Pairing Request"
+        content.body = name == code
+            ? "\(code) wants to pair with this \(ThisDeviceNoun.current)."
+            : "\(name) (\(code)) wants to pair with this \(ThisDeviceNoun.current)."
+        content.categoryIdentifier = pairingCategory
+        content.threadIdentifier = "pairing"
+        content.sound = .default
+        // What the Trust button needs once the connection is long gone.
+        content.userInfo = [requestIdKey: request.deviceId, requestAddressKey: request.address ?? "", requestNameKey: request.name ?? ""]
+        // One per device: a repeat replaces the earlier one.
+        let notification = UNNotificationRequest(identifier: "pairing-\(request.deviceId)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(notification)
+    }
+
+    static func removePairingNotification(deviceId: String) {
+        let identifier = "pairing-\(deviceId)"
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [identifier])
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [identifier])
+    }
+
+    // MARK: Synced items
 
     static func notify(_ entries: [ClipboardEntry], name: (String) -> String) {
         guard let newest = entries.first else { return }

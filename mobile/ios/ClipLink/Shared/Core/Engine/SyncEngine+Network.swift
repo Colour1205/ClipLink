@@ -178,9 +178,16 @@ extension SyncEngine {
             case .success(let link):
                 self.handleNewConnection(link, address: link.remoteAddress)
             case .failure(let failure):
-                if case .refused(let id, let name) = failure {
+                switch failure {
+                case .refused(let id, let name):
                     self.refusedAt[id] = Date()
                     self.noteSighting(id, address: remote, name: name)
+                case .blocked(let id, let name):
+                    // Quietly: a blocked device's card still shows where it
+                    // is, but nothing about it reaches the user.
+                    self.noteSighting(id, address: remote, name: name)
+                default:
+                    break
                 }
             }
         }
@@ -192,7 +199,9 @@ extension SyncEngine {
             trusted: Set(trust.all.map(\.publicKey)),
             passphraseKey: passphraseKey,
             pairingOpen: pairingOpen,
-            deviceName: ownDeviceName
+            deviceName: ownDeviceName,
+            blocked: Set(blocks.all.map(\.publicKey)),
+            acceptRequests: acceptsRequests
         )
     }
 
@@ -241,6 +250,10 @@ extension SyncEngine {
         capStrangerSightings()
         schedulePublish()
 
+        // A blocked device is seen (its card shows where it is) and nothing
+        // more: no auto-trust, no dial.
+        guard !blocks.isBlocked(id) else { return }
+
         if !trust.isTrusted(id), let key = passphraseKey, let proof = beacon.proof,
            PassphraseAuth.verifyProof(key: key, deviceId: id, proofBase64: proof) {
             log("auto-trusting \(DeviceLabel.short(id)) (shared passcode)")
@@ -252,7 +265,7 @@ extension SyncEngine {
         if trust.isTrusted(id) {
             guard !isBackedOff(id) else { return }
             dial(deviceId: id, candidates: [beacon.senderIP], port: UInt16(clamping: beacon.tcpPort), ignoreTieBreaker: false) { _ in }
-        } else if pairingOpen, beacon.pairing, pending == nil {
+        } else if pairingOpen, beacon.pairing, pendingRequests.count < Self.maxPendingRequests {
             dial(deviceId: id, candidates: [beacon.senderIP], port: UInt16(clamping: beacon.tcpPort), ignoreTieBreaker: false, purpose: .pairing) { _ in }
         }
     }
@@ -345,7 +358,8 @@ extension SyncEngine {
             // us would dial, be refused and redial every 2 s.
             let wanted = trust.isTrusted(id) || pairingOpen || id == pairingTargetKey ||
                 (passphraseKey != nil && now.timeIntervalSince(refusedAt[id] ?? .distantPast) > 600)
-            guard wanted else { continue }
+            // Never to a device the user blocked: it has no business dialling us.
+            guard wanted, !blocks.isBlocked(id) else { continue }
             for (address, seen) in sighting.addresses where now.timeIntervalSince(seen) < 600 {
                 targets.insert(address)
             }
@@ -412,7 +426,8 @@ extension SyncEngine {
     }
 
     func capStrangerSightings() {
-        let strangers = sightings.filter { !trust.isTrusted($0.key) && links[$0.key] == nil && pending?.link.peerDeviceId != $0.key }
+        let requesting = Set(pendingRequests.map { $0.link.peerDeviceId })
+        let strangers = sightings.filter { !trust.isTrusted($0.key) && links[$0.key] == nil && !requesting.contains($0.key) }
         guard strangers.count > Self.maxStrangerSightings else { return }
         for (id, _) in strangers.sorted(by: { $0.value.lastSeen < $1.value.lastSeen }).prefix(strangers.count - Self.maxStrangerSightings) {
             sightings[id] = nil
@@ -583,7 +598,7 @@ extension SyncEngine {
                     self.setLocalNetwork(.denied)
                 case .notWanted(let theirs):
                     self.noteSighting(theirs.identityPublicKey, address: host, name: theirs.deviceName)
-                case .refused(let id, let name):
+                case .refused(let id, let name), .blocked(let id, let name):
                     self.noteSighting(id, address: host, name: name)
                 default:
                     break
@@ -636,7 +651,7 @@ extension SyncEngine {
         let claims = SweepClaims(connected)
         let gate: (HandshakeMessage) -> Bool = { theirs in
             let id = theirs.identityPublicKey
-            guard !connected.contains(id) else { return false }
+            guard !connected.contains(id), !context.blocked.contains(id) else { return false }
             let wanted: Bool
             if id == target {
                 wanted = true
@@ -674,7 +689,7 @@ extension SyncEngine {
                     case .failure(.notWanted(let theirs)):
                         found += 1
                         self.noteSighting(theirs.identityPublicKey, address: host, name: theirs.deviceName)
-                    case .failure(.refused(let id, let name)):
+                    case .failure(.refused(let id, let name)), .failure(.blocked(let id, let name)):
                         found += 1
                         self.noteSighting(id, address: host, name: name)
                     case .failure(.localNetworkDenied):
@@ -714,22 +729,24 @@ extension SyncEngine {
         }
 
         if !link.wasAlreadyTrusted {
-            // Only possible because our pairing screen is open. Hold it -
-            // nothing read, nothing sent - until the user decides.
-            guard pairingOpen, pending == nil else {
-                link.close()
-                return
-            }
+            // An untrusted device: a pairing request. Held - nothing read,
+            // nothing sent - until the user decides.
             if link.direction == .outbound {
-                // We dialled without knowing whether ITS pairing screen is open
-                // (sweeps and pairing dials can't tell). A peer that isn't
-                // pairing refuses by hanging up within a round trip - wait for
-                // that before bothering the user with a prompt.
+                // We dialled from our own open pairing screen, without knowing
+                // whether ITS screen is open (sweeps and pairing dials can't
+                // tell). A peer that isn't pairing refuses by hanging up
+                // within a round trip - wait for that before bothering the
+                // user with a prompt.
+                guard pairingOpen else {
+                    link.close()
+                    return
+                }
                 queue.asyncAfter(deadline: .now() + Self.pairingVerdictDelay) { [weak self] in
                     self?.promoteToPending(link, address: address)
                 }
             } else {
-                // Inbound: the peer dialled us from its own open pairing screen.
+                // Inbound: the device dialled us - from its own pairing
+                // screen, whether or not ours is open.
                 promoteToPending(link, address: address)
             }
             return
@@ -751,22 +768,52 @@ extension SyncEngine {
     }
 
     func promoteToPending(_ link: PeerLink, address: String?) {
-        guard running, pairingOpen, pending == nil, !link.isClosed else {
+        let id = link.peerDeviceId
+        guard running, !link.isClosed, !blocks.isBlocked(id) else {
             link.close()
             return
         }
-        pending = PendingPairing(link: link, address: address)
+        // A request out of the blue (our pairing screen closed, or the device
+        // dialled us) counts against the budget: a flood is dropped quietly
+        // rather than turned into a stream of prompts.
+        let unprompted = link.direction == .inbound && !pairingOpen
+        if unprompted {
+            guard config.acceptPairingRequests, !config.sendOnly, acceptsRequests else {
+                log("ignored a pairing request from \(DeviceLabel.short(id)): too many requests")
+                link.close()
+                return
+            }
+            requestTimes.append(Date())
+        }
+        // One request per device, and the FIRST one stands: Windows, Android
+        // and HarmonyOS all hold the first candidate and turn later ones away,
+        // so keeping the newest here would leave the two ends holding
+        // different sockets, both of which then die. (A request whose link
+        // already closed is just stale and makes way.)
+        if let existing = pendingRequests.firstIndex(where: { $0.link.peerDeviceId == id }) {
+            if pendingRequests[existing].link.isClosed {
+                pendingRequests.remove(at: existing)
+            } else {
+                link.close()
+                return
+            }
+        }
+        guard pendingRequests.count < Self.maxPendingRequests else {
+            link.close()
+            return
+        }
+        pendingRequests.append(PendingPairing(link: link, address: address))
         link.onClosed = { [weak self] closed in
             guard let self else { return }
-            // The other side cancelled: clear the prompt so it can't block
-            // the next real request.
-            if self.pending?.link === closed {
-                self.pending = nil
+            // The other side cancelled: withdraw the request, so a prompt that
+            // can no longer be answered doesn't linger or block the next one.
+            if let index = self.pendingRequests.firstIndex(where: { $0.link === closed }) {
+                self.pendingRequests.remove(at: index)
                 self.log("pairing request from \(DeviceLabel.short(closed.peerDeviceId)) withdrawn")
             }
             self.schedulePublish()
         }
-        log("pairing request from \(DeviceLabel.short(link.peerDeviceId))")
+        log("pairing request from \(DeviceLabel.short(id))")
         schedulePublish()
     }
 
@@ -890,6 +937,7 @@ extension SyncEngine {
         if let info = PairingInfo.parse(trimmed) {
             let key = info.publicKey
             if isOwnIdentity(key) { return completion(.ownCode) }
+            if blocks.isBlocked(key) { return completion(.blocked(name: info.name ?? peerName(for: key))) }
             if links[key] != nil {
                 return completion(.connected(addressCandidates(for: key).first ?? displayName(for: key)))
             }
@@ -929,7 +977,7 @@ extension SyncEngine {
             switch o {
             case .refused: return 3
             case .silent: return 2
-            case .localNetworkDenied: return 4
+            case .localNetworkDenied, .blocked: return 4
             default: return 1
             }
         }
@@ -946,6 +994,7 @@ extension SyncEngine {
                     switch failure {
                     case .localNetworkDenied: outcome = .localNetworkDenied
                     case .silent: outcome = .silent(host)
+                    case .blocked(let id, let name): outcome = .blocked(name: name ?? self.peerName(for: id))
                     case .closedEarly, .refused, .malformed, .badSignature: outcome = .refused(host)
                     case .selfConnection: outcome = .ownCode
                     default: outcome = .unreachable(host)
@@ -955,19 +1004,17 @@ extension SyncEngine {
                     next()
                 case .success(let link):
                     let id = link.peerDeviceId
-                    let wasPending = self.pending != nil
                     let viaPasscode = link.newlyTrustedViaPassphrase
                     let trusted = link.wasAlreadyTrusted
+                    let roomForIt = self.pendingRequests.count < Self.maxPendingRequests
                     self.handleNewConnection(link, address: host)
                     if !trusted {
-                        if wasPending { return completion(.busy) }
+                        if !roomForIt { return completion(.busy) }
                         // handleNewConnection holds an outbound candidate for the
                         // verdict window before prompting; report after it.
                         self.queue.asyncAfter(deadline: .now() + Self.pairingVerdictDelay + 0.1) {
-                            if self.pending?.link === link {
+                            if self.pendingRequests.contains(where: { $0.link === link }) {
                                 completion(.prompt(host))
-                            } else if self.pending != nil {
-                                completion(.busy)
                             } else {
                                 completion(.refused(host))
                             }
@@ -977,7 +1024,7 @@ extension SyncEngine {
                     if viaPasscode { return completion(.passcode(host)) }
                     self.queue.asyncAfter(deadline: .now() + 3) {
                         if link.isClosed {
-                            completion(self.pending?.link.peerDeviceId == id ? .prompt(host) : .refused(host))
+                            completion(self.pendingRequests.contains { $0.link.peerDeviceId == id } ? .prompt(host) : .refused(host))
                         } else if link.hasReceivedSessionLine {
                             completion(.connected(host))
                         } else {

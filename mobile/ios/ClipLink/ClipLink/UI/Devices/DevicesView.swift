@@ -1,28 +1,41 @@
 import SwiftUI
 import UIKit
 
-/// The Devices tab: paired devices, devices discovered nearby, and the state
-/// of the local network, in an inset-grouped list. Pull to refresh re-runs
-/// discovery; "+" opens the pairing sheet (which is pairing mode).
+/// The Devices tab: paired devices, devices discovered nearby, blocked
+/// devices, and the state of the local network, in an inset-grouped list.
+/// Pull to refresh re-runs discovery; "+" opens the pairing sheet (which is
+/// pairing mode); a device opens its detail screen.
 struct DevicesView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var renaming: DevicesRenameTarget?
-    @State private var removing: DeviceRow?
+    /// One programmatic link for every card (as on the Synced tab): a link
+    /// inside a row would pop the detail screen the moment its device moves
+    /// to another section - trusting a nearby device does exactly that.
+    @State private var detailID = ""
+    @State private var detailActive = false
+
+    private var actions: DeviceActions { DeviceActions(model: model, haptics: settings.haptics) }
 
     var body: some View {
         NavigationView {
-            list
-                .navigationTitle("Devices")
-                .toolbar {
-                    ToolbarItem(placement: .navigationBarTrailing) {
-                        Button(action: openPairing) {
-                            Image(systemName: "plus")
-                        }
-                        .accessibilityLabel("Pair a Device")
+            ScrollViewReader { proxy in
+                list
+                    #if DEBUG
+                    .onAppear { applyDebugHooks(proxy) }
+                    #endif
+            }
+            .navigationTitle("Devices")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: openPairing) {
+                        Image(systemName: "plus")
                     }
+                    .accessibilityLabel("Pair a Device")
                 }
+            }
         }
         .navigationViewStyle(.stack)
         .sheet(item: $renaming) { target in
@@ -34,21 +47,29 @@ struct DevicesView: View {
 
     // MARK: - List
 
-    private var paired: [DeviceRow] { model.snapshot.devices.filter(\.trusted) }
-    private var nearby: [DeviceRow] { model.snapshot.devices.filter { !$0.trusted } }
+    private var paired: [DeviceRow] { model.snapshot.devices.filter { $0.trusted && !$0.blocked } }
+    private var nearby: [DeviceRow] { model.snapshot.devices.filter { !$0.trusted && !$0.blocked } }
+    private var blocked: [DeviceRow] { model.snapshot.devices.filter(\.blocked) }
 
     private var list: some View {
         List {
             Section {
                 DevicesStatusRow(snapshot: model.snapshot)
-                    .meRow(transparency: settings.cardTransparency)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .cardBackground(transparency: settings.cardTransparency)
+                    .devicesCardRow()
                 if model.snapshot.network.localNetwork == .denied {
                     DevicesLocalNetworkWarning()
-                        .meRow(transparency: settings.cardTransparency)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                        .cardBackground(transparency: settings.cardTransparency)
+                        .devicesCardRow()
                 }
             }
 
-            if paired.isEmpty && nearby.isEmpty {
+            if paired.isEmpty && nearby.isEmpty && blocked.isEmpty {
                 Section {
                     VStack(spacing: 4) {
                         EmptyStateView(
@@ -88,102 +109,48 @@ struct DevicesView: View {
                 }
             }
 
+            if !blocked.isEmpty {
+                Section(
+                    header: Text("Blocked"),
+                    footer: Text("Blocked devices can't send pairing requests, and ClipLink never connects to them.")
+                ) {
+                    ForEach(blocked) { row in
+                        cell(for: row)
+                    }
+                }
+            }
+
             DevicesNetworkSection(snapshot: model.snapshot, transparency: settings.cardTransparency)
         }
         .mePage(glow: settings.bottomGlow, accent: settings.accentTheme.color)
         .refreshable {
             await DevicesRefresh.run(model)
         }
-        .confirmationDialog(
-            removing.map { "Remove \(model.name(for: $0.deviceId))?" } ?? "Remove Device?",
-            isPresented: Binding(
-                get: { removing != nil },
-                set: { if !$0 { removing = nil } }
-            ),
-            titleVisibility: .visible,
-            presenting: removing
-        ) { row in
-            Button("Remove", role: .destructive) {
-                Haptics.tap(settings.haptics)
-                model.untrust(row)
+        .background(
+            NavigationLink(destination: DeviceDetailView(deviceId: detailID), isActive: $detailActive) {
+                EmptyView()
             }
-            Button("Cancel", role: .cancel) {}
-        } message: { _ in
-            Text("It will no longer be able to sync with this \(ThisDeviceNoun.current). You can pair again later.")
-        }
-        .animation(.default, value: model.snapshot.devices.map { "\($0.deviceId)|\($0.trusted)" })
+        )
+        // A device appearing, disappearing, being blocked or trusted moves
+        // its row with a spring; a status change (connected, offline) never
+        // reorders anything - the engine's order is deliberate.
+        .animation(
+            reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.4, dampingFraction: 0.86),
+            value: model.snapshot.devices.map { "\($0.deviceId)|\($0.trusted)|\($0.blocked)" }
+        )
     }
 
     @ViewBuilder
     private func cell(for row: DeviceRow) -> some View {
-        let name = model.name(for: row.deviceId)
-        DevicesRowView(row: row, name: name, accent: settings.accentTheme.fill) {
-            trust(row)
-        }
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            if row.trusted {
-                // Not role: .destructive - on iOS 15 that animates the row
-                // away before the confirmation dialog has been answered.
-                Button {
-                    removing = row
-                } label: {
-                    Label("Remove", systemImage: "trash")
-                }
-                .tint(.red)
-                Button {
-                    renaming = renameTarget(for: row)
-                } label: {
-                    Label("Rename", systemImage: "pencil")
-                }
-                .tint(.gray)
-            } else {
-                Button {
-                    trust(row)
-                } label: {
-                    Label("Trust", systemImage: "checkmark.shield")
-                }
-                // White label on it: the high-contrast fill, not the tint.
-                .tint(settings.accentTheme.fill)
-            }
-        }
-        .contextMenu {
-            if row.trusted {
-                Button {
-                    renaming = renameTarget(for: row)
-                } label: {
-                    Label("Rename", systemImage: "pencil")
-                }
-            } else {
-                Button {
-                    trust(row)
-                } label: {
-                    Label("Trust", systemImage: "checkmark.shield")
-                }
-            }
-            Button {
-                model.clipboard.copyText(row.deviceId)
-                model.showToast("Device ID copied.")
-            } label: {
-                Label("Copy Device ID", systemImage: "doc.on.doc")
-            }
-            if let address = row.addresses.first {
-                Button {
-                    model.clipboard.copyText(address)
-                    model.showToast("Address copied.")
-                } label: {
-                    Label("Copy Address", systemImage: "network")
-                }
-            }
-            if row.trusted {
-                Divider()
-                Button(role: .destructive) {
-                    removing = row
-                } label: {
-                    Label("Remove", systemImage: "trash")
-                }
-            }
-        }
-        .meRow(transparency: settings.cardTransparency)
+        DevicesCard(
+            row: row,
+            actions: actions,
+            accent: settings.accentTheme.fill,
+            transparency: settings.cardTransparency,
+            onOpen: { open(row) },
+            onRename: { renaming = actions.renameTarget(row) }
+        )
+        .devicesCardRow()
     }
 
     // MARK: - Actions
@@ -193,19 +160,40 @@ struct DevicesView: View {
         model.pairingPresented = true
     }
 
-    private func trust(_ row: DeviceRow) {
-        Haptics.success(settings.haptics)
-        model.trust(row)
-        model.showToast("Trusted \(model.name(for: row.deviceId)). It syncs once it trusts this \(ThisDeviceNoun.current) too.")
+    private func open(_ row: DeviceRow) {
+        Haptics.tap(settings.haptics)
+        detailID = row.deviceId
+        detailActive = true
     }
 
-    private func renameTarget(for row: DeviceRow) -> DevicesRenameTarget {
-        DevicesRenameTarget(
-            deviceId: row.deviceId,
-            current: model.snapshot.nicknames[row.deviceId] ?? "",
-            fallback: model.snapshot.deviceNames[row.deviceId] ?? DeviceLabel.short(row.deviceId)
-        )
+    #if DEBUG
+    private static var debugHandled = false
+
+    /// Test hooks (Debug builds only), for looking at states a screenshot
+    /// can't reach by tapping. Use them with `-ClipLinkDebugFixtures devices`;
+    /// `<index>` counts `model.snapshot.devices`.
+    ///   -ClipLinkDebugDeviceDetail <index>   opens that device's detail screen
+    ///   -ClipLinkDebugDevicesScroll <index>  scrolls the list to that device
+    private func applyDebugHooks(_ proxy: ScrollViewProxy) {
+        guard !Self.debugHandled else { return }
+        Self.debugHandled = true
+        let defaults = UserDefaults.standard
+        let devices = model.snapshot.devices
+        func device(_ key: String) -> DeviceRow? {
+            guard let raw = defaults.string(forKey: key), let index = Int(raw), devices.indices.contains(index) else { return nil }
+            return devices[index]
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            if let row = device("ClipLinkDebugDevicesScroll") {
+                proxy.scrollTo(row.deviceId, anchor: .center)
+            }
+            if let row = device("ClipLinkDebugDeviceDetail") {
+                detailID = row.deviceId
+                detailActive = true
+            }
+        }
     }
+    #endif
 }
 
 // MARK: - Refresh
@@ -362,167 +350,5 @@ private struct DevicesValueRow: View {
                 }
             }
         }
-    }
-}
-
-// MARK: - Device row
-
-private struct DevicesRowView: View {
-    let row: DeviceRow
-    let name: String
-    /// The accent fill (AccentTheme.fill): it sits under a white glyph.
-    let accent: Color
-    let onTrust: () -> Void
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                DevicesIconTile(trusted: row.trusted, connected: row.connected, accent: accent)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(name)
-                        .font(.body.weight(.semibold))
-                        .lineLimit(1)
-                    Text(status)
-                        .font(.subheadline)
-                        .foregroundColor(row.connected ? Theme.connected : .secondary)
-                    if !row.addresses.isEmpty {
-                        Text(row.addresses.joined(separator: " · "))
-                            .font(.caption.monospacedDigit())
-                            .foregroundColor(.secondary)
-                            .lineLimit(2)
-                    }
-                    if !row.connected, let lastSeen = row.lastSeen {
-                        Text("Last seen \(DevicesRelativeTime.string(for: lastSeen))")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-            }
-            .accessibilityElement(children: .combine)
-
-            Spacer(minLength: 4)
-
-            if !row.trusted {
-                Button("Trust", action: onTrust)
-                    .buttonStyle(.bordered)
-                    .accessibilityLabel("Trust \(name)")
-            }
-        }
-        .padding(.vertical, 4)
-    }
-
-    private var status: String {
-        if row.connected { return "Connected" }
-        if row.trusted { return "Paired · not connected" }
-        if row.pairing { return "Nearby — pairing mode open" }
-        return "Nearby"
-    }
-}
-
-/// Rounded tile with the device glyph and a status dot in its corner. There
-/// is no device type on the wire, so every peer gets the desktop glyph.
-private struct DevicesIconTile: View {
-    let trusted: Bool
-    let connected: Bool
-    let accent: Color
-
-    @ScaledMetric(relativeTo: .body) private var size: CGFloat = 40
-
-    var body: some View {
-        Image(systemName: "desktopcomputer")
-            .font(.system(size: size * 0.45, weight: .medium))
-            .foregroundColor(trusted ? .white : .secondary)
-            .frame(width: size, height: size)
-            .background(
-                RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                    .fill(trusted ? accent : Color(UIColor.tertiarySystemFill))
-            )
-            .overlay(alignment: .bottomTrailing) {
-                Circle()
-                    .fill(connected ? Theme.connected : Color(UIColor.systemGray3))
-                    .frame(width: 12, height: 12)
-                    .overlay(Circle().strokeBorder(Color(Theme.card), lineWidth: 2))
-                    .offset(x: 3, y: 3)
-            }
-            .accessibilityHidden(true)
-    }
-}
-
-private enum DevicesRelativeTime {
-    private static let formatter: RelativeDateTimeFormatter = {
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .full
-        f.dateTimeStyle = .named
-        return f
-    }()
-
-    static func string(for date: Date) -> String {
-        let now = Date()
-        if now.timeIntervalSince(date) < 10 { return "just now" }
-        return formatter.localizedString(for: min(date, now), relativeTo: now)
-    }
-}
-
-// MARK: - Rename
-
-struct DevicesRenameTarget: Identifiable {
-    var id: String { deviceId }
-    let deviceId: String
-    let current: String
-    /// What the row shows without a nickname: the device's own name, else
-    /// its short label.
-    let fallback: String
-}
-
-/// iOS 15 alerts can't host text fields, so renaming is a small sheet.
-private struct DevicesRenameSheet: View {
-    let target: DevicesRenameTarget
-    let onSave: (String) -> Void
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var name: String
-    @FocusState private var focused: Bool
-
-    init(target: DevicesRenameTarget, onSave: @escaping (String) -> Void) {
-        self.target = target
-        self.onSave = onSave
-        _name = State(initialValue: target.current)
-    }
-
-    var body: some View {
-        NavigationView {
-            Form {
-                Section(
-                    footer: Text("Only this \(ThisDeviceNoun.current) uses this name. Leave it empty to show \(target.fallback).")
-                ) {
-                    TextField(target.fallback, text: $name)
-                        .focused($focused)
-                        .textInputAutocapitalization(.words)
-                        .disableAutocorrection(true)
-                        .submitLabel(.done)
-                        .onSubmit(save)
-                }
-            }
-            .navigationTitle("Rename Device")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save", action: save)
-                }
-            }
-            .onAppear {
-                // Sheets on iOS 15 ignore focus set before they finish presenting.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { focused = true }
-            }
-        }
-        .navigationViewStyle(.stack)
-    }
-
-    private func save() {
-        onSave(name)
-        dismiss()
     }
 }

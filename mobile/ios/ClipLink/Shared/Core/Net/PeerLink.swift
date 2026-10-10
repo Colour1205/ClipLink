@@ -14,6 +14,14 @@ struct HandshakeContext {
     let pairingOpen: Bool
     /// This device's display name, sent as the handshake's `DeviceName`.
     let deviceName: String?
+    /// Devices the user blocked: refused before anything else, whatever they
+    /// bring - a matching passcode proof included.
+    var blocked: Set<String> = []
+    /// An untrusted peer that DIALS US may finish the handshake as a pairing
+    /// request even while our pairing screen is closed: it is held, nothing
+    /// is read or sent, and the user is asked. (When we dial, only our own
+    /// open pairing screen lets an untrusted peer through.)
+    var acceptRequests = false
 }
 
 enum HandshakeFailure: Error, CustomStringConvertible {
@@ -29,6 +37,8 @@ enum HandshakeFailure: Error, CustomStringConvertible {
     /// We refused them: untrusted, no matching passcode, pairing closed.
     /// `name` is their handshake's `DeviceName` (nil from older builds).
     case refused(peerId: String, name: String?)
+    /// A device the user blocked.
+    case blocked(peerId: String, name: String?)
     /// Outbound only: we read their line and chose not to continue - they
     /// never saw our handshake, so nothing was registered on their side.
     case notWanted(HandshakeMessage)
@@ -43,6 +53,7 @@ enum HandshakeFailure: Error, CustomStringConvertible {
         case .closedEarly: return "closed before handshake"
         case .malformed: return "malformed handshake"
         case .refused(let id, _): return "refused untrusted \(DeviceLabel.short(id))"
+        case .blocked(let id, _): return "refused blocked \(DeviceLabel.short(id))"
         case .notWanted(let theirs): return "not wanted: \(DeviceLabel.short(theirs.identityPublicKey))"
         case .badSignature: return "bad handshake signature"
         case .selfConnection: return "connected to itself"
@@ -305,6 +316,12 @@ final class PeerLink {
                 finish(.failure(.selfConnection))
                 return
             }
+            // A blocked device gets nothing - checked before the gate and the
+            // trust logic, so no proof of any kind can talk its way past it.
+            if context.blocked.contains(theirs.identityPublicKey) {
+                finish(.failure(.blocked(peerId: theirs.identityPublicKey, name: theirs.deviceName)))
+                return
+            }
             if let gate, !gate(theirs) {
                 finish(.failure(.notWanted(theirs)))
                 return
@@ -315,7 +332,8 @@ final class PeerLink {
                 PassphraseAuth.verifyProof(key: $0, deviceId: theirs.identityPublicKey, proofBase64: theirs.passphraseProof)
             } == true
             let effectivelyTrusted = alreadyTrusted || passphraseVerified
-            guard effectivelyTrusted || context.pairingOpen else {
+            let asksToPair = direction == .inbound && context.acceptRequests
+            guard effectivelyTrusted || context.pairingOpen || asksToPair else {
                 finish(.failure(.refused(peerId: theirs.identityPublicKey, name: theirs.deviceName)))
                 return
             }

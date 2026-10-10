@@ -209,6 +209,105 @@ public final class TrustStore {
     }
 }
 
+// MARK: - Block list
+
+/// A device the user blocked: its pairing requests never come through, it is
+/// never auto-trusted (not even by a matching passcode) and never dialled.
+/// Local only - nothing about a block goes on the wire.
+public struct BlockedDevice: Equatable {
+    public var publicKey: String
+    /// The name it last gave itself, kept only so its card can still be
+    /// titled when the device isn't around to say.
+    public var name: String?
+    public var blockedAt: Date
+
+    public init(publicKey: String, name: String? = nil, blockedAt: Date = Date()) {
+        self.publicKey = publicKey
+        self.name = name
+        self.blockedAt = blockedAt
+    }
+}
+
+/// Shared with the Share extension like the trust store, so a block applies
+/// there too (the extension refuses every untrusted peer anyway).
+public final class BlockStore {
+    private let file: JSONFile
+    private let lock: StoreLock
+    private var devices: [BlockedDevice]
+    private var stamp: Date?
+
+    public init(directory: URL) {
+        file = JSONFile(url: directory.appendingPathComponent("blocked_devices.json"))
+        lock = StoreLock.shared(for: directory)
+        devices = Self.load(file)
+        stamp = file.stamp()
+    }
+
+    public func reload() {
+        lock.withLock {
+            devices = Self.load(file)
+            stamp = file.stamp()
+        }
+    }
+
+    private func mutate(_ body: () -> Bool) {
+        lock.withLock {
+            if file.stamp() != stamp { devices = Self.load(file) }
+            if body() { save() }
+            stamp = file.stamp()
+        }
+    }
+
+    private static func load(_ file: JSONFile) -> [BlockedDevice] {
+        let raw = file.read() as? [[String: Any]] ?? []
+        return raw.compactMap { obj in
+            guard let key = obj["publicKey"] as? String, !key.isEmpty else { return nil }
+            let at = (obj["blockedAt"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? Date(timeIntervalSince1970: 0)
+            return BlockedDevice(publicKey: key, name: DeviceName.sanitize(obj["name"] as? String), blockedAt: at)
+        }
+    }
+
+    public var all: [BlockedDevice] { devices }
+
+    public func isBlocked(_ publicKey: String) -> Bool {
+        devices.contains { $0.publicKey == publicKey }
+    }
+
+    public func device(_ publicKey: String) -> BlockedDevice? {
+        devices.first { $0.publicKey == publicKey }
+    }
+
+    /// Idempotent. A known name is kept when the new one is nil.
+    public func block(_ publicKey: String, name: String? = nil) {
+        let name = name.flatMap { $0.isEmpty ? nil : $0 }
+        mutate {
+            if let index = devices.firstIndex(where: { $0.publicKey == publicKey }) {
+                guard let name, devices[index].name != name else { return false }
+                devices[index].name = name
+                return true
+            }
+            devices.append(BlockedDevice(publicKey: publicKey, name: name))
+            return true
+        }
+    }
+
+    public func unblock(_ publicKey: String) {
+        mutate {
+            let before = devices.count
+            devices.removeAll { $0.publicKey == publicKey }
+            return devices.count != before
+        }
+    }
+
+    private func save() {
+        file.write(devices.map { device -> [String: Any] in
+            var obj: [String: Any] = ["publicKey": device.publicKey, "blockedAt": device.blockedAt.timeIntervalSince1970]
+            if let name = device.name { obj["name"] = name }
+            return obj
+        })
+    }
+}
+
 // MARK: - File store
 
 /// Content-addressed blobs keyed by LOWERCASE SHA-256 hex. Windows spells

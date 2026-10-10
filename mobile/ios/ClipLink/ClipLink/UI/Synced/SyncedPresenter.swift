@@ -14,7 +14,15 @@ import UniformTypeIdentifiers
 @MainActor
 enum SyncedPresenter {
     static func present(_ controller: UIViewController, attempt: Int = 0) {
-        guard let root = keyWindow()?.rootViewController else { return }
+        guard let root = keyWindow()?.rootViewController else {
+            // No window yet (a launch still settling): try again shortly.
+            if attempt < 12 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    present(controller, attempt: attempt + 1)
+                }
+            }
+            return
+        }
         var top = root
         var busy = false
         while let next = top.presentedViewController {

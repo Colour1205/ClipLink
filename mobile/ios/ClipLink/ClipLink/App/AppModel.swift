@@ -4,6 +4,7 @@ import os
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+import UserNotifications
 
 struct Toast: Identifiable, Equatable {
     let id = UUID()
@@ -27,12 +28,24 @@ final class AppModel: ObservableObject {
     @Published private(set) var hasNewClipboardItem = false
     @Published private(set) var startupError: String?
     @Published private(set) var identityIsHardwareBacked = false
+    /// A request opened from its notification after the connection it came on
+    /// is gone: Trust still saves the device, and it connects when it next can.
+    @Published private(set) var offlineRequest: PairingRequest?
 
     /// True while the pairing sheet is on screen - that IS pairing mode.
     @Published var pairingPresented = false {
         didSet {
             guard pairingPresented != oldValue else { return }
             engine?.setPairingOpen(pairingPresented)
+            // The moment someone expects a request is the moment to ask
+            // whether they may be told about one while ClipLink is closed.
+            if pairingPresented {
+                #if DEBUG
+                if !usingFixtures { Notifier.requestPairingAuthorizationIfNeeded() }
+                #else
+                Notifier.requestPairingAuthorizationIfNeeded()
+                #endif
+            }
             if !pairingPresented {
                 pairStatus = nil
                 pairInProgress = false
@@ -54,6 +67,15 @@ final class AppModel: ObservableObject {
     /// else in the meantime.
     private var heldForForeground: (ClipboardEntry, URL?)?
     private var lastSentImage: (ImageFingerprint, Date)?
+    /// Requests the prompt has already been raised (or notified) for.
+    private var knownRequestIds: Set<String> = []
+    /// The OS-level modal for a pairing request - over whatever is on screen.
+    private let promptPresenter = PairingPromptPresenter()
+    #if DEBUG
+    /// `-ClipLinkDebugFixtures` shows a made-up snapshot instead of the
+    /// engine's (screenshots, UI work): see DebugFixtures.
+    private var usingFixtures = false
+    #endif
     private var pasteboardObserver: NSObjectProtocol?
     private var protectedDataObserver: NSObjectProtocol?
     private let logger = Logger(subsystem: "io.uaena.ClipLink", category: "ClipLinkNet")
@@ -64,6 +86,15 @@ final class AppModel: ObservableObject {
 
     private init() {
         startEngine()
+        promptPresenter.onTrust = { [weak self] in self?.acceptRequest($0) }
+        promptPresenter.onIgnore = { [weak self] in self?.ignoreRequest($0) }
+        promptPresenter.nameFor = { [weak self] in self?.name(for: $0) ?? DeviceLabel.short($0) }
+        #if DEBUG
+        if UserDefaults.standard.string(forKey: "ClipLinkDebugFixtures") != nil {
+            usingFixtures = true
+            snapshot = DebugFixtures.snapshot(UserDefaults.standard.string(forKey: "ClipLinkDebugFixtures") ?? "")
+        }
+        #endif
         clipboard.onOwnWriteSettled = { [weak self] in self?.refreshClipboardHint() }
         pasteboardObserver = NotificationCenter.default.addObserver(
             forName: UIPasteboard.changedNotification, object: nil, queue: .main
@@ -153,6 +184,7 @@ final class AppModel: ObservableObject {
         guard !isActive else { return }
         if startupError != nil { retryStartup() }
         isActive = true
+        refreshPrompt()
         endBackgroundTask(backgroundTask)
         // The user may have renamed the device in Settings meanwhile.
         engine?.setSystemDeviceName(Self.systemDeviceName)
@@ -161,6 +193,12 @@ final class AppModel: ObservableObject {
         // pairing sheet is still up.
         if pairingPresented { engine?.setPairingOpen(true) }
 
+        #if DEBUG
+        // Test hook: `-ClipLinkDebugOpenPairing` opens the pairing sheet at launch.
+        if UserDefaults.standard.bool(forKey: "ClipLinkDebugOpenPairing"), !pairingPresented {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.pairingPresented = true }
+        }
+        #endif
         clipboard.discardStaleCounts()
         if let (entry, url) = heldForForeground {
             heldForForeground = nil
@@ -187,6 +225,13 @@ final class AppModel: ObservableObject {
     private func enteredBackground() {
         guard isActive else { return }
         isActive = false
+        refreshPrompt()
+        // A request still waiting as the user leaves can't be answered here
+        // any more - its connection closes with the node. Carry it into a
+        // notification, whose Trust button works without the connection.
+        for request in snapshot.pairingRequests where !request.initiatedByUs && !answered.contains(request.id) {
+            Notifier.notifyPairingRequest(request, name: name(for: request.deviceId))
+        }
         changeCountAtBackground = clipboard.changeCount
         // Pairing mode never outlives the visible screen: nobody can accept a
         // request from the background, and the grace period below keeps the
@@ -389,11 +434,10 @@ final class AppModel: ObservableObject {
         switch result {
         case .failed(let why):
             showToast(why)
-        case .sent(let type, let peers, let name):
-            let what = name ?? type
-            showToast(peers > 0
-                ? "Synced \(what) to \(peers) device\(peers == 1 ? "" : "s")."
-                : "Saved \(what) — it syncs when a device connects.")
+        case .sent:
+            // No toast: the item is at the top of Synced the moment it's
+            // sent, and the connection pill says who is reachable.
+            break
         }
     }
 
@@ -415,24 +459,16 @@ final class AppModel: ObservableObject {
     }
 
     /// "Copy received items automatically", minus big files (see
-    /// maxAutoApplyFileBytes): those are only announced.
+    /// maxAutoApplyFileBytes): those just stay in Synced. Silent: the item
+    /// has already appeared in the list, and a toast on every arrival is
+    /// noise.
     private func autoApply(_ entry: ClipboardEntry, fileURL: URL?) {
         if entry.type == Wire.EntryType.file, let payload = FilePayload.parse(entry.content),
            payload.fileSize > ClipboardService.maxAutoApplyFileBytes {
-            showToast("Received \(payload.fileName) from \(name(for: entry.deviceId)) — copy or share it from Synced.")
             return
         }
         if clipboard.apply(entry, fileURL: fileURL) {
             refreshClipboardHint()
-            showToast("Copied \(label(for: entry)) from \(name(for: entry.deviceId)).")
-        }
-    }
-
-    private func label(for entry: ClipboardEntry) -> String {
-        switch entry.type {
-        case Wire.EntryType.file: return FilePayload.parse(entry.content)?.fileName ?? "a file"
-        case Wire.EntryType.image: return "an image"
-        default: return "text"
         }
     }
 
@@ -461,8 +497,8 @@ final class AppModel: ObservableObject {
     }
 
     func clearHistory() {
+        // No toast: the list visibly empties, after a confirmation.
         engine?.clearHistory()
-        showToast("History cleared.")
     }
 
     /// A shareable file for an item: the file itself under its real name, or
@@ -503,9 +539,46 @@ final class AppModel: ObservableObject {
 
     // MARK: - Devices & pairing
 
-    func trust(_ device: DeviceRow) { engine?.trustDevice(device.deviceId) }
+    func trust(_ device: DeviceRow) {
+        #if DEBUG
+        if fixture({ DebugFixtures.trust(device.deviceId, in: &$0) }) { return }
+        #endif
+        engine?.trustDevice(device.deviceId)
+    }
 
-    func untrust(_ device: DeviceRow) { engine?.untrustDevice(device.deviceId) }
+    func untrust(_ device: DeviceRow) {
+        #if DEBUG
+        if fixture({ DebugFixtures.untrust(device.deviceId, in: &$0) }) { return }
+        #endif
+        engine?.untrustDevice(device.deviceId)
+    }
+
+    /// Blocks a device: its pairing requests never come through, it is never
+    /// auto-trusted (not even by a matching passcode) and ClipLink never
+    /// connects to it. Local only; undone with `unblock`.
+    func block(_ device: DeviceRow) {
+        #if DEBUG
+        if fixture({ DebugFixtures.block(device.deviceId, in: &$0) }) { return }
+        #endif
+        engine?.blockDevice(device.deviceId)
+    }
+
+    func unblock(_ device: DeviceRow) {
+        #if DEBUG
+        if fixture({ DebugFixtures.unblock(device.deviceId, in: &$0) }) { return }
+        #endif
+        engine?.unblockDevice(device.deviceId)
+    }
+
+    #if DEBUG
+    /// Applies `change` to the fake snapshot when fixtures are on; false (and
+    /// nothing done) otherwise, so the caller goes on to the real engine.
+    private func fixture(_ change: (inout EngineSnapshot) -> Void) -> Bool {
+        guard usingFixtures else { return false }
+        change(&snapshot)
+        return true
+    }
+    #endif
 
     func rename(_ deviceId: String, to name: String) { engine?.setNickname(name, for: deviceId) }
 
@@ -522,11 +595,102 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func acceptPairing() { engine?.acceptPairing() }
+    // MARK: - Pairing requests
 
-    func rejectPairing() {
-        engine?.rejectPairing()
+    /// Trust. A live request is accepted - its connection goes to work. One
+    /// whose connection is long gone (a notification opened much later)
+    /// still saves the device; it connects as soon as it can be reached.
+    func acceptRequest(_ request: PairingRequest) {
+        Haptics.success(settings.haptics)
+        let live = snapshot.pairingRequests.contains { $0.id == request.id }
+        offlineRequest = nil
+        answered.insert(request.id)
+        Notifier.removePairingNotification(deviceId: request.deviceId)
+        #if DEBUG
+        if fixture({ DebugFixtures.trust(request.deviceId, in: &$0); DebugFixtures.answer(request.deviceId, in: &$0) }) { return refreshPrompt() }
+        #endif
+        engine?.trustDevice(request.deviceId, address: request.address)
+        if !live {
+            showToast("Trusted \(request.name ?? name(for: request.deviceId)). It connects as soon as it's reachable.")
+        }
+        refreshPrompt()
+    }
+
+    /// Ignore - not a block: the device may ask again later.
+    func ignoreRequest(_ request: PairingRequest) {
+        offlineRequest = nil
+        answered.insert(request.id)
+        Notifier.removePairingNotification(deviceId: request.deviceId)
+        #if DEBUG
+        if fixture({ DebugFixtures.answer(request.deviceId, in: &$0) }) { return refreshPrompt() }
+        #endif
+        engine?.ignorePairing(deviceId: request.deviceId)
         pairStatus = nil
+        refreshPrompt()
+    }
+
+    /// Requests the user has answered; kept until the engine stops listing
+    /// them so a snapshot published in between can't raise the prompt again.
+    private var answered: Set<String> = []
+
+    /// Called with every snapshot: raise a notification for a request that
+    /// arrived while ClipLink is closed, and keep the on-screen prompt in
+    /// step with the engine's list.
+    private func requestsChanged(_ requests: [PairingRequest]) {
+        let ids = Set(requests.map(\.id))
+        answered.formIntersection(ids)
+        for request in requests where !knownRequestIds.contains(request.id) && !request.initiatedByUs {
+            if isActive {
+                Haptics.tap(settings.haptics)
+            } else {
+                // Only possible during a background round: nothing on screen to
+                // ask in, so ask through a notification.
+                Notifier.notifyPairingRequest(request, name: name(for: request.deviceId))
+            }
+        }
+        // A request that went away while the app is open was answered or
+        // withdrawn: its notification is stale. While the app is NOT open it
+        // just went away with the background round - the notification must
+        // stay, its Trust button works without the connection.
+        if isActive {
+            for gone in knownRequestIds.subtracting(ids) { Notifier.removePairingNotification(deviceId: gone) }
+        }
+        knownRequestIds = ids
+        refreshPrompt()
+    }
+
+    /// Shows (or updates, or dismisses) the OS-level prompt for the oldest
+    /// request. Only while the app is open: otherwise a notification asks.
+    private func refreshPrompt() {
+        var shown = snapshot.pairingRequests.filter { !answered.contains($0.id) }
+        if let offline = offlineRequest, !shown.contains(where: { $0.id == offline.id }) { shown.append(offline) }
+        promptPresenter.update(shown, active: isActive)
+    }
+
+    /// A notification's button, or a tap on the notification itself. Runs
+    /// even when the app was launched just for this.
+    func handleNotificationResponse(actionIdentifier: String, userInfo: [AnyHashable: Any]) async {
+        guard let id = userInfo[Notifier.requestIdKey] as? String else { return }
+        let address = (userInfo[Notifier.requestAddressKey] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let name = (userInfo[Notifier.requestNameKey] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        switch actionIdentifier {
+        case Notifier.trustAction:
+            // Possibly the only thing this launch does: let the engine's queue
+            // finish writing the trust before the process may be suspended.
+            engine?.trustDevice(id, address: address)
+            await withCheckedContinuation { continuation in
+                guard let engine else { return continuation.resume() }
+                engine.currentSnapshot { _ in continuation.resume() }
+            }
+        case Notifier.ignoreAction:
+            engine?.ignorePairing(deviceId: id)
+        case UNNotificationDefaultActionIdentifier:
+            guard !snapshot.pairingRequests.contains(where: { $0.id == id }) else { return refreshPrompt() }
+            offlineRequest = PairingRequest(deviceId: id, address: address, name: name)
+            refreshPrompt()
+        default:
+            break
+        }
     }
 
     func copyDeviceID() {
@@ -536,7 +700,7 @@ final class AppModel: ObservableObject {
 
     func copyPairingInfo() {
         clipboard.copyText(snapshot.pairingPayload)
-        showToast("Pairing info copied — paste it into the other device's Pair by Address field.")
+        showToast("Pairing info copied.")
     }
 
     // MARK: - Passcode & network
@@ -551,21 +715,21 @@ final class AppModel: ObservableObject {
         passcodeBusy = true
         engine.setPassphrase(passphrase) { [weak self] ok in
             self?.passcodeBusy = false
-            self?.showToast(ok ? "Passcode set — matching devices will auto-trust." : "Couldn't set the passcode.")
+            // Only a failure needs saying: on success the screen itself
+            // changes to "Passcode is set".
+            if !ok { self?.showToast("Couldn't set the passcode.") }
             completion(ok)
         }
     }
 
     func clearPassphrase() {
         engine?.clearPassphrase()
-        showToast("Passcode cleared.")
     }
 
     /// Me › Device Name. Empty goes back to the OS default.
     func setDeviceName(_ name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         engine?.setDeviceName(trimmed)
-        showToast(trimmed.isEmpty ? "Device name reset." : "Device name saved.")
     }
 
     func saveTailscaleIP(_ ip: String) {
@@ -575,7 +739,6 @@ final class AppModel: ObservableObject {
             return
         }
         engine?.setTailscaleIP(trimmed)
-        showToast(trimmed.isEmpty ? "Tailscale IP cleared." : "Tailscale IP saved.")
     }
 
     /// iOS can see the Tailscale VPN interface, unlike the other platforms.
@@ -605,8 +768,12 @@ final class AppModel: ObservableObject {
 extension AppModel: SyncEngineDelegate {
     nonisolated func syncEngine(_ engine: SyncEngine, didUpdate snapshot: EngineSnapshot) {
         MainActor.assumeIsolated {
+            #if DEBUG
+            if self.usingFixtures { return }
+            #endif
             self.snapshot = snapshot
             self.refreshClipboardHint()
+            self.requestsChanged(snapshot.pairingRequests)
         }
     }
 
