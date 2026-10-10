@@ -28,6 +28,9 @@ final class EngineIntegrationTests: XCTestCase {
         var items: [SyncedItem] { lock.lock(); defer { lock.unlock() }; return snapshot.items }
         var pairingRequest: PairingRequest? { lock.lock(); defer { lock.unlock() }; return snapshot.pairingRequest }
         var devices: [DeviceRow] { lock.lock(); defer { lock.unlock() }; return snapshot.devices }
+        var pairingRequests: [PairingRequest] { lock.lock(); defer { lock.unlock() }; return snapshot.pairingRequests }
+        var pairingOpen: Bool { lock.lock(); defer { lock.unlock() }; return snapshot.pairingOpen }
+        func device(_ id: String) -> DeviceRow? { devices.first { $0.deviceId == id } }
         var hasPassphrase: Bool { lock.lock(); defer { lock.unlock() }; return snapshot.hasPassphrase }
         var running: Bool { lock.lock(); defer { lock.unlock() }; return snapshot.network.running }
     }
@@ -52,10 +55,10 @@ final class EngineIntegrationTests: XCTestCase {
     }
 
     /// Two nodes wired to beacon each other directly on 127.0.0.1.
-    private func makePair() -> (Node, Node) {
+    private func makePair(configureA: ((inout EngineConfig) -> Void)? = nil, configureB: ((inout EngineConfig) -> Void)? = nil) -> (Node, Node) {
         let base = Self.portBase
         Self.portBase += 10
-        func node(listen: UInt16, peer: UInt16) -> Node {
+        func node(listen: UInt16, peer: UInt16, configure: ((inout EngineConfig) -> Void)?) -> Node {
             let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cliplink-test-\(UUID().uuidString)")
             var config = EngineConfig(storageDirectory: dir)
             config.listenPort = listen
@@ -65,6 +68,11 @@ final class EngineIntegrationTests: XCTestCase {
             config.enableBroadcast = false
             config.enableSweeps = false
             config.extraBeaconTargets = ["127.0.0.1"]
+            configure?(&config)
+            if ProcessInfo.processInfo.environment["CLIPLINK_TEST_LOG"] != nil {
+                let tag = String(listen)
+                config.logSink = { print("[engine \(tag)] \($0)") }
+            }
             let engine = SyncEngine(config: config, identity: SoftwareIdentity(), secrets: MemorySecretStore())
             let recorder = Recorder()
             engine.delegate = recorder
@@ -72,7 +80,7 @@ final class EngineIntegrationTests: XCTestCase {
             nodes.append(n)
             return n
         }
-        return (node(listen: base, peer: base + 4), node(listen: base + 4, peer: base))
+        return (node(listen: base, peer: base + 4, configure: configureA), node(listen: base + 4, peer: base, configure: configureB))
     }
 
     private func wait(_ what: String, timeout: TimeInterval = 20, _ condition: () -> Bool) {
@@ -521,21 +529,210 @@ final class EngineIntegrationTests: XCTestCase {
         return try XCTUnwrap(link)
     }
 
-    func testUntrustedPeerIsRefusedWithoutPairingOrPasscode() throws {
+    /// With requests switched off (what the Share extension runs with) an
+    /// untrusted device is refused outright unless the pairing screen is open
+    /// or a passcode matches - the behaviour every platform had before
+    /// pairing requests could arrive out of the blue.
+    func testUntrustedPeerIsRefusedWhenRequestsAreOff() throws {
+        let (a, b) = makePair(configureB: { $0.acceptPairingRequests = false })
+        a.engine.enterForeground()
+        b.engine.enterForeground()
+        XCTAssertEqual(reach(a, b), .refused("127.0.0.1"))
+        XCTAssertTrue(b.recorder.pairingRequests.isEmpty)
+        XCTAssertEqual(b.recorder.connectedCount, 0)
+    }
+
+    // MARK: - Pairing requests out of the blue, ignoring, blocking
+
+    /// `a` opens its own pairing screen and reaches `b` by address, however
+    /// `b` is set up. The outcome is what `a`'s user is told.
+    private func reach(_ a: Node, _ b: Node) -> PairOutcome {
+        a.engine.setPairingOpen(true)
+        let done = expectation(description: "pair outcome")
+        var result: PairOutcome?
+        a.engine.pair(with: "127.0.0.1:\(b.engine.config.listenPort)") { outcome in
+            result = outcome
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 20)
+        return result ?? .empty
+    }
+
+    /// A stranger with its own pairing screen open asks `node` to pair - the
+    /// link stays held on the stranger's side too.
+    private func ask(_ node: Node, as stranger: SoftwareIdentity = SoftwareIdentity(), named name: String = "Stranger") throws -> PeerLink {
+        let context = HandshakeContext(identity: stranger, trusted: [], passphraseKey: nil, pairingOpen: true, deviceName: name)
+        let done = expectation(description: "ask as \(name)")
+        var link: PeerLink?
+        PeerLink.dial(host: "127.0.0.1", port: node.engine.config.listenPort, context: context, connectTimeout: 3,
+                      maxLineBytes: 1 << 20, deliveryQueue: .main, gate: { _ in true }) { result in
+            if case .success(let l) = result { link = l }
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 10)
+        return try XCTUnwrap(link, "the handshake as \(name) should complete")
+    }
+
+    func testStrangerCanAskToPairWhileOurPairingScreenIsClosed() throws {
         let (a, b) = makePair()
         a.engine.enterForeground()
         b.engine.enterForeground()
-        // Unilateral trust on A only: B must refuse (pairing closed, no passcode).
-        a.engine.trustDevice(b.engine.ownId)
-        let outcome = expectation(description: "pair outcome")
-        var result: PairOutcome?
-        a.engine.pair(with: PairingInfo(publicKey: b.engine.ownId, address: "127.0.0.1:\(b.engine.config.listenPort)").address!) { o in
-            result = o
-            outcome.fulfill()
+        XCTAssertFalse(b.recorder.pairingOpen, "b's pairing screen is closed")
+
+        XCTAssertEqual(reach(a, b), .prompt("127.0.0.1"))
+        wait("b is asked") { b.recorder.pairingRequests.count == 1 }
+        let request = try XCTUnwrap(b.recorder.pairingRequests.first)
+        XCTAssertEqual(request.deviceId, a.engine.ownId)
+        XCTAssertFalse(request.initiatedByUs, "it came to b out of the blue")
+        XCTAssertEqual(request.address, "127.0.0.1")
+        XCTAssertEqual(b.recorder.connectedCount, 0, "held: nothing flows before the user decides")
+        wait("a holds b as its own request") { a.recorder.pairingRequests.count == 1 }
+        XCTAssertTrue(a.recorder.pairingRequests[0].initiatedByUs, "a reached out, so its user expects the prompt")
+
+        b.engine.acceptPairing(deviceId: a.engine.ownId)
+        a.engine.acceptPairing(deviceId: b.engine.ownId)
+        wait("paired") { a.recorder.connectedCount == 1 && b.recorder.connectedCount == 1 }
+        XCTAssertTrue(b.recorder.pairingRequests.isEmpty)
+        a.engine.sendText("hello after the request")
+        wait("synced") { b.recorder.receivedEntries.contains { $0.0.content == "hello after the request" } }
+    }
+
+    /// Windows, Android and HarmonyOS hold the FIRST candidate and turn later
+    /// ones away; holding the newest here would leave the two ends with
+    /// different sockets, both of which then die.
+    func testSecondRequestFromTheSameDeviceIsTurnedAway() throws {
+        let (_, b) = makePair()
+        b.engine.enterForeground()
+        let who = SoftwareIdentity()
+        let first = try ask(b, as: who)
+        wait("one request") { b.recorder.pairingRequests.count == 1 }
+        let second = try ask(b, as: who)
+        wait("the later connection was closed") { second.isClosed }
+        XCTAssertFalse(first.isClosed, "the first one stands")
+        XCTAssertEqual(b.recorder.pairingRequests.count, 1)
+        first.close()
+        wait("withdrawn when its link closes") { b.recorder.pairingRequests.isEmpty }
+    }
+
+    func testSeveralDevicesQueueUpOldestFirstAndTheLimitHolds() throws {
+        let (_, b) = makePair()
+        b.engine.enterForeground()
+        let ids = (0..<4).map { _ in SoftwareIdentity() }
+        var links: [PeerLink] = []
+        for (i, id) in ids.enumerated() {
+            links.append(try ask(b, as: id, named: "Phone \(i)"))
+            if i < 3 { wait("request \(i + 1) queued") { b.recorder.pairingRequests.count == i + 1 } }
         }
-        wait(for: [outcome], timeout: 15)
-        if case .refused = result {} else { XCTFail("expected refused, got \(String(describing: result))") }
-        XCTAssertEqual(b.recorder.connectedCount, 0)
+        wait("the fourth was dropped") { links[3].isClosed }
+        XCTAssertEqual(b.recorder.pairingRequests.map(\.deviceId), ids.prefix(3).map(\.publicKeyBase64), "oldest first, capped at three")
+        XCTAssertEqual(b.recorder.pairingRequests.first?.name, "Phone 0")
+
+        b.engine.acceptPairing()   // the oldest
+        wait("accepted the first") { b.recorder.connectedCount == 1 }
+        XCTAssertEqual(b.recorder.pairingRequests.map(\.deviceId), ids[1..<3].map(\.publicKeyBase64))
+        links.forEach { $0.close() }
+    }
+
+    func testIgnoringIsNotBlockingAndItMayAskAgainAtOnce() throws {
+        let (a, b) = makePair()
+        a.engine.enterForeground()
+        b.engine.enterForeground()
+        XCTAssertEqual(reach(a, b), .prompt("127.0.0.1"))
+        wait("b is asked") { b.recorder.pairingRequests.count == 1 }
+
+        b.engine.ignorePairing(deviceId: a.engine.ownId)
+        wait("request gone") { b.recorder.pairingRequests.isEmpty }
+        XCTAssertNotEqual(b.recorder.device(a.engine.ownId)?.blocked, true, "ignoring is not blocking")
+
+        // No cooldown: it may ask again straight away - an ignore is not a no.
+        wait("a let go of its side") { a.recorder.pairingRequests.isEmpty }
+        XCTAssertEqual(reach(a, b), .prompt("127.0.0.1"))
+        wait("asked again at once") { b.recorder.pairingRequests.count == 1 }
+    }
+
+    func testAFloodOfRequestsIsDroppedWithoutPrompts() throws {
+        let (_, b) = makePair(configureB: { $0.requestBudget = 2 })
+        b.engine.enterForeground()
+        let one = try ask(b, as: SoftwareIdentity())
+        wait("first queued") { b.recorder.pairingRequests.count == 1 }
+        let two = try ask(b, as: SoftwareIdentity())
+        wait("second queued") { b.recorder.pairingRequests.count == 2 }
+        let three = try ask(b, as: SoftwareIdentity())
+        wait("the third was dropped") { three.isClosed }
+        XCTAssertEqual(b.recorder.pairingRequests.count, 2, "over budget: no prompt for the third")
+        [one, two, three].forEach { $0.close() }
+    }
+
+    func testShareExtensionStyleEngineNeverAcceptsRequests() throws {
+        let (_, b) = makePair(configureB: { $0.acceptPairingRequests = false })
+        b.engine.enterForeground()
+        let link = try? ask(b)
+        wait("refused or closed") { link == nil || link?.isClosed == true }
+        XCTAssertTrue(b.recorder.pairingRequests.isEmpty)
+    }
+
+    func testBlockedDeviceIsNeverTrustedDialledOrAskedAboutEvenWithTheSamePasscode() throws {
+        let (a, b) = makePair()
+        setPasscode(a, "shared passcode 123")
+        setPasscode(b, "shared passcode 123")
+        a.engine.enterForeground()
+        b.engine.enterForeground()
+        wait("auto-paired first") { a.recorder.connectedCount == 1 && b.recorder.connectedCount == 1 }
+
+        // Blocking closes the link, untrusts it, and refuses everything after.
+        b.engine.blockDevice(a.engine.ownId)
+        wait("link closed") { b.recorder.connectedCount == 0 && a.recorder.connectedCount == 0 }
+        let row = try XCTUnwrap(b.recorder.device(a.engine.ownId), "a blocked device keeps a card")
+        XCTAssertTrue(row.blocked)
+        XCTAssertFalse(row.trusted)
+        RunLoop.main.run(until: Date().addingTimeInterval(6))   // beacons every 2 s
+        XCTAssertEqual(b.recorder.connectedCount, 0, "a matching passcode does not get past a block")
+        XCTAssertEqual(a.recorder.connectedCount, 0)
+        XCTAssertTrue(b.recorder.pairingRequests.isEmpty, "and it never prompts")
+        // Even a fresh handshake as the blocked device is cut off at once.
+        let again = try? ask(b, as: try XCTUnwrap(a.engine.identity as? SoftwareIdentity), named: "a again")
+        wait("cut off") { again == nil || again?.isClosed == true }
+        XCTAssertTrue(b.recorder.pairingRequests.isEmpty)
+    }
+
+    func testUnblockLetsItTalkAgainButDoesNotTrustIt() throws {
+        let (a, b) = makePair()
+        b.engine.blockDevice(a.engine.ownId)
+        a.engine.enterForeground()
+        b.engine.enterForeground()
+        wait("listed as blocked") { b.recorder.device(a.engine.ownId)?.blocked == true }
+        XCTAssertEqual(reach(a, b), .refused("127.0.0.1"))
+        XCTAssertTrue(b.recorder.pairingRequests.isEmpty)
+
+        b.engine.unblockDevice(a.engine.ownId)
+        wait("unblocked") { b.recorder.device(a.engine.ownId)?.blocked != true }
+        XCTAssertEqual(b.recorder.device(a.engine.ownId)?.trusted ?? false, false, "unblocking never trusts")
+        XCTAssertEqual(reach(a, b), .prompt("127.0.0.1"))
+        wait("it can ask again") { b.recorder.pairingRequests.count == 1 }
+    }
+
+    func testScanningABlockedDevicesCodeSaysSo() throws {
+        let (a, b) = makePair()
+        a.engine.enterForeground()
+        a.engine.blockDevice(b.engine.ownId)
+        let done = expectation(description: "outcome")
+        var result: PairOutcome?
+        a.engine.pair(with: PairingInfo(publicKey: b.engine.ownId, address: "127.0.0.1", name: "Desk PC").jsonString()) { result = $0; done.fulfill() }
+        wait(for: [done], timeout: 10)
+        XCTAssertEqual(result, .blocked(name: "Desk PC"))
+    }
+
+    func testBlocksSurviveARestart() throws {
+        let (a, b) = makePair()
+        b.engine.blockDevice(a.engine.ownId)
+        wait("blocked") { b.recorder.device(a.engine.ownId)?.blocked == true }
+        b.engine.shutdown()
+        let again = SyncEngine(config: b.engine.config, identity: b.engine.identity, secrets: b.engine.secrets)
+        let recorder = Recorder()
+        again.delegate = recorder
+        again.enterForeground()
+        wait("still blocked after a restart") { recorder.device(a.engine.ownId)?.blocked == true }
+        again.shutdown()
     }
 
     /// A handshake in this device's own identity is never a peer - our line

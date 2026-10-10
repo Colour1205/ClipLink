@@ -202,6 +202,24 @@ extension View {
     func meRow(transparency: Double) -> some View {
         modifier(MeRowModifier(transparency: transparency))
     }
+
+    /// Just the iOS 15 hook of `meRow`, for rows that draw their own card
+    /// fill (and so leave the row's background clear).
+    func meTableClear() -> some View {
+        modifier(MeTableClearModifier())
+    }
+}
+
+private struct MeTableClearModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        Group {
+            if #available(iOS 16, *) {
+                content
+            } else {
+                content.background(MeTableBackgroundClearer())
+            }
+        }
+    }
 }
 
 private struct MePageModifier: ViewModifier {

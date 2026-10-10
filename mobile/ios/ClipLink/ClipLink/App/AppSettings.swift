@@ -22,6 +22,9 @@ final class AppSettings: ObservableObject {
     /// HarmonyOS' accent_theme ("" means navy there too).
     @Published var accentTheme: AccentTheme { didSet { defaults.set(accentTheme.rawValue, forKey: "accent_theme") } }
     @Published var bottomGlow: Bool { didSet { defaults.set(bottomGlow, forKey: "bottom_glow") } }
+    /// The out-of-the-box "Card transparency", shared by every platform;
+    /// someone who already moved the slider keeps their own value.
+    static let defaultCardTransparency: Double = 35
     /// 0...100, step 5 - HarmonyOS' card_transparency.
     @Published var cardTransparency: Double { didSet { defaults.set(cardTransparency, forKey: "card_transparency") } }
     @Published var syncedLayout: SyncedLayout { didSet { defaults.set(syncedLayout.rawValue, forKey: "synced_layout") } }
@@ -37,8 +40,14 @@ final class AppSettings: ObservableObject {
         notifyBackgroundItems = bool("notify_background_items", false)
         accentTheme = AccentTheme(rawValue: defaults.string(forKey: "accent_theme") ?? "") ?? .navy
         bottomGlow = bool("bottom_glow", true)
-        cardTransparency = defaults.object(forKey: "card_transparency") as? Double ?? 0
+        cardTransparency = defaults.object(forKey: "card_transparency") as? Double ?? Self.defaultCardTransparency
         syncedLayout = SyncedLayout(rawValue: defaults.string(forKey: "synced_layout") ?? "") ?? .grid
         haptics = bool("haptics", true)
+        #if DEBUG
+        // Screenshots: `-ClipLinkDebugCardTransparency 50` for this launch.
+        if let text = defaults.string(forKey: "ClipLinkDebugCardTransparency"), let value = Double(text) {
+            cardTransparency = value
+        }
+        #endif
     }
 }

@@ -23,11 +23,6 @@ struct PairingView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(spacing: 16) {
-                        if let request = model.snapshot.pairingRequest {
-                            requestCard(request)
-                                .id(PairingAnchor.request)
-                                .transition(.move(edge: .top).combined(with: .opacity))
-                        }
                         explainerCard
                         if model.snapshot.network.localNetwork == .denied {
                             localNetworkCard
@@ -51,22 +46,7 @@ struct PairingView: View {
                     .padding(.bottom, 32)
                     .frame(maxWidth: 560)
                     .frame(maxWidth: .infinity)
-                    .animation(.spring(response: 0.35, dampingFraction: 0.85), value: model.snapshot.pairingRequest)
                     .animation(.easeInOut(duration: 0.2), value: model.pairStatus)
-                }
-                .onChange(of: model.snapshot.pairingRequest) { request in
-                    guard request != nil else { return }
-                    Haptics.tap(settings.haptics)
-                    // The scanner covers the request card (and nothing can
-                    // present over it): close it so the request can be
-                    // answered. Announce once it has gone, or its dismissal
-                    // cuts the announcement off.
-                    let wasScanning = scanning
-                    scanning = false
-                    withAnimation { proxy.scrollTo(PairingAnchor.request, anchor: .top) }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + (wasScanning ? 0.6 : 0)) {
-                        UIAccessibility.post(notification: .announcement, argument: "Pairing request received.")
-                    }
                 }
                 .onChange(of: model.pairStatus) { status in
                     guard let status, !model.pairInProgress else { return }
@@ -84,9 +64,6 @@ struct PairingView: View {
             }
         }
         .navigationViewStyle(.stack)
-        // Closing the sheet closes pairing mode, which rejects a pending
-        // request: make that an explicit Reject or Done, never a stray swipe.
-        .interactiveDismissDisabled(model.snapshot.pairingRequest != nil)
         .fullScreenCover(isPresented: $scanning) {
             PairingScannerView(onCode: scanned, onCancel: { scanning = false })
         }
@@ -101,57 +78,6 @@ struct PairingView: View {
             .cardBackground(transparency: settings.cardTransparency)
     }
 
-    /// Who's asking: the name is whatever that device chose, so its short id
-    /// goes beside it (and the address, when known) - a copied name can't
-    /// pass for a device you know.
-    private func requester(_ request: PairingRequest) -> String {
-        let id = DeviceLabel.short(request.deviceId)
-        let name = model.name(for: request.deviceId)
-        let who = name == id ? id : "\(name) (\(id))"
-        return who + (request.address.map { " at \($0)" } ?? "")
-    }
-
-    /// Inline Accept / Reject, like Android's prompt card: the request only
-    /// ever arrives while this sheet is up, and the root view can't present
-    /// an alert over its own sheet.
-    private func requestCard(_ request: PairingRequest) -> some View {
-        card {
-            VStack(alignment: .leading, spacing: 12) {
-                Label {
-                    Text("Pairing Request")
-                        .font(.headline)
-                } icon: {
-                    Image(systemName: "laptopcomputer.and.iphone")
-                        .foregroundColor(accent)
-                }
-                Text("\(requester(request)) wants to pair with this \(ThisDeviceNoun.current). Only accept if you expect this.")
-                    .font(.subheadline)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 10) {
-                    Button {
-                        Haptics.tap(settings.haptics)
-                        model.rejectPairing()
-                    } label: {
-                        Text("Reject").frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    Button {
-                        Haptics.success(settings.haptics)
-                        model.acceptPairing()
-                    } label: {
-                        Text("Accept").frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                .controlSize(.large)
-            }
-        }
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-                .strokeBorder(accent, lineWidth: 1.5)
-        )
-    }
-
     private var explainerCard: some View {
         card {
             HStack(alignment: .top, spacing: 12) {
@@ -162,7 +88,7 @@ struct PairingView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Keep this screen open on both devices.")
                         .font(.subheadline.weight(.semibold))
-                    Text("A pairing request only reaches this \(ThisDeviceNoun.current) while it's open, and nothing is trusted until you accept it on both sides.")
+                    Text("Nothing is trusted until you accept it on both sides. A request from another device can also reach this \(ThisDeviceNoun.current) any time ClipLink is open, and you'll be asked before anything is trusted.")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -429,7 +355,7 @@ enum ThisDeviceNoun {
 }
 
 private enum PairingAnchor: Hashable {
-    case request, status
+    case status
 }
 
 /// Presents the system share sheet from the top-most view controller - a
