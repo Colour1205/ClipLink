@@ -14,6 +14,16 @@ data class ShareOutcome(
     /** Nothing was shared: the engine never got a key to sign with, or something threw. */
     val failed: Boolean = false,
 ) {
+    /**
+     * True when the user needs the message: something went wrong, was left out,
+     * is waiting for a device, or nothing came of it. A plain success - synced,
+     * and the new card is right there - needs none (the share sheet, where the
+     * app isn't in view, always says it).
+     */
+    val needsAttention: Boolean
+        get() = failed || connected == 0 || tooLarge.isNotEmpty() || unreadable > 0 || skipped > 0 ||
+            (files.isEmpty() && !text)
+
     val message: String
         get() {
             if (failed) return "ClipLink couldn't share that - open it and try again."

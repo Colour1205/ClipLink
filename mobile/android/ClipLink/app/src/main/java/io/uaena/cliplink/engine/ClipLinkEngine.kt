@@ -1218,7 +1218,6 @@ class ClipLinkEngine(context: Context) {
      */
     fun blockDevice(deviceId: String) {
         val name = knownNameOf(deviceId) // before the trust record goes
-        val label = displayNameOf(deviceId, name)
         // Blocked first: the next handshake from it is refused from here on,
         // whatever the rest of this takes to finish.
         blockStore.block(deviceId, name)
@@ -1228,19 +1227,13 @@ class ClipLinkEngine(context: Context) {
         rejectPairing(expecting = deviceId)
         refreshDevices()
         log("blocked ${shortIdOf(deviceId)}")
-        showToast("Blocked $label")
     }
 
     /** Lets a blocked device be heard again. It is not trusted again: it has to pair like any other. */
     fun unblockDevice(deviceId: String) {
-        val label = displayNameOf(
-            deviceId,
-            blockStore.all().firstOrNull { sameDeviceId(it.deviceId, deviceId) }?.name ?: knownNameOf(deviceId),
-        )
         blockStore.unblock(deviceId)
         refreshDevices()
         log("unblocked ${shortIdOf(deviceId)}")
-        showToast("Unblocked $label")
     }
 
     // ---- clipboard --------------------------------------------------------
@@ -1256,15 +1249,16 @@ class ClipLinkEngine(context: Context) {
                 try {
                     // On IO: a copied file is streamed into the FileStore right here.
                     when (val capture = withContext(Dispatchers.IO) { clipboard.capture() }) {
-                        // `quiet` is for the automatic on-open capture: an unprompted
-                        // "nothing to sync" every time the app opens is noise, but the
-                        // same message after a deliberate button press is the answer.
-                        null -> if (!quiet) showToast("Nothing on the clipboard to sync.")
+                        // Nothing on the clipboard, or nothing new on it ([Capture.Ours]):
+                        // nothing to sync and nothing to say - a toast on every paste
+                        // tap was noise. `quiet` is for the automatic on-open capture,
+                        // whose failures are not worth interrupting for either.
+                        null -> Unit
                         is Capture.Text -> broadcastText(capture.text, quiet)
                         is Capture.Image -> broadcastImage(capture.pngBytes, quiet)
                         is Capture.Payload -> broadcastFile(capture, quiet)
                         is Capture.TooLarge -> if (!quiet) showToast("${capture.fileName} is over 1 GB, too big to sync.")
-                        Capture.Ours -> alreadySynced(quiet)
+                        Capture.Ours -> Unit
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -1380,19 +1374,19 @@ class ClipLinkEngine(context: Context) {
 
     private suspend fun broadcastText(text: String, quiet: Boolean = false) {
         val hash = FileStore.hashOf(text.toByteArray(Charsets.UTF_8))
-        if (hash == clipboard.lastKnownHash) return alreadySynced(quiet)
+        if (hash == clipboard.lastKnownHash) return
         val ownId = readyOwnId() ?: return notReady(quiet)
         // Signed BEFORE the hash is noted: a Keystore that refuses must leave
         // the clipboard unsynced, not marked as synced and never retried.
         val entry = Signing.sign(identity, text, ClipboardEntry.TYPE_TEXT, ownId)
         clipboard.noteLocalHash(hash)
         broadcast(entry)
-        if (!quiet) showToast("Synced text.")
+        // No "Synced text." toast: the new card at the top of Synced is the answer.
     }
 
     private suspend fun broadcastImage(pngBytes: ByteArray, quiet: Boolean = false) {
         val hash = FileStore.hashOf(pngBytes)
-        if (hash == clipboard.lastKnownHash) return alreadySynced(quiet)
+        if (hash == clipboard.lastKnownHash) return
         val ownId = readyOwnId() ?: return notReady(quiet)
         // Images travel inline as base64 in the entry itself, matching the
         // other two platforms - they are NOT sent through the file-chunk path.
@@ -1400,7 +1394,6 @@ class ClipLinkEngine(context: Context) {
         val entry = Signing.sign(identity, content, ClipboardEntry.TYPE_IMAGE, ownId)
         clipboard.noteLocalHash(hash)
         broadcast(entry)
-        if (!quiet) showToast("Synced image.")
     }
 
     // A copy that goes no further here is left in the store for the next
@@ -1408,7 +1401,7 @@ class ClipLinkEngine(context: Context) {
     // share of the same file may be about to record an entry for it.
     private suspend fun broadcastFile(file: Capture.Payload, quiet: Boolean = false) {
         val hash = file.hash
-        if (hash == clipboard.lastKnownHash) return alreadySynced(quiet)
+        if (hash == clipboard.lastKnownHash) return
         val ownId = readyOwnId() ?: return notReady(quiet)
         // The bytes are in the store already (see ClipboardBridge.capture),
         // BEFORE the entry goes out: the receiver broadcasts a file_request
@@ -1418,17 +1411,6 @@ class ClipLinkEngine(context: Context) {
         clipboard.noteLocalHash(hash)
         broadcast(entry)
         syncManager.tryFulfillPendingEntry(hash)
-        if (!quiet) showToast("Synced ${file.fileName}.")
-    }
-
-    /**
-     * The clipboard already holds what we last sent or applied, so there is
-     * nothing to do. Silent for the automatic capture, but a deliberate tap on
-     * the paste button gets an answer - otherwise the button looks broken,
-     * which is exactly how the HarmonyOS paste button read before it was fixed.
-     */
-    private fun alreadySynced(quiet: Boolean) {
-        if (!quiet) showToast("Already synced.")
     }
 
     private suspend fun broadcast(entry: ClipboardEntry) {
@@ -1440,9 +1422,9 @@ class ClipLinkEngine(context: Context) {
     private fun onEntryReceived(entry: ClipboardEntry) {
         refreshItems()
         log("received ${entry.type} from ${shortIdOf(entry.deviceId)}")
-        if (deviceSettings.autoApply) {
-            if (clipboard.apply(entry)) showToast("Copied ${entry.type} from a paired device.")
-        }
+        // No toast for the copy: the item is in the list, and the system shows
+        // its own note that the clipboard changed.
+        if (deviceSettings.autoApply) clipboard.apply(entry)
     }
 
     fun applyToClipboard(item: SyncedItem): Boolean = clipboard.apply(item.entry)

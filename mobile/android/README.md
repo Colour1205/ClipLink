@@ -138,6 +138,10 @@ few hundred MB, so what a peer can make the app hold is capped (`net/Limits.kt`)
   chunks is dropped after 5 minutes, and stray `.tmp` files are deleted at
   start. Blobs are written to a temporary file and renamed, never in place.
 
+## Toasts (snackbars)
+
+A toast is for what the screen doesn't already show: a failure, a result with no visible trace ("History cleared."), or a wait ("Getting it ready to share…"). A success the UI shows by itself gets none, so the paste button doesn't say "Synced text." - the new card at the top of Synced is the answer - and a paste with nothing on the clipboard, or nothing new on it, says nothing at all; a device blocked, unblocked, or an item that arrives and is put on the clipboard says nothing either. Saving from the system's own dialog or picker has no toast of its own (there is none on Android). "Copied." and "Device ID copied." show only below Android 13: from 13 on the system shows its own copy preview and asks apps not to repeat it. A share from another app (`ShareReceiverActivity`) always says what it did, since ClipLink isn't on screen; one from the file picker (in the app) only does when `ShareOutcome.needsAttention`. Add a toast only if the user couldn't otherwise tell what happened. (The HarmonyOS app follows the same rule.)
+
 ## Where things are stored
 
 - **History** is `files/cliplink_history.jsonl`, one entry per line in the

@@ -77,7 +77,7 @@ class MainActivity : ComponentActivity() {
     ) { uri ->
         // The same path as the share sheet (see ShareReceiverActivity): a
         // picked photo is synced as the file it is, streamed, size-capped.
-        uri?.let { engine.shareIn(null, listOf(it)) { outcome -> engine.showToast(outcome.message) } }
+        uri?.let { engine.shareIn(null, listOf(it)) { outcome -> if (outcome.needsAttention) engine.showToast(outcome.message) } }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -195,7 +195,7 @@ class MainActivity : ComponentActivity() {
                             onClearHistory = engine::clearHistory,
                             onCopyDeviceId = {
                                 copyPlainText(ownDeviceId)
-                                engine.showToast("Device ID copied.")
+                                toastCopied("Device ID copied.")
                             },
                         ),
                         onTrust = { engine.trustDevice(it.deviceId) },
@@ -204,7 +204,7 @@ class MainActivity : ComponentActivity() {
                         onUnblock = { engine.unblockDevice(it.deviceId) },
                         onCopyDeviceId = {
                             copyPlainText(it.deviceId)
-                            engine.showToast("Device ID copied.")
+                            toastCopied("Device ID copied.")
                         },
                         onPairingOpenChange = { open ->
                             pairScreenOpen = open
@@ -285,8 +285,17 @@ class MainActivity : ComponentActivity() {
                     false
                 }
             }
-            engine.showToast(if (copied) "Copied." else "Couldn't copy that item.")
+            if (copied) toastCopied("Copied.") else engine.showToast("Couldn't copy that item.")
         }
+    }
+
+    /**
+     * Android 13+ shows its own "Copied" preview whenever an app sets the
+     * clipboard (and asks apps not to repeat it), so the toast is only for
+     * older versions, where nothing else says the copy happened.
+     */
+    private fun toastCopied(message: String) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) engine.showToast(message)
     }
 
     private var shareJob: Job? = null
