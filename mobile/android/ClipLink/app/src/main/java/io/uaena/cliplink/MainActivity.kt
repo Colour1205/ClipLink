@@ -159,19 +159,10 @@ class MainActivity : ComponentActivity() {
                         ),
                         me = MeActions(
                             onSetPassphrase = { passphrase ->
-                                val changing = engine.hasPassphrase.value
-                                lifecycleScope.launch {
-                                    if (engine.setPassphrase(passphrase)) {
-                                        engine.showToast(
-                                            (if (changing) "Passcode changed" else "Passcode set") +
-                                                " — matching devices will auto-trust.",
-                                        )
-                                    }
-                                }
+                                lifecycleScope.launch { engine.setPassphrase(passphrase) }
                             },
                             onClearPassphrase = {
                                 engine.clearPassphrase()
-                                engine.showToast("Passcode cleared.")
                             },
                             onSaveTailscaleIp = engine::saveTailscaleIp,
                             onSaveDeviceName = engine::saveDeviceName,
@@ -195,7 +186,6 @@ class MainActivity : ComponentActivity() {
                             onClearHistory = engine::clearHistory,
                             onCopyDeviceId = {
                                 copyPlainText(ownDeviceId)
-                                toastCopied("Device ID copied.")
                             },
                         ),
                         onTrust = { engine.trustDevice(it.deviceId) },
@@ -204,7 +194,6 @@ class MainActivity : ComponentActivity() {
                         onUnblock = { engine.unblockDevice(it.deviceId) },
                         onCopyDeviceId = {
                             copyPlainText(it.deviceId)
-                            toastCopied("Device ID copied.")
                         },
                         onPairingOpenChange = { open ->
                             pairScreenOpen = open
@@ -285,17 +274,8 @@ class MainActivity : ComponentActivity() {
                     false
                 }
             }
-            if (copied) toastCopied("Copied.") else engine.showToast("Couldn't copy that item.")
+            if (!copied) engine.showToast("Couldn't copy that item.")
         }
-    }
-
-    /**
-     * Android 13+ shows its own "Copied" preview whenever an app sets the
-     * clipboard (and asks apps not to repeat it), so the toast is only for
-     * older versions, where nothing else says the copy happened.
-     */
-    private fun toastCopied(message: String) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) engine.showToast(message)
     }
 
     private var shareJob: Job? = null

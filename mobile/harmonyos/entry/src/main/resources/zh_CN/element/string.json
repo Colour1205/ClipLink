@@ -189,18 +189,6 @@
       "value": "对方设备已取消配对请求，请重试。"
     },
     {
-      "name": "toast_paired",
-      "value": "已配对。"
-    },
-    {
-      "name": "toast_removed_device",
-      "value": "已移除 %1$s"
-    },
-    {
-      "name": "toast_passcode_cleared",
-      "value": "口令已清除。"
-    },
-    {
       "name": "toast_passcode_clear_failed",
       "value": "清除口令失败：%1$s"
     },
@@ -221,20 +209,8 @@
       "value": "保存失败：%1$s"
     },
     {
-      "name": "toast_device_name_saved",
-      "value": "设备名称已保存。"
-    },
-    {
-      "name": "toast_device_name_system",
-      "value": "将使用系统设备名称。"
-    },
-    {
       "name": "toast_passcode_empty",
       "value": "请先输入口令。"
-    },
-    {
-      "name": "toast_passcode_set",
-      "value": "口令已设置——口令相同的设备将自动互相信任。"
     },
     {
       "name": "toast_passcode_set_failed",
@@ -245,44 +221,12 @@
       "value": "请先输入地址。"
     },
     {
-      "name": "toast_pairing_info_copied",
-      "value": "配对信息已复制——请在另一台设备的“通过地址配对”中粘贴。"
-    },
-    {
-      "name": "toast_device_id_copied",
-      "value": "设备 ID 已复制。"
-    },
-    {
       "name": "toast_copy_failed",
       "value": "无法复制，请重试。"
     },
     {
-      "name": "toast_copied",
-      "value": "已复制到剪贴板。"
-    },
-    {
-      "name": "toast_paste_not_granted",
-      "value": "未获得访问授权，请重试。"
-    },
-    {
-      "name": "toast_unsupported_clipboard",
-      "value": "不支持的剪贴板内容：%1$s"
-    },
-    {
-      "name": "toast_file_store_not_ready_yet",
-      "value": "文件存储尚未就绪，请重试。"
-    },
-    {
       "name": "toast_file_store_not_ready",
       "value": "文件存储尚未就绪，请重试。"
-    },
-    {
-      "name": "toast_paste_save_failed",
-      "value": "无法保存该文件，请重试。"
-    },
-    {
-      "name": "toast_paste_sync_failed",
-      "value": "无法同步该内容，请重试。"
     },
     {
       "name": "toast_self_test_passed",
@@ -291,10 +235,6 @@
     {
       "name": "toast_self_test_failed",
       "value": "自检失败：%1$s"
-    },
-    {
-      "name": "toast_not_a_file",
-      "value": "该项目不是文件。"
     },
     {
       "name": "toast_file_not_downloaded",
@@ -327,18 +267,6 @@
     {
       "name": "item_already_in_cliplink",
       "value": "该内容已在 ClipLink 中。"
-    },
-    {
-      "name": "refuse_too_large",
-      "value": "该文件超过 1 GB，太大，无法同步。"
-    },
-    {
-      "name": "refuse_folder",
-      "value": "只能同步文件，不能同步文件夹。"
-    },
-    {
-      "name": "refuse_unreadable",
-      "value": "无法读取该文件。"
     },
     {
       "name": "share_what_text",
