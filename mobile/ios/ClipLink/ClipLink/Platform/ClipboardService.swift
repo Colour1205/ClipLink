@@ -97,6 +97,12 @@ final class ClipboardService {
         lastKnownHash = hash
     }
 
+    /// After something is deleted from history: pasting it again is a
+    /// deliberate act, not a repeat to skip.
+    func forgetLastHash() {
+        lastKnownHash = nil
+    }
+
     // MARK: - Reading
 
     /// The last capture() came back empty because a read was declined

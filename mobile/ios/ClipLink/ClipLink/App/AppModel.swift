@@ -22,12 +22,22 @@ final class AppModel: ObservableObject {
     let clipboard = ClipboardService()
     private(set) var engine: SyncEngine?
 
-    @Published private(set) var snapshot = EngineSnapshot()
+    @Published private(set) var snapshot = EngineSnapshot() {
+        didSet {
+            me.update(from: snapshot)
+            logCount.update(snapshot.log.count)
+        }
+    }
+    /// What the Me tab watches instead of `snapshot` (see MeState.swift).
+    let me = MeStore()
+    let logCount = LogCountStore()
     @Published var toast: Toast?
     /// The pasteboard changed since we last looked ("New item" hint).
     @Published private(set) var hasNewClipboardItem = false
     @Published private(set) var startupError: String?
-    @Published private(set) var identityIsHardwareBacked = false
+    @Published private(set) var identityIsHardwareBacked = false {
+        didSet { me.setHardwareBacked(identityIsHardwareBacked) }
+    }
     /// A request opened from its notification after the connection it came on
     /// is gone: Trust still saves the device, and it connects when it next can.
     @Published private(set) var offlineRequest: PairingRequest?
@@ -93,6 +103,8 @@ final class AppModel: ObservableObject {
         if UserDefaults.standard.string(forKey: "ClipLinkDebugFixtures") != nil {
             usingFixtures = true
             snapshot = DebugFixtures.snapshot(UserDefaults.standard.string(forKey: "ClipLinkDebugFixtures") ?? "")
+            me.update(from: snapshot)
+            logCount.update(snapshot.log.count)
         }
         #endif
         clipboard.onOwnWriteSettled = { [weak self] in self?.refreshClipboardHint() }
@@ -309,7 +321,7 @@ final class AppModel: ObservableObject {
             if !quiet { showToast(clipboard.lastCaptureDeclined ? "Paste wasn't allowed." : "Nothing on the clipboard to sync.") }
             return
         }
-        send(capture, quiet: quiet)
+        send(capture, quiet: quiet, skipRepeat: true)
     }
 
     /// From the system Paste button (iOS 16+), drag & drop, or share-in.
@@ -320,15 +332,19 @@ final class AppModel: ObservableObject {
         }
         clipboard.markSeen()
         refreshClipboardHint()
-        send(capture, quiet: false)
+        send(capture, quiet: false, skipRepeat: true)
     }
 
-    func send(_ capture: Capture, quiet: Bool) {
+    /// `skipRepeat` (the paste paths, and every automatic capture): content
+    /// identical to the last thing this device sent or applied is not sent
+    /// again - pasting the same clipboard twice is one item, not two.
+    func send(_ capture: Capture, quiet: Bool, skipRepeat: Bool = false) {
         guard let engine else { return }
+        let skipsRepeat = quiet || skipRepeat
         switch capture {
         case .text(let text):
             let hash = ContentHash.sha256Hex(Data(text.utf8))
-            guard hash != clipboard.lastKnownHash || !quiet else { return }
+            guard !(skipsRepeat && hash == clipboard.lastKnownHash) else { return alreadySynced(quiet: quiet) }
             clipboard.noteSent(hash: hash)
             engine.sendText(text) { [weak self] in self?.report($0) }
         case .image(let png):
@@ -338,7 +354,7 @@ final class AppModel: ObservableObject {
                 let (hash, fingerprint) = await Task.detached(priority: .userInitiated) {
                     (ContentHash.sha256Hex(png), ImageFingerprint(imageData: png))
                 }.value
-                guard hash != clipboard.lastKnownHash || !quiet else { return }
+                guard !(skipsRepeat && hash == clipboard.lastKnownHash) else { return alreadySynced(quiet: quiet) }
                 clipboard.noteSent(hash: hash)
                 if let fingerprint { lastSentImage = (fingerprint, Date()) }
                 guard png.count > Self.maxInlineImageBytes else {
@@ -351,8 +367,32 @@ final class AppModel: ObservableObject {
                 engine.sendFile(at: url, name: "Image.png", moveIntoStore: true) { [weak self] in self?.report($0) }
             }
         case .file(let url, let name):
-            engine.sendFile(at: url, name: name, moveIntoStore: true) { [weak self] in self?.report($0) }
+            guard skipsRepeat else {
+                engine.sendFile(at: url, name: name, moveIntoStore: true) { [weak self] in self?.report($0) }
+                return
+            }
+            Task {
+                // The engine hashes a file too, but only to store it: whether
+                // it is the same file as last time has to be known first.
+                let hash = await Task.detached(priority: .userInitiated) {
+                    (try? ContentHash.sha256Hex(fileAt: url))?.lowercased()
+                }.value
+                if let hash {
+                    if hash == clipboard.lastKnownHash?.lowercased() {
+                        try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+                        return alreadySynced(quiet: quiet)
+                    }
+                    clipboard.noteSent(hash: hash)
+                }
+                engine.sendFile(at: url, name: name, moveIntoStore: true) { [weak self] in self?.report($0) }
+            }
         }
+    }
+
+    /// A manual paste of what is already synced says why nothing happened;
+    /// the automatic capture stays silent.
+    private func alreadySynced(quiet: Bool) {
+        if !quiet { showToast("Already synced.") }
     }
 
     /// A file from the document picker. Copied right here: the picker's own
@@ -493,11 +533,13 @@ final class AppModel: ObservableObject {
     }
 
     func delete(_ item: SyncedItem) {
+        clipboard.forgetLastHash()
         engine?.deleteItem(id: item.id)
     }
 
     func clearHistory() {
         // No toast: the list visibly empties, after a confirmation.
+        clipboard.forgetLastHash()
         engine?.clearHistory()
     }
 

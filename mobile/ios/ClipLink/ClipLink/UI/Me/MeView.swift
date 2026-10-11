@@ -6,7 +6,10 @@ import UserNotifications
 /// The Me tab: this iPhone's identity, every setting, pairing extras,
 /// network status, support screens and data - Settings-app style.
 struct MeView: View {
-    @EnvironmentObject private var model: AppModel
+    /// Not observed: the Me list redraws for the few fields in `me` (and for
+    /// settings), not for every engine update - see MeState.swift.
+    private var model: AppModel { AppModel.shared }
+    @ObservedObject private var me = AppModel.shared.me
     @EnvironmentObject private var settings: AppSettings
 
     @State private var refreshStatus: UIBackgroundRefreshStatus = .available
@@ -50,8 +53,8 @@ struct MeView: View {
         }
     }
 
-    private var ownId: String { model.snapshot.ownDeviceId }
-    private var network: NetworkStatus { model.snapshot.network }
+    private var ownId: String { me.value.ownDeviceId }
+    private var network: NetworkStatus { me.value.network }
     /// Icon tiles carry white glyphs, so they use the accent's fill shade.
     private var accentFill: Color { settings.accentTheme.fill }
     private var transparency: Double { settings.cardTransparency }
@@ -78,7 +81,7 @@ struct MeView: View {
                     HStack(spacing: 12) {
                         MeRowLabel(title: "Device Name", systemImage: "textformat", tint: .orange)
                         Spacer(minLength: 8)
-                        Text(model.snapshot.deviceName.isEmpty ? "Not set" : model.snapshot.deviceName)
+                        Text(me.value.deviceName.isEmpty ? "Not set" : me.value.deviceName)
                             .foregroundColor(.secondary)
                             .lineLimit(1)
                     }
@@ -113,13 +116,13 @@ struct MeView: View {
                         .textSelection(.enabled)
                         .accessibilityLabel("Device ID")
                         .accessibilityValue(ownId.isEmpty ? "Generating identity" : ownId)
-                    if !model.snapshot.localAddresses.isEmpty {
-                        Text(model.snapshot.localAddresses.joined(separator: "  •  "))
+                    if !me.value.localAddresses.isEmpty {
+                        Text(me.value.localAddresses.joined(separator: "  •  "))
                             .font(.footnote.monospacedDigit())
                             .foregroundColor(.secondary)
                             .textSelection(.enabled)
                             .padding(.top, 2)
-                            .accessibilityLabel("Local addresses: \(model.snapshot.localAddresses.joined(separator: ", "))")
+                            .accessibilityLabel("Local addresses: \(me.value.localAddresses.joined(separator: ", "))")
                     }
                 }
                 .padding(.vertical, 4)
@@ -135,10 +138,10 @@ struct MeView: View {
             .meRow(transparency: transparency)
         } footer: {
             Label(
-                model.identityIsHardwareBacked
+                me.value.hardwareBacked
                     ? "Identity key stored in the Secure Enclave"
                     : "Identity key stored in the Keychain",
-                systemImage: model.identityIsHardwareBacked ? "lock.shield.fill" : "key.fill"
+                systemImage: me.value.hardwareBacked ? "lock.shield.fill" : "key.fill"
             )
         }
     }
@@ -377,7 +380,7 @@ struct MeView: View {
                     HStack(spacing: 12) {
                         MeRowLabel(title: "Passcode", systemImage: "ellipsis.rectangle.fill", tint: .green)
                         Spacer(minLength: 8)
-                        Text(model.snapshot.hasPassphrase ? "On" : "Off")
+                        Text(me.value.hasPassphrase ? "On" : "Off")
                             .foregroundColor(.secondary)
                     }
                     .accessibilityElement(children: .combine)
@@ -387,7 +390,7 @@ struct MeView: View {
                     HStack(spacing: 12) {
                         MeRowLabel(title: "Tailscale IP", systemImage: "globe", tint: .indigo)
                         Spacer(minLength: 8)
-                        Text(model.snapshot.tailscaleIP.isEmpty ? "Not set" : model.snapshot.tailscaleIP)
+                        Text(me.value.tailscaleIP.isEmpty ? "Not set" : me.value.tailscaleIP)
                             .font(.body.monospacedDigit())
                             .foregroundColor(.secondary)
                             .lineLimit(1)
@@ -431,15 +434,15 @@ struct MeView: View {
                 } label: {
                     HStack {
                         MeRowLabel(
-                            title: model.snapshot.sweeping ? "Looking for Devices…" : "Find Devices Now",
+                            title: me.value.sweeping ? "Looking for Devices…" : "Find Devices Now",
                             systemImage: "magnifyingglass",
                             tint: accentFill,
                             titleColor: .accentColor
                         )
-                        if model.snapshot.sweeping { ProgressView() }
+                        if me.value.sweeping { ProgressView() }
                     }
                 }
-                .disabled(model.snapshot.sweeping)
+                .disabled(me.value.sweeping)
             }
             .meRow(transparency: transparency)
         } header: {
@@ -492,9 +495,7 @@ struct MeView: View {
                     HStack(spacing: 12) {
                         MeRowLabel(title: "Activity Log", systemImage: "list.bullet.rectangle.fill", tint: Color(UIColor.systemGray))
                         Spacer(minLength: 8)
-                        Text("\(model.snapshot.log.count)")
-                            .font(.body.monospacedDigit())
-                            .foregroundColor(.secondary)
+                        MeLogCountBadge()
                     }
                     .accessibilityElement(children: .combine)
                 }
@@ -514,7 +515,7 @@ struct MeView: View {
             } label: {
                 MeRowLabel(title: "Clear Synced History", systemImage: "trash.fill", tint: .red)
             }
-            .disabled(model.snapshot.items.isEmpty)
+            .disabled(!me.value.hasItems)
             .confirmationDialog("Clear synced history?", isPresented: $confirmingClear, titleVisibility: .visible) {
                 Button("Clear History", role: .destructive) {
                     model.clearHistory()
@@ -580,5 +581,18 @@ struct MeThemeSwatch: View {
         .buttonStyle(.borderless)
         .accessibilityLabel(theme.name)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+
+/// The activity log's length - the one thing in the Me list that changes with
+/// every engine event, so it redraws by itself.
+private struct MeLogCountBadge: View {
+    @ObservedObject private var counter = AppModel.shared.logCount
+
+    var body: some View {
+        Text("\(counter.count)")
+            .font(.body.monospacedDigit())
+            .foregroundColor(.secondary)
     }
 }
