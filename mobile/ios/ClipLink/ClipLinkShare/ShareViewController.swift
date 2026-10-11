@@ -115,6 +115,8 @@ final class ShareModel: ObservableObject {
         // A sender only: peers' history batches (inline images and all) and
         // file bytes would cost memory the extension doesn't have.
         config.sendOnly = true
+        // ...with no screen to ask on: pairing requests are the app's to take.
+        config.acceptPairingRequests = false
         config.maxLineBytes = 8 * 1024 * 1024
         let engine = SyncEngine(config: config, identity: identity, secrets: KeychainSecretStore())
         self.engine = engine

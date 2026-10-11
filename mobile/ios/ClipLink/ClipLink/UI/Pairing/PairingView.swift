@@ -35,7 +35,7 @@ struct PairingView: View {
                                 .id(PairingAnchor.status)
                                 .transition(.opacity)
                         }
-                        Text("Devices on the same Wi-Fi find each other and ask to pair while both pairing screens are open — codes are only needed when they can't. Devices with the same passcode (Me › Passcode) pair with no prompts at all.")
+                        Text("Devices on the same Wi-Fi pair automatically while both pairing screens are open — codes are only needed when they can't find each other. Devices with the same passcode (Me › Passcode) pair with no prompts at all.")
                             .font(.footnote)
                             .foregroundColor(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -64,9 +64,6 @@ struct PairingView: View {
             }
         }
         .navigationViewStyle(.stack)
-        // A pairing request is a system alert over whatever is showing (see
-        // PairingPrompt), the scanner included, and closing this sheet leaves
-        // one that is waiting alone.
         .fullScreenCover(isPresented: $scanning) {
             PairingScannerView(onCode: scanned, onCancel: { scanning = false })
         }
@@ -91,7 +88,7 @@ struct PairingView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Keep this screen open on both devices.")
                         .font(.subheadline.weight(.semibold))
-                    Text("With it open on both, the two devices find each other and each asks you before trusting the other. Nothing is trusted until you say so on both sides.")
+                    Text("Nothing is trusted until you accept it on both sides. A request from another device can also reach this \(ThisDeviceNoun.current) any time ClipLink is open, and you'll be asked before anything is trusted.")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -142,7 +139,7 @@ struct PairingView: View {
                 Text("This \(ThisDeviceNoun.current)'s Code")
                     .font(.headline)
                 PairingQRCodeView(payload: payload)
-                Text("Scan this with the other device's pairing screen.")
+                Text("Scan this on the other device with its pairing screen open.")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)

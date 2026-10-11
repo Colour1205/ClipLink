@@ -209,74 +209,43 @@ public final class TrustStore {
     }
 }
 
-// MARK: - Block store
+// MARK: - Block list
 
-/// A device this one refuses to hear from, and the name it had when it was
-/// blocked (what the Devices tab shows for it).
+/// A device the user blocked: its pairing requests never come through, it is
+/// never auto-trusted (not even by a matching passcode) and never dialled.
+/// Local only - nothing about a block goes on the wire.
 public struct BlockedDevice: Equatable {
     public var publicKey: String
+    /// The name it last gave itself, kept only so its card can still be
+    /// titled when the device isn't around to say.
     public var name: String?
+    public var blockedAt: Date
 
-    public init(publicKey: String, name: String? = nil) {
+    public init(publicKey: String, name: String? = nil, blockedAt: Date = Date()) {
         self.publicKey = publicKey
         self.name = name
+        self.blockedAt = blockedAt
     }
 }
 
-/// An immutable copy of the block list, for code that runs off the engine
-/// queue (handshakes, sweep probes). Compares keys, not spellings: the
-/// decoder is lenient, so one key can be written several ways and a plain
-/// text compare would be a way round the list.
-struct BlockList {
-    private let ids: Set<String>
-    private let keys: Set<Data>
-
-    init(_ devices: [BlockedDevice] = []) {
-        ids = Set(devices.map(\.publicKey))
-        keys = Set(devices.compactMap { WireSignature.canonicalPublicKey($0.publicKey) })
-    }
-
-    var isEmpty: Bool { ids.isEmpty }
-
-    func contains(_ deviceId: String) -> Bool {
-        if ids.isEmpty { return false }
-        if ids.contains(deviceId) { return true }
-        guard !keys.isEmpty, let key = WireSignature.canonicalPublicKey(deviceId) else { return false }
-        return keys.contains(key)
-    }
-}
-
-/// The devices this one has blocked. A blocked device never gets a pairing
-/// prompt, is never dialled, is never trusted by a shared passcode, and its
-/// handshake is refused before anything else about it is decided - so it
-/// cannot be a source of spam, however often it asks.
-///
-/// Blocking a device is blocking its KEY. Someone who generates a new
-/// identity is a new device and is not stopped by this; what it does stop is
-/// the usual case, one phone or PC that keeps asking.
-///
-/// Mirrors BlockStore.cs / BlockStore.kt / BlockStore.ets. Not encrypted at
-/// rest, like the trust store beside it.
+/// Shared with the Share extension like the trust store, so a block applies
+/// there too (the extension refuses every untrusted peer anyway).
 public final class BlockStore {
     private let file: JSONFile
     private let lock: StoreLock
     private var devices: [BlockedDevice]
     private var stamp: Date?
-    private var list: BlockList
 
     public init(directory: URL) {
         file = JSONFile(url: directory.appendingPathComponent("blocked_devices.json"))
         lock = StoreLock.shared(for: directory)
         devices = Self.load(file)
-        list = BlockList(devices)
         stamp = file.stamp()
     }
 
-    /// Re-reads the file: the Share extension (a separate process) shares it.
     public func reload() {
         lock.withLock {
             devices = Self.load(file)
-            list = BlockList(devices)
             stamp = file.stamp()
         }
     }
@@ -285,55 +254,54 @@ public final class BlockStore {
         lock.withLock {
             if file.stamp() != stamp { devices = Self.load(file) }
             if body() { save() }
-            list = BlockList(devices)
             stamp = file.stamp()
         }
     }
 
     private static func load(_ file: JSONFile) -> [BlockedDevice] {
-        let raw = file.read() as? [[String: Any]] ?? [] // corrupt -> start empty, like every other store
+        let raw = file.read() as? [[String: Any]] ?? []
         return raw.compactMap { obj in
             guard let key = obj["publicKey"] as? String, !key.isEmpty else { return nil }
-            return BlockedDevice(publicKey: key, name: DeviceName.sanitize(obj["name"] as? String))
+            let at = (obj["blockedAt"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? Date(timeIntervalSince1970: 0)
+            return BlockedDevice(publicKey: key, name: DeviceName.sanitize(obj["name"] as? String), blockedAt: at)
         }
     }
 
     public var all: [BlockedDevice] { devices }
 
-    /// A copy for handshakes and sweeps to carry with them.
-    var snapshot: BlockList { list }
-
-    public func isBlocked(_ deviceId: String) -> Bool { list.contains(deviceId) }
-
-    public func device(_ deviceId: String) -> BlockedDevice? {
-        devices.first { WireSignature.isSameKey($0.publicKey, deviceId) }
+    public func isBlocked(_ publicKey: String) -> Bool {
+        devices.contains { $0.publicKey == publicKey }
     }
 
-    /// Blocks `deviceId`. An existing entry keeps its name unless a better one is given.
-    public func block(_ deviceId: String, name: String? = nil) {
+    public func device(_ publicKey: String) -> BlockedDevice? {
+        devices.first { $0.publicKey == publicKey }
+    }
+
+    /// Idempotent. A known name is kept when the new one is nil.
+    public func block(_ publicKey: String, name: String? = nil) {
         let name = name.flatMap { $0.isEmpty ? nil : $0 }
         mutate {
-            if let index = devices.firstIndex(where: { WireSignature.isSameKey($0.publicKey, deviceId) }) {
+            if let index = devices.firstIndex(where: { $0.publicKey == publicKey }) {
                 guard let name, devices[index].name != name else { return false }
                 devices[index].name = name
                 return true
             }
-            devices.append(BlockedDevice(publicKey: deviceId, name: name))
+            devices.append(BlockedDevice(publicKey: publicKey, name: name))
             return true
         }
     }
 
-    public func unblock(_ deviceId: String) {
+    public func unblock(_ publicKey: String) {
         mutate {
             let before = devices.count
-            devices.removeAll { WireSignature.isSameKey($0.publicKey, deviceId) }
+            devices.removeAll { $0.publicKey == publicKey }
             return devices.count != before
         }
     }
 
     private func save() {
         file.write(devices.map { device -> [String: Any] in
-            var obj: [String: Any] = ["publicKey": device.publicKey]
+            var obj: [String: Any] = ["publicKey": device.publicKey, "blockedAt": device.blockedAt.timeIntervalSince1970]
             if let name = device.name { obj["name"] = name }
             return obj
         })

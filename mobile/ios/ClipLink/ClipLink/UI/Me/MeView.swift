@@ -424,13 +424,22 @@ struct MeView: View {
                     value: network.listening ? "Port \(Wire.port)" : "Not listening"
                 )
                 MeValueRow(title: "Wi-Fi Address", systemImage: "wifi", tint: .blue, value: network.lanAddress ?? "Not on Wi-Fi")
+                // Progress shows in the row itself - no toast.
                 Button {
                     model.refreshNetwork()
-                    model.showToast("Looking for devices on this network…")
                     Haptics.tap(settings.haptics)
                 } label: {
-                    MeRowLabel(title: "Find Devices Now", systemImage: "magnifyingglass", tint: accentFill, titleColor: .accentColor)
+                    HStack {
+                        MeRowLabel(
+                            title: model.snapshot.sweeping ? "Looking for Devices…" : "Find Devices Now",
+                            systemImage: "magnifyingglass",
+                            tint: accentFill,
+                            titleColor: .accentColor
+                        )
+                        if model.snapshot.sweeping { ProgressView() }
+                    }
                 }
+                .disabled(model.snapshot.sweeping)
             }
             .meRow(transparency: transparency)
         } header: {

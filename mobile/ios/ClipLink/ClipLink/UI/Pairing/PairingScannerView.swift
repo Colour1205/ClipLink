@@ -92,7 +92,7 @@ struct PairingScannerView: View {
             }
             Spacer()
             if state == .ready, interruption == nil {
-                Text("Point the camera at the pairing QR code on the other device.")
+                Text("Point the camera at the pairing QR code on the other device. Its pairing screen has to be open too.")
                     .font(.subheadline)
                     .foregroundColor(.white)
                     .multilineTextAlignment(.center)

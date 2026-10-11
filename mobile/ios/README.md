@@ -78,31 +78,6 @@ and falls back to what every peer already accepts:
 If you do get the entitlement, add it to `ClipLink.entitlements`; nothing else
 changes.
 
-**Pairing requests are a system alert, not a page.** A stranger that dials the app
-is held as one pending request whether or not the pairing sheet is open (3
-minutes, then it lapses); `PairingPrompt` shows it as a `UIAlertController` over
-whatever is on screen - a tab, the pairing sheet, the QR scanner - which a SwiftUI
-`.alert` could not do over a sheet. Trust and Ignore only: Ignore remembers
-nothing, and Block is on the Devices tab (the card's ... menu, a long-press, or
-the card's detail screen). A blocked key is kept in `blocked_devices.json` and
-refused in the handshake before trust or a passcode are looked at.
-
-**iOS can only notify while the app is running.** When the app is running but
-isn't the active scene (app switcher, Control Center, a system prompt),
-`PairingNotifier` posts a notification with Trust (needs the phone unlocked)
-and Ignore. A suspended app has no sockets, so a request made while it is
-closed never arrives - that would take a push from a server - and a request is
-dropped when the app goes to the background. A background refresh round and the
-Share extension don't take requests. `AppDelegate` sets the notification
-delegate before launch ends; the permission prompt appears the first time the
-pairing sheet is opened.
-
-**Device cards show one address.** The card shows only the address the live
-connection uses; tapping it pushes `DeviceDetailView` with every address the
-device can be reached at, its fingerprint, id and the actions. The card's press
-and the push are the Synced tab's (a spring press-down, the standard
-navigation push).
-
 **Outbound dials read before they write.** Every acceptor on every platform
 writes its handshake immediately, so an iOS dialer reads the peer's line
 first, decides, then answers. On the wire this is indistinguishable from the
@@ -173,6 +148,43 @@ the same key header, so devices are told apart by a fingerprint, the first 4
 bytes of the SHA-256 of the id ("Device AB12·CD34", the same on every
 platform): a pairing request shows it beside the requester's name, to compare
 with *Me › Fingerprint* on that device.
+
+**Pairing requests.** A device that has never been trusted can ask to pair at
+any time ClipLink is open, not only while the pairing screen is up: the
+acceptor takes its handshake (nothing is trusted yet) and raises a system alert
+over whatever is on screen - a tab, the pairing sheet, the QR scanner, Quick
+Look - with the requester's name, its fingerprint ("Device AB12·CD34", to
+compare with *Me › Fingerprint* there) and its address. **Ignore** is the bold
+default and **Trust** the other button; there is no Deny, because ignoring
+leaves that device free to ask again at any time (Block is how you stop one).
+With ClipLink in the background, a request becomes a notification with the same
+two actions (Trust needs the phone unlocked; the notification carries the
+device's id and address, so Trust works after the connection is gone and the
+device is dialled when it next can be). iOS asks for notification permission
+the first time the pairing screen opens. Only the app takes requests: the Share
+extension never does. Protections, since anyone on the Wi-Fi can knock: a
+blocked device is refused before anything else, one request per device at a
+time (the first connection wins, like the other platforms), at most 3 waiting,
+and at most 6 new requests per 10 minutes - past that they're dropped without a
+prompt. The other platforms still only list requests while their own pairing
+screen is open, so a request from one of them reaches us any time, but ours
+reaches them only then.
+
+**Blocking.** A device's ⋯ menu in Devices has *Block Device*: from then on its
+connections, beacons and pairing requests - even with the right passcode or a
+scanned code - are dropped before they register anything, it is never dialled,
+and its card sits in a *Blocked* section in dark gray. Blocking also removes
+trust. *Unblock* only lets it talk again; it is not trusted until paired anew.
+The list is local to this iPhone (`blocked_devices.json` in the App Group).
+
+**Toasts.** Only what the screen can't already show: an error, a paste that
+needed permission, a copy that has no other feedback. Pasting, receiving,
+sending, saving a setting and clearing something all show their result in the UI
+itself and say nothing more.
+
+**Card transparency** starts at 35%, the same default on every platform (*Me ›
+Appearance* has the slider). Only a fresh install gets it: a value someone has
+already chosen is kept.
 
 **Files.** Hashes go out UPPERCASE: Windows' echo suppression compares
 uppercase hex, and a lowercase hash makes it re-broadcast your file. Blobs are

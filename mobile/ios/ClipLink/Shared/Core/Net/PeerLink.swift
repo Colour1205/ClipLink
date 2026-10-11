@@ -9,19 +9,19 @@ struct HandshakeContext {
     /// Trusted device IDs at the moment the handshake began.
     let trusted: Set<String>
     let passphraseKey: Data?
-    /// "My pairing screen is open right now": what lets THIS device dial an
-    /// untrusted peer (a stranger's pairing beacon, a scanned code).
+    /// "My pairing screen is open right now": lets an untrusted peer finish
+    /// the handshake so the user can accept or reject it.
     let pairingOpen: Bool
     /// This device's display name, sent as the handshake's `DeviceName`.
     let deviceName: String?
-    /// Whether an untrusted peer that dials us may finish the handshake, so
-    /// the user can trust or ignore it. Any time the app is up in front -
-    /// not only while the pairing screen is open - but never in the Share
-    /// extension or a background round: there is nobody to ask, and a link
-    /// can't be held across the app being suspended.
-    var acceptsStrangers = true
-    /// Devices the user blocked: refused before anything else is decided.
-    var blocked = BlockList()
+    /// Devices the user blocked: refused before anything else, whatever they
+    /// bring - a matching passcode proof included.
+    var blocked: Set<String> = []
+    /// An untrusted peer that DIALS US may finish the handshake as a pairing
+    /// request even while our pairing screen is closed: it is held, nothing
+    /// is read or sent, and the user is asked. (When we dial, only our own
+    /// open pairing screen lets an untrusted peer through.)
+    var acceptRequests = false
 }
 
 enum HandshakeFailure: Error, CustomStringConvertible {
@@ -34,17 +34,16 @@ enum HandshakeFailure: Error, CustomStringConvertible {
     /// The peer hung up before sending its handshake line.
     case closedEarly
     case malformed
-    /// We refused them: untrusted and no matching passcode, and not taking
-    /// requests right now (the Share extension, a background round).
+    /// We refused them: untrusted, no matching passcode, pairing closed.
     /// `name` is their handshake's `DeviceName` (nil from older builds).
     case refused(peerId: String, name: String?)
+    /// A device the user blocked.
+    case blocked(peerId: String, name: String?)
     /// Outbound only: we read their line and chose not to continue - they
     /// never saw our handshake, so nothing was registered on their side.
     case notWanted(HandshakeMessage)
     case badSignature
     case selfConnection
-    /// The user blocked this key. Nothing about it is remembered or shown.
-    case blocked
 
     var description: String {
         switch self {
@@ -54,10 +53,10 @@ enum HandshakeFailure: Error, CustomStringConvertible {
         case .closedEarly: return "closed before handshake"
         case .malformed: return "malformed handshake"
         case .refused(let id, _): return "refused untrusted \(DeviceLabel.short(id))"
+        case .blocked(let id, _): return "refused blocked \(DeviceLabel.short(id))"
         case .notWanted(let theirs): return "not wanted: \(DeviceLabel.short(theirs.identityPublicKey))"
         case .badSignature: return "bad handshake signature"
         case .selfConnection: return "connected to itself"
-        case .blocked: return "blocked device"
         }
     }
 }
@@ -86,7 +85,8 @@ final class PeerLink {
     private(set) var peerDeviceId = ""
     /// The name the peer's handshake gave itself; nil for older builds.
     private(set) var peerName: String?
-    /// False: a stranger - must be trusted by the user before it is registered.
+    /// False: only here because our pairing screen was open - must be
+    /// accepted by the user before it is registered.
     private(set) var wasAlreadyTrusted = false
     /// True when THIS handshake's passcode proof is what established trust.
     private(set) var newlyTrustedViaPassphrase = false
@@ -316,10 +316,10 @@ final class PeerLink {
                 finish(.failure(.selfConnection))
                 return
             }
-            // Before the gate and before trust or a passcode are looked at: a
-            // blocked key is never asked about, whatever else it can prove.
+            // A blocked device gets nothing - checked before the gate and the
+            // trust logic, so no proof of any kind can talk its way past it.
             if context.blocked.contains(theirs.identityPublicKey) {
-                finish(.failure(.blocked))
+                finish(.failure(.blocked(peerId: theirs.identityPublicKey, name: theirs.deviceName)))
                 return
             }
             if let gate, !gate(theirs) {
@@ -332,9 +332,8 @@ final class PeerLink {
                 PassphraseAuth.verifyProof(key: $0, deviceId: theirs.identityPublicKey, proofBase64: theirs.passphraseProof)
             } == true
             let effectivelyTrusted = alreadyTrusted || passphraseVerified
-            // A stranger that dials us is heard any time we are taking requests;
-            // one we dialled is only wanted while our pairing screen is open.
-            guard effectivelyTrusted || (direction == .inbound ? context.acceptsStrangers : context.pairingOpen) else {
+            let asksToPair = direction == .inbound && context.acceptRequests
+            guard effectivelyTrusted || context.pairingOpen || asksToPair else {
                 finish(.failure(.refused(peerId: theirs.identityPublicKey, name: theirs.deviceName)))
                 return
             }

@@ -10,7 +10,11 @@ public struct EngineSnapshot: Equatable {
     public var network = NetworkStatus()
     public var log: [LogLine] = []
     public var pairingOpen = false
-    public var pairingRequest: PairingRequest?
+    /// Everyone asking to pair right now, oldest first. Each is held with
+    /// nothing read or sent until the user trusts or ignores it.
+    public var pairingRequests: [PairingRequest] = []
+    /// The one the prompt shows first.
+    public var pairingRequest: PairingRequest? { pairingRequests.first }
     public var hasPassphrase = false
     public var tailscaleIP = ""
     public var localAddresses: [String] = []
@@ -130,22 +134,22 @@ public struct DeviceRow: Identifiable, Equatable {
     public let lastSeen: Date?
     /// Recently heard from (beacon, probe or connection) - within ~30s.
     public let nearby: Bool
-    /// The user blocked this device: it can't ask to pair, and nothing from
-    /// it is shown. Such a row is only here to be unblocked.
+    /// The user blocked this device: its requests never come through.
     public var blocked = false
-    /// The address the live connection to this device is using (nil when
-    /// not connected) - the one address the device card shows.
-    public var connectedAddress: String?
+    /// The address of the connection that is up right now - the one the
+    /// device card shows. Nil unless `connected`.
+    public var connectionAddress: String?
+    /// Every address this device can be reached at, with how we know it - for
+    /// the detail view. `addresses` stays the short list the engine dials.
+    public var addressDetails: [DeviceAddress] = []
 
     public var shortId: String { DeviceLabel.short(deviceId) }
 
-    /// The one row order every platform uses: paired devices first (blocked
-    /// ones last of all), then by name (case-insensitive; named rows before
-    /// unnamed ones), then by id. Deliberately never by last-seen time or
-    /// connection state - a beacon arriving or a link coming up must not
-    /// move a row.
+    /// The one row order every platform uses: paired devices first, then by
+    /// name (case-insensitive; named rows before unnamed ones), then by id.
+    /// Deliberately never by last-seen time or connection state - a beacon
+    /// arriving or a link coming up must not move a row.
     public static func displayOrder(_ a: DeviceRow, _ b: DeviceRow) -> Bool {
-        if a.blocked != b.blocked { return !a.blocked }
         if a.trusted != b.trusted { return a.trusted }
         switch (a.name, b.name) {
         case let (.some(x), .some(y)):
@@ -176,11 +180,62 @@ public struct LogLine: Identifiable, Equatable {
 
 /// A peer that completed a handshake but isn't trusted yet - awaiting an
 /// explicit Accept/Reject on this device.
-public struct PairingRequest: Equatable {
+/// One address a device can be reached at, and why we think so.
+public struct DeviceAddress: Equatable, Identifiable {
+    public enum Kind: Equatable { case lan, tailscale, other }
+    public enum Source: Equatable {
+        /// A beacon (or probe) arrived from it.
+        case heard
+        /// A connection to or from it was up there.
+        case reached
+        /// Saved with the pairing.
+        case stored
+        /// What the device advertises for itself (usually its Tailscale IP).
+        case advertised
+    }
+
+    public var id: String { ip }
+    public let ip: String
+    /// The connection that is up right now uses it.
+    public let inUse: Bool
+    public let sources: [Source]
+    /// The last beacon or connection from it, when we have seen one.
+    public let lastSeen: Date?
+
+    public var kind: Kind {
+        if NetworkInterfaces.isTailscale(ip) { return .tailscale }
+        return NetworkInterfaces.isPrivateLAN(ip) ? .lan : .other
+    }
+
+    public init(ip: String, inUse: Bool, sources: [Source], lastSeen: Date?) {
+        self.ip = ip
+        self.inUse = inUse
+        self.sources = sources
+        self.lastSeen = lastSeen
+    }
+}
+
+public struct PairingRequest: Equatable, Identifiable {
+    public var id: String { deviceId }
     public let deviceId: String
     public let address: String?
     /// The name its handshake gave; nil for older builds.
     public let name: String?
+    /// When it arrived.
+    public var date = Date()
+    /// True when WE reached out from our own pairing screen (QR scan, typed
+    /// address, a pairing beacon): the user is expecting it. False when the
+    /// device dialled us - a request out of the blue, possibly while this
+    /// device is locked or ClipLink is closed.
+    public var initiatedByUs = false
+
+    public init(deviceId: String, address: String?, name: String?, date: Date = Date(), initiatedByUs: Bool = false) {
+        self.deviceId = deviceId
+        self.address = address
+        self.name = name
+        self.date = date
+        self.initiatedByUs = initiatedByUs
+    }
 }
 
 /// How a manual (QR / typed) pairing dial ended. Mirrors the richest set, the
@@ -196,12 +251,12 @@ public enum PairOutcome: Equatable {
     case prompt(String)
     case awaitingOther(String)
     case busy
-    /// The scanned or typed device is on the block list.
-    case blocked
     case refused(String)
     case silent(String)
     case unreachable(String)
     case localNetworkDenied
+    /// The code is a device the user blocked.
+    case blocked(name: String?)
 
     public var message: String {
         switch self {
@@ -215,16 +270,17 @@ public enum PairOutcome: Equatable {
         case .passcode(let a): return "Paired with \(a) using your passcode."
         case .prompt(let a): return "Reached \(a) - accept the pairing prompt on both devices to finish."
         case .awaitingOther(let a): return "Reached \(a) - accept the request on that device to finish."
-        case .busy: return "Another pairing request is already waiting here - trust or ignore it first."
-        case .blocked: return "That device is blocked. Unblock it on the Devices tab first."
+        case .busy: return "Another pairing request is already waiting here - accept or reject it first."
         case .refused(let a):
-            return "\(a) answered but didn't accept this device. Set the same passcode on both, or finish any pairing request waiting on that device, then try again."
+            return "\(a) answered but didn't accept this device. Set the same passcode on both, or open its Pairing screen (and finish any other pairing request there), then try again."
         case .silent(let a):
             return "\(a) accepted the connection but ClipLink there didn't respond - try restarting it on that device."
         case .unreachable(let a):
             return "Couldn't connect to \(a). Check ClipLink is running there and both devices are on the same network (or Tailscale)."
         case .localNetworkDenied:
             return "iOS is blocking local network access for ClipLink. Turn it on in Settings › Privacy & Security › Local Network."
+        case .blocked(let name):
+            return "\(name ?? "That device") is blocked. Unblock it in Devices to pair with it."
         }
     }
 }

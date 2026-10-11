@@ -659,48 +659,6 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertNotEqual(DeviceLabel.fingerprint(a), DeviceLabel.fingerprint(b))
     }
 
-    func testBlockedRowsSortLastWhateverElseTheySay() {
-        func row(_ id: String, _ name: String?, trusted: Bool, blocked: Bool = false) -> DeviceRow {
-            DeviceRow(deviceId: id, name: name, trusted: trusted, connected: false, addresses: [], pairing: false, lastSeen: nil, nearby: false, blocked: blocked)
-        }
-        let rows = [
-            row("id3", "aardvark", trusted: false, blocked: true),
-            row("id2", "zebra", trusted: false),
-            row("id1", "mid", trusted: true),
-            row("id4", nil, trusted: false, blocked: true),
-        ]
-        XCTAssertEqual(rows.sorted(by: DeviceRow.displayOrder).map(\.deviceId), ["id1", "id2", "id3", "id4"])
-        XCTAssertEqual(rows.reversed().sorted(by: DeviceRow.displayOrder).map(\.deviceId), ["id1", "id2", "id3", "id4"])
-    }
-
-    /// Blocking a device is blocking its KEY: the list is kept across
-    /// restarts, and a copy of the id spelt another way is the same key.
-    func testBlockedKeysPersistAndMatchHoweverTheyAreSpelt() throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cliplink-block-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let id = SoftwareIdentity().publicKeyBase64
-        let other = SoftwareIdentity().publicKeyBase64
-        let store = BlockStore(directory: dir)
-        XCTAssertFalse(store.isBlocked(id))
-        store.block(id, name: "Spammer")
-        store.block(id) // no better name: the one it has stays
-        XCTAssertEqual(store.all, [BlockedDevice(publicKey: id, name: "Spammer")])
-        XCTAssertTrue(store.isBlocked(id))
-        XCTAssertFalse(store.isBlocked(other))
-        XCTAssertFalse(store.isBlocked(""))
-        for copy in [" " + id + "\n", String(id.dropLast(2)), id.replacingOccurrences(of: "A", with: "A ")] {
-            XCTAssertNotEqual(copy, id)
-            XCTAssertTrue(store.isBlocked(copy), copy.debugDescription)
-            XCTAssertTrue(store.snapshot.contains(copy), copy.debugDescription)
-        }
-        XCTAssertEqual(BlockStore(directory: dir).all, store.all, "persisted")
-        store.block(String(id.dropLast(2))) // the same key again: no second entry
-        XCTAssertEqual(store.all.count, 1)
-        store.unblock(" " + id + "\n") // and unblocking finds it by key too
-        XCTAssertFalse(store.isBlocked(id))
-        XCTAssertTrue(BlockStore(directory: dir).all.isEmpty)
-    }
-
     func testDeviceRowsSortByGroupThenNameThenIdOnly() {
         func row(_ id: String, _ name: String?, trusted: Bool, connected: Bool = false, lastSeen: Date? = nil) -> DeviceRow {
             DeviceRow(deviceId: id, name: name, trusted: trusted, connected: connected, addresses: [], pairing: false, lastSeen: lastSeen, nearby: connected)

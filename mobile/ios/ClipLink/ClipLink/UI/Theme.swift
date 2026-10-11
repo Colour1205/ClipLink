@@ -102,11 +102,6 @@ enum Theme {
             ? UIColor.systemGreen.resolvedColor(with: trait)
             : UIColor(hex: 0x1E7F36)
     })
-    /// A blocked device's card: dark gray in the light and the dark theme
-    /// alike, so it reads as switched off at a glance. Its text is light.
-    static let blockedCard = Color(UIColor { trait in
-        trait.userInterfaceStyle == .dark ? UIColor(hex: 0x3A3A3C) : UIColor(hex: 0x48484A)
-    })
 }
 
 extension View {
