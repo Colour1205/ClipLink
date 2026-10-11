@@ -97,18 +97,6 @@
       "value": "保存文件"
     },
     {
-      "name": "kind_text",
-      "value": "文本"
-    },
-    {
-      "name": "kind_image",
-      "value": "图片"
-    },
-    {
-      "name": "kind_file",
-      "value": "文件"
-    },
-    {
       "name": "item_image",
       "value": "图片"
     },
@@ -194,7 +182,7 @@
     },
     {
       "name": "pairing_request_warning",
-      "value": "仅在你确实预期此请求时才接受——正是因为你打开了配对页面，这个请求才能送达。"
+      "value": "仅在你确实预期此请求时才信任。“忽略”只会拒绝这一次请求，对方仍可再次发起；如需阻止其再次请求，请在“设备”页将其屏蔽。"
     },
     {
       "name": "toast_pairing_cancelled",
@@ -219,10 +207,6 @@
     {
       "name": "toast_history_cleared",
       "value": "历史记录已清除。"
-    },
-    {
-      "name": "toast_item_deleted",
-      "value": "项目已删除。"
     },
     {
       "name": "toast_tailscale_saved",
@@ -281,10 +265,6 @@
       "value": "未获得访问授权，请重试。"
     },
     {
-      "name": "toast_clipboard_unchanged",
-      "value": "剪贴板自上次同步后没有变化。"
-    },
-    {
       "name": "toast_unsupported_clipboard",
       "value": "不支持的剪贴板内容：%1$s"
     },
@@ -303,14 +283,6 @@
     {
       "name": "toast_paste_sync_failed",
       "value": "无法同步该内容，请重试。"
-    },
-    {
-      "name": "toast_synced_to_devices",
-      "value": "已将%1$s同步到%2$s。"
-    },
-    {
-      "name": "toast_captured_no_devices",
-      "value": "已获取%1$s——尚无已连接的设备。"
     },
     {
       "name": "toast_self_test_passed",
@@ -345,16 +317,8 @@
       "value": "保存未获授权。"
     },
     {
-      "name": "toast_saved_to_gallery",
-      "value": "已保存到相册。"
-    },
-    {
       "name": "toast_save_image_failed",
       "value": "无法保存图片。"
-    },
-    {
-      "name": "toast_file_saved",
-      "value": "文件已保存。"
     },
     {
       "name": "toast_save_file_failed",
@@ -438,7 +402,7 @@
     },
     {
       "name": "outcome_refused",
-      "value": "%1$s 有响应，但未接受此设备。请在两台设备上设置相同的口令，或打开对方的配对页面（并先处理完那里的其他配对请求），然后重试。"
+      "value": "%1$s 有响应，但未接受此设备。请在两台设备上设置相同的口令，或先处理完对方设备上等待中的配对请求，然后重试。"
     },
     {
       "name": "outcome_silent",
@@ -618,11 +582,11 @@
     },
     {
       "name": "pairing_open_detail",
-      "value": "只有在此页面打开期间，配对请求才能送达此设备，并且只有在你点按此处的“接受”后才会完成——配对时请在两台设备上同时保持此页面打开。离开此页面即关闭配对窗口；不会有任何设备在后台悄悄完成配对。"
+      "value": "两台设备同时打开此页面时，它们会互相发现并发起配对。网络中的设备也可以随时向你发起配对请求，只有你点按“信任”后才会信任对方。离开此页面即停止搜索；不会有任何设备在后台悄悄完成配对。"
     },
     {
       "name": "pairing_scan_hint",
-      "value": "在另一台设备上（并打开其配对页面）扫描此二维码，即可找到本设备。"
+      "value": "在另一台设备上扫描此二维码，即可找到本设备。"
     },
     {
       "name": "pairing_scan_button",
@@ -719,6 +683,142 @@
     {
       "name": "log_empty",
       "value": "暂无日志。"
+    },
+    {
+      "name": "pairing_trust",
+      "value": "信任"
+    },
+    {
+      "name": "pairing_ignore",
+      "value": "忽略"
+    },
+    {
+      "name": "devices_block",
+      "value": "屏蔽"
+    },
+    {
+      "name": "devices_unblock",
+      "value": "取消屏蔽"
+    },
+    {
+      "name": "devices_copy_id",
+      "value": "复制设备 ID"
+    },
+    {
+      "name": "devices_status_blocked",
+      "value": "已屏蔽"
+    },
+    {
+      "name": "toast_unblock_first",
+      "value": "该设备已被屏蔽，请先取消屏蔽。"
+    },
+    {
+      "name": "dialog_block_title",
+      "value": "屏蔽 %1$s？"
+    },
+    {
+      "name": "dialog_block_message",
+      "value": "它将从已配对设备中移除并停止同步。取消屏蔽之前，它无法再次请求配对，也不会显示它的任何内容。"
+    },
+    {
+      "name": "notif_pairing_title",
+      "value": "配对请求"
+    },
+    {
+      "name": "notif_received_title",
+      "value": "来自 %1$s 的新内容"
+    },
+    {
+      "name": "notif_received_key",
+      "value": "密钥或令牌"
+    },
+    {
+      "name": "notif_received_link",
+      "value": "链接"
+    },
+    {
+      "name": "notif_received_text",
+      "value": "文本"
+    },
+    {
+      "name": "me_notify_received_title",
+      "value": "新内容通知"
+    },
+    {
+      "name": "me_notify_received_subtitle",
+      "value": "ClipLink 不在前台时收到新内容，会弹出带简短预览的通知。HarmonyOS 会在你离开应用后不久将其挂起，因此只覆盖离开后的短暂时间。"
+    },
+    {
+      "name": "notif_pairing_text",
+      "value": "%1$s 请求与此设备配对"
+    },
+    {
+      "name": "device_detail_addresses",
+      "value": "可连接的地址"
+    },
+    {
+      "name": "device_detail_no_address",
+      "value": "暂未获知任何地址。在网络中发现该设备后，地址会显示在这里。"
+    },
+    {
+      "name": "device_detail_in_use",
+      "value": "使用中"
+    },
+    {
+      "name": "device_detail_details",
+      "value": "详细信息"
+    },
+    {
+      "name": "device_detail_status",
+      "value": "状态"
+    },
+    {
+      "name": "device_detail_name",
+      "value": "名称"
+    },
+    {
+      "name": "device_detail_name_unknown",
+      "value": "暂未获知"
+    },
+    {
+      "name": "device_detail_fingerprint",
+      "value": "指纹"
+    },
+    {
+      "name": "device_detail_id",
+      "value": "设备 ID"
+    },
+    {
+      "name": "device_detail_pairing_open",
+      "value": "对方的配对页面已打开"
+    },
+    {
+      "name": "synced_preview_none_title",
+      "value": "没有可预览的内容"
+    },
+    {
+      "name": "synced_preview_none_detail",
+      "value": "从列表中选择文本或图片后，会在这里显示。"
+    },
+    {
+      "name": "devices_detail_none_title",
+      "value": "还没有设备"
+    },
+    {
+      "name": "devices_detail_none_detail",
+      "value": "配对设备后，它的详细信息会显示在这里。"
+    },
+    {
+      "name": "file_preview_failed",
+      "value": "无法在此预览该文件，请点击“打开”在其他应用中打开。"
+    },
+    {
+      "name": "file_preview_truncated",
+      "value": "仅显示文件开头部分。"
+    },
+    {
+      "name": "file_preview_open_in_app",
+      "value": "在其他应用中打开"
     }
   ]
 }

@@ -140,8 +140,8 @@ fun ScanScreen(
             CameraPreview(onResult = onResult, onUnavailable = { onUnavailable(CAMERA_UNAVAILABLE_MESSAGE) })
             Spacer(Modifier.height(16.dp))
             Text(
-                "Point the camera at the other device's pairing code. Its own pairing screen " +
-                    "has to be open too - a scan alone can't trust it.",
+                "Point the camera at the other device's pairing code. A scan alone can't trust " +
+                    "it - each device still asks its owner to confirm.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

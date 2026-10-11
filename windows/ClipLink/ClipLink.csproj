@@ -43,6 +43,10 @@
     <PackageReference Include="Microsoft.WindowsAppSDK.Search" Version="2.5.5" ExcludeAssets="all" />
     <PackageReference Include="Microsoft.WindowsAppSDK.Widgets" Version="2.0.5" ExcludeAssets="all" />
     <PackageReference Include="H.NotifyIcon.WinUI" Version="2.4.1" />
+    <!-- Toast notifications with buttons (a pairing request's Trust / Ignore) for
+         an unpackaged, self-contained app: see PairingNotifications.cs for why
+         not the Windows App SDK's own. -->
+    <PackageReference Include="Microsoft.Toolkit.Uwp.Notifications" Version="7.1.3" />
     <PackageReference Include="CommunityToolkit.WinUI.Controls.SettingsControls" Version="8.2.251219" />
     <PackageReference Include="CommunityToolkit.WinUI.Controls.Primitives" Version="8.2.251219" />
     <PackageReference Include="CommunityToolkit.WinUI.Controls.Segmented" Version="8.2.251219" />

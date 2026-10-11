@@ -102,6 +102,7 @@ public sealed partial class ClipLinkEngine : IDisposable
     private IncomingFiles incomingFiles = null!;
     private HistoryAccess historyAccess = null!;
     private TrustStore trustStore = null!;
+    private BlockStore blockStore = null!;
     private PassphraseKeyStore passphraseKeyStore = null!;
     private DeviceNameStore deviceName = null!;
     private ClipboardSync clipboardSync = null!;
@@ -191,6 +192,7 @@ public sealed partial class ClipLinkEngine : IDisposable
             incomingFiles = new IncomingFiles(fileStore);
             historyAccess = new HistoryAccess(label, fileStore, new DeletedEntries(label));
             trustStore = new TrustStore(label);
+            blockStore = new BlockStore(label);
             passphraseKeyStore = new PassphraseKeyStore(label);
             deviceName = new DeviceNameStore(label);
             clipboardSync = new ClipboardSync(fileStore, label);
@@ -438,6 +440,14 @@ public sealed partial class ClipLinkEngine : IDisposable
             // (see SeenPeer).
             RememberBeacon(other_device_id,
                 new SeenPeer(otherName, sender.ToString(), peerAddress, otherPairingOpen, DateTime.UtcNow));
+
+            // A blocked device is listed (so it can be unblocked) and that is
+            // all: no passcode auto-trust, no dial, no pairing.
+            if (blockStore.IsBlocked(other_device_id))
+            {
+                NotifyDevicesChanged();
+                return;
+            }
 
             // auto-trust: if this device wasn't already trusted, but it proved
             // knowledge of the same passphrase we have configured, trust it now —

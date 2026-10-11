@@ -91,6 +91,19 @@ before any real app-building starts.
 9. **Foreground-only lifecycle wiring** — sync triggers on app open/foreground, per the architecture doc; minimal UI (pairing screen, connected/trusted devices, maybe a history view).
 10. **File transfer** (chunking, `FileStore`-equivalent) — deliberately last, since it's the most complex piece and everything before it needs to be solid first.
 
+## Toasts
+
+A toast is for what the screen doesn't already show: a failure, a result with no visible trace ("History cleared.", "Device ID copied.", "Tailscale IP saved."). A success the UI shows by itself gets none: the paste button says nothing on success, nothing new on the clipboard or nobody connected (the new card is the answer), blocking or unblocking a device and deleting an item say nothing, and neither does a save to the gallery or to a file - the system's own dialog or picker has just been in front of the user. A share into ClipLink only toasts when something was skipped, nobody is connected, or nothing was shared. Add a toast only if the user couldn't otherwise tell what happened. (Android follows the same rule, and skips "Copied." from Android 13 on, where the system shows its own.)
+
+## Notifications
+
+Two local notifications (`notificationManager`, `Index.ets`), both posted only while the app is out of view (`appVisible`, set by `onPageShow` / `onPageHide`):
+
+- A pairing request that arrives while the app is out of view, with Trust and Ignore buttons (see `networking/PairingActions.ets`).
+- Items from other devices (`notifyReceivedItem`), if Me > **Notify about new items** is on (on by default): "New from <device>" for the first, "3 new items synced" after. There is one notification, replaced as more arrive and cleared by `onPageShow`, so opening the app starts the count over. Only an item new to the list counts (`alreadyListed`), and only one from a peer. The text is the same as the iOS notification's, since it can sit on the lock screen: a key or token is "Key or token", a link is its host, text is its first line cut at 60 characters, an image is "Image", a file is its name.
+- **Both use `SlotType.SERVICE_INFORMATION`.** Without `notificationSlotType` a notification goes to the default slot, `OTHER_TYPES`, which the system folds into the shade's "more notifications" at the bottom and never shows as a banner: it did arrive, nobody saw it. `SERVICE_INFORMATION` (level 4, banner, lock screen, vibration) lands at the top of the shade. A phone in Sleep mode still mutes the banner and sound.
+- **Only while the process runs.** HarmonyOS freezes an app within seconds of leaving the screen (this app has no continuous task; see the ACL notes), so an item sent later is listed when the app is next opened, not announced. Checked on a device: an item sent a second after leaving the app was announced; one sent 15 seconds later never reached it (the connection was reset). `netLog` writes `new-item notification: ...` lines under the `ClipLinkNet` hilog tag, and the Activity log gets a line if the notification couldn't be shown.
+
 ## Share to ClipLink
 
 ClipLink appears in the system share panel (Gallery, Files, a browser's Share...). `entry/src/main/module.json5` gives `EntryAbility` a second skill (`ohos.want.action.sendData`, `general.object` + `general.file`, up to 50 files). No permission is needed.
@@ -110,6 +123,64 @@ ClipLink appears in the system share panel (Gallery, Files, a browser's Share...
 **Missing file bytes**: every peer that connects is sent a `file_request` for each history file whose bytes aren't in `FileStore` (`SyncManager.requestMissingFiles`), not only the items received this run, so a file whose stream was cut off, failed its hash check or never came (the app killed mid-transfer) is fetched later. A file whose stream fails or is cut off is asked for again from the peers still connected, at most 3 times (`requestAgain`, the same cap as Android's `MAX_RETRIES`, so a sender with a bad copy isn't asked forever); after that, only a peer connecting asks again.
 
 **Tests**: `entry/src/test` holds local unit tests (hypium) for the pieces that touch no socket or file: `LineFramer`, `ChunkOrder` (`file_chunk` ordering), `safeFileName`, the own-identity key comparison and the echo guard's nonce key (`nonceKey`). They run on the PC, with no device: `hvigorw --mode module -p module=entry@default -p product=default test`. Read the results in `entry/.test/default/intermediates/test/coverage_data/test_result.txt`, since the task reports BUILD SUCCESSFUL even when a test fails. The host runtime stubs the system APIs (its `util.Base64Helper` encodes everything to `''` and decodes everything to no bytes), so a test that needs the real one only checks something on a device.
+
+## Tablets and wide windows
+
+The pages follow the window's size, not the device: `windowWidthVp`/`windowHeightVp` are kept by the
+window's `windowSizeChange` listener (`Index.ets`), so rotating, split screen and a resized free window
+all re-lay the page out. What follows is the OS API for each job (Huawei's multi-device "responsive
+layout" and "page layout scenarios" guides), not hand-rolled layout.
+
+- **A list beside its detail.** `isSplitLayout()` is the guide's single/double-column rule: the window
+  at least 600vp wide and no taller than 1.2 times its width (what
+  `NavigationMode.AUTO_WITH_ASPECT_RATIO` applies). Then Synced and Devices are an `HdsNavigation` in
+  `NavigationMode.Split` - the cards (or devices) are its navigation bar on the left, the preview (or
+  the device's detail) is its one route on the right, with a draggable divider (`navBarWidthRange`).
+  A tap only selects: nothing is pushed. The selected card gets a constant-width 2vp border (only its
+  colour changes - a border that came and went resized the card and reshuffled the grid). Devices
+  shows its first device until one is selected; Synced shows the newest item. Narrower windows
+  (a phone, a tablet held upright) keep the original one-column list -> pushed detail stack, which is a
+  separate composition (`syncedOneColumnTab`, `devicesOneColumnTab`), so the phone layout is
+  unchanged. The shared `geometryTransition` id is cleared in the split (`gtId`), where card and
+  preview are on screen together.
+- **Columns by width.** The Synced list is `List.lanes({ minLength, maxLength })`: as many lanes as fit,
+  each 400-640vp, so its cards are wide enough to show more text. The grid is a `WaterFlow`; its column
+  count is the number of 200vp columns that fit the pane's *measured* width (`onAreaChange`), shared
+  out evenly, and two on a phone. (`columnsTemplate(ItemFillPolicy)` and `repeat(auto-fill, n)` also
+  count columns by width, but the first gives 5 columns even in a narrow pane and the second leaves
+  the remainder empty at the edge.)
+- **Me.** One column on a phone; on a wide window a `WaterFlow` of the sections (2 columns under 1100vp,
+  3 above) so tall and short sections pack without gaps. The sub-screens (pairing, passcode, ...) are
+  capped at 680vp and centred.
+- **Files.** Tapping a file opens its preview first (never another app): a PDF is rendered in the app
+  with PDF Kit's `PdfView`, a plain-text file is read, anything else shows a card with its name and
+  size. Open (title bar) hands it to another app. The store keeps files by the hash of their bytes
+  (no name, no extension), so Share and Open work on a copy under the file's real name,
+  `<cache>/named/<hash>/<name>` (`namedFileUri`, cleared at start) and give the share sheet the type
+  its extension implies.
+
+## Long-press menus: cards go solid while pressed
+
+Cards are filled with the "Card transparency" slider's value (default 35%, the same on every platform
+that has the slider). A long-press menu on a card (`bindContextMenu` with
+`preview: MenuPreviewMode.IMAGE`) lifts a *snapshot* of the card and draws it over the original, which
+stays where it is. A snapshot of a see-through card lets the original show through it: the text twice,
+a few pixels apart, a doubled button, a doubled type chip. So a card must be **solid from the moment it
+is touched until its menu closes**, and back to the slider's value afterwards:
+
+- `cardFillFor(key)` is the fill to use for a card's own background (not `cardFill()`): the solid
+  `cardSurface()` when `pressedCardKey` or `menuCardKey` is that card's key, else `cardFill()`.
+- `cardTouch(key, event)` on the card's `onTouch` sets `pressedCardKey` on the finger going down and
+  clears it on up/cancel (a scroll or drag taking over the touch cancels) or when the finger moves more
+  than `CARD_PRESS_MOVE_SLOP_VP`. It is set on touch-down, not after a delay, so the snapshot - taken
+  when the long press fires - is already solid. The cost is that a card flashes solid when a scroll
+  starts on it, until the finger moves.
+- The menu's `aboutToAppear`/`onDisappear` set and clear `menuCardKey`, so the original under the lifted
+  card is solid while the menu is open too.
+- The key is the item's id for a Synced card, `deviceCardKey(deviceId)` for a device card.
+
+**Any new card with a long-press menu must do all three** (fill, `onTouch`, the two menu callbacks), or
+it leaks again. The three-dots menu (`bindMenu`) has no lifted card and needs none of this.
 
 ## Languages
 

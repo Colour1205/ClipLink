@@ -6,6 +6,7 @@ import io.uaena.cliplink.core.DeviceIdentity
 import io.uaena.cliplink.core.LineReader
 import io.uaena.cliplink.core.describeError
 import io.uaena.cliplink.core.toHex
+import io.uaena.cliplink.store.BlockCheck
 import io.uaena.cliplink.store.PassphraseKeyStore
 import io.uaena.cliplink.store.TrustStore
 import kotlinx.coroutines.CancellationException
@@ -56,9 +57,9 @@ class PeerConnection private constructor(
     override val peerName: String?,
     /**
      * False means this peer was not in the trust store when the handshake
-     * ran, and the connection exists only because pairing mode was open. The
-     * caller MUST surface an explicit accept/reject prompt rather than hand
-     * it to the sync manager like an ordinary trusted link.
+     * ran and no passcode proof vouched for it: it is a stranger asking to
+     * pair. The caller MUST surface an explicit trust/ignore prompt rather
+     * than hand it to the sync manager like an ordinary trusted link.
      */
     val wasAlreadyTrusted: Boolean,
     /**
@@ -308,16 +309,23 @@ class PeerConnection private constructor(
          * throws, matching CreateAsync's contract on the Windows side - and
          * "never" includes Errors: the first line comes from a stranger.
          *
-         * [pairingModeOpen] must be a live "I am at the pairing screen right
-         * now" signal, not a setting. With it false, an untrusted peer is
-         * refused before this even spends effort verifying their signature.
-         * With it true, the handshake completes so the caller can show an
-         * accept/reject prompt. A verifying passphrase proof is a second,
-         * independent way in, exactly as the LAN beacon's passive auto-trust
-         * already is.
+         * An untrusted peer's handshake completes - once its signature
+         * verifies - so the caller can ask the user, as a dialog or a
+         * notification, whether to trust it. Nothing is trusted by that: the
+         * caller gets a connection that is not yet registered, and only the
+         * user's Trust makes it one. (This used to need the pairing screen
+         * open; a request now reaches the device whenever it is running.) A
+         * verifying passphrase proof is a second way in, which needs no
+         * question at all. Only a blocked key is turned away outright.
          *
          * [ownName] is this device's display name as it should go out in the
          * handshake, or null to leave the field off.
+         *
+         * [isBlocked] is asked about the peer's claimed key as soon as it is
+         * read, before trust, a passcode proof or pairing mode is looked at: a
+         * blocked device gets nothing, however it got here. (It has already
+         * been sent our handshake line - an acceptor writes first - which is
+         * only a public key and a signature.)
          *
          * Not cancellable once started: the handshake blocks in socket reads
          * that a cancellation can't interrupt, and a caller that was cancelled
@@ -329,11 +337,11 @@ class PeerConnection private constructor(
             identity: DeviceIdentity,
             trustStore: TrustStore,
             passphraseKeyStore: PassphraseKeyStore,
-            pairingModeOpen: Boolean,
             ownName: String?,
+            isBlocked: BlockCheck = BlockCheck { false },
         ): PeerConnection? = withContext(Dispatchers.IO + NonCancellable) {
             val connection = try {
-                handshake(socket, identity, trustStore, passphraseKeyStore, pairingModeOpen, ownName)
+                handshake(socket, identity, trustStore, passphraseKeyStore, ownName, isBlocked)
             } catch (e: Throwable) {
                 null
             }
@@ -356,8 +364,8 @@ class PeerConnection private constructor(
             identity: DeviceIdentity,
             trustStore: TrustStore,
             passphraseKeyStore: PassphraseKeyStore,
-            pairingModeOpen: Boolean,
             ownName: String?,
+            isBlocked: BlockCheck,
         ): PeerConnection? {
             socket.tcpNoDelay = true
             // One deadline for the whole thing, not one per read: a peer that
@@ -406,6 +414,10 @@ class PeerConnection private constructor(
             // Windows does.
             if (DeviceIdentity.isSameKey(theirs.identityPublicKey, myIdentityPublicKey)) return null
 
+            // Before trust, the passcode proof and pairing mode: a blocked
+            // device is never let in by any of them.
+            if (isBlocked.isBlocked(theirs.identityPublicKey)) return null
+
             val alreadyTrusted = trustStore.isTrusted(theirs.identityPublicKey)
             val passphraseVerified = !alreadyTrusted && myKey != null &&
                 passphraseKeyStore.verifyProof(
@@ -414,12 +426,9 @@ class PeerConnection private constructor(
                     theirs.passphraseProof,
                 )
             val effectivelyTrusted = alreadyTrusted || passphraseVerified
-            if (!effectivelyTrusted && !pairingModeOpen) {
-                // Not someone we trust or can auto-trust, and we aren't
-                // expecting to pair - refuse before doing any more work.
-                return null
-            }
-
+            // Not someone we trust or can auto-trust is no longer refused here:
+            // it becomes a pairing request (wasAlreadyTrusted = false) that the
+            // user answers. Its signature still has to verify below.
             val theirEphemeralBytes = B64.decodeOrNull(theirs.ephemeralPublicKey) ?: return null
             val theirSignature = B64.decodeOrNull(theirs.signature) ?: return null
             if (!DeviceIdentity.verifyRawSignature(

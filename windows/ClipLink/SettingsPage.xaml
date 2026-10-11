@@ -105,6 +105,16 @@
                                       Toggled="ShareMenuToggle_Toggled" />
                     </controls:SettingsCard>
 
+                    <controls:SettingsCard Header="Notify me about new items"
+                                           Description="Shows a Windows notification when something arrives from another device while ClipLink isn't in front. It shows a short preview - never a key, or a link's full address.">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xEA8F;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <ToggleSwitch x:Name="NotifyReceivedToggle" OnContent="On" OffContent="Off"
+                                      AutomationProperties.Name="Notify me about new items"
+                                      Toggled="NotifyReceivedToggle_Toggled" />
+                    </controls:SettingsCard>
+
                     <!-- Synced history -->
                     <TextBlock Text="Synced history" Style="{StaticResource SectionHeader}" />
                     <controls:SettingsCard Header="Clear synced history"

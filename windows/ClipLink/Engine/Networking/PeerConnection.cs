@@ -41,8 +41,8 @@ public class PeerConnection
     public string PeerDeviceId { get; }
 
     // False means this peer wasn't in the trust store when the handshake
-    // ran, and the connection only exists at all because pairingModeOpen
-    // was true (see CreateAsync's relaxed gate below). Callers MUST treat
+    // ran and its passcode proof (if any) didn't verify: the connection only
+    // exists so the user can be asked (see CreateAsync). Callers MUST treat
     // this as a live pairing candidate — show an explicit accept/reject
     // prompt fed by this already signature-verified PeerDeviceId — rather
     // than handing it straight to normal message processing.
@@ -61,6 +61,11 @@ public class PeerConnection
     // the handshake's signature: shown right away, but only stored once
     // SessionProven fires.
     public string? PeerDeviceName { get; }
+
+    // The address this connection runs over, read when it was created (the
+    // socket may be closed by the time anyone asks): what the Devices list
+    // shows for a connected device. Null if it couldn't be read.
+    public string? RemoteAddress { get; }
 
     public event Action<string>? MessageReceived;
     public event Action? Disconnected;
@@ -97,28 +102,36 @@ public class PeerConnection
         WasAlreadyTrusted = wasAlreadyTrusted;
         NewlyTrustedViaPassphrase = newlyTrustedViaPassphrase;
         PeerDeviceName = peerDeviceName;
+        try
+        {
+            RemoteAddress = (client.Client.RemoteEndPoint as System.Net.IPEndPoint)?.Address.ToString();
+        }
+        catch (Exception)
+        {
+            // already closed or disposed - no address to show
+        }
     }
 
     // Performs the authenticated ECDH handshake described in HandshakeMessage.cs.
-    // Returns null (never throws for a bad peer, or an untrusted one that's
-    // neither pairing-mode-eligible nor passphrase-verified) if the
-    // handshake fails or the signature doesn't verify — callers should just
+    // Returns null (never throws for a bad peer) if the handshake fails, the
+    // signature doesn't verify, or the peer is blocked — callers should just
     // close the socket and move on.
     //
-    // pairingModeOpen: true only while the local app's pairing screen is
-    // open (mirrors HarmonyOS's Index.ets pairingOpen) — a live, explicit
-    // "I'm expecting to pair right now" signal. Without it, an untrusted
-    // peer is refused exactly as before (same early-bail, no wasted
-    // signature verification) UNLESS their handshake carries a passphrase
-    // proof that verifies against passphraseKeyStore (see
-    // NewlyTrustedViaPassphrase) - a second, independent way in, same as
-    // the LAN beacon's passive auto-trust already is regardless of pairing
-    // mode. With pairingModeOpen true, the handshake completes fully for a
-    // live accept/reject prompt instead - both sides need this true on
-    // their OWN behalf for a NEW pairing to succeed that way, since each
-    // independently runs this same check over the same connection; the
-    // caller who gets back WasAlreadyTrusted=false is responsible for a
-    // local accept/reject prompt before writing trust.
+    // An untrusted peer's handshake completes once its signature verifies, so
+    // the user can be asked, as a dialog or a notification, whether to trust
+    // it: the caller who gets back WasAlreadyTrusted=false is responsible for
+    // that Trust/Ignore prompt before writing trust, and nothing is trusted
+    // by the connection merely existing. (This used to need the pairing
+    // screen open; a request now reaches this PC whenever it is running.) A
+    // handshake whose passcode proof verifies against passphraseKeyStore
+    // (NewlyTrustedViaPassphrase) is trusted without a question, the same as
+    // the LAN beacon's passive auto-trust.
+    //
+    // isBlocked is asked about the peer's claimed key as soon as it is read,
+    // before trust, the passcode proof or anything else: a blocked device
+    // gets nothing, however it got here. (It has already been sent this
+    // side's handshake line, an acceptor writes first - only a public key
+    // and a signature.)
     //
     // myDeviceName is this device's display name, sent in the handshake's
     // DeviceName (the caller reads it fresh, so a rename applies to the next
@@ -127,7 +140,7 @@ public class PeerConnection
     // A handshake carrying this device's own identity is always refused
     // (null); answeredAsSelf, if given, is called first, so a caller that
     // dialled an address can tell "that's this device" from a refusal.
-    public static async Task<PeerConnection?> CreateAsync(TcpClient client, DeviceIdentity myIdentity, TrustStore trustStore, bool pairingModeOpen, PassphraseKeyStore passphraseKeyStore, string? myDeviceName = null, Action? answeredAsSelf = null)
+    public static async Task<PeerConnection?> CreateAsync(TcpClient client, DeviceIdentity myIdentity, TrustStore trustStore, PassphraseKeyStore passphraseKeyStore, string? myDeviceName = null, Action? answeredAsSelf = null, Func<string, bool>? isBlocked = null)
     {
         Stream stream = client.GetStream();
         var reader = new StreamReader(stream);
@@ -175,17 +188,20 @@ public class PeerConnection
             return null;
         }
 
+        // Before trust, the passcode proof and anything else: a blocked device
+        // is never let in by any of them.
+        if (isBlocked != null && isBlocked(theirHandshake.IdentityPublicKey)) return null;
+
         bool alreadyTrusted = trustStore.IsTrusted(theirHandshake.IdentityPublicKey);
         bool passphraseVerified = false;
         if (!alreadyTrusted && myKey != null && theirHandshake.PassphraseProof != null)
         {
             passphraseVerified = PassphraseAuth.VerifyProof(myKey, theirHandshake.IdentityPublicKey, theirHandshake.PassphraseProof);
         }
+        // Not a device we trust or can auto-trust is no longer refused here:
+        // it becomes a pairing request (WasAlreadyTrusted = false) that the
+        // user answers. Its signature still has to verify below.
         bool effectivelyTrusted = alreadyTrusted || passphraseVerified;
-        if (!effectivelyTrusted && !pairingModeOpen)
-        {
-            return null; // not a device we trust or can auto-trust, and not expecting to pair right now — refuse outright
-        }
 
         byte[] theirEphemeralPublicKeyBytes;
         byte[] theirSignature;

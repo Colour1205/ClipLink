@@ -93,10 +93,26 @@ data class DeviceRow(
      * whole Devices screen for nothing.
      */
     val lastSeenAtMs: Long?,
+    /**
+     * On the network as far as this device can tell: connected, or heard from
+     * within the listing window. A trusted device that is neither is offline.
+     * Unlike [lastSeenAtMs] it is part of the row's identity - it flips rarely
+     * (once, when a device goes quiet) and the list has to be redrawn when it
+     * does, which a flow dropping "equal" lists would otherwise swallow.
+     */
+    val online: Boolean = connected,
+    /** Blocked here: no request from it is shown and it is never dialled. It stays listed so it can be unblocked. */
+    val blocked: Boolean = false,
+    /**
+     * The address the live connection is using, when there is one - the one
+     * address the card shows. The full list is [addresses], on the detail screen.
+     */
+    val connectedAddress: String? = null,
 ) {
     override fun equals(other: Any?): Boolean =
         other is DeviceRow && deviceId == other.deviceId && name == other.name && trusted == other.trusted &&
-            connected == other.connected && addresses == other.addresses && pairing == other.pairing
+            connected == other.connected && addresses == other.addresses && pairing == other.pairing &&
+            online == other.online && blocked == other.blocked && connectedAddress == other.connectedAddress
 
     override fun hashCode(): Int {
         var result = deviceId.hashCode()
@@ -105,6 +121,9 @@ data class DeviceRow(
         result = 31 * result + connected.hashCode()
         result = 31 * result + addresses.hashCode()
         result = 31 * result + pairing.hashCode()
+        result = 31 * result + online.hashCode()
+        result = 31 * result + blocked.hashCode()
+        result = 31 * result + (connectedAddress?.hashCode() ?: 0)
         return result
     }
 
@@ -115,14 +134,16 @@ data class DeviceRow(
 
     companion object {
         /**
-         * Trusted first, then discovered; within each, named devices by name
-         * (case-insensitive), unnamed ones after them; the id breaks every
-         * tie. Deliberately nothing that changes on its own - not last-seen
-         * time, not connection state, not arrival order - so a beacon or a
-         * link coming up never moves a row out from under the user's thumb.
+         * Blocked devices last, out of the way; trusted first, then
+         * discovered; within each, named devices by name (case-insensitive),
+         * unnamed ones after them; the id breaks every tie. Deliberately
+         * nothing that changes on its own - not last-seen time, not
+         * connection state, not arrival order - so a beacon or a link coming
+         * up never moves a row out from under the user's thumb.
          */
         val STABLE_ORDER: Comparator<DeviceRow> =
-            compareByDescending<DeviceRow> { it.trusted }
+            compareBy<DeviceRow> { it.blocked }
+                .thenByDescending { it.trusted }
                 .thenBy { it.name == null }
                 .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name.orEmpty() }
                 .thenBy { it.deviceId }

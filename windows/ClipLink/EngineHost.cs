@@ -44,6 +44,8 @@ public sealed class EngineHost : Observable
     // stable order.
     public ObservableCollection<DeviceRow> PairedDevices { get; } = new();
     public ObservableCollection<DeviceRow> NearbyDevices { get; } = new();
+    // Blocked ones, listed last so they can be unblocked.
+    public ObservableCollection<DeviceRow> BlockedDevices { get; } = new();
 
     public EngineStatus Status { get; private set; } = new(EngineState.NotStarted, null);
 
@@ -64,7 +66,8 @@ public sealed class EngineHost : Observable
     public bool HistoryIsEmpty => History.Count == 0;
     public bool HasPairedDevices => PairedDevices.Count > 0;
     public bool HasNearbyDevices => NearbyDevices.Count > 0;
-    public bool HasNoDevices => PairedDevices.Count == 0 && NearbyDevices.Count == 0;
+    public bool HasBlockedDevices => BlockedDevices.Count > 0;
+    public bool HasNoDevices => PairedDevices.Count == 0 && NearbyDevices.Count == 0 && BlockedDevices.Count == 0;
 
     // The Devices page's pairing view is showing (so pairing mode is on).
     public bool PairingUiActive { get; private set; }
@@ -144,22 +147,34 @@ public sealed class EngineHost : Observable
         Raise(nameof(Status), nameof(IsFaulted), nameof(HasWarning), nameof(ConnectionSummary));
     }
 
+    // Items that came from other devices and weren't in History before: what
+    // arrived since the last reload (newest first). Never raised for the
+    // first load, nor for this PC's own copies.
+    public event Action<IReadOnlyList<HistoryItem>>? ItemsArrived;
+
+    private bool historyLoaded;
+
     private void ReloadHistory()
     {
         var items = Engine.GetHistory();
+        var known = new HashSet<string>(History.Select(card => card.Key));
+        var arrived = historyLoaded ? items.Where(item => !item.FromThisDevice && !known.Contains(item.Key)).ToList() : new List<HistoryItem>();
+        historyLoaded = true;
         SyncByKey(History, items, card => card.Key, item => item.Key, item => new HistoryCard(item), (card, item) => card.Update(item));
         foreach (var card in History)
         {
             if (card.IsImage && !card.ThumbnailRequested) _ = LoadThumbnailAsync(card);
         }
         Raise(nameof(HistoryIsEmpty));
+        if (arrived.Count > 0) ItemsArrived?.Invoke(arrived);
     }
 
     private void ApplyDevices(IReadOnlyList<DeviceListing> devices)
     {
-        SyncByKey(PairedDevices, devices.Where(d => d.Trusted).ToList(), row => row.PublicKey, d => d.PublicKey, d => new DeviceRow(d), (row, d) => row.Update(d));
-        SyncByKey(NearbyDevices, devices.Where(d => !d.Trusted).ToList(), row => row.PublicKey, d => d.PublicKey, d => new DeviceRow(d), (row, d) => row.Update(d));
-        Raise(nameof(ConnectedCount), nameof(ConnectionSummary), nameof(HasPairedDevices), nameof(HasNearbyDevices), nameof(HasNoDevices));
+        SyncByKey(PairedDevices, devices.Where(d => d.Trusted && !d.Blocked).ToList(), row => row.PublicKey, d => d.PublicKey, d => new DeviceRow(d), (row, d) => row.Update(d));
+        SyncByKey(NearbyDevices, devices.Where(d => !d.Trusted && !d.Blocked).ToList(), row => row.PublicKey, d => d.PublicKey, d => new DeviceRow(d), (row, d) => row.Update(d));
+        SyncByKey(BlockedDevices, devices.Where(d => d.Blocked).ToList(), row => row.PublicKey, d => d.PublicKey, d => new DeviceRow(d), (row, d) => row.Update(d));
+        Raise(nameof(ConnectedCount), nameof(ConnectionSummary), nameof(HasPairedDevices), nameof(HasNearbyDevices), nameof(HasBlockedDevices), nameof(HasNoDevices));
         // The cards show device names too, which may have just changed.
         ReloadHistory();
     }

@@ -66,6 +66,9 @@ public sealed partial class SettingsPage : Page
             loadingToggle = false;
         }
         UpdateShareMenuToggle();
+        loadingToggle = true;
+        NotifyReceivedToggle.IsOn = App.Settings.NotifyReceivedItems;
+        loadingToggle = false;
     }
 
     private static string ComputerName()
@@ -248,6 +251,13 @@ public sealed partial class SettingsPage : Page
             SignInToggle.IsOn = !on;
             loadingToggle = false;
         }
+    }
+
+    private void NotifyReceivedToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (loadingToggle) return;
+        App.Settings.NotifyReceivedItems = NotifyReceivedToggle.IsOn;
+        App.Settings.Save();
     }
 
     private void UpdateShareMenuToggle()

@@ -10,6 +10,15 @@
       ]
     },
     {
+      "name": "notif_received_many_title",
+      "value": [
+        {
+          "quantity": "other",
+          "value": "已同步 %d 项新内容"
+        }
+      ]
+    },
+    {
       "name": "devices_count",
       "value": [
         {

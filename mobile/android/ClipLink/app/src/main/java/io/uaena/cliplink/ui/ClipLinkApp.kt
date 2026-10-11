@@ -81,6 +81,9 @@ data class AppActions(
     val me: MeActions,
     val onTrust: (DeviceRow) -> Unit,
     val onUntrust: (DeviceRow) -> Unit,
+    val onBlock: (DeviceRow) -> Unit,
+    val onUnblock: (DeviceRow) -> Unit,
+    val onCopyDeviceId: (DeviceRow) -> Unit,
     val onPairingOpenChange: (Boolean) -> Unit,
     val onPair: (String) -> Unit,
     val onAcceptPairing: () -> Unit,
@@ -102,6 +105,8 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
     // never as the item itself: a file that finishes arriving while it is open
     // shows as arrived, and the key is something a Bundle can hold.
     var detailKey by rememberSaveable { mutableStateOf<String?>(null) }
+    // The open device, held the same way: by id, looked up in the live list.
+    var deviceDetailId by rememberSaveable { mutableStateOf<String?>(null) }
     var scanning by rememberSaveable { mutableStateOf(false) }
     // Hoisted up here rather than remembered inside SyncedScreen itself -
     // that screen gets swapped out of composition entirely (this file's
@@ -123,17 +128,27 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
     val deviceNames = remember(state.devices) { state.devices.associate { it.deviceId to it.name } }
     val items = remember(state.items) { keyedItems(state.items) }
     val detail = detailKey?.let { key -> items.firstOrNull { it.key == key } }
+    val deviceDetail = deviceDetailId?.let { id -> state.devices.firstOrNull { it.deviceId == id } }
 
-    // Pairing mode is a live signal, not a setting: an untrusted peer can only
-    // complete a handshake while this screen is actually open, so it has to be
-    // flipped on the way in and off on every way out (leaving the app is
-    // MainActivity's: no composition runs while it is stopped).
+    // A device that left the list while its screen was open (a discovered one
+    // that went quiet, or one just removed that was never heard): close the
+    // screen, and forget the id so it cannot jump open if the device returns.
+    LaunchedEffect(deviceDetailId, deviceDetail) {
+        if (deviceDetailId != null && deviceDetail == null) deviceDetailId = null
+    }
+
+    // Pairing mode is a live signal, not a setting: this device advertises it
+    // and dials strangers that advertise it only while this screen is actually
+    // open, so it has to be flipped on the way in and off on every way out
+    // (leaving the app is MainActivity's: no composition runs while it is
+    // stopped).
     //
     // Only real transitions are reported. The first composition of a fresh
     // Activity (after a rotation, say) used to report "closed" whenever the
-    // screen wasn't open, and closing is what rejects a pending pairing
-    // request and drops its connection - for nothing having changed. An open
-    // screen is still reported at once: that is a recreation restoring it.
+    // screen wasn't open - a change nobody made. An open screen is still
+    // reported at once: that is a recreation restoring it. (Whether the screen
+    // is open only decides what this device advertises and dials; a pairing
+    // request reaches it either way.)
     var reportedPairing by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(pairing) {
         val before = reportedPairing
@@ -148,10 +163,11 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
         }
     }
 
-    BackHandler(enabled = scanning || detail != null || pairing) {
+    BackHandler(enabled = scanning || detail != null || deviceDetail != null || pairing) {
         when {
             scanning -> scanning = false
             detail != null -> detailKey = null
+            deviceDetail != null -> deviceDetailId = null
             else -> pairing = false
         }
     }
@@ -163,7 +179,7 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
             // own back affordance, and leaving a tab bar visible invites
             // tapping it mid-pairing, which silently cancels the pairing
             // window the other device is waiting on.
-            if (detail == null && !pairing && !scanning) {
+            if (detail == null && deviceDetail == null && !pairing && !scanning) {
                 ShortNavigationBar {
                     Tab.entries.forEach { entry ->
                         ShortNavigationBarItem(
@@ -205,7 +221,7 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
             val exitFade = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
 
             AnimatedContent(
-                targetState = Screen.of(scanning, detail != null, pairing, tab),
+                targetState = Screen.of(scanning, detail != null, deviceDetail != null, pairing, tab),
                 transitionSpec = {
                     (fadeIn(enterFade) + scaleIn(enterScale, initialScale = 0.96f)) togetherWith
                         (fadeOut(exitFade) + scaleOut(exitFade, targetScale = 1.02f)) using
@@ -231,6 +247,19 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
                                     actions.synced.onDelete(item)
                                     detailKey = null
                                 },
+                            )
+                        }
+
+                        Screen.DeviceDetail -> deviceDetail?.let { opened ->
+                            DeviceDetailScreen(
+                                device = opened,
+                                contentPadding = padding,
+                                onBack = { deviceDetailId = null },
+                                onTrust = { actions.onTrust(opened) },
+                                onUntrust = { actions.onUntrust(opened) },
+                                onBlock = { actions.onBlock(opened) },
+                                onUnblock = { actions.onUnblock(opened) },
+                                onCopyId = { actions.onCopyDeviceId(opened) },
                             )
                         }
 
@@ -271,8 +300,11 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
                         Screen.Devices -> DevicesScreen(
                             devices = state.devices,
                             contentPadding = padding,
+                            onOpen = { deviceDetailId = it.deviceId },
                             onTrust = actions.onTrust,
                             onUntrust = actions.onUntrust,
+                            onBlock = actions.onBlock,
+                            onUnblock = actions.onUnblock,
                             onAdd = { pairing = true },
                         )
 
@@ -298,28 +330,34 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
                 }
             }
 
-            state.pairingRequest?.let { request ->
-                PairingPromptCard(
-                    request = request,
-                    onAccept = actions.onAcceptPairing,
-                    onReject = actions.onRejectPairing,
-                    modifier = Modifier
-                        .align(androidx.compose.ui.Alignment.BottomCenter)
-                        .padding(16.dp)
-                        .padding(bottom = padding.calculateBottomPadding()),
-                )
-            }
         }
+    }
+
+    // A modal over whatever is open - not a page of its own. (With the app out
+    // of view, the same two answers come from a notification.)
+    state.pairingRequest?.let { request ->
+        PairingRequestDialog(
+            request = request,
+            onTrust = actions.onAcceptPairing,
+            onIgnore = actions.onRejectPairing,
+        )
     }
 }
 
 private enum class Screen {
-    Scan, Detail, Pairing, Synced, Devices, Me;
+    Scan, Detail, DeviceDetail, Pairing, Synced, Devices, Me;
 
     companion object {
-        fun of(scanning: Boolean, hasDetail: Boolean, pairing: Boolean, tab: Tab): Screen = when {
+        fun of(
+            scanning: Boolean,
+            hasDetail: Boolean,
+            hasDeviceDetail: Boolean,
+            pairing: Boolean,
+            tab: Tab,
+        ): Screen = when {
             scanning -> Scan
             hasDetail -> Detail
+            hasDeviceDetail -> DeviceDetail
             pairing -> Pairing
             tab == Tab.Devices -> Devices
             tab == Tab.Me -> Me

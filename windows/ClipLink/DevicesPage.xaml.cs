@@ -34,11 +34,20 @@ public sealed partial class DevicesPage : Page
         {
             App.MainAppWindow.OnScreenChanged += UpdatePairingMode;
             UpdatePairingMode();
+            // A device's detail view follows its row: renamed, connected,
+            // blocked, gone.
+            host.PairedDevices.CollectionChanged += Devices_Changed;
+            host.NearbyDevices.CollectionChanged += Devices_Changed;
+            host.BlockedDevices.CollectionChanged += Devices_Changed;
         };
         Unloaded += (_, _) =>
         {
             // Navigated to another page: back to the list, pairing off.
             App.MainAppWindow.OnScreenChanged -= UpdatePairingMode;
+            host.PairedDevices.CollectionChanged -= Devices_Changed;
+            host.NearbyDevices.CollectionChanged -= Devices_Changed;
+            host.BlockedDevices.CollectionChanged -= Devices_Changed;
+            CloseDetail();
             ShowPairView(false);
         };
         QrCard.SizeChanged += (_, e) => LayOutQrCard(e.NewSize.Width);
@@ -46,6 +55,12 @@ public sealed partial class DevicesPage : Page
 
     private void Escape_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
+        if (detailKey != null)
+        {
+            CloseDetail();
+            args.Handled = true;
+            return;
+        }
         if (!pairViewOpen) return;
         ShowPairView(false);
         args.Handled = true;
@@ -240,17 +255,19 @@ public sealed partial class DevicesPage : Page
         PairOutcome.PairedByPasscode => (InfoBarSeverity.Success, "Paired.",
             "Both devices have the same passcode, so they trust each other. Syncing now."),
         PairOutcome.Pending => (InfoBarSeverity.Informational, "Found it.",
-            "Accept the pairing request here, and on the other device too."),
+            "Trust the pairing request here, and on the other device too."),
         PairOutcome.Busy => (InfoBarSeverity.Warning, "Another request is waiting.",
-            "Accept or reject that one first, then try again."),
+            "Trust or ignore that one first, then try again."),
         PairOutcome.Refused => (InfoBarSeverity.Error, "The other device said no.",
-            "Open its pairing screen too (or give both the same passcode), then try again."),
+            "It may have blocked this PC. Otherwise try again, or give both devices the same passcode."),
         PairOutcome.Unreachable => (InfoBarSeverity.Error, "Nothing answered.",
             "Check the address, that ClipLink is running there, and that both devices are on the same network or on Tailscale."),
         PairOutcome.InvalidAddress => (InfoBarSeverity.Error, "That isn't an address.",
             "Enter an IP address or host name (a port after a colon if it isn't 49000), or paste the other device's pairing info."),
         PairOutcome.ThisDevice => (InfoBarSeverity.Warning, "That's this PC.",
             "Enter the other device's address."),
+        PairOutcome.Blocked => (InfoBarSeverity.Warning, "That device is blocked.",
+            "Unblock it on the Devices page first."),
         _ => (InfoBarSeverity.Error, "ClipLink isn't syncing right now.",
             "See the message at the top of the page."),
     };
@@ -269,41 +286,236 @@ public sealed partial class DevicesPage : Page
 
     private static DeviceRow? RowOf(object sender) => (sender as FrameworkElement)?.DataContext as DeviceRow;
 
-    private void CopyId_Click(object sender, RoutedEventArgs e)
-    {
-        if (RowOf(sender) is not { } row) return;
-        CopyId(row);
-    }
-
     private void CopyId(DeviceRow row)
     {
         if (host.CopyText(row.PublicKey)) App.MainAppWindow.Toast("Device ID copied");
         else App.MainAppWindow.ToastError("Couldn't copy", "Another app is using the clipboard. Try again.");
     }
 
+    // The menu on a card's three dots, and on its right-click: block it (or,
+    // for a blocked one, unblock it), and copy its id.
+    private MenuFlyout MenuFor(DeviceRow row)
+    {
+        var flyout = new MenuFlyout();
+        if (row.Blocked)
+        {
+            var unblock = new MenuFlyoutItem { Text = "Unblock", Icon = new FontIcon { Glyph = "\uE785" } };
+            unblock.Click += (_, _) => Unblock(row);
+            flyout.Items.Add(unblock);
+        }
+        else
+        {
+            var block = new MenuFlyoutItem { Text = "Block", Icon = new FontIcon { Glyph = "\uE72E" } };
+            block.Click += async (_, _) => await BlockAsync(row);
+            flyout.Items.Add(block);
+        }
+        flyout.Items.Add(new MenuFlyoutSeparator());
+        var copy = new MenuFlyoutItem { Text = "Copy device ID", Icon = new SymbolIcon(Symbol.Copy) };
+        copy.Click += (_, _) => CopyId(row);
+        flyout.Items.Add(copy);
+        return flyout;
+    }
+
+    private void More_Click(object sender, RoutedEventArgs e)
+    {
+        if (RowOf(sender) is not { } row) return;
+        MenuFor(row).ShowAt((FrameworkElement)sender);
+    }
+
     // Right-click or Shift+F10 on a row.
     private void Device_ContextRequested(UIElement sender, ContextRequestedEventArgs args)
     {
         if (RowOf(sender) is not { } row) return;
-        var copy = new MenuFlyoutItem { Text = "Copy device ID", Icon = new SymbolIcon(Symbol.Copy) };
-        copy.Click += (_, _) => CopyId(row);
-        var flyout = new MenuFlyout();
-        flyout.Items.Add(copy);
+        var flyout = MenuFor(row);
         if (args.TryGetPosition(sender, out var position)) flyout.ShowAt(sender, new FlyoutShowOptions { Position = position });
         else flyout.ShowAt((FrameworkElement)sender);
         args.Handled = true;
     }
 
+    // A click anywhere on the card opens the device - except on one of its
+    // own buttons, which do their own thing.
+    private void Device_Tapped(object sender, TappedRoutedEventArgs e)
+    {
+        for (var element = e.OriginalSource as DependencyObject; element != null && !ReferenceEquals(element, sender); element = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(element))
+        {
+            if (element is Microsoft.UI.Xaml.Controls.Primitives.ButtonBase) return;
+        }
+        if (RowOf(sender) is { } row) ShowDetail(row);
+    }
+
+    private void OpenDetail_Click(object sender, RoutedEventArgs e)
+    {
+        if (RowOf(sender) is { } row) ShowDetail(row);
+    }
+
+    // Blocking a trusted device also removes it, so that one asks first.
+    private async Task BlockAsync(DeviceRow row)
+    {
+        string name = row.Title;
+        if (row.Trusted)
+        {
+            bool confirmed = await App.MainAppWindow.ConfirmAsync($"Block {name}?",
+                $"{name} is removed from your paired devices and stops syncing with this PC. It can't ask to pair again, and nothing from it is shown, until you unblock it.",
+                "Block");
+            if (!confirmed) return;
+        }
+        host.Engine.BlockDevice(row.PublicKey);
+        App.MainAppWindow.Toast($"Blocked {name}");
+    }
+
+    private void Unblock(DeviceRow row)
+    {
+        host.Engine.UnblockDevice(row.PublicKey);
+        App.MainAppWindow.Toast($"Unblocked {row.Title}", "It is not paired: it has to pair again like any other device.");
+    }
+
+    // ---- one device in full -------------------------------------------------------
+
+    private string? detailKey;
+    private DeviceRow? detailRow;
+
+    private DeviceRow? FindRow(string key) =>
+        host.PairedDevices.Concat(host.NearbyDevices).Concat(host.BlockedDevices).FirstOrDefault(row => row.PublicKey == key);
+
+    private void ShowDetail(DeviceRow row)
+    {
+        detailKey = row.PublicKey;
+        ListTitle.Visibility = AddDeviceButton.Visibility = DeviceList.Visibility = Visibility.Collapsed;
+        DetailTitle.Visibility = DetailView.Visibility = Visibility.Visible;
+        RefreshDetail();
+        DetailView.ChangeView(null, 0, null, disableAnimation: true);
+        // Keyboard users land on the first action.
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+            () => (DetailTrust.Visibility == Visibility.Visible ? DetailTrust : DetailBlock).Focus(FocusState.Programmatic));
+    }
+
+    // Back to the list.
+    private void CloseDetail()
+    {
+        if (detailKey == null) return;
+        detailKey = null;
+        if (detailRow != null) detailRow.PropertyChanged -= DetailRow_Changed;
+        detailRow = null;
+        DetailTitle.Visibility = DetailView.Visibility = Visibility.Collapsed;
+        if (!pairViewOpen)
+        {
+            ListTitle.Visibility = AddDeviceButton.Visibility = DeviceList.Visibility = Visibility.Visible;
+        }
+    }
+
+    private void DetailTitle_ItemClicked(BreadcrumbBar sender, BreadcrumbBarItemClickedEventArgs args)
+    {
+        if (args.Index == 0) CloseDetail();
+    }
+
+    // A row can move between the lists (trusted, blocked) - a new row - or go
+    // altogether (a discovered device that went quiet).
+    private void Devices_Changed(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
+    {
+        if (detailKey != null) RefreshDetail();
+    }
+
+    private void DetailRow_Changed(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (detailKey != null) RefreshDetail();
+    }
+
+    private void RefreshDetail()
+    {
+        if (detailKey is not { } key) return;
+        if (FindRow(key) is not { } row)
+        {
+            CloseDetail(); // it left the list while its view was open
+            return;
+        }
+        if (!ReferenceEquals(row, detailRow))
+        {
+            if (detailRow != null) detailRow.PropertyChanged -= DetailRow_Changed;
+            detailRow = row;
+            row.PropertyChanged += DetailRow_Changed;
+        }
+
+        DetailTitle.ItemsSource = new[] { "Devices", row.Title };
+        DetailTrust.Visibility = row.CanTrust ? Visibility.Visible : Visibility.Collapsed;
+        DetailRemove.Visibility = row.Trusted ? Visibility.Visible : Visibility.Collapsed;
+        DetailBlock.Content = row.Blocked ? "Unblock" : "Block";
+
+        // Every address it can be reached at; the one the live connection runs
+        // over is marked.
+        DetailAddresses.Children.Clear();
+        foreach (string address in row.Addresses)
+        {
+            var line = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            line.Children.Add(new TextBlock
+            {
+                Text = address,
+                FontFamily = new Microsoft.UI.Xaml.Media.FontFamily("Consolas"),
+                IsTextSelectionEnabled = true,
+                VerticalAlignment = VerticalAlignment.Center,
+            });
+            if (address == row.ConnectedAddress)
+            {
+                line.Children.Add(new TextBlock
+                {
+                    Text = "In use",
+                    Style = (Style)Application.Current.Resources["CaptionSecondary"],
+                    VerticalAlignment = VerticalAlignment.Center,
+                });
+            }
+            DetailAddresses.Children.Add(line);
+        }
+        DetailNoAddresses.Visibility = row.Addresses.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        // The fingerprint comes from the id, so it is the same on every device
+        // that shows it - a name is whatever the device calls itself.
+        DetailFacts.Text =
+            $"Status: {row.Status}\n" +
+            $"Name: {row.Listing.Name ?? "not known yet"}\n" +
+            $"Fingerprint: {DeviceLabel.Fingerprint(row.PublicKey)}\n" +
+            (row.Listing.PairingOpen && !row.Blocked ? "Pairing: its pairing screen is open\n" : "") +
+            $"Device ID: {row.PublicKey}";
+    }
+
+    private void DetailTrust_Click(object sender, RoutedEventArgs e)
+    {
+        if (detailRow is { } row) Trust_Click(DetailTrust, e, row);
+    }
+
+    private async void DetailRemove_Click(object sender, RoutedEventArgs e)
+    {
+        if (detailRow is { } row) await RemoveAsync(row);
+    }
+
+    private async void DetailBlock_Click(object sender, RoutedEventArgs e)
+    {
+        if (detailRow is not { } row) return;
+        if (row.Blocked) Unblock(row);
+        else await BlockAsync(row);
+    }
+
+    private void DetailCopyId_Click(object sender, RoutedEventArgs e)
+    {
+        if (detailRow is { } row) CopyId(row);
+    }
+
     private void Trust_Click(object sender, RoutedEventArgs e)
     {
-        if (RowOf(sender) is not { } row) return;
+        if (RowOf(sender) is { } row) Trust_Click(sender, e, row);
+    }
+
+    private void Trust_Click(object sender, RoutedEventArgs e, DeviceRow row)
+    {
         if (host.Engine.TrustDevice(row.PublicKey))
             App.MainAppWindow.Toast($"{row.Title} is trusted", $"It connects once {row.Title} trusts this PC too.");
     }
 
     private async void Remove_Click(object sender, RoutedEventArgs e)
     {
-        if (RowOf(sender) is not { } row) return;
+        if (RowOf(sender) is { } row) await RemoveAsync(row);
+    }
+
+    private async Task RemoveAsync(DeviceRow row)
+    {
         string name = row.Title;
         bool confirmed = await App.MainAppWindow.ConfirmAsync($"Remove {name}?",
             $"This PC stops syncing with {name} and won't trust it any more. To sync again, pair them again.",

@@ -54,6 +54,11 @@
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
+        // Follow the sensor, but not the user's rotation lock. Left out, a
+        // phone stays upright (a tablet turned anyway) - and the app is laid
+        // out for both: under 600vp wide it is one column, wider it is the
+        // list-and-detail split (see the README's Tablets and wide windows).
+        "orientation": "auto_rotation_restricted",
         "skills": [
           {
             "entities": [

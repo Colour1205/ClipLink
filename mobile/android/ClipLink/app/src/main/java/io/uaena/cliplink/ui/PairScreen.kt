@@ -39,7 +39,6 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import io.uaena.cliplink.engine.PairingRequest
 
 @Composable
 fun PairScreen(
@@ -87,8 +86,8 @@ fun PairScreen(
         Text(
             // The mutual requirement is the whole security story of this
             // screen, so it's stated up front rather than buried.
-            "Both devices must have this screen open. Neither one can trust the other on its " +
-                "own — each side confirms the pairing itself.",
+            "Open this screen on both devices and they find each other. Neither one can trust " +
+                "the other on its own — each side confirms the pairing itself.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -215,55 +214,6 @@ private fun QrPanel(payload: String) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 8.dp),
             )
-        }
-    }
-}
-
-/**
- * The name is whatever the peer claims, so the id's fingerprint and the
- * address sit right under it - two devices can share a name, never an id.
- */
-@Composable
-fun PairingPromptCard(
-    request: PairingRequest,
-    onAccept: () -> Unit,
-    onReject: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Surface(
-        shape = RoundedCornerShape(28.dp),
-        color = MaterialTheme.colorScheme.tertiaryContainer,
-        modifier = modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(20.dp)) {
-            Text(
-                "Pairing request",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onTertiaryContainer,
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "${request.name ?: "A device with no name"} wants to pair. Only accept if you're " +
-                    "expecting this — your pairing screen being open is what let the request " +
-                    "reach you at all.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onTertiaryContainer,
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                // "Device AB12·CD34" - the fingerprint the Me screen shows
-                // for its own id (here and on iOS), so the two can be compared.
-                listOfNotNull(request.shortId, request.address).joinToString("  •  "),
-                style = MaterialTheme.typography.labelSmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onTertiaryContainer,
-            )
-            Spacer(Modifier.height(16.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onAccept) { Text("Accept") }
-                androidx.compose.material3.OutlinedButton(onClick = onReject) { Text("Reject") }
-            }
         }
     }
 }

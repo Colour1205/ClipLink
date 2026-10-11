@@ -1,60 +1,38 @@
 package io.uaena.cliplink
 
 import io.uaena.cliplink.ui.canSetPasscode
-import io.uaena.cliplink.ui.passcodesMatch
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** The Me screen's passcode form: typed twice, any length, blank refused. */
+/** The Me screen's passcode form: one field, any length, blank refused. */
 class PasscodeTest {
 
     @Test
-    fun identicalPasscodesMatch() {
-        assertTrue(passcodesMatch("correct horse", "correct horse"))
+    fun aPasscodeCanBeSet() {
+        assertTrue(canSetPasscode("correct horse", busy = false))
     }
 
     @Test
-    fun differentPasscodesDoNotMatch() {
-        assertFalse(passcodesMatch("correct horse", "correct horsf"))
+    fun aBlankPasscodeCannotBeSet() {
+        assertFalse(canSetPasscode("", busy = false))
+        assertFalse(canSetPasscode("   ", busy = false))
     }
 
     @Test
-    fun caseMatters() {
-        assertFalse(passcodesMatch("Secret", "secret"))
-    }
-
-    @Test
-    fun aStrayTrailingSpaceIsNotAMismatch() {
-        // The engine trims before deriving the key, so these are one passcode.
-        assertTrue(passcodesMatch("secret ", "secret"))
-    }
-
-    @Test
-    fun matchingPasscodesCanBeSet() {
-        assertTrue(canSetPasscode("secret", "secret", busy = false))
-    }
-
-    @Test
-    fun mismatchedPasscodesCannotBeSet() {
-        assertFalse(canSetPasscode("secret", "secrte", busy = false))
-        assertFalse(canSetPasscode("secret", "", busy = false))
-    }
-
-    @Test
-    fun aBlankPasscodeCannotBeSetEvenIfBothAreBlank() {
-        assertFalse(canSetPasscode("", "", busy = false))
-        assertFalse(canSetPasscode("   ", "   ", busy = false))
+    fun aPasscodeWithSpacesAroundItCanBeSet() {
+        // The engine trims before deriving the key, so this is just "secret".
+        assertTrue(canSetPasscode(" secret ", busy = false))
     }
 
     @Test
     fun anyLengthIsAllowed() {
         // No minimum, by design - see the docs.
-        assertTrue(canSetPasscode("a", "a", busy = false))
+        assertTrue(canSetPasscode("a", busy = false))
     }
 
     @Test
     fun aKeyStillBeingDerivedBlocksIt() {
-        assertFalse(canSetPasscode("secret", "secret", busy = true))
+        assertFalse(canSetPasscode("secret", busy = true))
     }
 }

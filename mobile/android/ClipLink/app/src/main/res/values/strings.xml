@@ -3,4 +3,6 @@
     <string name="service_channel_name">Clipboard sync</string>
     <string name="service_channel_description">Keeps ClipLink connected to your paired devices.</string>
     <string name="passcode_length_hint">Longer passcodes are harder to guess.</string>
+    <string name="pairing_channel_name">Pairing requests</string>
+    <string name="pairing_channel_description">Asks whether to trust a device that wants to pair while ClipLink is not open.</string>
 </resources>

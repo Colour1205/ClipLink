@@ -9,15 +9,21 @@
     </Page.KeyboardAccelerators>
 
     <Page.Resources>
-        <!-- One device: name, then status and addresses; full id on hover. -->
+        <!-- One device: name, then its status and the ONE address the live
+             connection runs over; full id on hover. Everything else is a click
+             away, on its detail view. The card is layered so a blocked device can
+             be dark gray in either theme: the normal card, the gray over it, and
+             the content on top in the dark theme (so its text turns light). -->
         <DataTemplate x:Key="DeviceTemplate" x:DataType="local:DeviceRow">
-            <Border Style="{StaticResource CardBorder}"
-                    Padding="16,12,12,12"
-                    Margin="0,0,0,4"
-                    AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}"
-                    ToolTipService.ToolTip="{x:Bind IdToolTip, Mode=OneWay}"
-                    ContextRequested="Device_ContextRequested">
-                <Grid>
+            <Grid Margin="0,0,0,4"
+                  AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}"
+                  ToolTipService.ToolTip="{x:Bind IdToolTip, Mode=OneWay}"
+                  Tapped="Device_Tapped"
+                  ContextRequested="Device_ContextRequested">
+                <Border Style="{StaticResource CardBorder}" />
+                <Border CornerRadius="{StaticResource ControlCornerRadius}" Background="#FF3A3A3E"
+                        Visibility="{x:Bind Blocked, Mode=OneWay}" />
+                <Grid Padding="16,12,12,12" RequestedTheme="{x:Bind CardTheme, Mode=OneWay}">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
@@ -34,27 +40,35 @@
                                  Stroke="{ThemeResource SolidBackgroundFillColorBaseBrush}" StrokeThickness="2"
                                  Visibility="{x:Bind Connected, Mode=OneWay}" />
                     </Grid>
-                    <StackPanel Grid.Column="1" Margin="12,0,12,0" VerticalAlignment="Center">
-                        <TextBlock Text="{x:Bind Title, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
-                        <TextBlock Text="{x:Bind Details, Mode=OneWay}" Style="{StaticResource CaptionSecondary}" TextTrimming="CharacterEllipsis" />
-                    </StackPanel>
+                    <!-- The way in for the keyboard: a click anywhere on the card
+                         does the same. -->
+                    <Button Grid.Column="1" Margin="12,0,12,0" Padding="0" MinHeight="0"
+                            Background="Transparent" BorderThickness="0"
+                            HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" VerticalAlignment="Center"
+                            AutomationProperties.Name="{x:Bind OpenLabel, Mode=OneWay}"
+                            Click="OpenDetail_Click">
+                        <StackPanel>
+                            <TextBlock Text="{x:Bind Title, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{x:Bind Details, Mode=OneWay}" Style="{StaticResource CaptionSecondary}" TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                    </Button>
                     <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                        <Button Style="{StaticResource IconButton}"
-                                ToolTipService.ToolTip="Copy device ID" AutomationProperties.Name="Copy device ID"
-                                Click="CopyId_Click">
-                            <SymbolIcon Symbol="Copy" />
-                        </Button>
                         <Button Content="Remove" MinWidth="88"
                                 Visibility="{x:Bind Trusted, Mode=OneWay}"
                                 AutomationProperties.Name="{x:Bind RemoveLabel, Mode=OneWay}"
                                 Click="Remove_Click" />
                         <Button Content="Trust" MinWidth="88" Style="{StaticResource AccentButtonStyle}"
-                                Visibility="{x:Bind local:Fn.VisibleIfNot(Trusted), Mode=OneWay}"
+                                Visibility="{x:Bind CanTrust, Mode=OneWay}"
                                 AutomationProperties.Name="{x:Bind TrustLabel, Mode=OneWay}"
                                 Click="Trust_Click" />
+                        <Button Style="{StaticResource IconButton}"
+                                ToolTipService.ToolTip="More options" AutomationProperties.Name="{x:Bind MoreLabel, Mode=OneWay}"
+                                Click="More_Click">
+                            <FontIcon Glyph="&#xE712;" />
+                        </Button>
                     </StackPanel>
                 </Grid>
-            </Border>
+            </Grid>
         </DataTemplate>
     </Page.Resources>
 
@@ -78,6 +92,8 @@
                     <TextBlock x:Name="ListTitle" Text="Devices" Style="{StaticResource TitleTextBlockStyle}" />
                     <!-- In the pairing view: "Devices > Add a device", Devices going back. -->
                     <BreadcrumbBar x:Name="PairTitle" Style="{StaticResource PageBreadcrumb}" Visibility="Collapsed" ItemClicked="PairTitle_ItemClicked" />
+                    <!-- One device in full: "Devices > Name", Devices going back. -->
+                    <BreadcrumbBar x:Name="DetailTitle" Style="{StaticResource PageBreadcrumb}" Visibility="Collapsed" ItemClicked="DetailTitle_ItemClicked" />
                     <Button x:Name="AddDeviceButton" Grid.Column="1"
                             Style="{StaticResource AccentButtonStyle}"
                             VerticalAlignment="Center" Margin="12,0,0,0"
@@ -111,7 +127,14 @@
                         <ItemsControl ItemsSource="{x:Bind host.NearbyDevices}" ItemTemplate="{StaticResource DeviceTemplate}" IsTabStop="False" />
                     </StackPanel>
 
-                    <!-- Nothing paired or nearby. -->
+                    <StackPanel Visibility="{x:Bind host.HasBlockedDevices, Mode=OneWay}">
+                        <TextBlock Text="Blocked" Style="{StaticResource SectionHeader}" Margin="1,20,0,2" />
+                        <TextBlock Style="{StaticResource CaptionSecondary}" TextWrapping="Wrap" Margin="1,0,0,8"
+                                   Text="No pairing request from these devices is shown, and this PC never connects to them. Unblock one to hear from it again." />
+                        <ItemsControl ItemsSource="{x:Bind host.BlockedDevices}" ItemTemplate="{StaticResource DeviceTemplate}" IsTabStop="False" />
+                    </StackPanel>
+
+                    <!-- Nothing paired, nearby or blocked. -->
                     <StackPanel Visibility="{x:Bind host.HasNoDevices, Mode=OneWay}"
                                 HorizontalAlignment="Center" MaxWidth="380" Margin="0,56,0,0">
                         <FontIcon Glyph="&#xE975;" FontSize="48" HorizontalAlignment="Center"
@@ -126,6 +149,46 @@
             </Grid>
         </ScrollViewer>
 
+        <!-- One device in full: every address it can be reached at, and the rest
+             of what is known about it. Laid out like an item on the Synced page
+             (actions, then cards, then the facts). -->
+        <ScrollViewer x:Name="DetailView" Grid.Row="1" Visibility="Collapsed">
+            <Grid Margin="{StaticResource PageContentMargin}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" MaxWidth="{StaticResource PageMaxWidth}" />
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="DetailTrust" Style="{StaticResource AccentButtonStyle}" MinWidth="96" Content="Trust" Click="DetailTrust_Click" />
+                        <Button x:Name="DetailRemove" MinWidth="96" Content="Remove" Click="DetailRemove_Click" />
+                        <Button x:Name="DetailBlock" MinWidth="96" Content="Block" Click="DetailBlock_Click" />
+                        <Button x:Name="DetailCopyId" Click="DetailCopyId_Click">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <SymbolIcon Symbol="Copy" />
+                                <TextBlock Text="Copy device ID" />
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+
+                    <TextBlock Text="Can connect at" Style="{StaticResource SectionHeader}" Margin="1,20,0,8" />
+                    <Border Style="{StaticResource CardBorder}">
+                        <StackPanel>
+                            <StackPanel x:Name="DetailAddresses" Spacing="6" />
+                            <TextBlock x:Name="DetailNoAddresses" Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       Text="No address is known yet. One appears here once this device is heard on your network." />
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock Text="Details" Style="{StaticResource SectionHeader}" Margin="1,20,0,8" />
+                    <Border Style="{StaticResource CardBorder}">
+                        <TextBlock x:Name="DetailFacts" Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"
+                                   IsTextSelectionEnabled="True" />
+                    </Border>
+                </StackPanel>
+            </Grid>
+        </ScrollViewer>
+
         <!-- Pairing: open only while this is showing. -->
         <ScrollViewer x:Name="PairView" Grid.Row="1" Visibility="Collapsed">
             <Grid Margin="{StaticResource PageContentMargin}">
@@ -135,7 +198,7 @@
                 <StackPanel>
                     <InfoBar IsOpen="True" IsClosable="False" Severity="Informational" Margin="0,12,0,0"
                              Title="Pairing is on while this page is open."
-                             Message="Open the pairing screen on your other device too. Each device asks you to accept the other - nothing is trusted until both do." />
+                             Message="Open the pairing screen on your other device and the two find each other. Each device asks you to trust the other - nothing is trusted until both do." />
 
                     <TextBlock Text="Scan with your phone" Style="{StaticResource SectionHeader}" />
                     <Border x:Name="QrCard" Style="{StaticResource CardBorder}">

@@ -97,18 +97,6 @@
       "value": "Save file"
     },
     {
-      "name": "kind_text",
-      "value": "text"
-    },
-    {
-      "name": "kind_image",
-      "value": "image"
-    },
-    {
-      "name": "kind_file",
-      "value": "file"
-    },
-    {
       "name": "item_image",
       "value": "Image"
     },
@@ -194,7 +182,7 @@
     },
     {
       "name": "pairing_request_warning",
-      "value": "Only accept if you expect this - your Pairing screen being open is what let this request reach you at all."
+      "value": "Only trust it if you expect this. Ignore turns this request away and the device can ask again; to stop a device asking, block it on the Devices tab."
     },
     {
       "name": "toast_pairing_cancelled",
@@ -219,10 +207,6 @@
     {
       "name": "toast_history_cleared",
       "value": "History cleared."
-    },
-    {
-      "name": "toast_item_deleted",
-      "value": "Item deleted."
     },
     {
       "name": "toast_tailscale_saved",
@@ -281,10 +265,6 @@
       "value": "Tap did not grant access — try again."
     },
     {
-      "name": "toast_clipboard_unchanged",
-      "value": "Clipboard unchanged since last sync."
-    },
-    {
       "name": "toast_unsupported_clipboard",
       "value": "Unsupported clipboard content: %1$s"
     },
@@ -303,14 +283,6 @@
     {
       "name": "toast_paste_sync_failed",
       "value": "Could not sync that — try again."
-    },
-    {
-      "name": "toast_synced_to_devices",
-      "value": "Synced %1$s to %2$s."
-    },
-    {
-      "name": "toast_captured_no_devices",
-      "value": "Captured %1$s — no devices connected yet."
     },
     {
       "name": "toast_self_test_passed",
@@ -345,16 +317,8 @@
       "value": "Save was not authorized."
     },
     {
-      "name": "toast_saved_to_gallery",
-      "value": "Saved to gallery."
-    },
-    {
       "name": "toast_save_image_failed",
       "value": "Could not save image."
-    },
-    {
-      "name": "toast_file_saved",
-      "value": "File saved."
     },
     {
       "name": "toast_save_file_failed",
@@ -438,7 +402,7 @@
     },
     {
       "name": "outcome_refused",
-      "value": "%1$s answered but didn't accept this device. Set the same passcode on both, or open its Pairing screen (and finish any other pairing request there), then try again."
+      "value": "%1$s answered but didn't accept this device. Set the same passcode on both, or finish any pairing request waiting on that device, then try again."
     },
     {
       "name": "outcome_silent",
@@ -618,11 +582,11 @@
     },
     {
       "name": "pairing_open_detail",
-      "value": "A pairing request only reaches this device while this screen is open, and only completes once you tap Accept here - keep it open on BOTH devices at the same time while pairing. Leaving this screen closes the window; nothing pairs silently in the background."
+      "value": "With this screen open on both devices they find each other and ask to pair. A device on your network can also ask at any time, and nothing is trusted until you tap Trust. Leaving this screen stops the searching; nothing pairs silently in the background."
     },
     {
       "name": "pairing_scan_hint",
-      "value": "Scan this on another device (with its own Pairing screen open) to find it."
+      "value": "Scan this on another device to find it."
     },
     {
       "name": "pairing_scan_button",
@@ -719,6 +683,142 @@
     {
       "name": "log_empty",
       "value": "Nothing logged yet."
+    },
+    {
+      "name": "pairing_trust",
+      "value": "Trust"
+    },
+    {
+      "name": "pairing_ignore",
+      "value": "Ignore"
+    },
+    {
+      "name": "devices_block",
+      "value": "Block"
+    },
+    {
+      "name": "devices_unblock",
+      "value": "Unblock"
+    },
+    {
+      "name": "devices_copy_id",
+      "value": "Copy device ID"
+    },
+    {
+      "name": "devices_status_blocked",
+      "value": "Blocked"
+    },
+    {
+      "name": "toast_unblock_first",
+      "value": "That device is blocked. Unblock it first."
+    },
+    {
+      "name": "dialog_block_title",
+      "value": "Block %1$s?"
+    },
+    {
+      "name": "dialog_block_message",
+      "value": "It is removed from your paired devices and stops syncing. It can't ask to pair again, and nothing from it is shown, until you unblock it."
+    },
+    {
+      "name": "notif_pairing_title",
+      "value": "Pairing request"
+    },
+    {
+      "name": "notif_received_title",
+      "value": "New from %1$s"
+    },
+    {
+      "name": "notif_received_key",
+      "value": "Key or token"
+    },
+    {
+      "name": "notif_received_link",
+      "value": "Link"
+    },
+    {
+      "name": "notif_received_text",
+      "value": "Text"
+    },
+    {
+      "name": "me_notify_received_title",
+      "value": "Notify about new items"
+    },
+    {
+      "name": "me_notify_received_subtitle",
+      "value": "A notification with a short preview when something arrives while ClipLink is out of view. HarmonyOS suspends apps soon after you leave them, so it covers the first moments only."
+    },
+    {
+      "name": "notif_pairing_text",
+      "value": "%1$s wants to pair with this device"
+    },
+    {
+      "name": "device_detail_addresses",
+      "value": "Can connect at"
+    },
+    {
+      "name": "device_detail_no_address",
+      "value": "No address is known yet. One appears here once this device is heard on your network."
+    },
+    {
+      "name": "device_detail_in_use",
+      "value": "In use"
+    },
+    {
+      "name": "device_detail_details",
+      "value": "Details"
+    },
+    {
+      "name": "device_detail_status",
+      "value": "Status"
+    },
+    {
+      "name": "device_detail_name",
+      "value": "Name"
+    },
+    {
+      "name": "device_detail_name_unknown",
+      "value": "Not known yet"
+    },
+    {
+      "name": "device_detail_fingerprint",
+      "value": "Fingerprint"
+    },
+    {
+      "name": "device_detail_id",
+      "value": "Device ID"
+    },
+    {
+      "name": "device_detail_pairing_open",
+      "value": "Its pairing screen is open"
+    },
+    {
+      "name": "synced_preview_none_title",
+      "value": "Nothing to preview"
+    },
+    {
+      "name": "synced_preview_none_detail",
+      "value": "Text and images show here when you select them from the list."
+    },
+    {
+      "name": "devices_detail_none_title",
+      "value": "No device yet"
+    },
+    {
+      "name": "devices_detail_none_detail",
+      "value": "Pair a device and its details show here."
+    },
+    {
+      "name": "file_preview_failed",
+      "value": "This file can't be previewed here. Use Open to open it in another app."
+    },
+    {
+      "name": "file_preview_truncated",
+      "value": "Showing the start of the file."
+    },
+    {
+      "name": "file_preview_open_in_app",
+      "value": "Open in another app"
     }
   ]
 }

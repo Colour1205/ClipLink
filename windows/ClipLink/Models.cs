@@ -181,17 +181,35 @@ public sealed class DeviceRow : Observable
     public string PublicKey => Listing.PublicKey;
     public bool Trusted => Listing.Trusted;
     public bool Connected => Listing.Connected;
+    // Blocked here: no request from it is shown and it is never dialled. It
+    // stays listed, on its own dark gray card, so it can be unblocked.
+    public bool Blocked => Listing.Blocked;
+    // Trust is offered for a device that is neither trusted nor blocked.
+    public bool CanTrust => !Listing.Trusted && !Listing.Blocked;
+
+    // A blocked card is dark gray in either theme; its text follows (a dark
+    // subtree gets light text), so it stays readable in the light theme too.
+    public Microsoft.UI.Xaml.ElementTheme CardTheme => Listing.Blocked
+        ? Microsoft.UI.Xaml.ElementTheme.Dark
+        : Microsoft.UI.Xaml.ElementTheme.Default;
 
     public string Title => DeviceLabel.Of(Listing.PublicKey, Listing.Name);
 
-    public string Status => Listing.Trusted
-        ? (Listing.Connected ? "Connected" : "Not connected")
-        : (Listing.PairingOpen ? "Pairing open" : "Not paired");
+    public string Status => Listing.Blocked ? "Blocked"
+        : Listing.Trusted
+            ? (Listing.Connected ? "Connected" : "Not connected")
+            : (Listing.PairingOpen ? "Pairing open" : "Not paired");
 
-    // Second line: status, then every address it's known at.
-    public string Details => Listing.Addresses.Count == 0
+    // Second line: the status, then the ONE address the live connection runs
+    // over (only while there is one). Every address the device is known at is
+    // on its detail view, a click away.
+    public string Details => string.IsNullOrEmpty(Listing.ConnectedAddress)
         ? Status
-        : $"{Status} · {string.Join(" · ", Listing.Addresses)}";
+        : $"{Status} · {Listing.ConnectedAddress}";
+
+    // Every address it is known at, and which one is in use.
+    public IReadOnlyList<string> Addresses => Listing.Addresses;
+    public string? ConnectedAddress => Listing.ConnectedAddress;
 
     // The fingerprint too: it's what that device shows for itself.
     public string IdToolTip => $"Fingerprint: {DeviceLabel.Fingerprint(Listing.PublicKey)}\nDevice ID: {Listing.PublicKey}";
@@ -200,6 +218,8 @@ public sealed class DeviceRow : Observable
 
     public string RemoveLabel => $"Remove {Title}";
     public string TrustLabel => $"Trust {Title}";
+    public string MoreLabel => $"More options for {Title}";
+    public string OpenLabel => $"Open details for {Title}";
 
     public override string ToString() => AutomationName;
 
@@ -207,12 +227,14 @@ public sealed class DeviceRow : Observable
     {
         if (listing.PublicKey == Listing.PublicKey && listing.Name == Listing.Name && listing.Trusted == Listing.Trusted
             && listing.Connected == Listing.Connected && listing.PairingOpen == Listing.PairingOpen
+            && listing.Blocked == Listing.Blocked && listing.ConnectedAddress == Listing.ConnectedAddress
             && listing.Addresses.SequenceEqual(Listing.Addresses))
         {
             return;
         }
         Listing = listing;
-        Raise(nameof(Listing), nameof(Trusted), nameof(Connected), nameof(Title), nameof(Status), nameof(Details), nameof(AutomationName),
-            nameof(IdToolTip), nameof(RemoveLabel), nameof(TrustLabel));
+        Raise(nameof(Listing), nameof(Trusted), nameof(Connected), nameof(Blocked), nameof(CanTrust), nameof(CardTheme), nameof(Title),
+            nameof(Status), nameof(Details), nameof(Addresses), nameof(ConnectedAddress), nameof(AutomationName),
+            nameof(IdToolTip), nameof(RemoveLabel), nameof(TrustLabel), nameof(MoreLabel), nameof(OpenLabel));
     }
 }
