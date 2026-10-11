@@ -23,12 +23,14 @@ import io.uaena.cliplink.net.Protocol
 import io.uaena.cliplink.net.SyncManager
 import io.uaena.cliplink.share.ShareIntake
 import io.uaena.cliplink.share.ShareOutcome
+import io.uaena.cliplink.store.BlockStore
 import io.uaena.cliplink.store.DeletedStore
 import io.uaena.cliplink.store.DeviceSettings
 import io.uaena.cliplink.store.FileStore
 import io.uaena.cliplink.store.HistoryStore
 import io.uaena.cliplink.store.PassphraseKeyStore
 import io.uaena.cliplink.store.TrustStore
+import io.uaena.cliplink.store.sameDeviceId
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -90,6 +92,7 @@ class ClipLinkEngine(context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + crashGuard)
 
     val trustStore = TrustStore(appContext)
+    val blockStore = BlockStore(appContext)
     val passphraseKeyStore = PassphraseKeyStore(appContext)
     val deviceSettings = DeviceSettings(appContext)
     val fileStore = FileStore(appContext)
@@ -124,7 +127,12 @@ class ClipLinkEngine(context: Context) {
 
     /** The connection a pairing prompt is about, and the prompt - always changed together, under [pairingLock]. */
     private var pendingPairingConnection: PeerConnection? = null
+    private var pendingPairingSince = 0L
     private val pairingLock = Any()
+
+    /** Told when a pairing request arrives and when it is settled - set by the Application. See [PairingAlerts]. */
+    @Volatile
+    var pairingAlerts: PairingAlerts? = null
 
     // ---- observable state -------------------------------------------------
 
@@ -299,6 +307,7 @@ class ClipLinkEngine(context: Context) {
                     // that came out equal, so this costs nothing when nothing changed.
                     refreshDevices()
                     syncManager.tidyTransfers()
+                    expireStalePairingRequest()
                 }
             }
         }
@@ -460,6 +469,10 @@ class ClipLinkEngine(context: Context) {
         // peer, and a flood of forged beacons must not rebuild the list per packet.
         if (recorded == BeaconBook.Recorded.Changed) refreshDevices()
 
+        // A blocked device stays on the list (so it can be unblocked), and
+        // that is all: no passcode auto-trust, no dial, no pairing.
+        if (blockStore.isBlocked(beacon.deviceId)) return
+
         // Nothing to launch for a beacon that asks nothing of us.
         val wantsTrust = beacon.proof != null && !trusted
         val wantsDial = (trusted && !syncManager.isConnected(beacon.deviceId)) ||
@@ -493,6 +506,7 @@ class ClipLinkEngine(context: Context) {
     private suspend fun maybeAutoTrustViaPassphrase(beacon: Discovery.Beacon) {
         val proof = beacon.proof ?: return
         if (trustStore.isTrusted(beacon.deviceId)) return
+        if (blockStore.isBlocked(beacon.deviceId)) return // a blocked device is never auto-trusted
         val key = withContext(Dispatchers.IO) { passphraseKeyStore.key() } ?: return
         if (!passphraseKeyStore.verifyProof(key, beacon.deviceId, proof)) return
         log("auto-trusting ${shortIdOf(beacon.deviceId)} (shared passcode)")
@@ -510,6 +524,7 @@ class ClipLinkEngine(context: Context) {
     /** Connect to an already-trusted device the moment its beacon is heard. */
     private suspend fun maybeAutoConnect(beacon: Discovery.Beacon) {
         if (syncManager.isConnected(beacon.deviceId)) return
+        if (blockStore.isBlocked(beacon.deviceId)) return
         if (!connectingTo.add(beacon.deviceId)) return
         try {
             if (losesTieBreaker(beacon.deviceId)) return
@@ -529,6 +544,7 @@ class ClipLinkEngine(context: Context) {
     private suspend fun maybeConnectForPairing(beacon: Discovery.Beacon) {
         if (!_pairingOpen.value || !beacon.pairing) return
         if (syncManager.isConnected(beacon.deviceId)) return
+        if (blockStore.isBlocked(beacon.deviceId)) return
         if (_pairingRequest.value != null) return // already awaiting a decision
         if (!connectingTo.add(beacon.deviceId)) return
         try {
@@ -702,8 +718,8 @@ class ClipLinkEngine(context: Context) {
             identity = identity,
             trustStore = trustStore,
             passphraseKeyStore = passphraseKeyStore,
-            pairingModeOpen = _pairingOpen.value,
             ownName = ownName(),
+            isBlocked = blockStore,
         ) ?: return
         handleNewConnection(conn, remoteAddress)
     }
@@ -734,8 +750,8 @@ class ClipLinkEngine(context: Context) {
                     identity = identity,
                     trustStore = trustStore,
                     passphraseKeyStore = passphraseKeyStore,
-                    pairingModeOpen = _pairingOpen.value,
                     ownName = ownName(),
+                    isBlocked = blockStore,
                 )
             } catch (e: Throwable) {
                 closeQuietly(socket)
@@ -761,28 +777,40 @@ class ClipLinkEngine(context: Context) {
     }
 
     private fun setUpConnection(conn: PeerConnection, address: String?) {
+        // Blocked after the handshake began and before it got here: refused,
+        // however it got this far.
+        if (blockStore.isBlocked(conn.peerDeviceId)) {
+            conn.close("blocked")
+            return
+        }
         // Shown right away, but stored only once proven - see rememberProvenName.
         peerNames.heardInHandshake(conn.peerDeviceId, conn.peerName)
         if (!conn.wasAlreadyTrusted) {
             // Checked and set together: two untrusted connections arriving at
             // once could both pass a bare check, and the second would
             // replace - and orphan, socket open - the first.
+            val request = PairingRequest(
+                conn.peerDeviceId,
+                address,
+                // Handshake name first; a beacon's only for display. The
+                // prompt shows the id and address beside it either way.
+                peerNames.display(conn.peerDeviceId, null),
+            )
             val awaitingDecision = synchronized(pairingLock) {
                 if (_pairingRequest.value != null) {
                     false
                 } else {
                     pendingPairingConnection = conn
-                    _pairingRequest.value = PairingRequest(
-                        conn.peerDeviceId,
-                        address,
-                        // Handshake name first; a beacon's only for display. The
-                        // prompt shows the id and address beside it either way.
-                        peerNames.display(conn.peerDeviceId, null),
-                    )
+                    pendingPairingSince = System.currentTimeMillis()
+                    _pairingRequest.value = request
                     true
                 }
             }
-            if (!awaitingDecision) {
+            if (awaitingDecision) {
+                // The app's own dialog shows from the state above; this is for
+                // when nobody is looking at the app (a notification).
+                alert { requested(request) }
+            } else {
                 // Already prompting for a different candidate. Don't juggle
                 // two - whoever came second just doesn't pair this round.
                 conn.close("another pairing request is open")
@@ -853,14 +881,22 @@ class ClipLinkEngine(context: Context) {
         if (peerNames.forgetHandshake(conn.peerDeviceId, conn.peerName)) refreshDevices()
     }
 
-    fun acceptPairing() {
+    /**
+     * Trust: the answer to the dialog's (and the notification's) Trust.
+     * [expecting] is the id the answer was given FOR - a notification's
+     * button names the request it was posted for, so one that outlived its
+     * request can't trust whoever asked next.
+     */
+    fun acceptPairing(expecting: String? = null) {
         val (conn, request) = synchronized(pairingLock) {
             val pending = pendingPairingConnection ?: return // nothing waiting: nothing to accept
+            if (expecting != null && !sameDeviceId(pending.peerDeviceId, expecting)) return
             val prompt = _pairingRequest.value
             pendingPairingConnection = null
             _pairingRequest.value = null
             pending to prompt
         }
+        alert { resolved() }
         // No name yet, whatever the prompt showed: this connection's is
         // stored once its session is proven (rememberProvenName).
         trustStore.trust(conn.peerDeviceId, request?.address)
@@ -871,17 +907,53 @@ class ClipLinkEngine(context: Context) {
         showToast("Paired.")
     }
 
-    /** Safe to call with nothing pending - it then does nothing, as the pairing screen closing does. */
-    fun rejectPairing() {
+    /**
+     * Ignore: closes the waiting connection and nothing else. Nothing is
+     * remembered - the device can ask again, which is what separates this
+     * from blocking it (see [blockDevice]). Safe to call with nothing
+     * pending: it then does nothing, as the pairing screen closing does.
+     * [expecting] is as for [acceptPairing].
+     */
+    fun rejectPairing(expecting: String? = null) {
         val conn = synchronized(pairingLock) {
             val pending = pendingPairingConnection
+            if (pending != null && expecting != null && !sameDeviceId(pending.peerDeviceId, expecting)) return
             pendingPairingConnection = null
             _pairingRequest.value = null
             pending
         }
         if (conn != null) {
-            conn.close("pairing declined")
+            conn.close("pairing ignored")
             forgetUnprovenName(conn) // never listened, so never proven
+        }
+        alert { resolved() }
+    }
+
+    /**
+     * Ignores a request nobody answered for [PAIRING_REQUEST_TTL_MS]. A
+     * request can now come from any device on the network at any time, and
+     * only one is held at once (a second is turned away while it waits), so
+     * without this one unanswered request would keep every later one out -
+     * a stranger's, or the user's own new device's - until somebody opened
+     * the app and dealt with it. Its notification times out at the same moment.
+     */
+    private fun expireStalePairingRequest() {
+        val stale = synchronized(pairingLock) {
+            pendingPairingConnection != null &&
+                System.currentTimeMillis() - pendingPairingSince > PAIRING_REQUEST_TTL_MS
+        }
+        if (!stale) return
+        log("a pairing request went unanswered and was ignored")
+        rejectPairing()
+    }
+
+    /** Runs [action] on the alerts, if any: a notification that can't be posted must never break pairing. */
+    private fun alert(action: PairingAlerts.() -> Unit) {
+        val alerts = pairingAlerts ?: return
+        try {
+            alerts.action()
+        } catch (e: Throwable) {
+            log("couldn't show the pairing notification: ${describeError(e)}")
         }
     }
 
@@ -922,9 +994,15 @@ class ClipLinkEngine(context: Context) {
 
     // ---- pairing ----------------------------------------------------------
 
+    /**
+     * Whether this device's Pairing screen is open: it is advertised in the
+     * beacon, and it lets this device dial a stranger that advertises the
+     * same. A request from a stranger no longer depends on it - they reach
+     * the device whenever it is running - so closing the screen leaves a
+     * request that is waiting for an answer alone.
+     */
     fun setPairingOpen(open: Boolean) {
         _pairingOpen.value = open
-        if (!open) rejectPairing()
     }
 
     fun pairingPayload(): String =
@@ -942,10 +1020,9 @@ class ClipLinkEngine(context: Context) {
     /**
      * Dials a scanned or typed-in peer. Deliberately never writes trust by
      * itself: it only finds the other device's address, and the normal
-     * accept/reject prompt decides. That prompt only appears when this
-     * device's pairing screen is open, and the connection only completes when
-     * the other device's is too - so possessing someone's code can't
-     * unilaterally trust them.
+     * trust/ignore prompt decides. The other device asks its owner, and the
+     * connection only completes once both have trusted each other - so
+     * possessing someone's code can't unilaterally trust them.
      *
      * Safe against the caller going away mid-way (see [connectToAddress]).
      */
@@ -960,6 +1037,7 @@ class ClipLinkEngine(context: Context) {
             // carries no address (LAN-only device, meant to be found via
             // its beacon instead), there's nothing to dial.
             if (info.publicKey == _ownDeviceId.value) return "That's this device's own code."
+            if (blockStore.isBlocked(info.publicKey)) return "That device is blocked. Unblock it first."
             val candidates = addressCandidatesFor(info.publicKey, info.address)
             if (candidates.isEmpty()) {
                 // The id beside the name: a code's name is self-claimed.
@@ -1100,6 +1178,10 @@ class ClipLinkEngine(context: Context) {
     }
 
     fun trustDevice(deviceId: String) {
+        if (blockStore.isBlocked(deviceId)) {
+            showToast("That device is blocked. Unblock it first.")
+            return
+        }
         val beacon = beaconBook.get(deviceId)
         // Nameless until a connection to it proves its session.
         trustStore.trust(deviceId, beacon?.senderIp)
@@ -1121,6 +1203,44 @@ class ClipLinkEngine(context: Context) {
         // nothing at all.
         log("untrusted ${shortIdOf(deviceId)}")
         showToast("Removed $label")
+    }
+
+    /**
+     * Blocks a device: no pairing request from it is shown, it is never
+     * dialled or auto-trusted, and a handshake from it is refused before
+     * anything else is decided. A blocked device is not a trusted one, so
+     * blocking also removes its trust and closes its link - it must stop
+     * receiving what is copied here - and an open request from it goes too.
+     *
+     * Not the same as ignoring a request ([rejectPairing]), which remembers
+     * nothing. It blocks this KEY only: a device that makes itself a new
+     * identity is a new device.
+     */
+    fun blockDevice(deviceId: String) {
+        val name = knownNameOf(deviceId) // before the trust record goes
+        val label = displayNameOf(deviceId, name)
+        // Blocked first: the next handshake from it is refused from here on,
+        // whatever the rest of this takes to finish.
+        blockStore.block(deviceId, name)
+        trustStore.untrust(deviceId)
+        syncManager.close(deviceId, "blocked")
+        connectionAddresses.remove(deviceId)
+        rejectPairing(expecting = deviceId)
+        refreshDevices()
+        log("blocked ${shortIdOf(deviceId)}")
+        showToast("Blocked $label")
+    }
+
+    /** Lets a blocked device be heard again. It is not trusted again: it has to pair like any other. */
+    fun unblockDevice(deviceId: String) {
+        val label = displayNameOf(
+            deviceId,
+            blockStore.all().firstOrNull { sameDeviceId(it.deviceId, deviceId) }?.name ?: knownNameOf(deviceId),
+        )
+        blockStore.unblock(deviceId)
+        refreshDevices()
+        log("unblocked ${shortIdOf(deviceId)}")
+        showToast("Unblocked $label")
     }
 
     // ---- clipboard --------------------------------------------------------
@@ -1388,13 +1508,17 @@ class ClipLinkEngine(context: Context) {
         synchronized(devicesLock) {
             val connected = syncManager.connectedDeviceIds()
             val trusted = trustStore.all()
+            val blockedDevices = blockStore.all()
             val ids = LinkedHashSet<String>()
             trusted.forEach { ids.add(it.publicKey) }
+            // Listed even when silent: that's where it gets unblocked.
+            blockedDevices.forEach { ids.add(it.deviceId) }
             beaconBook.ids().forEach(ids::add)
 
             _devices.value = ids.map { id ->
                 val beacon = beaconBook.get(id)
                 val trustedEntry = trusted.firstOrNull { it.publicKey == id }
+                val blockedEntry = blockedDevices.firstOrNull { sameDeviceId(it.deviceId, id) }
                 // Every address this peer is reachable at, not just one: the LAN
                 // address it beaconed from, the one its last connection came
                 // from, whatever it advertises for itself, and whatever we cached
@@ -1409,8 +1533,9 @@ class ClipLinkEngine(context: Context) {
                 DeviceRow(
                     deviceId = id,
                     // A trusted device's stored name wins; a beacon name only
-                    // fills in while there is none.
-                    name = peerNames.display(id, trustedEntry?.name),
+                    // fills in while there is none. A blocked one keeps the
+                    // name it had when it was blocked.
+                    name = peerNames.display(id, trustedEntry?.name ?: blockedEntry?.name),
                     trusted = trustedEntry != null,
                     connected = connected.contains(id),
                     addresses = addresses.toList(),
@@ -1418,6 +1543,17 @@ class ClipLinkEngine(context: Context) {
                     // heard, long ago, is not open now.
                     pairing = beacon?.pairing == true && beaconBook.isRecent(id),
                     lastSeenAtMs = beaconBook.lastSeenAt(id),
+                    online = connected.contains(id) || beaconBook.isRecent(id),
+                    blocked = blockedEntry != null,
+                    // The address the live link is using - the one the card
+                    // shows. Only while there is a link: nothing is "in use"
+                    // for a device that is merely nearby.
+                    connectedAddress = if (connected.contains(id)) {
+                        connectionAddresses[id]?.takeIf { it.isNotEmpty() }
+                            ?: beacon?.senderIp?.takeIf { it.isNotEmpty() }
+                    } else {
+                        null
+                    },
                 )
             }.sortedWith(DeviceRow.STABLE_ORDER)
         }
@@ -1473,6 +1609,9 @@ class ClipLinkEngine(context: Context) {
         const val MAX_LOG_LINES = 60
         const val RECONNECT_INTERVAL_MS = 30_000L
         const val HOUSEKEEPING_INTERVAL_MS = 5_000L
+
+        /** How long a pairing request waits for an answer: the same as its notification. */
+        const val PAIRING_REQUEST_TTL_MS = 3 * 60 * 1000L
         const val CONNECT_TIMEOUT_MS = 3_000
         const val READY_TIMEOUT_MS = 15_000L
 

@@ -9,12 +9,22 @@ struct DevicesView: View {
     @EnvironmentObject private var settings: AppSettings
 
     @State private var renaming: DevicesRenameTarget?
-    @State private var removing: DeviceRow?
+    /// A Remove or Block waiting for its confirmation.
+    @State private var confirming: DevicesConfirmation?
+    /// One programmatic link for every card, like the Synced tab's: a link
+    /// inside a row is torn down with it whenever the list reorders.
+    @State private var detailID = ""
+    @State private var detailActive = false
 
     var body: some View {
         NavigationView {
             list
                 .navigationTitle("Devices")
+                .background(
+                    NavigationLink(destination: DeviceDetailView(deviceId: detailID), isActive: $detailActive) {
+                        EmptyView()
+                    }
+                )
                 .toolbar {
                     ToolbarItem(placement: .navigationBarTrailing) {
                         Button(action: openPairing) {
@@ -34,8 +44,9 @@ struct DevicesView: View {
 
     // MARK: - List
 
-    private var paired: [DeviceRow] { model.snapshot.devices.filter(\.trusted) }
-    private var nearby: [DeviceRow] { model.snapshot.devices.filter { !$0.trusted } }
+    private var paired: [DeviceRow] { model.snapshot.devices.filter { $0.trusted && !$0.blocked } }
+    private var nearby: [DeviceRow] { model.snapshot.devices.filter { !$0.trusted && !$0.blocked } }
+    private var blocked: [DeviceRow] { model.snapshot.devices.filter(\.blocked) }
 
     private var list: some View {
         List {
@@ -48,7 +59,7 @@ struct DevicesView: View {
                 }
             }
 
-            if paired.isEmpty && nearby.isEmpty {
+            if paired.isEmpty && nearby.isEmpty && blocked.isEmpty {
                 Section {
                     VStack(spacing: 4) {
                         EmptyStateView(
@@ -80,9 +91,20 @@ struct DevicesView: View {
             if !nearby.isEmpty {
                 Section(
                     header: Text("Nearby"),
-                    footer: Text("Trust lets this device accept it. The other device must also trust this \(ThisDeviceNoun.current) (same passcode, or its pairing screen open).")
+                    footer: Text("Trust lets this \(ThisDeviceNoun.current) accept it. The other device then asks whether to trust this \(ThisDeviceNoun.current) too - or use the same passcode on both.")
                 ) {
                     ForEach(nearby) { row in
+                        cell(for: row)
+                    }
+                }
+            }
+
+            if !blocked.isEmpty {
+                Section(
+                    header: Text("Blocked"),
+                    footer: Text("A blocked device can't ask to pair, and nothing from it is shown. Unblock it to hear from it again.")
+                ) {
+                    ForEach(blocked) { row in
                         cell(for: row)
                     }
                 }
@@ -95,37 +117,50 @@ struct DevicesView: View {
             await DevicesRefresh.run(model)
         }
         .confirmationDialog(
-            removing.map { "Remove \(model.name(for: $0.deviceId))?" } ?? "Remove Device?",
+            confirming.map { $0.title(name: model.name(for: $0.row.deviceId)) } ?? "Are you sure?",
             isPresented: Binding(
-                get: { removing != nil },
-                set: { if !$0 { removing = nil } }
+                get: { confirming != nil },
+                set: { if !$0 { confirming = nil } }
             ),
             titleVisibility: .visible,
-            presenting: removing
-        ) { row in
-            Button("Remove", role: .destructive) {
+            presenting: confirming
+        ) { action in
+            Button(action.confirmLabel, role: .destructive) {
                 Haptics.tap(settings.haptics)
-                model.untrust(row)
+                action.perform(on: model)
             }
             Button("Cancel", role: .cancel) {}
-        } message: { _ in
-            Text("It will no longer be able to sync with this \(ThisDeviceNoun.current). You can pair again later.")
+        } message: { action in
+            Text(action.message)
         }
-        .animation(.default, value: model.snapshot.devices.map { "\($0.deviceId)|\($0.trusted)" })
+        .animation(.default, value: model.snapshot.devices.map { "\($0.deviceId)|\($0.trusted)|\($0.blocked)" })
     }
 
     @ViewBuilder
     private func cell(for row: DeviceRow) -> some View {
         let name = model.name(for: row.deviceId)
-        DevicesRowView(row: row, name: name, accent: settings.accentTheme.fill) {
-            trust(row)
+        DevicesRowView(
+            row: row,
+            name: name,
+            accent: settings.accentTheme.fill,
+            onOpen: { open(row) },
+            onTrust: { trust(row) }
+        ) {
+            menuItems(for: row)
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            if row.trusted {
+            if row.blocked {
+                Button {
+                    unblock(row)
+                } label: {
+                    Label("Unblock", systemImage: "lock.open")
+                }
+                .tint(settings.accentTheme.fill)
+            } else if row.trusted {
                 // Not role: .destructive - on iOS 15 that animates the row
                 // away before the confirmation dialog has been answered.
                 Button {
-                    removing = row
+                    confirming = .remove(row)
                 } label: {
                     Label("Remove", systemImage: "trash")
                 }
@@ -146,44 +181,66 @@ struct DevicesView: View {
                 .tint(settings.accentTheme.fill)
             }
         }
-        .contextMenu {
-            if row.trusted {
-                Button {
-                    renaming = renameTarget(for: row)
-                } label: {
-                    Label("Rename", systemImage: "pencil")
-                }
-            } else {
-                Button {
-                    trust(row)
-                } label: {
-                    Label("Trust", systemImage: "checkmark.shield")
-                }
-            }
+        .contextMenu { menuItems(for: row) }
+        // A blocked device's card is dark gray in either theme.
+        .meRow(transparency: settings.cardTransparency, fill: row.blocked ? Theme.blockedCard : nil)
+    }
+
+    /// The card's ... menu and its long-press menu: the same items.
+    @ViewBuilder
+    private func menuItems(for row: DeviceRow) -> some View {
+        Button {
+            open(row)
+        } label: {
+            Label("Details", systemImage: "info.circle")
+        }
+        if row.trusted {
             Button {
-                model.clipboard.copyText(row.deviceId)
-                model.showToast("Device ID copied.")
+                renaming = renameTarget(for: row)
             } label: {
-                Label("Copy Device ID", systemImage: "doc.on.doc")
+                Label("Rename", systemImage: "pencil")
             }
-            if let address = row.addresses.first {
-                Button {
-                    model.clipboard.copyText(address)
-                    model.showToast("Address copied.")
-                } label: {
-                    Label("Copy Address", systemImage: "network")
-                }
+        } else if !row.blocked {
+            Button {
+                trust(row)
+            } label: {
+                Label("Trust", systemImage: "checkmark.shield")
+            }
+        }
+        Button {
+            model.copyDeviceID(of: row)
+        } label: {
+            Label("Copy Device ID", systemImage: "doc.on.doc")
+        }
+        if let address = row.connectedAddress ?? row.addresses.first {
+            Button {
+                model.clipboard.copyText(address)
+                model.showToast("Address copied.")
+            } label: {
+                Label("Copy Address", systemImage: "network")
+            }
+        }
+        Divider()
+        if row.blocked {
+            Button {
+                unblock(row)
+            } label: {
+                Label("Unblock", systemImage: "lock.open")
+            }
+        } else {
+            Button(role: .destructive) {
+                confirming = .block(row)
+            } label: {
+                Label("Block", systemImage: "nosign")
             }
             if row.trusted {
-                Divider()
                 Button(role: .destructive) {
-                    removing = row
+                    confirming = .remove(row)
                 } label: {
                     Label("Remove", systemImage: "trash")
                 }
             }
         }
-        .meRow(transparency: settings.cardTransparency)
     }
 
     // MARK: - Actions
@@ -191,6 +248,17 @@ struct DevicesView: View {
     private func openPairing() {
         Haptics.tap(settings.haptics)
         model.pairingPresented = true
+    }
+
+    private func open(_ row: DeviceRow) {
+        Haptics.tap(settings.haptics)
+        detailID = row.deviceId
+        detailActive = true
+    }
+
+    private func unblock(_ row: DeviceRow) {
+        Haptics.tap(settings.haptics)
+        model.unblock(row)
     }
 
     private func trust(_ row: DeviceRow) {
@@ -367,88 +435,167 @@ private struct DevicesValueRow: View {
 
 // MARK: - Device row
 
-private struct DevicesRowView: View {
+/// A Remove or Block waiting for its answer. Shared with the detail screen.
+enum DevicesConfirmation {
+    case remove(DeviceRow)
+    case block(DeviceRow)
+
+    var row: DeviceRow {
+        switch self {
+        case .remove(let row), .block(let row): return row
+        }
+    }
+
+    func title(name: String) -> String {
+        switch self {
+        case .remove: return "Remove \(name)?"
+        case .block: return "Block \(name)?"
+        }
+    }
+
+    var confirmLabel: String {
+        switch self {
+        case .remove: return "Remove"
+        case .block: return "Block"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .remove:
+            return "It will no longer be able to sync with this \(ThisDeviceNoun.current). You can pair again later."
+        case .block:
+            return "It is removed from your paired devices and stops syncing. It can't ask to pair again, and nothing from it is shown, until you unblock it."
+        }
+    }
+
+    @MainActor
+    func perform(on model: AppModel) {
+        switch self {
+        case .remove(let row): model.untrust(row)
+        case .block(let row): model.block(row)
+        }
+    }
+}
+
+/// One device card: tap it for the detail screen, ... for the menu. Only the
+/// address the live connection uses is shown here; the rest are in the detail.
+private struct DevicesRowView<MenuItems: View>: View {
     let row: DeviceRow
     let name: String
     /// The accent fill (AccentTheme.fill): it sits under a white glyph.
     let accent: Color
+    let onOpen: () -> Void
     let onTrust: () -> Void
+    let menuItems: () -> MenuItems
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    init(
+        row: DeviceRow,
+        name: String,
+        accent: Color,
+        onOpen: @escaping () -> Void,
+        onTrust: @escaping () -> Void,
+        @ViewBuilder menuItems: @escaping () -> MenuItems
+    ) {
+        self.row = row
+        self.name = name
+        self.accent = accent
+        self.onOpen = onOpen
+        self.onTrust = onTrust
+        self.menuItems = menuItems
+    }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                DevicesIconTile(trusted: row.trusted, connected: row.connected, accent: accent)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(name)
-                        .font(.body.weight(.semibold))
-                        .lineLimit(1)
-                    Text(status)
-                        .font(.subheadline)
-                        .foregroundColor(row.connected ? Theme.connected : .secondary)
-                    if !row.addresses.isEmpty {
-                        Text(row.addresses.joined(separator: " · "))
-                            .font(.caption.monospacedDigit())
-                            .foregroundColor(.secondary)
-                            .lineLimit(2)
+        HStack(alignment: .center, spacing: 8) {
+            Button(action: onOpen) {
+                HStack(alignment: .top, spacing: 12) {
+                    DevicesIconTile(trusted: row.trusted, connected: row.connected, blocked: row.blocked, accent: accent)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(name)
+                            .font(.body.weight(.semibold))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                        Text(status)
+                            .font(.subheadline)
+                            .foregroundColor(row.connected && !row.blocked ? Theme.connected : .secondary)
+                        if row.connected, !row.blocked, let address = row.connectedAddress {
+                            Text(address)
+                                .font(.caption.monospacedDigit())
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        } else if !row.connected, !row.blocked, let lastSeen = row.lastSeen {
+                            Text("Last seen \(DevicesRelativeTime.string(for: lastSeen))")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
                     }
-                    if !row.connected, let lastSeen = row.lastSeen {
-                        Text("Last seen \(DevicesRelativeTime.string(for: lastSeen))")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+                    Spacer(minLength: 0)
                 }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(SyncedCardButtonStyle())
             .accessibilityElement(children: .combine)
+            .accessibilityHint("Shows details")
 
-            Spacer(minLength: 4)
-
-            if !row.trusted {
+            if !row.trusted && !row.blocked {
                 Button("Trust", action: onTrust)
                     .buttonStyle(.bordered)
                     .accessibilityLabel("Trust \(name)")
             }
+
+            Menu {
+                menuItems()
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.body.weight(.semibold))
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("More options for \(name)")
         }
         .padding(.vertical, 4)
+        // The gray card is dark in either theme: light text on it.
+        .environment(\.colorScheme, row.blocked ? .dark : colorScheme)
     }
 
-    private var status: String {
-        if row.connected { return "Connected" }
-        if row.trusted { return "Paired · not connected" }
-        if row.pairing { return "Nearby — pairing mode open" }
-        return "Nearby"
-    }
+    private var status: String { row.statusText }
 }
 
 /// Rounded tile with the device glyph and a status dot in its corner. There
 /// is no device type on the wire, so every peer gets the desktop glyph.
-private struct DevicesIconTile: View {
+struct DevicesIconTile: View {
     let trusted: Bool
     let connected: Bool
+    var blocked = false
     let accent: Color
 
     @ScaledMetric(relativeTo: .body) private var size: CGFloat = 40
 
     var body: some View {
-        Image(systemName: "desktopcomputer")
+        Image(systemName: blocked ? "nosign" : "desktopcomputer")
             .font(.system(size: size * 0.45, weight: .medium))
-            .foregroundColor(trusted ? .white : .secondary)
+            .foregroundColor(blocked || trusted ? .white : .secondary)
             .frame(width: size, height: size)
             .background(
                 RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                    .fill(trusted ? accent : Color(UIColor.tertiarySystemFill))
+                    .fill(blocked ? Color(UIColor.systemGray) : trusted ? accent : Color(UIColor.tertiarySystemFill))
             )
             .overlay(alignment: .bottomTrailing) {
-                Circle()
-                    .fill(connected ? Theme.connected : Color(UIColor.systemGray3))
-                    .frame(width: 12, height: 12)
-                    .overlay(Circle().strokeBorder(Color(Theme.card), lineWidth: 2))
-                    .offset(x: 3, y: 3)
+                if !blocked {
+                    Circle()
+                        .fill(connected ? Theme.connected : Color(UIColor.systemGray3))
+                        .frame(width: 12, height: 12)
+                        .overlay(Circle().strokeBorder(Color(Theme.card), lineWidth: 2))
+                        .offset(x: 3, y: 3)
+                }
             }
             .accessibilityHidden(true)
     }
 }
 
-private enum DevicesRelativeTime {
+enum DevicesRelativeTime {
     private static let formatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .full
@@ -475,7 +622,7 @@ struct DevicesRenameTarget: Identifiable {
 }
 
 /// iOS 15 alerts can't host text fields, so renaming is a small sheet.
-private struct DevicesRenameSheet: View {
+struct DevicesRenameSheet: View {
     let target: DevicesRenameTarget
     let onSave: (String) -> Void
 

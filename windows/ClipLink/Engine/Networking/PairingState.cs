@@ -53,6 +53,17 @@ public class PairingState
         }
     }
 
+    // TakePending, but only if the slot still holds this very connection: what
+    // a request's expiry uses, so the timer of one that was answered long ago
+    // can't take the next one's slot.
+    public (PeerConnection conn, string? address)? TakePendingIf(PeerConnection conn)
+    {
+        lock (gate)
+        {
+            return pendingConn == conn ? TakePending() : null;
+        }
+    }
+
     // Atomically hands over the pending connection (for accept) and clears
     // the slot - null if nothing was pending.
     public (PeerConnection conn, string? address)? TakePending()

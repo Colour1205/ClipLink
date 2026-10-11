@@ -41,6 +41,9 @@ public static class Program
 
         if (options.Unregister) return Unregister(options);
         if (options.Quit) return QuitRunning(options);
+        // A notification clicked after ClipLink quit: there is no request left
+        // to answer, and starting the whole app for it would only surprise.
+        if (options.ToastLaunch) return 0;
 
         using var mutex = new Mutex(initiallyOwned: false, MutexName(options.Label));
         if (!TryOwn(mutex))
@@ -147,6 +150,9 @@ public static class Program
         try
         {
             ShellIntegration.For(options).Unregister();
+            // The toast library's COM activator, registered under HKCU the first time
+            // a pairing request was shown: nothing else removes it.
+            if (options.IsDefaultLabel) Microsoft.Toolkit.Uwp.Notifications.ToastNotificationManagerCompat.Uninstall();
         }
         catch (Exception ex)
         {

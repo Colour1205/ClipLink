@@ -33,6 +33,11 @@ public sealed record AppOptions
     public IReadOnlyList<string>? SharePaths { get; init; }
     public bool Unregister { get; init; }
     public bool Quit { get; init; }
+    // Started by Windows because a notification's button or body was clicked
+    // while ClipLink wasn't running (-Embedding, the COM activation of an
+    // unpackaged app's notification). Whatever the notification was about
+    // died with the process that posted it, so there is nothing to do.
+    public bool ToastLaunch { get; init; }
     public string Label { get; init; } = ClipLinkEngine.DefaultLabel;
     public int Port { get; init; } = ClipLinkEngine.DefaultPort;
     public int DiscoveryPort { get; init; } = ClipLinkEngine.DefaultPort;
@@ -62,6 +67,11 @@ public sealed record AppOptions
         {
             string arg = args[i];
             string name = arg.ToLowerInvariant();
+            if (name is "-embedding" or "-toastactivated" || name.StartsWith("----appnotificationactivated", StringComparison.Ordinal))
+            {
+                options = options with { ToastLaunch = true };
+                continue;
+            }
             string? Value()
             {
                 if (i + 1 < args.Length) return args[++i];

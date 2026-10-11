@@ -388,11 +388,11 @@ export class PeerConnection {
   private heartbeatTimerId: number = -1;
   public readonly peerDeviceId: string;
   // False means: this peer wasn't in the trust store when the handshake
-  // ran, and the connection only exists at all because pairingModeOpen was
-  // true (see create()'s relaxed gate below). The caller MUST treat this as
-  // a live pairing candidate - show an explicit accept/reject prompt fed by
-  // this already signature-verified peerDeviceId - rather than handing it
-  // straight to SyncManager like an ordinary already-trusted connection.
+  // ran and its passcode proof (if any) didn't verify: the connection only
+  // exists so the user can be asked (see create()). The caller MUST treat
+  // this as a live pairing candidate - show an explicit Trust/Ignore prompt
+  // fed by this already signature-verified peerDeviceId - rather than handing
+  // it straight to SyncManager like an ordinary already-trusted connection.
   public readonly wasAlreadyTrusted: boolean;
   // True only when wasAlreadyTrusted became true because THIS handshake's
   // passphrase proof verified (not because the peer was already in the
@@ -423,28 +423,30 @@ export class PeerConnection {
     this.peerName = peerName;
   }
 
-  // pairingModeOpen: true only while the local Pairing screen is open (see
-  // Index.ets's pairingOpen) - a live, explicit "I'm expecting to pair right
-  // now" signal. Without it, an untrusted peer is refused exactly as before
-  // (same early-bail, no wasted signature verification) UNLESS their
-  // handshake carries a passphrase proof that verifies against
-  // passphraseKeyStore (see newlyTrustedViaPassphrase) - that's a second,
-  // independent way in, same as the LAN beacon's passive auto-trust already
-  // is regardless of pairing mode. With pairingModeOpen true, the handshake
-  // completes fully for a live accept/reject prompt instead - both sides
-  // need this true on their OWN "physically at the screen" behalf for a NEW
-  // pairing to succeed that way, since each side runs this same check
-  // independently over the same connection; the caller who gets back
-  // wasAlreadyTrusted=false is responsible for a local accept/reject prompt
-  // before writing trust.
+  // An untrusted peer's handshake completes once its signature verifies, so
+  // the user can be asked, as a dialog or a notification, whether to trust
+  // it: the caller who gets back wasAlreadyTrusted=false is responsible for
+  // that Trust/Ignore prompt before writing trust, and nothing is trusted by
+  // the connection merely existing. (This used to need the Pairing screen
+  // open; a request now reaches this device whenever the app is running.) A
+  // handshake whose passcode proof verifies against passphraseKeyStore
+  // (see newlyTrustedViaPassphrase) is trusted without a question, the same
+  // as the LAN beacon's passive auto-trust.
+  //
+  // isBlocked is asked about the peer's claimed key as soon as it is read,
+  // before trust, the passcode proof or anything else: a blocked device gets
+  // nothing, however it got here. (It has already been sent this side's
+  // handshake line - an acceptor writes first - only a public key and a
+  // signature.) A function rather than the store itself: the store compares
+  // keys with sameIdentityKey, from this file.
   //
   // ownName: this device's display name to send as DeviceName, or null to
   // leave it out.
   //
-  // Returns null (never throws for a bad/malformed peer, or an untrusted
-  // one that's neither pairing-mode-eligible nor passphrase-verified) on
-  // any handshake failure - same contract as PeerConnection.cs's CreateAsync.
-  static async create(client: TcpLike, myIdentity: DeviceIdentity, trustStore: TrustStore, context: common.UIAbilityContext, pairingModeOpen: boolean, passphraseKeyStore: PassphraseKeyStore, ownName: string | null, report?: HandshakeReport): Promise<PeerConnection | null> {
+  // Returns null (never throws for a bad/malformed peer) on any handshake
+  // failure, or for a blocked one - same contract as PeerConnection.cs's
+  // CreateAsync.
+  static async create(client: TcpLike, myIdentity: DeviceIdentity, trustStore: TrustStore, context: common.UIAbilityContext, isBlocked: (deviceId: string) => Promise<boolean>, passphraseKeyStore: PassphraseKeyStore, ownName: string | null, report?: HandshakeReport): Promise<PeerConnection | null> {
     const channel = new TcpLineChannel(client);
 
     try {
@@ -491,15 +493,21 @@ export class PeerConnection {
         return null;
       }
 
+      // Before trust, the passcode proof and anything else: a blocked device
+      // is never let in by any of them.
+      if (await isBlocked(theirHandshake.IdentityPublicKey)) {
+        return null;
+      }
+
       const alreadyTrusted = await trustStore.isTrusted(context, theirHandshake.IdentityPublicKey);
       let passphraseVerified = false;
       if (!alreadyTrusted && myKey !== null && theirHandshake.PassphraseProof) {
         passphraseVerified = await passphraseKeyStore.verifyProof(myKey, theirHandshake.IdentityPublicKey, theirHandshake.PassphraseProof);
       }
+      // Not a device we trust or can auto-trust is no longer refused here: it
+      // becomes a pairing request (wasAlreadyTrusted = false) that the user
+      // answers. Its signature still has to verify below.
       const effectivelyTrusted = alreadyTrusted || passphraseVerified;
-      if (!effectivelyTrusted && !pairingModeOpen) {
-        return null; // not a device we trust or can auto-trust, and not expecting to pair right now - refuse outright
-      }
 
       let theirEphemeralPubBytes: Uint8Array;
       let theirSignature: Uint8Array;

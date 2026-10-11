@@ -200,14 +200,20 @@ class MainActivity : ComponentActivity() {
                         ),
                         onTrust = { engine.trustDevice(it.deviceId) },
                         onUntrust = { engine.untrustDevice(it.deviceId) },
+                        onBlock = { engine.blockDevice(it.deviceId) },
+                        onUnblock = { engine.unblockDevice(it.deviceId) },
+                        onCopyDeviceId = {
+                            copyPlainText(it.deviceId)
+                            engine.showToast("Device ID copied.")
+                        },
                         onPairingOpenChange = { open ->
                             pairScreenOpen = open
                             engine.setPairingOpen(open)
                             if (!open) pairModel.clear()
                         },
                         onPair = { raw -> pairModel.pair(raw, engine::pairWith) },
-                        onAcceptPairing = engine::acceptPairing,
-                        onRejectPairing = engine::rejectPairing,
+                        onAcceptPairing = { engine.acceptPairing() },
+                        onRejectPairing = { engine.rejectPairing() },
                         onToastShown = engine::consumeToast,
                     ),
                 )
@@ -224,12 +230,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
-        // Pairing mode means "an untrusted peer may complete a handshake", and
-        // the Pair screen's own on/off follows in-app navigation only. Left on
-        // here, a phone with keep-alive on kept beaconing pairing=1 and taking
-        // untrusted handshakes after the user went Home from that screen. Not
-        // for a recreation, though: it is the same screen, a moment later, and
-        // closing would reject a pairing request somebody is looking at.
+        // Pairing mode is what this device advertises (pairing=1 in its beacon)
+        // and what lets it dial a stranger that advertises the same, and the
+        // Pair screen's own on/off follows in-app navigation only. Left on
+        // here, a phone with keep-alive on kept beaconing pairing=1 and dialling
+        // strangers after the user went Home from that screen. Not for a
+        // recreation, though: it is the same screen, a moment later. (A request
+        // that is waiting for an answer is left alone either way.)
         if (!isChangingConfigurations) engine.setPairingOpen(false)
     }
 

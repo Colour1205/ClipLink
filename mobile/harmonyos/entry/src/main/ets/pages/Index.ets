@@ -14,8 +14,9 @@
 // PeerConnection, and SyncManager, all built and verified in earlier steps.
 
 import hilog from '@ohos.hilog';
-import { common, Want, wantConstant } from '@kit.AbilityKit';
+import { common, Want, WantAgent, wantConstant, wantAgent } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { notificationManager } from '@kit.NotificationKit';
 import { window, promptAction, curves, LengthMetrics } from '@kit.ArkUI';
 import { HdsNavigation, HdsNavDestination, HdsNavDestinationTitleMode, HdsNavigationTitleBarOptions,
   HdsNavigationMenuItemOptions, ScrollEffectType, TitleSize, hdsMaterial } from '@kit.UIDesignKit';
@@ -35,6 +36,7 @@ import { vibrator } from '@kit.SensorServiceKit';
 import { ClipboardWatcher } from '../clipboard/ClipboardWatcher';
 import { DeviceIdentity } from '../identity/DeviceIdentity';
 import { TrustStore, TrustedDevice } from '../identity/TrustStore';
+import { BlockStore, BlockedDevice } from '../identity/BlockStore';
 import { PassphraseKeyStore } from '../identity/PassphraseKeyStore';
 import { DeviceSettings } from '../identity/DeviceSettings';
 import { deviceFingerprint, effectiveDeviceName, getLocalDeviceName, normalizeDeviceName, shortDeviceId } from '../identity/DeviceName';
@@ -45,7 +47,8 @@ import { CopyRefusal, SHARED_IN_EVENT, SharedIn, removeQuietly, takePendingShare
 import { entryKey } from '../storage/DeletedEntries';
 import { Discovery, PeerBeacon } from '../networking/Discovery';
 import { TcpServer, connectTcp } from '../networking/TcpTransport';
-import { HandshakeReport, PeerConnection, PeerVerdict, TcpSocketAdapter, TcpSocketConnectionAdapter } from '../networking/PeerConnection';
+import { HandshakeReport, PeerConnection, PeerVerdict, TcpSocketAdapter, TcpSocketConnectionAdapter, sameIdentityKey } from '../networking/PeerConnection';
+import { PAIRING_ACTION_EVENT, PAIRING_ACTION_OPEN, PAIRING_ACTION_PARAM, PAIRING_ACTION_TRUST, PAIRING_ACTION_IGNORE, PAIRING_DEVICE_PARAM } from '../networking/PairingActions';
 import { SyncManager } from '../networking/SyncManager';
 import { connection } from '@kit.NetworkKit';
 import { signEntry, ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
@@ -104,6 +107,20 @@ function tapHaptic(): void {
     .catch(() => { /* no haptic hardware, or effect unsupported - fine to just skip it */ });
 }
 
+// How long a pairing request waits for an answer before it is ignored. A
+// request can come from any device on the network at any time and only one is
+// held at once (a second is turned away while it waits), so without this one
+// unanswered request would keep every later one out. Its notification times out
+// at the same moment.
+const PAIRING_REQUEST_TTL_MS: number = 3 * 60 * 1000;
+const PAIRING_NOTIFICATION_ID: number = 2001;
+
+// A blocked device's card is dark gray in either theme, so it reads as
+// switched off at a glance; its text is light to match.
+const BLOCKED_CARD: string = '#FF3A3A3E';
+const BLOCKED_TEXT: string = '#FFE3E3E8';
+const BLOCKED_TEXT_MUTED: string = '#FFA9A9B2';
+
 // Merged view of a device for the UI - could be trusted, discovered (via
 // beacon), connected, or any combination. A device the user has never
 // trusted but whose beacon we've heard is "discovered only"; a trusted
@@ -126,6 +143,13 @@ interface DeviceRow {
   discovered: boolean;
   tcpPort: number | null;
   connected: boolean;
+  // Blocked here: no request from it is shown and it is never dialled. It
+  // stays listed, on its own dark gray card, so it can be unblocked.
+  blocked: boolean;
+  // The address the live connection runs over, only while there is one -
+  // the one address the card shows (addresses is the full list, for the
+  // detail screen).
+  connectedAddress: string | null;
 }
 
 // A device without a known name is titled "Device XXXX·XXXX" - see
@@ -139,6 +163,8 @@ function deviceRowTitle(row: DeviceRow): string {
 // that changes on its own - last beacon, connection state, arrival order -
 // takes part, so a device coming online never makes the list jump.
 function compareDeviceRows(a: DeviceRow, b: DeviceRow): number {
+  // Blocked ones last, out of the way.
+  if (a.blocked !== b.blocked) return a.blocked ? 1 : -1;
   if (a.trusted !== b.trusted) return a.trusted ? -1 : 1;
   if (a.name !== null && b.name === null) return -1;
   if (a.name === null && b.name !== null) return 1;
@@ -529,6 +555,25 @@ struct Index {
   @State pendingPairingPeerId: string = '';
   @State pendingPairingAddress: string = '';
   private pendingPairingConn: PeerConnection | null = null;
+  // What the waiting request's device calls itself, for its notification.
+  private pendingPairingName: string | null = null;
+  // The alert for the waiting request has been put up (so coming back to the
+  // app does not put up a second one). A request that arrived while the app
+  // was away only got a notification, and gets its alert on return.
+  private pairingDialogShown: boolean = false;
+  private pairingExpiryTimerId: number = -1;
+  // False while the app is out of view: a request then goes to a
+  // notification instead of a dialog nobody can see.
+  private appVisible: boolean = true;
+  // Blocked devices, mirrored from BlockStore. State, so a card turns dark
+  // gray the moment its device is blocked.
+  @State blockedDevices: BlockedDevice[] = [];
+  private blockStore: BlockStore = new BlockStore();
+  // The device whose detail screen is open ('' when none).
+  @State openDeviceId: string = '';
+  private deviceDetailScroller: Scroller = new Scroller();
+  // The address each live connection runs over, for the Devices list.
+  private connectionAddresses: Map<string, string> = new Map<string, string>();
   @State pairByAddressInput: string = '';
   @State pairingInProgress: boolean = false;
 
@@ -552,6 +597,20 @@ struct Index {
   // "Share to ClipLink" (see drainPendingShares): true while a batch is
   // being synced, and the eventHub listener EntryAbility's shares wake.
   private sharesDraining: boolean = false;
+  // A Trust or Ignore button on the pairing notification (see
+  // postPairingNotification). Each names the request it was posted for and
+  // acts only if that is still the one waiting: a stale one cannot answer
+  // whoever asked next. 'open' (the notification itself) only brings the
+  // app up, and onPageShow then puts the request on screen.
+  private onPairingAction = (action: string, deviceId: string): void => {
+    if (this.pendingPairingConn === null || !sameIdentityKey(this.pendingPairingPeerId, deviceId)) return;
+    if (action === PAIRING_ACTION_TRUST) {
+      void this.acceptPairing(deviceId);
+    } else if (action === PAIRING_ACTION_IGNORE) {
+      this.rejectPairing(deviceId);
+    }
+  };
+
   private onSharedIn = (): void => {
     void this.drainPendingShares();
   };
@@ -695,6 +754,7 @@ struct Index {
     // (a cold start from the share panel) is drained once ownDeviceId is
     // known, below.
     context.eventHub.on(SHARED_IN_EVENT, this.onSharedIn);
+    context.eventHub.on(PAIRING_ACTION_EVENT, this.onPairingAction);
 
     this.tcpServer.onConnection((conn: socket.TCPSocketConnection) => {
       const identity = new DeviceIdentity();
@@ -708,7 +768,7 @@ struct Index {
         .then((addr: socket.NetAddress) => addr.address)
         .catch(() => null)
         .then((remoteAddress: string | null) => {
-          PeerConnection.create(new TcpSocketConnectionAdapter(conn), identity, this.trustStore, context, this.pairingOpen, this.passphraseKeyStore, this.ownDeviceName())
+          PeerConnection.create(new TcpSocketConnectionAdapter(conn), identity, this.trustStore, context, this.blockCheck(), this.passphraseKeyStore, this.ownDeviceName())
             .then((peerConn: PeerConnection | null) => {
               if (peerConn === null) {
                 conn.close().catch(() => { /* already closed - fine */ });
@@ -770,6 +830,8 @@ struct Index {
     });
 
     void this.refreshTrustedDevices();
+    void this.refreshBlockedDevices();
+    void this.ensureNotificationPermission();
     void this.loadTailscaleIp();
     void this.loadSyncSettings();
     this.refreshLocalAddresses();
@@ -810,6 +872,11 @@ struct Index {
   // clipboard sync with it. stop() now awaits the close, this awaits
   // stop(), and a failed bind is retried once rather than swallowed.
   onPageShow(): void {
+    this.appVisible = true;
+    // Back in view with a request waiting that only got a notification: the
+    // dialog takes over, and the notification goes.
+    this.cancelPairingNotification();
+    if (this.pendingPairingConn !== null && !this.pairingDialogShown) this.presentPairingDialog();
     void this.restartDiscovery();
     void this.reconnectOffLanPeers();
     this.refreshLocalAddresses();
@@ -825,6 +892,13 @@ struct Index {
     if (this.noticeOnOpen && this.watcher.hasUnseenChange()) {
       this.pendingChange = true;
     }
+  }
+
+  // Out of view: a request that is still waiting is now for nobody to see,
+  // so say so with a notification.
+  onPageHide(): void {
+    this.appVisible = false;
+    if (this.pendingPairingConn !== null) void this.postPairingNotification();
   }
 
   private async restartDiscovery(): Promise<void> {
@@ -877,6 +951,7 @@ struct Index {
     this.mainWindow?.off('avoidAreaChange', this.onAvoidAreaChange);
     this.mainWindow?.off('windowSizeChange', this.onWindowSizeChange);
     (getContext(this) as common.UIAbilityContext).eventHub.off(SHARED_IN_EVENT, this.onSharedIn);
+    (getContext(this) as common.UIAbilityContext).eventHub.off(PAIRING_ACTION_EVENT, this.onPairingAction);
     this.watcher.stopListening();
     void this.discovery.stop();
     this.tcpServer.stop();
@@ -976,6 +1051,23 @@ struct Index {
     this.trustedDevices = await this.trustStore.getAllTrustedDevices(context);
   }
 
+  private async refreshBlockedDevices(): Promise<void> {
+    const context = getContext(this) as common.UIAbilityContext;
+    this.blockedDevices = await this.blockStore.getAll(context);
+  }
+
+  // The handshake's question about a claimed key, answered from the store.
+  private blockCheck(): (deviceId: string) => Promise<boolean> {
+    const context = getContext(this) as common.UIAbilityContext;
+    return (deviceId: string): Promise<boolean> => this.blockStore.isBlocked(context, deviceId);
+  }
+
+  // Synchronous, from the mirrored list: for the beacon paths, which run
+  // every two seconds per peer.
+  private isBlockedNow(deviceId: string): boolean {
+    return this.blockedDevices.some((d: BlockedDevice) => sameIdentityKey(d.deviceId, deviceId));
+  }
+
   // Keeps a trusted device's stored name current from its handshake, so the
   // Devices list still names it once it's off the LAN - but only once this
   // connection's first envelope has decrypted (see
@@ -1045,6 +1137,7 @@ struct Index {
   // simultaneously dial each other.
   private async maybeAutoConnect(beacon: PeerBeacon): Promise<void> {
     if (beacon.deviceId === this.ownDeviceId) return;
+    if (this.isBlockedNow(beacon.deviceId)) return;
     if (this.syncManager?.isConnected(beacon.deviceId)) return;
     if (this.connectingTo.has(beacon.deviceId)) return;
     if (beacon.deviceId >= this.ownDeviceId) return;
@@ -1080,6 +1173,7 @@ struct Index {
   private async maybeConnectForPairing(beacon: PeerBeacon): Promise<void> {
     if (!this.pairingOpen || !beacon.pairing) return;
     if (beacon.deviceId === this.ownDeviceId) return;
+    if (this.isBlockedNow(beacon.deviceId)) return;
     if (this.syncManager?.isConnected(beacon.deviceId)) return;
     if (this.connectingTo.has(beacon.deviceId)) return;
     if (this.pendingPairingConn !== null) return; // already have a candidate awaiting a decision
@@ -1106,6 +1200,12 @@ struct Index {
   // prompt instead, never auto-registered.
   private handleNewConnection(peerConn: PeerConnection, address: string | null): void {
     netLog(`handleNewConnection: peer=${deviceFingerprint(peerConn.peerDeviceId)} address=${address ?? 'null'} wasAlreadyTrusted=${peerConn.wasAlreadyTrusted} newlyTrustedViaPassphrase=${peerConn.newlyTrustedViaPassphrase}`);
+    if (this.isBlockedNow(peerConn.peerDeviceId)) {
+      // Blocked after the handshake began and before it got here: refused,
+      // however it got this far.
+      peerConn.close();
+      return;
+    }
     if (peerConn.wasAlreadyTrusted) {
       // Registered FIRST, before any trust-store write or activity-log
       // append. Those are conveniences; starting the connection's read
@@ -1113,6 +1213,7 @@ struct Index {
       // registerConnection was skipped entirely - the link stayed
       // unregistered and unlistened, isConnected() stayed false, and the
       // peer redialled every 2s forever while no clipboard data moved.
+      if (address !== null) this.connectionAddresses.set(peerConn.peerDeviceId, address);
       this.syncManager?.registerConnection(peerConn);
       // Its handshake's name waits for the first envelope - see
       // rememberNameOnceProven. The trust() calls below never carry it.
@@ -1144,33 +1245,85 @@ struct Index {
       return;
     }
     if (this.pendingPairingConn !== null) {
-      // Already showing a prompt for a different candidate - don't juggle
-      // two at once; whichever arrived second just doesn't get to pair
-      // this round (nothing stops them from opening pairing mode again).
+      // Already asking about a different candidate - don't juggle two at
+      // once; whichever arrived second just doesn't get to pair this round
+      // (it can ask again).
       peerConn.close();
       return;
     }
     this.pendingPairingConn = peerConn;
     this.pendingPairingPeerId = peerConn.peerDeviceId;
     this.pendingPairingAddress = address ?? '';
+    this.pendingPairingName = peerConn.peerName;
+    this.pairingDialogShown = false;
+    // Ignored if nobody answers: see PAIRING_REQUEST_TTL_MS.
+    this.pairingExpiryTimerId = setTimeout(() => { this.expirePairingRequest(peerConn); }, PAIRING_REQUEST_TTL_MS);
+    // In view: a dialog over whatever page is open (the system's own alert,
+    // not a page of its own). Out of view: a notification with Trust and
+    // Ignore - and the dialog follows when the app comes back (onPageShow).
+    if (this.appVisible) {
+      this.presentPairingDialog();
+    } else {
+      void this.postPairingNotification();
+    }
+  }
+
+  // The waiting request as a dialog over whatever is open. Trust or Ignore,
+  // and only those: Ignore closes this one request and remembers nothing, so
+  // the device can ask again - blocking it is a deliberate act on the Devices
+  // tab. Each button names the request it was put up for, so a dialog that
+  // outlived its request (it expired) cannot answer whoever asked next.
+  private presentPairingDialog(): void {
+    const conn = this.pendingPairingConn;
+    if (conn === null) return;
+    const requester: string = conn.peerDeviceId;
+    this.pairingDialogShown = true;
     this.getUIContext().showAlertDialog({
       title: $r('app.string.dialog_pairing_request_title'),
-      message: this.pairingRequestMessage(peerConn.peerDeviceId, peerConn.peerName, address),
-      primaryButton: { value: $r('app.string.common_accept'), action: () => { void this.acceptPairing(); } },
-      secondaryButton: { value: $r('app.string.common_reject'), action: () => { this.rejectPairing(); } },
-      cancel: () => { this.rejectPairing(); },
+      message: this.pairingRequestMessage(requester, conn.peerName, this.pendingPairingAddress.length > 0 ? this.pendingPairingAddress : null),
+      primaryButton: { value: $r('app.string.pairing_trust'), action: () => { void this.acceptPairing(requester); } },
+      secondaryButton: { value: $r('app.string.pairing_ignore'), action: () => { this.rejectPairing(requester); } },
+      cancel: () => { this.rejectPairing(requester); },
     });
   }
 
-  async acceptPairing(): Promise<void> {
+  // Ignores a request nobody answered in time - if it is still the one waiting.
+  private expirePairingRequest(conn: PeerConnection): void {
+    if (this.pendingPairingConn !== conn) return; // answered since
+    this.log('a pairing request went unanswered and was ignored');
+    this.rejectPairing(conn.peerDeviceId);
+  }
+
+  // Everything that belongs to the waiting request, gone together: the
+  // timer, the dialog flag and the notification.
+  private clearPendingPairing(): void {
+    if (this.pairingExpiryTimerId !== -1) {
+      clearTimeout(this.pairingExpiryTimerId);
+      this.pairingExpiryTimerId = -1;
+    }
+    this.pendingPairingConn = null;
+    this.pendingPairingPeerId = '';
+    this.pendingPairingAddress = '';
+    this.pendingPairingName = null;
+    this.pairingDialogShown = false;
+    this.cancelPairingNotification();
+  }
+
+  // Trust: the answer to the dialog's (and the notification's) Trust.
+  // expecting is the id the answer was given FOR: nothing happens if the
+  // request waiting now is a different one.
+  async acceptPairing(expecting?: string): Promise<void> {
     const conn = this.pendingPairingConn;
-    if (conn === null) return;
+    if (conn === null) {
+      // Answered, expired or withdrawn while the dialog was up.
+      promptAction.showToast({ message: $r('app.string.toast_pairing_cancelled') });
+      return;
+    }
+    if (expecting !== undefined && !sameIdentityKey(conn.peerDeviceId, expecting)) return;
     if (conn.isClosed) {
       // The other side rejected or gave up while this prompt was up.
       // Trusting it anyway would pair this side only.
-      this.pendingPairingConn = null;
-      this.pendingPairingPeerId = '';
-      this.pendingPairingAddress = '';
+      this.clearPendingPairing();
       promptAction.showToast({ message: $r('app.string.toast_pairing_cancelled') });
       return;
     }
@@ -1180,20 +1333,100 @@ struct Index {
     // connection's first envelope decrypts (see rememberNameOnceProven).
     await this.trustStore.trust(context, conn.peerDeviceId, address);
     await this.refreshTrustedDevices();
-    this.pendingPairingConn = null;
-    this.pendingPairingPeerId = '';
-    this.pendingPairingAddress = '';
+    // Expired or answered while the record was being written: the trust is
+    // kept, and the connection is already closed.
+    if (this.pendingPairingConn !== conn || conn.isClosed) return;
+    this.clearPendingPairing();
+    if (address !== undefined) this.connectionAddresses.set(conn.peerDeviceId, address);
     this.syncManager?.registerConnection(conn);
     this.rememberNameOnceProven(conn);
     this.log(`paired: ${shortDeviceId(conn.peerDeviceId)}`);
     promptAction.showToast({ message: $r('app.string.toast_paired') });
   }
 
-  rejectPairing(): void {
-    this.pendingPairingConn?.close();
-    this.pendingPairingConn = null;
-    this.pendingPairingPeerId = '';
-    this.pendingPairingAddress = '';
+  // Ignore: closes the waiting connection and nothing else - nothing is
+  // remembered. Safe with nothing pending. expecting is as for acceptPairing.
+  rejectPairing(expecting?: string): void {
+    const conn = this.pendingPairingConn;
+    if (conn !== null && expecting !== undefined && !sameIdentityKey(conn.peerDeviceId, expecting)) return;
+    conn?.close();
+    this.clearPendingPairing();
+  }
+
+  // ---- the notification, for a request while the app is out of view ----
+
+  // Local notifications need the user's say-so, asked for once at start so
+  // the system's own dialog doesn't pop up in the middle of a pairing.
+  private async ensureNotificationPermission(): Promise<void> {
+    try {
+      if (!(await notificationManager.isNotificationEnabled())) {
+        await notificationManager.requestEnableNotification(getContext(this) as common.UIAbilityContext);
+      }
+    } catch (e) {
+      // Refused or unavailable: a request is still there when the app opens.
+    }
+  }
+
+  // A button of the notification is a WantAgent that starts this ability: the
+  // answer arrives in EntryAbility.onNewWant (see networking/PairingActions.ets).
+  // HarmonyOS has no button that answers without opening the app.
+  private async pairingWantAgent(context: common.UIAbilityContext, action: string, deviceId: string, requestCode: number): Promise<WantAgent> {
+    const params: Record<string, Object> = {};
+    params[PAIRING_ACTION_PARAM] = action;
+    params[PAIRING_DEVICE_PARAM] = deviceId;
+    const info: wantAgent.WantAgentInfo = {
+      wants: [{ bundleName: context.abilityInfo.bundleName, abilityName: context.abilityInfo.name, parameters: params }],
+      actionType: wantAgent.OperationType.START_ABILITY,
+      requestCode: requestCode,
+      wantAgentFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG],
+    };
+    return wantAgent.getWantAgent(info);
+  }
+
+  private async postPairingNotification(): Promise<void> {
+    const conn = this.pendingPairingConn;
+    if (conn === null) return;
+    const requester: string = conn.peerDeviceId;
+    try {
+      if (!(await notificationManager.isNotificationEnabled())) return;
+      const context = getContext(this) as common.UIAbilityContext;
+      const open: WantAgent = await this.pairingWantAgent(context, PAIRING_ACTION_OPEN, requester, 20);
+      const trust: WantAgent = await this.pairingWantAgent(context, PAIRING_ACTION_TRUST, requester, 21);
+      const ignore: WantAgent = await this.pairingWantAgent(context, PAIRING_ACTION_IGNORE, requester, 22);
+      // Answered, or expired, while the agents were being made.
+      if (this.pendingPairingConn !== conn) return;
+      const claimed: string | null = this.peerName(requester, conn.peerName);
+      const who: string = claimed !== null ? claimed : this.str($r('app.string.pairing_request_unnamed'));
+      const request: notificationManager.NotificationRequest = {
+        id: PAIRING_NOTIFICATION_ID,
+        content: {
+          notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
+          normal: {
+            title: this.str($r('app.string.notif_pairing_title')),
+            text: this.str($r('app.string.notif_pairing_text'), who),
+            // The name is whatever that device chose; the fingerprint comes
+            // from its id, so the two are shown together.
+            additionalText: this.str($r('app.string.pairing_request_id_line'), deviceFingerprint(requester)),
+          },
+        },
+        wantAgent: open,
+        actionButtons: [
+          { title: this.str($r('app.string.pairing_trust')), wantAgent: trust },
+          { title: this.str($r('app.string.pairing_ignore')), wantAgent: ignore },
+        ],
+        tapDismissed: true,
+        // The same moment the request itself is ignored.
+        autoDeletedTime: Date.now() + PAIRING_REQUEST_TTL_MS,
+      };
+      await notificationManager.publish(request);
+    } catch (e) {
+      const be = e as BusinessError;
+      this.log(`couldn't show the pairing notification: ${be.message ?? e}`);
+    }
+  }
+
+  private cancelPairingNotification(): void {
+    notificationManager.cancel(PAIRING_NOTIFICATION_ID).catch(() => { /* none showing - fine */ });
   }
 
   private async connectToBeacon(beacon: PeerBeacon): Promise<void> {
@@ -1201,7 +1434,7 @@ struct Index {
       const client = await connectTcp(beacon.senderIp, beacon.tcpPort);
       const identity = new DeviceIdentity();
       const context = getContext(this) as common.UIAbilityContext;
-      const conn = await PeerConnection.create(new TcpSocketAdapter(client), identity, this.trustStore, context, this.pairingOpen, this.passphraseKeyStore, this.ownDeviceName());
+      const conn = await PeerConnection.create(new TcpSocketAdapter(client), identity, this.trustStore, context, this.blockCheck(), this.passphraseKeyStore, this.ownDeviceName());
       if (conn === null) {
         client.close().catch(() => { /* already closed - fine */ });
         this.log(`connect failed: ${shortDeviceId(beacon.deviceId)}`);
@@ -1287,7 +1520,7 @@ struct Index {
       const identity = new DeviceIdentity();
       const context = getContext(this) as common.UIAbilityContext;
       const report = new HandshakeReport();
-      const conn = await PeerConnection.create(new TcpSocketAdapter(client), identity, this.trustStore, context, this.pairingOpen, this.passphraseKeyStore, this.ownDeviceName(), report);
+      const conn = await PeerConnection.create(new TcpSocketAdapter(client), identity, this.trustStore, context, this.blockCheck(), this.passphraseKeyStore, this.ownDeviceName(), report);
       if (conn === null) {
         netLog(`connectToAddress ${address}:${port}: TCP connected but no usable handshake (${report.timedOut ? 'no answer' : 'peer closed, or refused locally'})`);
         client.close().catch(() => { /* already closed - fine */ });
@@ -1332,6 +1565,10 @@ struct Index {
   // follows stores the device's own, once its first envelope decrypts (see
   // rememberNameOnceProven).
   async trustAndConnect(beacon: PeerBeacon): Promise<void> {
+    if (this.isBlockedNow(beacon.deviceId)) {
+      promptAction.showToast({ message: $r('app.string.toast_unblock_first') });
+      return;
+    }
     const context = getContext(this) as common.UIAbilityContext;
     await this.trustStore.trust(context, beacon.deviceId, beacon.senderIp);
     await this.refreshTrustedDevices();
@@ -1356,6 +1593,71 @@ struct Index {
     // on the LAN looks like it silently did nothing.
     this.log(`untrusted ${shortDeviceId(deviceId)}`);
     promptAction.showToast({ message: this.str($r('app.string.toast_removed_device'), label) });
+  }
+
+  // Blocking a trusted device also removes it, so that one asks first.
+  confirmBlockDevice(deviceId: string): void {
+    const trusted: boolean = this.trustedDevices.some((d: TrustedDevice) => d.publicKey === deviceId);
+    if (!trusted) {
+      void this.blockDevice(deviceId);
+      return;
+    }
+    this.getUIContext().showAlertDialog({
+      title: this.str($r('app.string.dialog_block_title'), this.peerLabel(deviceId)),
+      message: $r('app.string.dialog_block_message'),
+      primaryButton: { value: $r('app.string.common_cancel'), action: () => {} },
+      secondaryButton: { value: $r('app.string.devices_block'), fontColor: $r('sys.color.warning'), action: () => { void this.blockDevice(deviceId); } },
+    });
+  }
+
+  // Blocks a device: no pairing request from it is shown, it is never dialled
+  // or auto-trusted, and a handshake from it is refused before anything else
+  // is decided. A blocked device is not a trusted one, so blocking also
+  // removes its trust and closes its connection - it must stop receiving what
+  // is copied here - and a request from it that is waiting goes too. Not the
+  // same as ignoring a request (rejectPairing), which remembers nothing. It
+  // blocks this KEY only: a device that makes itself a new identity is a new
+  // device.
+  async blockDevice(deviceId: string): Promise<void> {
+    const context = getContext(this) as common.UIAbilityContext;
+    // Its name before the trust record goes, so the blocked row still has one.
+    const name: string | null = this.peerName(deviceId, null);
+    const label: string = this.peerLabel(deviceId);
+    // Blocked first: the next handshake from it is refused from here on,
+    // whatever the rest of this takes to finish.
+    await this.blockStore.block(context, deviceId, name !== null ? name : undefined);
+    await this.refreshBlockedDevices();
+    await this.trustStore.untrust(context, deviceId);
+    this.syncManager?.disconnect(deviceId);
+    this.connectionAddresses.delete(deviceId);
+    const pending = this.pendingPairingConn;
+    if (pending !== null && sameIdentityKey(pending.peerDeviceId, deviceId)) this.rejectPairing();
+    await this.refreshTrustedDevices();
+    this.log(`blocked ${shortDeviceId(deviceId)}`);
+    promptAction.showToast({ message: this.str($r('app.string.toast_blocked'), label) });
+  }
+
+  // Lets a blocked device be heard again. It is not trusted again: it has to
+  // pair like any other.
+  async unblockDevice(deviceId: string): Promise<void> {
+    const context = getContext(this) as common.UIAbilityContext;
+    const label: string = this.peerLabel(deviceId, this.blockedDevices.find((d: BlockedDevice) => sameIdentityKey(d.deviceId, deviceId))?.name ?? null);
+    await this.blockStore.unblock(context, deviceId);
+    await this.refreshBlockedDevices();
+    this.log(`unblocked ${shortDeviceId(deviceId)}`);
+    promptAction.showToast({ message: this.str($r('app.string.toast_unblocked'), label) });
+  }
+
+  // Copies another device's id, from its card menu or detail screen.
+  async copyPeerDeviceId(deviceId: string): Promise<void> {
+    try {
+      const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, deviceId);
+      await pasteboard.getSystemPasteboard().setData(data);
+      this.noteOwnClipboardWrite();
+      promptAction.showToast({ message: $r('app.string.toast_device_id_copied') });
+    } catch (e) {
+      promptAction.showToast({ message: $r('app.string.toast_copy_failed') });
+    }
   }
 
   // Recomputes the QR/manual pairing payload - called whenever ownDeviceId,
@@ -1611,6 +1913,7 @@ struct Index {
   // sender on localhost.
   private async maybeAutoTrustViaPassphrase(beacon: PeerBeacon): Promise<void> {
     if (beacon.deviceId === this.ownDeviceId) return;
+    if (this.isBlockedNow(beacon.deviceId)) return; // a blocked device is never auto-trusted
     if (beacon.proof === null) return;
     const context = getContext(this) as common.UIAbilityContext;
     if (await this.trustStore.isTrusted(context, beacon.deviceId)) return;
@@ -2388,7 +2691,7 @@ struct Index {
     void this.connectedCount;
     const found: DeviceRow | undefined = this.deviceRows().find((r: DeviceRow) => r.deviceId === deviceId);
     if (found !== undefined) return found;
-    return { deviceId, name: null, addresses: [], address: null, trusted: false, discovered: false, tcpPort: null, connected: false };
+    return { deviceId, name: null, addresses: [], address: null, trusted: false, discovered: false, tcpPort: null, connected: false, blocked: false, connectedAddress: null };
   }
 
   private deviceRows(): DeviceRow[] {
@@ -2411,6 +2714,8 @@ struct Index {
         discovered: false,
         tcpPort: null,
         connected: this.syncManager?.isConnected(t.publicKey) ?? false,
+        blocked: false,
+        connectedAddress: null,
       };
       rows.set(t.publicKey, row);
     }
@@ -2427,6 +2732,8 @@ struct Index {
           discovered: true,
           tcpPort: b.tcpPort,
           connected: this.syncManager?.isConnected(b.deviceId) ?? false,
+          blocked: false,
+          connectedAddress: null,
         };
         rows.set(b.deviceId, row);
       }
@@ -2449,7 +2756,89 @@ struct Index {
       const row = rows.get(t.publicKey);
       if (row !== undefined) addAddress(row, t.address);
     }
+    // The address the live link runs over - the one the card shows - only
+    // while there is a link.
+    for (const row of rows.values()) {
+      row.connectedAddress = row.connected ? (this.connectionAddresses.get(row.deviceId) ?? row.address) : null;
+    }
+    // Blocked devices, listed even when silent: that is where they get
+    // unblocked. A blocked device is never also a trusted one.
+    for (const blocked of this.blockedDevices) {
+      let row: DeviceRow | undefined = rows.get(blocked.deviceId);
+      if (row === undefined) {
+        row = {
+          deviceId: blocked.deviceId,
+          name: blocked.name !== undefined && blocked.name.length > 0 ? blocked.name : null,
+          addresses: [],
+          address: null,
+          trusted: false,
+          discovered: false,
+          tcpPort: null,
+          connected: false,
+          blocked: true,
+          connectedAddress: null,
+        };
+        rows.set(blocked.deviceId, row);
+      }
+      row.blocked = true;
+      row.trusted = false;
+      row.connected = false;
+      row.connectedAddress = null;
+      if (row.name === null && blocked.name !== undefined && blocked.name.length > 0) row.name = blocked.name;
+    }
     return Array.from(rows.values()).sort(compareDeviceRows);
+  }
+
+  // One line under a device's name: its status, then the ONE address the live
+  // connection runs over (only while there is one). Every address it is known
+  // at is on its detail screen, a tap away.
+  private deviceStatusLine(deviceId: string): string {
+    const row: DeviceRow = this.liveRow(deviceId);
+    const status: string = row.blocked ? this.str($r('app.string.devices_status_blocked'))
+      : row.connected ? this.str($r('app.string.devices_status_connected'))
+        : row.trusted ? this.str($r('app.string.devices_status_trusted'))
+          : this.str($r('app.string.devices_status_discovered'));
+    return row.connectedAddress !== null ? `${status} · ${row.connectedAddress}` : status;
+  }
+
+  // The three dots on a card and on its detail screen: block it (or unblock
+  // it), and copy its id.
+  private deviceMenuItems(deviceId: string): MenuElement[] {
+    const blocked: boolean = this.liveRow(deviceId).blocked;
+    const items: MenuElement[] = [];
+    items.push({
+      value: blocked ? $r('app.string.devices_unblock') : $r('app.string.devices_block'),
+      action: () => {
+        tapHaptic();
+        if (blocked) {
+          void this.unblockDevice(deviceId);
+        } else {
+          this.confirmBlockDevice(deviceId);
+        }
+      },
+    });
+    items.push({
+      value: $r('app.string.devices_copy_id'),
+      action: () => { tapHaptic(); void this.copyPeerDeviceId(deviceId); },
+    });
+    return items;
+  }
+
+  // A device in full: every address it can be reached at, and the rest of what
+  // is known about it. Pushed on the Devices tab's own stack like the item
+  // preview is on Synced's, and closed the same way.
+  openDeviceDetail(deviceId: string): void {
+    // Set BEFORE the push: the destination's builder reads it the moment it mounts.
+    this.openDeviceId = deviceId;
+    this.getUIContext().animateTo({ curve: curves.interpolatingSpring(0, 1, 328, 36) }, () => {
+      this.devicesNavStack.pushPath({ name: 'deviceDetail' }, false);
+    });
+  }
+
+  closeDeviceDetail(): void {
+    this.getUIContext().animateTo({ curve: curves.interpolatingSpring(0, 1, 328, 36) }, () => {
+      this.devicesNavStack.pop(false);
+    });
   }
 
   private syncedItemFor(entry: ClipboardEntry, fromPeer: boolean): SyncedItem {
@@ -3733,25 +4122,24 @@ struct Index {
         Text(deviceRowTitle(this.liveRow(deviceId)))
           .fontSize(15)
           .fontWeight(FontWeight.Medium)
-          .fontColor($r('sys.color.font_primary'))
+          .fontColor(this.liveRow(deviceId).blocked ? BLOCKED_TEXT : $r('sys.color.font_primary'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-        // Every address, LAN first - a peer can legitimately be reachable at
-        // both a LAN IP and a Tailscale IP, and which one it is paired on
-        // matters when diagnosing a connection.
-        Text(this.liveRow(deviceId).addresses.length > 0 ? this.liveRow(deviceId).addresses.join(' · ') : $r('app.string.devices_unknown_address'))
+        // Status, then the ONE address the live connection runs over - not
+        // the list of every address a peer can be reached at (a LAN IP, a
+        // Tailscale IP, a cached one), which buried the line. They are all
+        // on the detail screen.
+        Text(this.deviceStatusLine(deviceId))
           .fontSize(12)
-          .fontColor($r('sys.color.font_secondary'))
+          .fontColor(this.liveRow(deviceId).blocked ? BLOCKED_TEXT_MUTED
+            : this.liveRow(deviceId).connected ? $r('sys.color.confirm') : $r('sys.color.font_secondary'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(this.liveRow(deviceId).connected ? $r('app.string.devices_status_connected') : this.liveRow(deviceId).trusted ? $r('app.string.devices_status_trusted') : $r('app.string.devices_status_discovered'))
-          .fontSize(12)
-          .fontColor(this.liveRow(deviceId).connected ? $r('sys.color.confirm') : $r('sys.color.font_secondary'))
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
 
-      if (!this.liveRow(deviceId).trusted && this.liveRow(deviceId).discovered) {
+      if (!this.liveRow(deviceId).blocked && !this.liveRow(deviceId).trusted && this.liveRow(deviceId).discovered) {
         // Deliberately a plain solid button, no systemMaterial: material
         // WOULD render here (it is a CommonMethod attribute, available on
         // every component - see itemDetailView's note correcting the
@@ -3775,7 +4163,7 @@ struct Index {
             const beacon = this.receivedBeacons.find(b => b.deviceId === deviceId);
             if (beacon) void this.trustAndConnect(beacon);
           })
-      } else if (this.liveRow(deviceId).trusted) {
+      } else if (!this.liveRow(deviceId).blocked && this.liveRow(deviceId).trusted) {
         // Destructive, so it stays quiet: a tinted secondary surface
         // rather than a filled brand button competing with Trust.
         Button($r('app.string.devices_remove'))
@@ -3786,9 +4174,16 @@ struct Index {
           .padding({ left: 16, right: 16 })
           .onClick(() => { tapHaptic(); void this.untrustDevice(deviceId); })
       }
+
+      // The three dots: block (or unblock) and copy the id.
+      Image(this.liveRow(deviceId).blocked ? $r('app.media.ic_more_on_dark') : $r('app.media.ic_more'))
+        .width(22)
+        .height(22)
+        .padding(6)
+        .bindMenu(this.deviceMenuItems(deviceId))
     }
     .width('100%')
-    .padding({ left: 14, right: 14, top: 14, bottom: 14 })
+    .padding({ left: 14, right: 8, top: 14, bottom: 14 })
     .borderRadius(18)
     // One neutral card surface for every state - the connected case is
     // already carried by the dot and the status line, so tinting the
@@ -3796,9 +4191,169 @@ struct Index {
     // re-resolve per theme, which the old hardcoded '#FFFFFF'/'#EAF2FF'
     // pair did not: the device name follows the theme to near-white in
     // dark mode, and against a card frozen at white that was invisible.
-    .backgroundColor(this.cardFill())
+    // A blocked device is the one exception: dark gray in either theme.
+    .backgroundColor(this.liveRow(deviceId).blocked ? BLOCKED_CARD : this.cardFill())
     .alignItems(VerticalAlign.Center)
     .clickEffect({ level: ClickEffectLevel.MIDDLE })
+    // Anywhere on the card opens the device; its own buttons and menu take their taps first.
+    .onClick(() => { tapHaptic(); this.openDeviceDetail(deviceId); })
+  }
+
+  // One device in full - the Devices tab's counterpart of the item preview.
+  @Builder
+  deviceDetailView(deviceId: string) {
+    Scroll(this.deviceDetailScroller) {
+      Column({ space: 14 }) {
+        // Who it is and where it stands.
+        Row({ space: 14 }) {
+          Image($r('app.media.ic_device_desktop'))
+            .width(36)
+            .height(36)
+          Column({ space: 3 }) {
+            Text(deviceRowTitle(this.liveRow(deviceId)))
+              .fontSize(20)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.liveRow(deviceId).blocked ? BLOCKED_TEXT : $r('sys.color.font_primary'))
+              .maxLines(2)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(this.deviceStatusLine(deviceId))
+              .fontSize(13)
+              .fontColor(this.liveRow(deviceId).blocked ? BLOCKED_TEXT_MUTED
+                : this.liveRow(deviceId).connected ? $r('sys.color.confirm') : $r('sys.color.font_secondary'))
+          }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
+        }
+        .width('100%')
+        .padding(16)
+        .borderRadius(18)
+        .backgroundColor(this.liveRow(deviceId).blocked ? BLOCKED_CARD : this.cardFill())
+
+        // Every address it can be reached at; the one in use is marked.
+        Column({ space: 8 }) {
+          Text($r('app.string.device_detail_addresses'))
+            .fontSize(12)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.liveRow(deviceId).blocked ? BLOCKED_TEXT_MUTED : $r('sys.color.font_secondary'))
+          if (this.liveRow(deviceId).addresses.length === 0) {
+            Text($r('app.string.device_detail_no_address'))
+              .fontSize(13)
+              .fontColor(this.liveRow(deviceId).blocked ? BLOCKED_TEXT_MUTED : $r('sys.color.font_secondary'))
+          } else {
+            // Keyed by the address AND whether it is the one in use, so the
+            // marker follows when the connection moves to another address.
+            ForEach(this.liveRow(deviceId).addresses, (address: string) => {
+              Row({ space: 8 }) {
+                Text(address)
+                  .fontSize(15)
+                  .fontColor(this.liveRow(deviceId).blocked ? BLOCKED_TEXT : $r('sys.color.font_primary'))
+                  .copyOption(CopyOptions.LocalDevice)
+                if (address === this.liveRow(deviceId).connectedAddress) {
+                  Text($r('app.string.device_detail_in_use'))
+                    .fontSize(11)
+                    .fontColor($r('sys.color.confirm'))
+                }
+              }
+              .width('100%')
+            }, (address: string) => `${address}|${address === this.liveRow(deviceId).connectedAddress}`)
+          }
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(16)
+        .borderRadius(18)
+        .backgroundColor(this.liveRow(deviceId).blocked ? BLOCKED_CARD : this.cardFill())
+
+        // The rest of what is known.
+        Column({ space: 10 }) {
+          Text($r('app.string.device_detail_details'))
+            .fontSize(12)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.liveRow(deviceId).blocked ? BLOCKED_TEXT_MUTED : $r('sys.color.font_secondary'))
+          this.deviceFact($r('app.string.device_detail_status'), this.deviceStatusLine(deviceId), deviceId)
+          this.deviceFact($r('app.string.device_detail_name'),
+            this.liveRow(deviceId).name !== null ? (this.liveRow(deviceId).name as string) : this.str($r('app.string.device_detail_name_unknown')), deviceId)
+          // From the id, so it is the same on every device that shows it: a
+          // name is whatever the device calls itself, a fingerprint cannot be copied.
+          this.deviceFact($r('app.string.device_detail_fingerprint'), deviceFingerprint(deviceId), deviceId)
+          this.deviceFact($r('app.string.device_detail_id'), deviceId, deviceId)
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(16)
+        .borderRadius(18)
+        .backgroundColor(this.liveRow(deviceId).blocked ? BLOCKED_CARD : this.cardFill())
+
+        // The actions: the one that fits, then block (or unblock).
+        Row({ space: 10 }) {
+          if (this.liveRow(deviceId).blocked) {
+            Button($r('app.string.devices_unblock'))
+              .fontSize(14)
+              .fontColor($r('sys.color.font_on_primary'))
+              .backgroundColor(this.accent())
+              .onClick(() => { tapHaptic(); void this.unblockDevice(deviceId); })
+          } else if (this.liveRow(deviceId).trusted) {
+            Button($r('app.string.devices_remove'))
+              .fontSize(14)
+              .fontColor($r('sys.color.font_secondary'))
+              .backgroundColor($r('sys.color.comp_background_tertiary'))
+              .onClick(() => { tapHaptic(); void this.untrustDevice(deviceId); })
+          } else if (this.liveRow(deviceId).discovered) {
+            Button($r('app.string.devices_trust'))
+              .fontSize(14)
+              .fontColor($r('sys.color.font_on_primary'))
+              .backgroundColor(this.accent())
+              .onClick(() => {
+                tapHaptic();
+                const beacon = this.receivedBeacons.find(b => b.deviceId === deviceId);
+                if (beacon) void this.trustAndConnect(beacon);
+              })
+          }
+          if (!this.liveRow(deviceId).blocked) {
+            Button($r('app.string.devices_block'))
+              .fontSize(14)
+              .fontColor($r('sys.color.warning'))
+              .backgroundColor($r('sys.color.comp_background_tertiary'))
+              .onClick(() => { tapHaptic(); this.confirmBlockDevice(deviceId); })
+          }
+          Button($r('app.string.devices_copy_id'))
+            .fontSize(14)
+            .fontColor($r('sys.color.font_secondary'))
+            .backgroundColor($r('sys.color.comp_background_tertiary'))
+            .onClick(() => { tapHaptic(); void this.copyPeerDeviceId(deviceId); })
+        }
+        .width('100%')
+        .justifyContent(FlexAlign.Start)
+      }
+      .width('100%')
+      // No topInsetVp compensation - see pairingScreenContent's comment.
+      .padding({ left: 16, right: 16, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE })
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+    .height('100%')
+    .align(Alignment.Top)
+    .edgeEffect(EdgeEffect.Spring)
+    .transition(TransitionEffect.OPACITY.combine(TransitionEffect.move(TransitionEdge.END)))
+    .backgroundColor($r('sys.color.background_secondary'))
+    .linearGradient(this.bottomGlow())
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+  }
+
+  // One labelled line of a device's details, the value selectable.
+  @Builder
+  deviceFact(label: Resource, value: string, deviceId: string) {
+    Column({ space: 2 }) {
+      Text(label)
+        .fontSize(12)
+        .fontColor(this.liveRow(deviceId).blocked ? BLOCKED_TEXT_MUTED : $r('sys.color.font_secondary'))
+      Text(value)
+        .fontSize(14)
+        .fontColor(this.liveRow(deviceId).blocked ? BLOCKED_TEXT : $r('sys.color.font_primary'))
+        .copyOption(CopyOptions.LocalDevice)
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('100%')
   }
 
   @Builder
@@ -3914,6 +4469,19 @@ struct Index {
       .titleMode(HdsNavDestinationTitleMode.MINI)
       .bindToScrollable([this.devicesScroller])
       .hideBackButton(true)
+      .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    } else if (name === 'deviceDetail') {
+      HdsNavDestination() {
+        this.deviceDetailView(this.openDeviceId)
+      }
+      .titleBar(this.hdsTitleBar('', false, []))
+      .titleMode(HdsNavDestinationTitleMode.MINI)
+      .bindToScrollable([this.deviceDetailScroller])
+      // The HDS bar's own back button, as on the item preview: its tap and the
+      // system back gesture both land in onBackPressed (deliberately no
+      // backIcon.action as well), so either goes through the same animated pop.
+      .hideBackButton(false)
+      .onBackPressed(() => { this.closeDeviceDetail(); return true; })
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
     }
   }

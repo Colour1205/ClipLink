@@ -78,6 +78,31 @@ and falls back to what every peer already accepts:
 If you do get the entitlement, add it to `ClipLink.entitlements`; nothing else
 changes.
 
+**Pairing requests are a system alert, not a page.** A stranger that dials the app
+is held as one pending request whether or not the pairing sheet is open (3
+minutes, then it lapses); `PairingPrompt` shows it as a `UIAlertController` over
+whatever is on screen - a tab, the pairing sheet, the QR scanner - which a SwiftUI
+`.alert` could not do over a sheet. Trust and Ignore only: Ignore remembers
+nothing, and Block is on the Devices tab (the card's ... menu, a long-press, or
+the card's detail screen). A blocked key is kept in `blocked_devices.json` and
+refused in the handshake before trust or a passcode are looked at.
+
+**iOS can only notify while the app is running.** When the app is running but
+isn't the active scene (app switcher, Control Center, a system prompt),
+`PairingNotifier` posts a notification with Trust (needs the phone unlocked)
+and Ignore. A suspended app has no sockets, so a request made while it is
+closed never arrives - that would take a push from a server - and a request is
+dropped when the app goes to the background. A background refresh round and the
+Share extension don't take requests. `AppDelegate` sets the notification
+delegate before launch ends; the permission prompt appears the first time the
+pairing sheet is opened.
+
+**Device cards show one address.** The card shows only the address the live
+connection uses; tapping it pushes `DeviceDetailView` with every address the
+device can be reached at, its fingerprint, id and the actions. The card's press
+and the push are the Synced tab's (a spring press-down, the standard
+navigation push).
+
 **Outbound dials read before they write.** Every acceptor on every platform
 writes its handshake immediately, so an iOS dialer reads the peer's line
 first, decides, then answers. On the wire this is indistinguishable from the

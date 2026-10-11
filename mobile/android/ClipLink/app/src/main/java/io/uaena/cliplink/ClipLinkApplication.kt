@@ -2,6 +2,7 @@ package io.uaena.cliplink
 
 import android.app.Application
 import io.uaena.cliplink.engine.ClipLinkEngine
+import io.uaena.cliplink.service.PairingNotifier
 
 /**
  * The engine is process-scoped, not Activity- or ViewModel-scoped. Sync has
@@ -11,7 +12,9 @@ import io.uaena.cliplink.engine.ClipLinkEngine
  */
 class ClipLinkApplication : Application() {
 
-    val engine: ClipLinkEngine by lazy { ClipLinkEngine(this) }
+    val engine: ClipLinkEngine by lazy {
+        ClipLinkEngine(this).also { it.pairingAlerts = PairingNotifier(this, it) }
+    }
 
     override fun onCreate() {
         super.onCreate()

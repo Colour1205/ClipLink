@@ -2,6 +2,7 @@ import { AbilityConstant, Configuration, ConfigurationConstant, UIAbility, Want 
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { enqueueShares, intakeShare, isShareWant, SHARED_IN_EVENT, SharedIn, sweepShareCopies } from '../share/ShareIntake';
+import { PAIRING_ACTION_EVENT, PairingAnswer, readPairingAnswer } from '../networking/PairingActions';
 
 const DOMAIN = 0x0000;
 
@@ -28,6 +29,18 @@ export default class EntryAbility extends UIAbility {
   // arrives here rather than in onCreate (onForeground never sees the Want).
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     this.acceptShare(want, launchParam);
+    this.acceptPairingAnswer(want);
+  }
+
+  // A Trust or Ignore button on the pairing notification, or the
+  // notification itself (see networking/PairingActions.ets): handed to the
+  // page, which only acts if that request is still the one waiting. Only
+  // onNewWant: a notification can only be answered by a running app, since
+  // the request it is about lives in the process that posted it.
+  private acceptPairingAnswer(want: Want): void {
+    const answer: PairingAnswer | null = readPairingAnswer(want);
+    if (answer === null) return;
+    this.context.eventHub.emit(PAIRING_ACTION_EVENT, answer.action, answer.deviceId);
   }
 
   // "Share to ClipLink" (see share/ShareIntake.ets): copies the shared files

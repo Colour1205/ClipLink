@@ -215,6 +215,19 @@ class EngineStateTest {
         assertFalse(row(1) == row(1).copy(name = null))
         assertFalse(row(1) == row(1).copy(pairing = true))
         assertFalse(row(1) == row(1).copy(trusted = false))
+        // And whether it is on the network: the Devices list is redrawn from a
+        // flow that drops equal lists, so a row coming or going quiet has to
+        // compare unequal. (This row is not connected, so it starts offline.)
+        assertFalse(row(1) == row(1).copy(online = true))
+        assertFalse(row(1).copy(online = true) == row(1))
+    }
+
+    @Test
+    fun `a device is online when connected unless said otherwise`() {
+        // The default keeps a positional constructor call honest: a row built
+        // as connected is never also offline.
+        assertTrue(DeviceRow("id", "name", true, true, emptyList(), false, null).online)
+        assertFalse(DeviceRow("id", "name", true, false, emptyList(), false, null).online)
     }
 
     // ---- synced item keys ----------------------------------------------------------------------

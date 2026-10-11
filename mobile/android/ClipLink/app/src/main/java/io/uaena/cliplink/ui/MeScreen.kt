@@ -14,8 +14,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -36,6 +41,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import io.uaena.cliplink.R
 import io.uaena.cliplink.engine.LogLine
@@ -86,9 +92,9 @@ fun MeScreen(
 ) {
     // Deliberately NOT saved: a passcode must not end up in the saved-state
     // Bundle (which can be written to disk when the process is killed), so a
-    // recreation clears these two fields. Everything below is saved.
+    // recreation clears this field and hides it again. Everything below is saved.
     var passphrase by remember { mutableStateOf("") }
-    var passphraseConfirmation by remember { mutableStateOf("") }
+    var passphraseShown by remember { mutableStateOf(false) }
     var tailscale by rememberSaveable(state.tailscaleIp) { mutableStateOf(state.tailscaleIp) }
     var deviceName by rememberSaveable(state.deviceNameOverride) { mutableStateOf(state.deviceNameOverride) }
     val shownName = state.deviceNameOverride.ifBlank { state.defaultDeviceName }
@@ -264,30 +270,26 @@ fun MeScreen(
                         // Advice only - nothing is refused for being short.
                         supportingText = { Text(stringResource(R.string.passcode_length_hint)) },
                         singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
+                        // One field, not two: a passcode typed blind and never
+                        // confirmed can be mistyped into one nobody can
+                        // reproduce on the other device, so the eye lets it be
+                        // read back before it is set.
+                        visualTransformation = if (passphraseShown) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
+                        trailingIcon = {
+                            IconButton(onClick = { passphraseShown = !passphraseShown }) {
+                                Icon(
+                                    if (passphraseShown) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+                                    contentDescription = if (passphraseShown) "Hide passcode" else "Show passcode",
+                                )
+                            }
+                        },
                         // A password keyboard, with no learning or correcting:
                         // without it the IME treats this as ordinary text and
                         // may remember (and suggest) what was typed.
-                        keyboardOptions = PasscodeKeyboard.copy(imeAction = ImeAction.Next),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    // Typed blind, so typed twice: a typo here would otherwise
-                    // set a passcode nobody can reproduce on the other device.
-                    val mismatch = passphraseConfirmation.isNotEmpty() &&
-                        !passcodesMatch(passphrase, passphraseConfirmation)
-                    OutlinedTextField(
-                        value = passphraseConfirmation,
-                        onValueChange = { passphraseConfirmation = it },
-                        label = { Text("Confirm passcode") },
-                        isError = mismatch,
-                        supportingText = if (mismatch) {
-                            { Text("The two passcodes don't match.") }
-                        } else {
-                            null
-                        },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
                         keyboardOptions = PasscodeKeyboard.copy(imeAction = ImeAction.Done),
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -296,18 +298,17 @@ fun MeScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        // No minimum length - blank is the only thing refused
-                        // (besides the two fields disagreeing), and the engine
-                        // trims before deriving the key. Both buttons wait out
-                        // a key that is still being derived, so a Change and a
-                        // Clear can never cross.
+                        // No minimum length - blank is the only thing refused,
+                        // and the engine trims before deriving the key. Both
+                        // buttons wait out a key that is still being derived,
+                        // so a Change and a Clear can never cross.
                         Button(
                             onClick = {
                                 actions.onSetPassphrase(passphrase)
                                 passphrase = ""
-                                passphraseConfirmation = ""
+                                passphraseShown = false
                             },
-                            enabled = canSetPasscode(passphrase, passphraseConfirmation, state.passphraseBusy),
+                            enabled = canSetPasscode(passphrase, state.passphraseBusy),
                         ) {
                             Text(
                                 when {

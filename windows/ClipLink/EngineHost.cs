@@ -44,6 +44,8 @@ public sealed class EngineHost : Observable
     // stable order.
     public ObservableCollection<DeviceRow> PairedDevices { get; } = new();
     public ObservableCollection<DeviceRow> NearbyDevices { get; } = new();
+    // Blocked ones, listed last so they can be unblocked.
+    public ObservableCollection<DeviceRow> BlockedDevices { get; } = new();
 
     public EngineStatus Status { get; private set; } = new(EngineState.NotStarted, null);
 
@@ -64,7 +66,8 @@ public sealed class EngineHost : Observable
     public bool HistoryIsEmpty => History.Count == 0;
     public bool HasPairedDevices => PairedDevices.Count > 0;
     public bool HasNearbyDevices => NearbyDevices.Count > 0;
-    public bool HasNoDevices => PairedDevices.Count == 0 && NearbyDevices.Count == 0;
+    public bool HasBlockedDevices => BlockedDevices.Count > 0;
+    public bool HasNoDevices => PairedDevices.Count == 0 && NearbyDevices.Count == 0 && BlockedDevices.Count == 0;
 
     // The Devices page's pairing view is showing (so pairing mode is on).
     public bool PairingUiActive { get; private set; }
@@ -157,9 +160,10 @@ public sealed class EngineHost : Observable
 
     private void ApplyDevices(IReadOnlyList<DeviceListing> devices)
     {
-        SyncByKey(PairedDevices, devices.Where(d => d.Trusted).ToList(), row => row.PublicKey, d => d.PublicKey, d => new DeviceRow(d), (row, d) => row.Update(d));
-        SyncByKey(NearbyDevices, devices.Where(d => !d.Trusted).ToList(), row => row.PublicKey, d => d.PublicKey, d => new DeviceRow(d), (row, d) => row.Update(d));
-        Raise(nameof(ConnectedCount), nameof(ConnectionSummary), nameof(HasPairedDevices), nameof(HasNearbyDevices), nameof(HasNoDevices));
+        SyncByKey(PairedDevices, devices.Where(d => d.Trusted && !d.Blocked).ToList(), row => row.PublicKey, d => d.PublicKey, d => new DeviceRow(d), (row, d) => row.Update(d));
+        SyncByKey(NearbyDevices, devices.Where(d => !d.Trusted && !d.Blocked).ToList(), row => row.PublicKey, d => d.PublicKey, d => new DeviceRow(d), (row, d) => row.Update(d));
+        SyncByKey(BlockedDevices, devices.Where(d => d.Blocked).ToList(), row => row.PublicKey, d => d.PublicKey, d => new DeviceRow(d), (row, d) => row.Update(d));
+        Raise(nameof(ConnectedCount), nameof(ConnectionSummary), nameof(HasPairedDevices), nameof(HasNearbyDevices), nameof(HasBlockedDevices), nameof(HasNoDevices));
         // The cards show device names too, which may have just changed.
         ReloadHistory();
     }

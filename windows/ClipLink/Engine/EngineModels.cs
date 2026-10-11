@@ -55,8 +55,11 @@ public record PairingInfo(string PublicKey, string? Address = null, string? Name
 // off-LAN (Tailscale) one - the one its beacon advertises and/or the one
 // stored with its trust (which the latest connection back-fills).
 // PairingOpen: its latest beacon (within the last 30s) says its own pairing
-// screen is open.
-public record DeviceListing(string PublicKey, string? Name, bool Trusted, bool Connected, bool PairingOpen, IReadOnlyList<string> Addresses);
+// screen is open. Blocked: this PC refuses to hear from it - it is listed last,
+// and even when silent, so it can be unblocked. ConnectedAddress: the address
+// the live connection runs over, only while there is one - the one address a
+// device card shows (Addresses is the full list, for the detail view).
+public record DeviceListing(string PublicKey, string? Name, bool Trusted, bool Connected, bool PairingOpen, IReadOnlyList<string> Addresses, bool Blocked = false, string? ConnectedAddress = null);
 
 // A pairing request waiting for Accept/Reject: the peer's (signature-
 // verified) device id, the display name its handshake or beacon carried
@@ -69,7 +72,7 @@ public enum PairingDecision
 {
     Accepted,
     Rejected,
-    // Nobody decided: pairing mode was turned off, or the engine stopped.
+    // Nobody decided: the request expired unanswered, or the engine stopped.
     Abandoned,
 }
 
@@ -85,9 +88,9 @@ public enum PairOutcome
     Pending,
     // Another pairing request is already pending here - decide that one first.
     Busy,
-    // Reached the device but it refused: it doesn't trust this PC and its
-    // pairing screen isn't open (and no matching passcode) - or this PC's
-    // own pairing mode is off.
+    // Reached the device but it refused: it didn't take this PC (it blocked
+    // it, or it is an older build whose pairing screen is closed and has no
+    // matching passcode) - or this PC's own pairing mode is off.
     Refused,
     // Nothing answered at that address (or it didn't finish the handshake).
     Unreachable,
@@ -95,6 +98,8 @@ public enum PairOutcome
     InvalidAddress,
     // The address is this PC's own.
     ThisDevice,
+    // The device is blocked here - unblock it first.
+    Blocked,
     // The engine isn't running.
     NotRunning,
 }

@@ -5,6 +5,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         // Background tasks must be registered before launch finishes.
         BackgroundSync.register()
+        PairingNotifier.register()
         return true
     }
 }

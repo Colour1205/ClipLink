@@ -199,8 +199,8 @@ extension View {
 
     /// Row fill honouring "Card transparency" (only the fill fades), plus the
     /// iOS 15 hook that lets the page background show through the list.
-    func meRow(transparency: Double) -> some View {
-        modifier(MeRowModifier(transparency: transparency))
+    func meRow(transparency: Double, fill override: Color? = nil) -> some View {
+        modifier(MeRowModifier(transparency: transparency, override: override))
     }
 }
 
@@ -223,11 +223,13 @@ private struct MePageModifier: ViewModifier {
 
 private struct MeRowModifier: ViewModifier {
     let transparency: Double
+    /// A row with a fill of its own (a blocked device's gray card): used as is.
+    var override: Color?
 
     func body(content: Content) -> some View {
-        let fill: Color? = transparency > 0
+        let fill: Color? = override ?? (transparency > 0
             ? Color(Theme.card).opacity(1 - min(max(transparency, 0), 95) / 100)
-            : nil
+            : nil)
         Group {
             if #available(iOS 16, *) {
                 content

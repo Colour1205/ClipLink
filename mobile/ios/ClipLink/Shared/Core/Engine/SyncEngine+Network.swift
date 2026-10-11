@@ -34,7 +34,8 @@ extension SyncEngine {
     /// unauthenticated UDP: without a cap, spoofed ids grow this forever.
     static let maxStrangerSightings = 64
     /// How long to hold an outbound untrusted link before prompting: a peer
-    /// whose own pairing screen is closed hangs up within one round trip.
+    /// that won't take us (an older build whose pairing screen is closed)
+    /// hangs up within one round trip.
     static let pairingVerdictDelay: TimeInterval = 1.5
 
     // MARK: - Start / kick
@@ -192,7 +193,9 @@ extension SyncEngine {
             trusted: Set(trust.all.map(\.publicKey)),
             passphraseKey: passphraseKey,
             pairingOpen: pairingOpen,
-            deviceName: ownDeviceName
+            deviceName: ownDeviceName,
+            acceptsStrangers: acceptsStrangers,
+            blocked: blocks.snapshot
         )
     }
 
@@ -224,6 +227,9 @@ extension SyncEngine {
         // Our own broadcast, looped back - or replayed: it carries our own
         // passcode proof, which must never trust our own id. Re-spelt too.
         guard !isOwnIdentity(id) else { return }
+        // A blocked device is not heard at all: not noted, not dialled, not
+        // trusted by a passcode it can prove.
+        guard !blocks.isBlocked(id) else { return }
         // Spoof resistance: a never-seen id must at least be a real P-256 key.
         if sightings[id] == nil, !trust.isTrusted(id), !WireSignature.isValidPublicKey(id) { return }
         var sighting = sightings[id] ?? Sighting(lastSeen: Date())
@@ -263,6 +269,7 @@ extension SyncEngine {
     }
 
     func beaconTick() {
+        expireStalePairingRequest()
         guard running, let udp else { return }
         if tickTimer != nil { touchLiveMarker() }
         let beacon = currentBeacon()
@@ -394,7 +401,7 @@ extension SyncEngine {
     /// verified, so storing a name is register's job, once a link proves it
     /// holds the session key.
     func noteSighting(_ id: String, address: String?, name: String? = nil) {
-        guard !isOwnIdentity(id) else { return }
+        guard !isOwnIdentity(id), !blocks.isBlocked(id) else { return }
         var sighting = sightings[id] ?? Sighting(lastSeen: Date())
         sighting.lastSeen = Date()
         if let address, Self.isPeerAddress(address) { sighting.addresses[address] = Date() }
@@ -708,28 +715,31 @@ extension SyncEngine {
         // doesn't cover DeviceName, so a replayed handshake could carry any
         // name. register() stores it once this link decrypts a line.
         noteSighting(id, address: address, name: link.peerName)
-        guard running else {
+        guard running, !blocks.isBlocked(id) else {
             link.close()
             return
         }
 
         if !link.wasAlreadyTrusted {
-            // Only possible because our pairing screen is open. Hold it -
-            // nothing read, nothing sent - until the user decides.
-            guard pairingOpen, pending == nil else {
+            // A stranger: hold it - nothing read, nothing sent - until the
+            // user decides. One that dialled us is held whenever we take
+            // requests; one we dialled only while our pairing screen is open.
+            // One request at a time: a second is turned away while it waits.
+            guard pending == nil, (link.direction == .inbound ? acceptsStrangers : pairingOpen) else {
                 link.close()
                 return
             }
             if link.direction == .outbound {
-                // We dialled without knowing whether ITS pairing screen is open
-                // (sweeps and pairing dials can't tell). A peer that isn't
-                // pairing refuses by hanging up within a round trip - wait for
-                // that before bothering the user with a prompt.
+                // We dialled without knowing whether it will take us (sweeps and
+                // pairing dials can't tell, and an older build still refuses
+                // unless its pairing screen is open). A peer that refuses
+                // hangs up within a round trip - wait for that before
+                // bothering the user with a prompt.
                 queue.asyncAfter(deadline: .now() + Self.pairingVerdictDelay) { [weak self] in
                     self?.promoteToPending(link, address: address)
                 }
             } else {
-                // Inbound: the peer dialled us from its own open pairing screen.
+                // Inbound: a stranger dialled us.
                 promoteToPending(link, address: address)
             }
             return
@@ -751,7 +761,8 @@ extension SyncEngine {
     }
 
     func promoteToPending(_ link: PeerLink, address: String?) {
-        guard running, pairingOpen, pending == nil, !link.isClosed else {
+        guard running, pending == nil, !link.isClosed, !blocks.isBlocked(link.peerDeviceId),
+              (link.direction == .inbound ? acceptsStrangers : pairingOpen) else {
             link.close()
             return
         }
@@ -890,6 +901,7 @@ extension SyncEngine {
         if let info = PairingInfo.parse(trimmed) {
             let key = info.publicKey
             if isOwnIdentity(key) { return completion(.ownCode) }
+            if blocks.isBlocked(key) { return completion(.blocked) }
             if links[key] != nil {
                 return completion(.connected(addressCandidates(for: key).first ?? displayName(for: key)))
             }
@@ -948,9 +960,11 @@ extension SyncEngine {
                     case .silent: outcome = .silent(host)
                     case .closedEarly, .refused, .malformed, .badSignature: outcome = .refused(host)
                     case .selfConnection: outcome = .ownCode
+                    case .blocked: outcome = .blocked
                     default: outcome = .unreachable(host)
                     }
                     if case .ownCode = outcome { return completion(.ownCode) }
+                    if case .blocked = outcome { return completion(.blocked) }
                     if rank(outcome) >= rank(worst) { worst = outcome }
                     next()
                 case .success(let link):

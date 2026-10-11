@@ -209,6 +209,137 @@ public final class TrustStore {
     }
 }
 
+// MARK: - Block store
+
+/// A device this one refuses to hear from, and the name it had when it was
+/// blocked (what the Devices tab shows for it).
+public struct BlockedDevice: Equatable {
+    public var publicKey: String
+    public var name: String?
+
+    public init(publicKey: String, name: String? = nil) {
+        self.publicKey = publicKey
+        self.name = name
+    }
+}
+
+/// An immutable copy of the block list, for code that runs off the engine
+/// queue (handshakes, sweep probes). Compares keys, not spellings: the
+/// decoder is lenient, so one key can be written several ways and a plain
+/// text compare would be a way round the list.
+struct BlockList {
+    private let ids: Set<String>
+    private let keys: Set<Data>
+
+    init(_ devices: [BlockedDevice] = []) {
+        ids = Set(devices.map(\.publicKey))
+        keys = Set(devices.compactMap { WireSignature.canonicalPublicKey($0.publicKey) })
+    }
+
+    var isEmpty: Bool { ids.isEmpty }
+
+    func contains(_ deviceId: String) -> Bool {
+        if ids.isEmpty { return false }
+        if ids.contains(deviceId) { return true }
+        guard !keys.isEmpty, let key = WireSignature.canonicalPublicKey(deviceId) else { return false }
+        return keys.contains(key)
+    }
+}
+
+/// The devices this one has blocked. A blocked device never gets a pairing
+/// prompt, is never dialled, is never trusted by a shared passcode, and its
+/// handshake is refused before anything else about it is decided - so it
+/// cannot be a source of spam, however often it asks.
+///
+/// Blocking a device is blocking its KEY. Someone who generates a new
+/// identity is a new device and is not stopped by this; what it does stop is
+/// the usual case, one phone or PC that keeps asking.
+///
+/// Mirrors BlockStore.cs / BlockStore.kt / BlockStore.ets. Not encrypted at
+/// rest, like the trust store beside it.
+public final class BlockStore {
+    private let file: JSONFile
+    private let lock: StoreLock
+    private var devices: [BlockedDevice]
+    private var stamp: Date?
+    private var list: BlockList
+
+    public init(directory: URL) {
+        file = JSONFile(url: directory.appendingPathComponent("blocked_devices.json"))
+        lock = StoreLock.shared(for: directory)
+        devices = Self.load(file)
+        list = BlockList(devices)
+        stamp = file.stamp()
+    }
+
+    /// Re-reads the file: the Share extension (a separate process) shares it.
+    public func reload() {
+        lock.withLock {
+            devices = Self.load(file)
+            list = BlockList(devices)
+            stamp = file.stamp()
+        }
+    }
+
+    private func mutate(_ body: () -> Bool) {
+        lock.withLock {
+            if file.stamp() != stamp { devices = Self.load(file) }
+            if body() { save() }
+            list = BlockList(devices)
+            stamp = file.stamp()
+        }
+    }
+
+    private static func load(_ file: JSONFile) -> [BlockedDevice] {
+        let raw = file.read() as? [[String: Any]] ?? [] // corrupt -> start empty, like every other store
+        return raw.compactMap { obj in
+            guard let key = obj["publicKey"] as? String, !key.isEmpty else { return nil }
+            return BlockedDevice(publicKey: key, name: DeviceName.sanitize(obj["name"] as? String))
+        }
+    }
+
+    public var all: [BlockedDevice] { devices }
+
+    /// A copy for handshakes and sweeps to carry with them.
+    var snapshot: BlockList { list }
+
+    public func isBlocked(_ deviceId: String) -> Bool { list.contains(deviceId) }
+
+    public func device(_ deviceId: String) -> BlockedDevice? {
+        devices.first { WireSignature.isSameKey($0.publicKey, deviceId) }
+    }
+
+    /// Blocks `deviceId`. An existing entry keeps its name unless a better one is given.
+    public func block(_ deviceId: String, name: String? = nil) {
+        let name = name.flatMap { $0.isEmpty ? nil : $0 }
+        mutate {
+            if let index = devices.firstIndex(where: { WireSignature.isSameKey($0.publicKey, deviceId) }) {
+                guard let name, devices[index].name != name else { return false }
+                devices[index].name = name
+                return true
+            }
+            devices.append(BlockedDevice(publicKey: deviceId, name: name))
+            return true
+        }
+    }
+
+    public func unblock(_ deviceId: String) {
+        mutate {
+            let before = devices.count
+            devices.removeAll { WireSignature.isSameKey($0.publicKey, deviceId) }
+            return devices.count != before
+        }
+    }
+
+    private func save() {
+        file.write(devices.map { device -> [String: Any] in
+            var obj: [String: Any] = ["publicKey": device.publicKey]
+            if let name = device.name { obj["name"] = name }
+            return obj
+        })
+    }
+}
+
 // MARK: - File store
 
 /// Content-addressed blobs keyed by LOWERCASE SHA-256 hex. Windows spells

@@ -521,21 +521,128 @@ final class EngineIntegrationTests: XCTestCase {
         return try XCTUnwrap(link)
     }
 
-    func testUntrustedPeerIsRefusedWithoutPairingOrPasscode() throws {
+    /// A stranger reaches a device whose pairing screen is closed: it is held
+    /// for the user - nothing read, nothing sent - not refused. Ignore
+    /// remembers nothing, so the device can ask again, and an answer meant for
+    /// some other request is no answer. Trust is what connects them.
+    func testStrangerIsHeldForTheUserWhateverTheirPairingScreenSays() throws {
         let (a, b) = makePair()
         a.engine.enterForeground()
         b.engine.enterForeground()
-        // Unilateral trust on A only: B must refuse (pairing closed, no passcode).
+        let address = "127.0.0.1:\(b.engine.config.listenPort)"
+        // Unilateral trust on A only, and nobody has a pairing screen open.
+        wait("A hears B") { a.recorder.devices.contains { $0.deviceId == b.engine.ownId } }
+        a.engine.trustDevice(b.engine.ownId) // dials B
+        wait("B is asked") { b.recorder.pairingRequest?.deviceId == a.engine.ownId }
+        XCTAssertEqual(b.recorder.connectedCount, 0, "held, not connected")
+        XCTAssertFalse(TrustStore(directory: b.dir).isTrusted(a.engine.ownId))
+
+        // An answer given for another request does nothing.
+        let someoneElse = SoftwareIdentity().publicKeyBase64
+        b.engine.acceptPairing(expecting: someoneElse)
+        b.engine.rejectPairing(expecting: someoneElse)
+        XCTAssertEqual(b.engine.queue.sync { b.engine.pending?.link.peerDeviceId }, a.engine.ownId, "still waiting")
+
+        // Ignore: the request goes and nothing is remembered.
+        b.engine.rejectPairing(expecting: a.engine.ownId)
+        wait("request gone") { b.recorder.pairingRequest == nil }
+        XCTAssertFalse(b.engine.queue.sync { b.engine.blocks.isBlocked(a.engine.ownId) })
+        XCTAssertFalse(TrustStore(directory: b.dir).isTrusted(a.engine.ownId))
+
+        // So it can ask again - and this time it is trusted.
+        wait("A's link dropped") { a.recorder.connectedCount == 0 }
+        a.engine.pair(with: address) { _ in }
+        wait("B is asked again") { b.recorder.pairingRequest?.deviceId == a.engine.ownId }
+        b.engine.acceptPairing(expecting: a.engine.ownId)
+        wait("connected") { a.recorder.connectedCount == 1 && b.recorder.connectedCount == 1 }
+    }
+
+    /// A blocked key is refused before trust, a passcode or a pairing screen
+    /// are looked at: it is never asked about, never listed as a stranger and
+    /// never connects. Unblocking lets it ask again - as a stranger.
+    func testBlockedDeviceIsNeverAskedAboutAndCanBeUnblocked() throws {
+        let (a, b) = makePair()
+        a.engine.enterForeground()
+        b.engine.enterForeground()
+        let address = "127.0.0.1:\(b.engine.config.listenPort)"
+        b.engine.blockDevice(a.engine.ownId)
+        wait("B lists A as blocked") { b.recorder.devices.contains { $0.deviceId == a.engine.ownId && $0.blocked } }
+        XCTAssertTrue(BlockStore(directory: b.dir).isBlocked(a.engine.ownId), "persisted")
+
         a.engine.trustDevice(b.engine.ownId)
-        let outcome = expectation(description: "pair outcome")
+        let refused = expectation(description: "refused")
         var result: PairOutcome?
-        a.engine.pair(with: PairingInfo(publicKey: b.engine.ownId, address: "127.0.0.1:\(b.engine.config.listenPort)").address!) { o in
+        a.engine.pair(with: address) { o in
             result = o
-            outcome.fulfill()
+            refused.fulfill()
         }
-        wait(for: [outcome], timeout: 15)
+        wait(for: [refused], timeout: 15)
         if case .refused = result {} else { XCTFail("expected refused, got \(String(describing: result))") }
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertNil(b.recorder.pairingRequest, "never asked")
         XCTAssertEqual(b.recorder.connectedCount, 0)
+        XCTAssertEqual(b.recorder.devices.filter { $0.deviceId == a.engine.ownId }.map(\.blocked), [true], "one row, and it is the blocked one")
+
+        // B trying to pair with a blocked key is told so, without dialling.
+        let told = expectation(description: "blocked outcome")
+        var own: PairOutcome?
+        b.engine.pair(with: PairingInfo(publicKey: a.engine.ownId, address: "127.0.0.1:\(a.engine.config.listenPort)").jsonString()) { o in
+            own = o
+            told.fulfill()
+        }
+        wait(for: [told], timeout: 5)
+        XCTAssertEqual(own, PairOutcome.blocked)
+
+        b.engine.unblockDevice(a.engine.ownId)
+        wait("unblocked") { !b.recorder.devices.contains { $0.blocked } }
+        a.engine.pair(with: address) { _ in }
+        wait("B is asked") { b.recorder.pairingRequest?.deviceId == a.engine.ownId }
+        XCTAssertEqual(b.recorder.connectedCount, 0, "unblocking trusts nobody")
+        XCTAssertFalse(TrustStore(directory: b.dir).isTrusted(a.engine.ownId))
+    }
+
+    /// The shared passcode trusts a device on sight - except one that was blocked.
+    func testASharedPasscodeNeverOverridesABlock() throws {
+        let (a, b) = makePair()
+        b.engine.blockDevice(a.engine.ownId)
+        setPasscode(a, "pw")
+        setPasscode(b, "pw")
+        a.engine.enterForeground()
+        b.engine.enterForeground()
+        Thread.sleep(forTimeInterval: 4)
+        XCTAssertEqual(b.recorder.connectedCount, 0)
+        XCTAssertNil(b.recorder.pairingRequest)
+        XCTAssertFalse(TrustStore(directory: b.dir).isTrusted(a.engine.ownId), "a passcode proof is not trust, for a blocked key")
+    }
+
+    /// Only one request is held and nobody may hog the slot: one that is not
+    /// answered in time is ignored, as if the user had pressed Ignore.
+    func testAnUnansweredRequestIsIgnoredAfterItsTimeToLive() throws {
+        let (a, b) = makePair()
+        b.engine.queue.sync { b.engine.pairingRequestTTL = 2 }
+        a.engine.enterForeground()
+        b.engine.enterForeground()
+        wait("A hears B") { a.recorder.devices.contains { $0.deviceId == b.engine.ownId } }
+        a.engine.trustDevice(b.engine.ownId) // dials B
+        wait("B is asked") { b.recorder.pairingRequest != nil }
+        wait("the request lapses", timeout: 10) { b.recorder.pairingRequest == nil }
+        XCTAssertEqual(b.recorder.connectedCount, 0)
+        XCTAssertFalse(TrustStore(directory: b.dir).isTrusted(a.engine.ownId), "lapsing is not trust")
+        XCTAssertFalse(b.engine.queue.sync { b.engine.blocks.isBlocked(a.engine.ownId) }, "nor a block")
+    }
+
+    func testStrangersAreOnlyTakenWhileTheAppIsUpInFront() {
+        let (a, _) = makePair()
+        a.engine.queue.sync {
+            XCTAssertTrue(a.engine.handshakeContext().acceptsStrangers)
+            a.engine.inBackground = true
+            XCTAssertFalse(a.engine.handshakeContext().acceptsStrangers, "a link can't be held across suspension")
+            a.engine.inBackground = false
+            a.engine.backgroundSession = UUID()
+            XCTAssertFalse(a.engine.handshakeContext().acceptsStrangers, "nor in a background refresh round")
+            a.engine.backgroundSession = nil
+            XCTAssertTrue(a.engine.handshakeContext().acceptsStrangers)
+        }
     }
 
     /// A handshake in this device's own identity is never a peer - our line

@@ -97,7 +97,9 @@ Quit ClipLink first if it's running from `windows\dist`: its files are locked.
     entries stay behind pointing at nothing. (The uninstaller does this.)
 - Data: `%APPDATA%\ClipboardDaemon` — the same files the older Windows builds
   used, so an existing identity, trusted devices and history carry over:
-  `identitydefault.key`, `truststoredefault.json`, `historydefault.json`,
+  `identitydefault.key`, `truststoredefault.json`, `blockeddefault.json` (devices
+  blocked from the Devices page: their keys, which are refused before anything
+  else is decided), `historydefault.json`,
   `deleteddefault.json` (deleted items), `passphrasekeydefault.key`,
   `devicenamedefault.txt`, `filestoredefault\` (synced files by hash) and
   `ReceivedFiles\` (files and images put on the clipboard; received images

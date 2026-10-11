@@ -130,14 +130,22 @@ public struct DeviceRow: Identifiable, Equatable {
     public let lastSeen: Date?
     /// Recently heard from (beacon, probe or connection) - within ~30s.
     public let nearby: Bool
+    /// The user blocked this device: it can't ask to pair, and nothing from
+    /// it is shown. Such a row is only here to be unblocked.
+    public var blocked = false
+    /// The address the live connection to this device is using (nil when
+    /// not connected) - the one address the device card shows.
+    public var connectedAddress: String?
 
     public var shortId: String { DeviceLabel.short(deviceId) }
 
-    /// The one row order every platform uses: paired devices first, then by
-    /// name (case-insensitive; named rows before unnamed ones), then by id.
-    /// Deliberately never by last-seen time or connection state - a beacon
-    /// arriving or a link coming up must not move a row.
+    /// The one row order every platform uses: paired devices first (blocked
+    /// ones last of all), then by name (case-insensitive; named rows before
+    /// unnamed ones), then by id. Deliberately never by last-seen time or
+    /// connection state - a beacon arriving or a link coming up must not
+    /// move a row.
     public static func displayOrder(_ a: DeviceRow, _ b: DeviceRow) -> Bool {
+        if a.blocked != b.blocked { return !a.blocked }
         if a.trusted != b.trusted { return a.trusted }
         switch (a.name, b.name) {
         case let (.some(x), .some(y)):
@@ -188,6 +196,8 @@ public enum PairOutcome: Equatable {
     case prompt(String)
     case awaitingOther(String)
     case busy
+    /// The scanned or typed device is on the block list.
+    case blocked
     case refused(String)
     case silent(String)
     case unreachable(String)
@@ -205,9 +215,10 @@ public enum PairOutcome: Equatable {
         case .passcode(let a): return "Paired with \(a) using your passcode."
         case .prompt(let a): return "Reached \(a) - accept the pairing prompt on both devices to finish."
         case .awaitingOther(let a): return "Reached \(a) - accept the request on that device to finish."
-        case .busy: return "Another pairing request is already waiting here - accept or reject it first."
+        case .busy: return "Another pairing request is already waiting here - trust or ignore it first."
+        case .blocked: return "That device is blocked. Unblock it on the Devices tab first."
         case .refused(let a):
-            return "\(a) answered but didn't accept this device. Set the same passcode on both, or open its Pairing screen (and finish any other pairing request there), then try again."
+            return "\(a) answered but didn't accept this device. Set the same passcode on both, or finish any pairing request waiting on that device, then try again."
         case .silent(let a):
             return "\(a) accepted the connection but ClipLink there didn't respond - try restarting it on that device."
         case .unreachable(let a):

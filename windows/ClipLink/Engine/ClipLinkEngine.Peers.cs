@@ -667,6 +667,13 @@ public sealed partial class ClipLinkEngine
             conn.Close();
             return PairOutcome.ThisDevice;
         }
+        if (blockStore.IsBlocked(conn.PeerDeviceId))
+        {
+            // Blocked after the handshake began and before it got here:
+            // refused, however it got this far.
+            conn.Close();
+            return PairOutcome.Blocked;
+        }
         if (conn.WasAlreadyTrusted)
         {
             if (conn.NewlyTrustedViaPassphrase)
@@ -705,9 +712,38 @@ public sealed partial class ClipLinkEngine
             pairingState.TakePending()?.conn.Close();
             return PairOutcome.NotRunning;
         }
-        Console.WriteLine($"[pair] pairing request from {DeviceLabel.ShortId(conn.PeerDeviceId)} ({address ?? "unknown address"}) - waiting for Accept/Reject");
+        Console.WriteLine($"[pair] pairing request from {DeviceLabel.ShortId(conn.PeerDeviceId)} ({address ?? "unknown address"}) - waiting for Trust/Ignore");
         Raise(PairingRequested, new PendingPairing(conn.PeerDeviceId, NameOfCandidate(conn), address), nameof(PairingRequested));
+        _ = IgnoreWhenUnanswered(conn);
         return PairOutcome.Pending;
+    }
+
+    // How long a pairing request waits for an answer. A request can now come
+    // from any device on the network at any time, and only one is held at once
+    // (a second is turned away while it waits), so without this one unanswered
+    // request would keep every later one out - a stranger's, or the user's own
+    // new device's - until somebody opened the app and dealt with it. The
+    // notification the app posts for it times out at the same moment.
+    private static readonly TimeSpan PairingRequestTtl = TimeSpan.FromMinutes(3);
+
+    // Ignores conn's request if it is still the one waiting when the time is
+    // up (TakePendingIf: the timer of a request that was answered long ago
+    // must not take the slot of the next one).
+    private async Task IgnoreWhenUnanswered(PeerConnection conn)
+    {
+        try
+        {
+            await Task.Delay(PairingRequestTtl, stopping.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return; // stopping: Stop() abandons it
+        }
+        var taken = pairingState.TakePendingIf(conn);
+        if (taken == null) return;
+        Console.WriteLine($"[pair] the request from {DeviceLabel.ShortId(conn.PeerDeviceId)} went unanswered and was ignored");
+        conn.Close();
+        RaisePairingResolved(conn.PeerDeviceId, PairingDecision.Abandoned);
     }
 
     // Handshake name first; an older peer's may only be in its beacon.
@@ -761,8 +797,8 @@ public sealed partial class ClipLinkEngine
             // reconnect loop's Task.WhenAll - so no other peer was retried -
             // and kept this peer reserved in connectingTo, blocking beacon
             // dials to it as well.
-            conn = await PeerConnection.CreateAsync(client, identity, trustStore, pairingState.ModeOpen, passphraseKeyStore, deviceName.Current,
-                    answeredAsSelf: () => answeredAsSelf = true)
+            conn = await PeerConnection.CreateAsync(client, identity, trustStore, passphraseKeyStore, deviceName.Current,
+                    answeredAsSelf: () => answeredAsSelf = true, isBlocked: blockStore.IsBlocked)
                 .WaitAsync(HandshakeTimeout);
         }
         catch
@@ -835,14 +871,14 @@ public sealed partial class ClipLinkEngine
             // reconnect loop), only ever be reconnected TO.
             remoteAddress = (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString();
 
-            var conn = await PeerConnection.CreateAsync(client, identity, trustStore, pairingState.ModeOpen, passphraseKeyStore, deviceName.Current)
+            var conn = await PeerConnection.CreateAsync(client, identity, trustStore, passphraseKeyStore, deviceName.Current,
+                    isBlocked: blockStore.IsBlocked)
                 .WaitAsync(HandshakeTimeout);
             if (conn == null)
             {
-                // handshake failed, or whoever connected isn't in our trust
-                // store and we're not expecting to pair right now — refuse at
-                // the connection level, not just per-message
-                Console.WriteLine($"[listen] handshake from {remoteAddress} rejected or incomplete (not trusted with no matching passcode and the pairing window closed, or it disconnected / sent a bad handshake)");
+                // handshake failed - it disconnected, sent a bad handshake, or
+                // is blocked - refuse at the connection level, not just per-message
+                Console.WriteLine($"[listen] handshake from {remoteAddress} rejected or incomplete (blocked, or it disconnected / sent a bad handshake)");
                 client.Close();
                 return;
             }
@@ -872,8 +908,8 @@ public sealed partial class ClipLinkEngine
             EnableKeepAlive(client);
             // Same reason as ConnectToPeer's timeout.
             bool answeredAsSelf = false;
-            var conn = await PeerConnection.CreateAsync(client, identity, trustStore, pairingState.ModeOpen, passphraseKeyStore, deviceName.Current,
-                    answeredAsSelf: () => answeredAsSelf = true)
+            var conn = await PeerConnection.CreateAsync(client, identity, trustStore, passphraseKeyStore, deviceName.Current,
+                    answeredAsSelf: () => answeredAsSelf = true, isBlocked: blockStore.IsBlocked)
                 .WaitAsync(HandshakeTimeout);
             if (conn == null)
             {
@@ -936,16 +972,31 @@ public sealed partial class ClipLinkEngine
                 Trusted: true,
                 Connected: conn != null,
                 PairingOpen: recent && seen!.PairingOpen,
-                DistinctAddresses(seen?.LanAddress, seen?.AdvertisedAddress, device.Address)));
+                DistinctAddresses(seen?.LanAddress, seen?.AdvertisedAddress, device.Address),
+                Blocked: false,
+                ConnectedAddress: conn?.RemoteAddress ?? (conn != null ? seen?.LanAddress : null)));
+        }
+        // Blocked devices are listed even when silent: that is where they get
+        // unblocked. A blocked device is never also a trusted one.
+        var blockedList = blockStore.GetAll();
+        foreach (var device in blockedList)
+        {
+            if (trusted.ContainsKey(device.PublicKey)) continue;
+            seenPeers.TryGetValue(device.PublicKey, out var seen);
+            rows.Add(new DeviceListing(device.PublicKey, device.Name ?? seen?.Name, Trusted: false, Connected: false, PairingOpen: false,
+                DistinctAddresses(seen?.LanAddress, seen?.AdvertisedAddress),
+                Blocked: true, ConnectedAddress: null));
         }
         foreach (var (id, seen) in seenPeers)
         {
             if (trusted.ContainsKey(id) || now - seen.LastSeenUtc > DiscoveredListingWindow) continue;
+            if (blockedList.Any(device => device.PublicKey == id)) continue; // its blocked row is above
             rows.Add(new DeviceListing(id, seen.Name, Trusted: false, Connected: false, seen.PairingOpen,
                 DistinctAddresses(seen.LanAddress, seen.AdvertisedAddress)));
         }
         return rows
-            .OrderBy(row => row.Trusted ? 0 : 1)
+            .OrderBy(row => row.Blocked ? 1 : 0)
+            .ThenBy(row => row.Trusted ? 0 : 1)
             .ThenBy(row => row.Name == null ? 1 : 0)
             .ThenBy(row => row.Name, StringComparer.OrdinalIgnoreCase)
             .ThenBy(row => row.PublicKey, StringComparer.Ordinal)

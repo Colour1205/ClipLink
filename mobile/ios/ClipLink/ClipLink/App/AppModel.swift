@@ -33,6 +33,8 @@ final class AppModel: ObservableObject {
         didSet {
             guard pairingPresented != oldValue else { return }
             engine?.setPairingOpen(pairingPresented)
+            // Asked when pairing comes up, where the person can see why.
+            if pairingPresented { PairingNotifier.requestAuthorizationIfNeeded() }
             if !pairingPresented {
                 pairStatus = nil
                 pairInProgress = false
@@ -46,6 +48,15 @@ final class AppModel: ObservableObject {
     /// The scene is in the foreground (between becameActive and
     /// enteredBackground).
     private(set) var isActive = false
+    /// The active scene, not merely a running app (the app switcher, Control
+    /// Center or a system prompt over it make it inactive): a pairing request
+    /// is a modal alert then, and a notification otherwise.
+    private(set) var isFrontmost = false
+    /// The pairing request the alert or notification is for.
+    private var shownRequest: PairingRequest?
+    /// The request the person just answered: a snapshot built before the
+    /// engine acted on it must not bring its prompt back.
+    private var answeredRequestId: String?
     /// The UIKit background task of the latest trip to the background.
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var changeCountAtBackground: Int?
@@ -142,10 +153,15 @@ final class AppModel: ObservableObject {
     // MARK: - Lifecycle
 
     func scenePhaseChanged(_ phase: ScenePhase) {
+        isFrontmost = phase == .active
         switch phase {
-        case .active: becameActive()
-        case .background: enteredBackground()
-        default: break
+        case .active:
+            becameActive()
+            showWaitingPairingPrompt()
+        case .background:
+            enteredBackground()
+        default:
+            break
         }
     }
 
@@ -192,6 +208,11 @@ final class AppModel: ObservableObject {
         // request from the background, and the grace period below keeps the
         // node reachable for a while.
         engine?.setPairingOpen(false)
+        // The engine drops a waiting request with its socket: the prompt and
+        // the notification for it go too.
+        shownRequest = nil
+        PairingPrompt.dismiss()
+        PairingNotifier.clear()
         // Time to finish in-flight transfers and close links cleanly (peers
         // then drop us at once instead of after their heartbeat timeout).
         // Each task is ended exactly once, by its own id: a completion from
@@ -522,10 +543,80 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func acceptPairing() { engine?.acceptPairing() }
+    /// Blocks the device's key: no more pairing requests from it, nothing
+    /// from it shown, its trust and link removed. The engine says so in a toast.
+    func block(_ device: DeviceRow) { engine?.blockDevice(device.deviceId) }
 
-    func rejectPairing() {
-        engine?.rejectPairing()
+    func unblock(_ device: DeviceRow) { engine?.unblockDevice(device.deviceId) }
+
+    func copyDeviceID(of device: DeviceRow) {
+        clipboard.copyText(device.deviceId)
+        showToast("Device ID copied.")
+    }
+
+    // MARK: - Pairing requests
+
+    /// A request from a device that wants to pair, now or while the app was
+    /// not in front. In front: the alert. Otherwise: a notification, and the
+    /// alert as soon as the app is active again.
+    private func pairingRequestChanged(_ request: PairingRequest?) {
+        guard let request else {
+            answeredRequestId = nil
+            shownRequest = nil
+            PairingPrompt.dismiss()
+            PairingNotifier.clear()
+            return
+        }
+        guard request.deviceId != answeredRequestId, request.deviceId != shownRequest?.deviceId else { return }
+        shownRequest = request
+        Haptics.tap(settings.haptics)
+        if isFrontmost {
+            showPairingPrompt(for: request)
+        } else {
+            PairingNotifier.post(deviceId: request.deviceId, who: requester(request))
+        }
+    }
+
+    /// The app came back to the front with a request still waiting.
+    private func showWaitingPairingPrompt() {
+        guard let request = shownRequest, !PairingPrompt.isShowing else { return }
+        PairingNotifier.clear()
+        showPairingPrompt(for: request)
+    }
+
+    private func showPairingPrompt(for request: PairingRequest) {
+        let name = self.name(for: request.deviceId)
+        PairingPrompt.show(
+            title: "Pair with \(name)?",
+            message: "\(requester(request)) wants to pair with this \(ThisDeviceNoun.current). Only trust it if you expect this.\n\nIgnore turns this request away; the device can ask again. To stop a device asking, block it on the Devices tab.",
+            onTrust: { [weak self] in self?.answerPairing(trust: true, expecting: request.deviceId) },
+            onIgnore: { [weak self] in self?.answerPairing(trust: false, expecting: request.deviceId) }
+        )
+    }
+
+    /// Who is asking: the name is whatever that device chose, so its short id
+    /// goes beside it (and the address, when known) - a copied name can't
+    /// pass for a device you know.
+    private func requester(_ request: PairingRequest) -> String {
+        let id = DeviceLabel.short(request.deviceId)
+        let name = self.name(for: request.deviceId)
+        let who = name == id ? id : "\(name) (\(id))"
+        return who + (request.address.map { " at \($0)" } ?? "")
+    }
+
+    /// Trust or Ignore, from the alert or the notification. `expecting` is
+    /// the id the answer was given for: it only applies to that request.
+    func answerPairing(trust: Bool, expecting deviceId: String?) {
+        answeredRequestId = deviceId ?? shownRequest?.deviceId
+        shownRequest = nil
+        PairingPrompt.dismiss()
+        PairingNotifier.clear()
+        if trust {
+            Haptics.success(settings.haptics)
+            engine?.acceptPairing(expecting: deviceId)
+        } else {
+            engine?.rejectPairing(expecting: deviceId)
+        }
         pairStatus = nil
     }
 
@@ -607,6 +698,7 @@ extension AppModel: SyncEngineDelegate {
         MainActor.assumeIsolated {
             self.snapshot = snapshot
             self.refreshClipboardHint()
+            self.pairingRequestChanged(snapshot.pairingRequest)
         }
     }
 

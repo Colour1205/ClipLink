@@ -130,6 +130,7 @@ public sealed partial class ClipLinkEngine
     {
         RequireStores();
         if (string.IsNullOrWhiteSpace(deviceId) || DeviceIdentity.IsSameKey(deviceId, ownId)) return false;
+        if (blockStore.IsBlocked(deviceId)) return false; // unblock it first
         if (trustStore.IsTrusted(deviceId)) return true;
         seenPeers.TryGetValue(deviceId, out var seen);
         trustStore.Trust(deviceId, seen?.AdvertisedAddress ?? seen?.LanAddress);
@@ -158,11 +159,13 @@ public sealed partial class ClipLinkEngine
         if (pairingInfo != null && !string.IsNullOrWhiteSpace(pairingInfo.PublicKey))
         {
             if (DeviceIdentity.IsSameKey(pairingInfo.PublicKey, ownId)) return false;
+            if (blockStore.IsBlocked(pairingInfo.PublicKey)) return false;
             trustStore.Trust(pairingInfo.PublicKey, pairingInfo.Address, pairingInfo.Name);
         }
         else
         {
             if (DeviceIdentity.IsSameKey(payload, ownId)) return false;
+            if (blockStore.IsBlocked(payload)) return false;
             trustStore.Trust(payload);
         }
         NotifyDevicesChanged();
@@ -182,6 +185,44 @@ public sealed partial class ClipLinkEngine
         NotifyDevicesChanged();
     }
 
+    // Blocks a device: no pairing request from it is shown, it is never
+    // dialled or auto-trusted, and a handshake from it is refused before
+    // anything else is decided. A blocked device is not a trusted one, so
+    // blocking also removes its trust and closes its connection - it must stop
+    // receiving what is copied here - and a request from it that is waiting
+    // right now goes too. Not the same as ignoring a request (RejectPairing),
+    // which remembers nothing. It blocks this KEY only: a device that makes
+    // itself a new identity is a new device.
+    public void BlockDevice(string deviceId)
+    {
+        RequireStores();
+        if (string.IsNullOrWhiteSpace(deviceId) || DeviceIdentity.IsSameKey(deviceId, ownId)) return;
+        // Its name before the trust record goes, so the blocked row still has one.
+        string? name = ListDevices().FirstOrDefault(row => row.PublicKey == deviceId)?.Name;
+        // Blocked first: the next handshake from it is refused from here on,
+        // whatever the rest of this takes to finish.
+        blockStore.Block(deviceId, name);
+        trustStore.Untrust(deviceId);
+        if (connectionsByDeviceId.TryRemove(deviceId, out var conn))
+        {
+            conn.Close();
+        }
+        if (pairingState.PendingPeerId is string pendingId && pendingId == deviceId)
+        {
+            RejectPairing();
+        }
+        NotifyDevicesChanged();
+    }
+
+    // Lets a blocked device be heard again. It is not trusted again: it has to
+    // pair like any other.
+    public void UnblockDevice(string deviceId)
+    {
+        RequireStores();
+        blockStore.Unblock(deviceId);
+        NotifyDevicesChanged();
+    }
+
     // ---- pairing -----------------------------------------------------
 
     // Pairing mode - mirrors the mobile apps' Pairing screens (HarmonyOS's
@@ -194,20 +235,13 @@ public sealed partial class ClipLinkEngine
 
     public void SetPairingMode(bool open)
     {
+        // Pairing mode now only decides what this PC advertises and dials: a
+        // beacon that says its pairing screen is open, and a dial to a
+        // stranger that says the same. A request from a stranger no longer
+        // depends on it - it reaches this PC whenever the app is running - so
+        // closing the pairing UI leaves a request that is waiting alone (it
+        // expires on its own, see IgnoreWhenUnanswered).
         pairingState.ModeOpen = open;
-        if (!open)
-        {
-            // Closing the pairing UI abandons any request it was showing.
-            // Left pending, it blocked every later attempt (TrySetPending
-            // refuses while one is held), and the held socket is never
-            // read, so its peer dying went unnoticed.
-            var abandoned = pairingState.TakePending();
-            if (abandoned != null)
-            {
-                abandoned.Value.conn.Close();
-                RaisePairingResolved(abandoned.Value.conn.PeerDeviceId, PairingDecision.Abandoned);
-            }
-        }
     }
 
     // The pairing request waiting for Accept/Reject, or null. The same thing

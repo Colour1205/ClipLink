@@ -79,6 +79,8 @@ public final class SyncEngine {
     let identity: IdentitySigner
     let secrets: SecretStore
     let trust: TrustStore
+    /// Devices the user blocked (see BlockStore).
+    let blocks: BlockStore
     public let files: FileStore
     let history: HistoryStore
     /// Items deleted or cleared here: never taken back from a peer.
@@ -117,6 +119,14 @@ public final class SyncEngine {
     var pairingOpen = false
     var pairingTargetKey: String?
     var pending: PendingPairing?
+    /// The app is (or is about to be) suspended: no request can be held.
+    var inBackground = false
+    /// How long a request waits for an answer. A request can now come from
+    /// any device on the network at any time and only one is held (a second
+    /// is turned away while it waits), so without this one unanswered
+    /// request would keep every later one out - a stranger's, or the user's
+    /// own new device's - until somebody dealt with it.
+    var pairingRequestTTL: TimeInterval = 3 * 60
     var passphraseKey: Data?
     var cachedProof: String?
     var tailscaleIP = ""
@@ -169,6 +179,7 @@ public final class SyncEngine {
         self.ownKey = WireSignature.canonicalPublicKey(identity.publicKeyBase64)
         try? FileManager.default.createDirectory(at: config.storageDirectory, withIntermediateDirectories: true)
         trust = TrustStore(directory: config.storageDirectory)
+        blocks = BlockStore(directory: config.storageDirectory)
         files = FileStore(directory: config.storageDirectory)
         history = HistoryStore(directory: config.storageDirectory, fileStore: files)
         deleted = DeletedStore(directory: config.storageDirectory)
@@ -260,6 +271,7 @@ public final class SyncEngine {
             // The user opened the app mid background-refresh: keep everything
             // up and let the refresh round end without tearing down.
             backgroundSession = nil
+            inBackground = false
             // Supersedes any background teardown still in its grace period.
             lifecycleGeneration += 1
             if !running {
@@ -285,8 +297,12 @@ public final class SyncEngine {
         queue.async { [self] in
             lifecycleGeneration += 1
             let generation = lifecycleGeneration
+            inBackground = true
             stopNetworking()
+            // A held request can't outlive its socket: it is dropped, and the
+            // device can ask again once the app is open.
             rejectPendingLocked()
+            schedulePublish()
             waitForTransfers(deadline: Date().addingTimeInterval(grace), generation: generation) { [self] superseded in
                 if !superseded {
                     // Sockets may have been reopened meanwhile (path change,
@@ -394,6 +410,7 @@ public final class SyncEngine {
     /// added history, trust or a passcode while this one was suspended.
     func reloadFromDisk() {
         trust.reload()
+        blocks.reload()
         history.reload()
         deleted.reload()
         let settings = settingsFile.read() as? [String: Any] ?? [:]
@@ -467,8 +484,10 @@ public final class SyncEngine {
     // MARK: - Pairing & trust API
 
     /// True exactly while the pairing screen is visible. Opening it advertises
-    /// pairing in our beacon and lets untrusted peers finish a handshake;
-    /// closing it rejects any request still waiting.
+    /// pairing in our beacon and lets this device dial a stranger that
+    /// advertises the same. A request FROM a stranger no longer depends on it
+    /// - they reach this device whenever the app is up - so closing the
+    /// screen leaves a request that is waiting for an answer alone.
     public func setPairingOpen(_ open: Bool) {
         queue.async { [self] in
             guard pairingOpen != open else { return }
@@ -481,15 +500,19 @@ public final class SyncEngine {
                 tcpSweep(force: true, reason: "pairing")
             } else {
                 pairingTargetKey = nil
-                rejectPendingLocked()
             }
             schedulePublish()
         }
     }
 
-    public func acceptPairing() {
+    /// Trust: the answer to the prompt's (and the notification's) Trust.
+    /// `expecting` is the id the answer was given FOR - a notification's
+    /// button names the request it was posted for, so one that outlived its
+    /// request can't trust whoever asked next.
+    public func acceptPairing(expecting: String? = nil) {
         queue.async { [self] in
             guard let request = pending else { return }
+            if let expecting, !WireSignature.isSameKey(request.link.peerDeviceId, expecting) { return }
             pending = nil
             if request.link.isClosed {
                 notice("The other device cancelled the pairing request - try again.")
@@ -507,8 +530,13 @@ public final class SyncEngine {
         }
     }
 
-    public func rejectPairing() {
+    /// Ignore: closes the waiting connection and nothing else. Nothing is
+    /// remembered - the device can ask again, which is what separates this
+    /// from blocking it. A no-op with nothing pending. `expecting` is as for
+    /// `acceptPairing`.
+    public func rejectPairing(expecting: String? = nil) {
         queue.async { [self] in
+            if let expecting, let request = pending, !WireSignature.isSameKey(request.link.peerDeviceId, expecting) { return }
             rejectPendingLocked()
             schedulePublish()
         }
@@ -517,6 +545,20 @@ public final class SyncEngine {
     func rejectPendingLocked() {
         pending?.link.close()
         pending = nil
+    }
+
+    /// Ignores a request nobody answered for `pairingRequestTTL`.
+    func expireStalePairingRequest() {
+        guard let pending, Date().timeIntervalSince(pending.since) > pairingRequestTTL else { return }
+        log("a pairing request went unanswered and was ignored")
+        rejectPendingLocked()
+        schedulePublish()
+    }
+
+    /// Whether a stranger that dials this device may be held for the user to
+    /// decide about (see HandshakeContext.acceptsStrangers).
+    var acceptsStrangers: Bool {
+        !config.sendOnly && !inBackground && backgroundSession == nil
     }
 
     /// Dials a scanned QR payload or a typed address/pairing text. Never writes
@@ -536,6 +578,10 @@ public final class SyncEngine {
         queue.async { [self] in
             // Never this device itself (PeerLink refuses our own handshake too).
             guard !isOwnIdentity(deviceId) else { return }
+            guard !blocks.isBlocked(deviceId) else {
+                notice("That device is blocked. Unblock it first.")
+                return
+            }
             let address = addressCandidates(for: deviceId).first
             trust.trust(deviceId, address: address)
             log("trusted \(DeviceLabel.short(deviceId))")
@@ -556,6 +602,49 @@ public final class SyncEngine {
             awaitingInbound[deviceId] = nil
             log("untrusted \(DeviceLabel.short(deviceId))")
             notice("Removed \(displayName(for: deviceId)).")
+            schedulePublish()
+        }
+    }
+
+    /// Blocks a device: no pairing request from it is shown, it is never
+    /// dialled or auto-trusted, and a handshake from it is refused before
+    /// anything else is decided. A blocked device is not a trusted one, so
+    /// blocking also removes its trust and closes its link - it must stop
+    /// receiving what is copied here - and an open request from it goes too.
+    ///
+    /// Not the same as ignoring a request (`rejectPairing`), which remembers
+    /// nothing. It blocks this KEY only: a device that makes itself a new
+    /// identity is a new device.
+    public func blockDevice(_ deviceId: String) {
+        queue.async { [self] in
+            guard !isOwnIdentity(deviceId) else { return }
+            let name = peerName(for: deviceId) ?? (pending?.link.peerDeviceId == deviceId ? pending?.link.peerName : nil)
+            let label = displayName(for: deviceId)
+            // Blocked first: the next handshake from it is refused from here
+            // on, whatever the rest of this takes to finish.
+            blocks.block(deviceId, name: name)
+            trust.untrust(deviceId)
+            if let link = links.removeValue(forKey: deviceId) { link.close() }
+            if let request = pending, WireSignature.isSameKey(request.link.peerDeviceId, deviceId) { rejectPendingLocked() }
+            sightings[deviceId] = nil
+            backoff[deviceId] = nil
+            awaitingInbound[deviceId] = nil
+            refusedAt[deviceId] = nil
+            if pairingTargetKey == deviceId { pairingTargetKey = nil }
+            log("blocked \(DeviceLabel.short(deviceId))")
+            notice("Blocked \(label).")
+            schedulePublish()
+        }
+    }
+
+    /// Lets a blocked device be heard again. It is not trusted again: it has
+    /// to pair like any other.
+    public func unblockDevice(_ deviceId: String) {
+        queue.async { [self] in
+            let label = nicknames[deviceId] ?? blocks.device(deviceId)?.name ?? DeviceLabel.short(deviceId)
+            blocks.unblock(deviceId)
+            log("unblocked \(DeviceLabel.short(deviceId))")
+            notice("Unblocked \(label).")
             schedulePublish()
         }
     }
@@ -820,6 +909,23 @@ public final class SyncEngine {
             ids.append(id)
             seen.insert(id)
         }
+        // Blocked devices: always listed (they are not in the trust list and
+        // their sightings are dropped), so they can be unblocked.
+        let blockedDevices = blocks.all.filter { !isOwnIdentity($0.publicKey) }
+        let blockedRows = blockedDevices.map { device -> DeviceRow in
+            DeviceRow(
+                deviceId: device.publicKey,
+                name: nicknames[device.publicKey] ?? device.name,
+                trusted: false,
+                connected: false,
+                addresses: [],
+                pairing: false,
+                lastSeen: nil,
+                nearby: false,
+                blocked: true
+            )
+        }
+        ids.removeAll { id in blockedDevices.contains { WireSignature.isSameKey($0.publicKey, id) } }
         let rows = ids.map { id -> DeviceRow in
             let sighting = sightings[id]
             let trusted = trust.device(id)
@@ -841,12 +947,13 @@ public final class SyncEngine {
                 addresses: addresses,
                 pairing: sighting?.pairing == true && now.timeIntervalSince(sighting?.pairingSeen ?? .distantPast) < 10,
                 lastSeen: lastSeen,
-                nearby: links[id] != nil || (sighting.map { now.timeIntervalSince($0.lastSeen) < 30 } ?? false)
+                nearby: links[id] != nil || (sighting.map { now.timeIntervalSince($0.lastSeen) < 30 } ?? false),
+                connectedAddress: links[id]?.remoteAddress
             )
         }
         // Stable: sorting by connection state and last-seen time made a row
         // jump to the top on every beacon or new connection.
-        return rows.sorted(by: DeviceRow.displayOrder)
+        return (rows + blockedRows).sorted(by: DeviceRow.displayOrder)
     }
 }
 
@@ -875,6 +982,8 @@ struct Backoff {
 struct PendingPairing {
     let link: PeerLink
     let address: String?
+    /// When it arrived: a request nobody answers is dropped (expireStalePairingRequest).
+    let since = Date()
 }
 
 struct PendingFile {

@@ -22,8 +22,10 @@ public sealed partial class MainWindow : Window
     private bool isActive;
     // Only one dialog at a time: a new one replaces whatever is showing.
     private ContentDialog? openDialog;
-    // The Accept/Reject prompt showing now, and whose request it is.
+    // The Trust/Ignore prompt showing now, and whose request it is.
     private (string DeviceId, ContentDialog Dialog)? pairingPrompt;
+    // The same prompt as a notification, for when the window isn't in front.
+    private readonly PairingNotifications notifications;
 
     internal MainWindow(EngineHost host)
     {
@@ -57,8 +59,16 @@ public sealed partial class MainWindow : Window
         {
             if (e.DidVisibilityChange || e.DidPresenterChange) OnScreenChanged?.Invoke();
         };
-        Activated += (_, e) => isActive = e.WindowActivationState != WindowActivationState.Deactivated;
+        Activated += (_, e) =>
+        {
+            isActive = e.WindowActivationState != WindowActivationState.Deactivated;
+            // Brought to the front (by the notification, or by hand) with a
+            // request still waiting: it is a dialog now.
+            if (isActive) ShowPendingPairing();
+        };
 
+        notifications = new PairingNotifications((answer, deviceId) => DispatcherQueue.TryEnqueue(() => OnNotificationAnswered(answer, deviceId)));
+        notifications.Register();
         host.PairingRequested += OnPairingRequested;
         host.PairingResolved += OnPairingResolved;
         RootNavigation.IsPaneOpen = !App.Settings.NavPaneCollapsed;
@@ -201,17 +211,39 @@ public sealed partial class MainWindow : Window
 
     // ---- pairing requests -------------------------------------------------------
 
+    // A request from any device on the network, at any time. In front: a dialog
+    // over whatever page is open. Otherwise a notification with Trust and
+    // Ignore - the window is not forced up. Never a page of its own.
     private async void OnPairingRequested(PendingPairing pending)
     {
-        if (!host.PairingUiActive)
+        if (pairingPrompt?.DeviceId == pending.DeviceId) return; // already asking
+        if (IsInFront)
         {
-            // Pairing was closed while this request was on its way (e.g. a
-            // pair-by-address that finished after the window was hidden):
-            // nobody is here to answer it - let it go.
-            host.Engine.SetPairingMode(false);
+            await AskAboutPairingAsync(pending);
             return;
         }
-        if (pairingPrompt?.DeviceId == pending.DeviceId) return; // already asking
+        if (!notifications.Show(pending))
+        {
+            // No notifications here: bring the window up so it can be answered.
+            if (!IsOnScreen) App.Instance.ShowMainWindow();
+            await AskAboutPairingAsync(pending);
+        }
+    }
+
+    // The window came to the front with a request waiting (its notification
+    // may have been clicked, or ignored): ask here instead.
+    private async void ShowPendingPairing()
+    {
+        if (pairingPrompt != null) return;
+        if (host.Engine.GetPendingPairing() is not { } pending) return;
+        await AskAboutPairingAsync(pending);
+    }
+
+    private async Task AskAboutPairingAsync(PendingPairing pending)
+    {
+        if (pairingPrompt?.DeviceId == pending.DeviceId) return;
+        // Being asked here, so the notification for it goes.
+        notifications.Remove();
 
         string name = DeviceLabel.Of(pending.DeviceId, pending.Name);
         // Where it's asking from, as the phones say it.
@@ -230,17 +262,20 @@ public sealed partial class MainWindow : Window
             {
                 Children =
                 {
-                    Paragraph($"{from} wants to pair with this PC. Only accept if you're pairing it right now."),
+                    Paragraph($"{from} wants to pair with this PC. Only trust it if you're pairing it right now."),
                     fingerprint,
                 },
             },
-            PrimaryButtonText = "Accept",
-            CloseButtonText = "Reject",
+            // Trust or Ignore, and only those: Ignore closes this one request
+            // and remembers nothing, so the device can ask again. Blocking is
+            // a deliberate act on the Devices page, not something to do by
+            // accident from a prompt.
+            PrimaryButtonText = "Trust",
+            CloseButtonText = "Ignore",
             // Enter doesn't pair by accident.
             DefaultButton = ContentDialogButton.Close,
         };
         pairingPrompt = (pending.DeviceId, dialog);
-        if (!IsOnScreen) App.Instance.ShowMainWindow();
         var result = await ShowDialogAsync(dialog);
         if (pairingPrompt?.Dialog != dialog)
         {
@@ -250,9 +285,9 @@ public sealed partial class MainWindow : Window
 
         if (result == ContentDialogResult.Primary)
         {
-            // (It may have accepted this PC already, or not yet.)
+            // (It may have trusted this PC already, or not yet.)
             if (host.Engine.AcceptPairing())
-                Toast($"Accepted {name}", $"If {name} is still asking, accept this PC there too - syncing starts once both have.");
+                Toast($"Trusted {name}", $"Syncing starts once {name} trusts this PC too.");
             else
                 ToastError("That pairing request has gone", "The other device may have cancelled it. Try again from both devices.");
         }
@@ -264,10 +299,28 @@ public sealed partial class MainWindow : Window
 
     private void OnPairingResolved(string deviceId, PairingDecision decision)
     {
+        // Settled - here, from the notification, by expiry or by blocking: the
+        // dialog and the notification both go.
+        notifications.Remove();
         if (pairingPrompt is { } prompt && prompt.DeviceId == deviceId)
         {
             pairingPrompt = null;
             prompt.Dialog.Hide();
         }
+    }
+
+    // A button (or the body) of the notification was clicked. Each button names
+    // the request it was posted for, and acts only if that is still the one
+    // waiting: a stale one can't answer whoever asked next.
+    private void OnNotificationAnswered(PairingNotifications.Answer answer, string? deviceId)
+    {
+        if (answer == PairingNotifications.Answer.Open)
+        {
+            App.Instance.ShowMainWindow(); // the dialog follows once it is in front
+            return;
+        }
+        if (host.Engine.GetPendingPairing()?.DeviceId != deviceId) return;
+        if (answer == PairingNotifications.Answer.Trust) host.Engine.AcceptPairing();
+        else host.Engine.RejectPairing();
     }
 }
