@@ -64,11 +64,12 @@ public sealed partial class MainWindow : Window
             isActive = e.WindowActivationState != WindowActivationState.Deactivated;
             // Brought to the front (by the notification, or by hand) with a
             // request still waiting: it is a dialog now.
-            if (isActive) ShowPendingPairing();
+            if (isActive) OnBroughtToFront();
         };
 
         notifications = new PairingNotifications((answer, deviceId) => DispatcherQueue.TryEnqueue(() => OnNotificationAnswered(answer, deviceId)));
         notifications.Register();
+        host.ItemsArrived += OnItemsArrived;
         host.PairingRequested += OnPairingRequested;
         host.PairingResolved += OnPairingResolved;
         RootNavigation.IsPaneOpen = !App.Settings.NavPaneCollapsed;
@@ -208,6 +209,30 @@ public sealed partial class MainWindow : Window
         Text = text,
         TextWrapping = TextWrapping.Wrap,
     };
+
+    // ---- new items -----------------------------------------------------------
+
+    // How many items arrived since the window was last in front: what the
+    // notification counts.
+    private int unseenArrived;
+
+    // In front: what arrived is on the Synced page, so its notification goes
+    // and the count starts over.
+    private void OnBroughtToFront()
+    {
+        unseenArrived = 0;
+        notifications.RemoveReceived();
+        ShowPendingPairing();
+    }
+
+    // Items from another device, while the window isn't in front: a
+    // notification, if that is switched on (Settings > General).
+    private void OnItemsArrived(IReadOnlyList<HistoryItem> items)
+    {
+        if (!App.Settings.NotifyReceivedItems || IsInFront) return;
+        unseenArrived += items.Count;
+        notifications.ShowReceived(items[0], unseenArrived);
+    }
 
     // ---- pairing requests -------------------------------------------------------
 

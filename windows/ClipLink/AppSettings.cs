@@ -22,6 +22,11 @@ internal sealed class AppSettings
     // The navigation pane is collapsed to icons only.
     public bool NavPaneCollapsed { get; set; }
 
+    // A notification when an item arrives from another device while the window
+    // isn't in front (PairingNotifications.ShowReceived). Off until chosen:
+    // everything copied on a phone would otherwise announce itself.
+    public bool NotifyReceivedItems { get; set; }
+
     // "Show 'Share to ClipLink' in File Explorer" (ShellIntegration). Null
     // until the user chooses: on for the real ClipLink, off for a test copy
     // (another --label) - see ExplorerShareMenuOn.

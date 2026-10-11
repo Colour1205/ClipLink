@@ -6,6 +6,9 @@ namespace ClipLink;
 // A pairing request as a Windows notification with Trust and Ignore buttons,
 // for when the window isn't in front. In front, the window shows a dialog
 // over whatever page is open instead (MainWindow) and this stays quiet.
+// Also the notification for items that arrive while the window isn't in
+// front (opt-in, Settings > General): the one place ClipLink's toasts are
+// made, so the one place that registers for them.
 //
 // Ignore, not Deny: nothing is remembered, so the device can ask again.
 // Blocking is a separate, deliberate action on the Devices page.
@@ -45,12 +48,24 @@ internal sealed class PairingNotifications
         {
             ToastNotificationManagerCompat.OnActivated += OnActivated;
             registered = true;
-            return true;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[app] notifications aren't available: {ex.GetType().Name}: {ex.Message}");
             return false;
+        }
+
+        try
+        {
+            // Windows 11 shows no toast of an app without this (see ToastShortcut).
+            if (ToastShortcut.Ensure(App.Options.Label)) Console.WriteLine("[app] wrote the Start menu shortcut that notifications need");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // Registered, so the toasts are still made - they may just never show.
+            Console.WriteLine($"[app] couldn't write the Start menu shortcut notifications need: {ex.GetType().Name}: {ex.Message}");
+            return true;
         }
     }
 
@@ -92,6 +107,82 @@ internal sealed class PairingNotifications
             Console.WriteLine($"[app] couldn't show the pairing notification: {ex.GetType().Name}: {ex.Message}");
             return false;
         }
+    }
+
+    // ---- items that arrived while the window isn't in front ----
+
+    private const string ReceivedTag = "received";
+    private const int PreviewChars = 60;
+
+    // One toast, replaced as more arrive: "New from <device>" for the first,
+    // "3 new items synced" after (count is how many since the window was last
+    // in front). newest is the one it previews. Clicking it brings the window
+    // up (the default of OnActivated).
+    public void ShowReceived(HistoryItem newest, int count)
+    {
+        if (!registered) return;
+        try
+        {
+            string title = count == 1
+                ? $"New from {DeviceLabel.Of(newest.DeviceId, newest.DeviceName)}"
+                : $"{count} new items synced";
+            new ToastContentBuilder()
+                .AddArgument("action", "open")
+                .AddText(title)
+                .AddText(ReceivedPreview(newest))
+                .Show(toast =>
+                {
+                    toast.Tag = ReceivedTag;
+                    toast.Group = ReceivedTag;
+                });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[app] couldn't show the new-item notification: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // Takes it down: the window is in front now.
+    public void RemoveReceived()
+    {
+        if (!registered) return;
+        try
+        {
+            ToastNotificationManagerCompat.History.Remove(ReceivedTag, ReceivedTag);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[app] couldn't remove the new-item notification: {ex.Message}");
+        }
+    }
+
+    // What the notification says about an item. It can end up on the lock
+    // screen, in the Action Center and on a paired phone's mirror, so: no
+    // keys or tokens, a link as its host only, and a short first line of text
+    // (the same rules as the iOS and HarmonyOS notifications).
+    private static string ReceivedPreview(HistoryItem item)
+    {
+        switch (item.Type)
+        {
+            case "image":
+                return "Image";
+            case "file":
+                return string.IsNullOrWhiteSpace(item.FileName) ? "File" : item.FileName;
+        }
+
+        string text = (item.TextPreview ?? "").Trim();
+        if (text.Length >= 40 && !text.Contains(' ') && text.All(c => char.IsAsciiLetterOrDigit(c) || c is '+' or '/' or '=' or '_' or '-'))
+        {
+            return "Key or token";
+        }
+        if ((text.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || text.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            && Uri.TryCreate(text.Split(new[] { ' ', '\n', '\r', '\t' }, StringSplitOptions.RemoveEmptyEntries)[0], UriKind.Absolute, out Uri? uri) && uri.Host.Length > 0)
+        {
+            return uri.Host;
+        }
+        string firstLine = text.Split('\n').Select(line => line.Trim()).FirstOrDefault(line => line.Length > 0) ?? "";
+        if (firstLine.Length == 0) return "Text";
+        return firstLine.Length > PreviewChars ? firstLine[..PreviewChars] + "…" : firstLine;
     }
 
     // Takes it down: the request was answered, in the window or elsewhere.

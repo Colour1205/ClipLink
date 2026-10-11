@@ -95,6 +95,25 @@ Quit ClipLink first if it's running from `windows\dist`: its files are locked.
     fixes itself — but **before deleting a copy that wasn't installed, run
     `ClipLink.exe --unregister`** (or turn the setting off), or the menu
     entries stay behind pointing at nothing. (The uninstaller does this.)
+- **Notifications** (Windows toasts, `PairingNotifications.cs`), only while the
+  window isn't in front: a pairing request, with **Trust** and **Ignore**
+  buttons; and, if Settings > General > **Notify me about new items** is on
+  (off by default), items that arrive from another device — "New from <device>"
+  for the first, "3 new items synced" after, one toast replaced as more arrive,
+  gone as soon as the window is in front. A toast shows a short preview and never
+  a key or token, a link's host only, a text's first 60 characters.
+  - **Windows 11 shows no toast of an app that has no Start menu shortcut
+    carrying its notification identity** (AppUserModelID + ToastActivatorCLSID):
+    the toast is "delivered" to the shell and then dropped with no banner, and the
+    app doesn't appear in Settings > Notifications. The identity the toast library
+    registers on its own (under `HKCU\Software\Classes\AppUserModelId`) isn't
+    enough — a plain toast sent under ClipLink's own id was dropped until the
+    shortcut existed. So every start `ToastShortcut` makes sure one exists
+    (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\ClipLink.lnk`, same
+    target, so the setup program's own entry just gains the identity). A copy
+    that isn't the installed one (a build folder, a test copy) doesn't take that
+    entry over: it gets `ClipLink <6 hex digits of its path's hash>.lnk` instead,
+    and `ClipLink.exe --label <name> --unregister` removes a test copy's.
 - Data: `%APPDATA%\ClipboardDaemon` — the same files the older Windows builds
   used, so an existing identity, trusted devices and history carry over:
   `identitydefault.key`, `truststoredefault.json`, `blockeddefault.json` (devices

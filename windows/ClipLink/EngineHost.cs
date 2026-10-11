@@ -147,15 +147,26 @@ public sealed class EngineHost : Observable
         Raise(nameof(Status), nameof(IsFaulted), nameof(HasWarning), nameof(ConnectionSummary));
     }
 
+    // Items that came from other devices and weren't in History before: what
+    // arrived since the last reload (newest first). Never raised for the
+    // first load, nor for this PC's own copies.
+    public event Action<IReadOnlyList<HistoryItem>>? ItemsArrived;
+
+    private bool historyLoaded;
+
     private void ReloadHistory()
     {
         var items = Engine.GetHistory();
+        var known = new HashSet<string>(History.Select(card => card.Key));
+        var arrived = historyLoaded ? items.Where(item => !item.FromThisDevice && !known.Contains(item.Key)).ToList() : new List<HistoryItem>();
+        historyLoaded = true;
         SyncByKey(History, items, card => card.Key, item => item.Key, item => new HistoryCard(item), (card, item) => card.Update(item));
         foreach (var card in History)
         {
             if (card.IsImage && !card.ThumbnailRequested) _ = LoadThumbnailAsync(card);
         }
         Raise(nameof(HistoryIsEmpty));
+        if (arrived.Count > 0) ItemsArrived?.Invoke(arrived);
     }
 
     private void ApplyDevices(IReadOnlyList<DeviceListing> devices)
