@@ -32,3 +32,65 @@ mobile/ios/**/xcuserdata/
 mobile/ios/**/*.xcuserstate
 mobile/ios/**/DerivedData/
 /mobile/android/ClipLink/app/release
+
+# ---------------------------------------------------------------------------
+# Secrets and signing material. These must never reach the repository: an
+# Android upload key, an Apple provisioning profile or a Windows code-signing
+# certificate cannot be un-leaked once pushed, and ClipLink's own identity
+# and passcode keys are *.key files.
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.p8
+*.pem
+*.key
+*.cer
+*.mobileprovision
+*.provisionprofile
+.env
+.env.*
+!.env.example
+local.properties
+
+# Built packages and archives (the build scripts put these in dist/ or outside
+# the tree; this stops a copy that wandered in from being committed)
+*.apk
+*.aab
+*.hap
+*.hsp
+*.ipa
+*.xcarchive
+*.dSYM/
+*.dSYM.zip
+*.msix
+*.appx
+
+# Build and tool output
+build/
+.kotlin/
+.swiftpm/
+Pods/
+TestResults/
+*.binlog
+__pycache__/
+*.pyc
+*.hprof
+
+# Claude Code: per-machine settings and its git worktrees
+.claude/settings.local.json
+.claude/worktrees/
+CLAUDE.local.md
+
+# OneDrive / editors / merge leftovers (this repo lives in a synced folder)
+desktop.ini
+~$*
+*.tmp
+*.bak
+*.orig
+*.rej
+*.swp
+
+# Raw Google Drive downloads (design assets and the like): import what is
+# needed into the app, don't commit the download folder
+drive-download-*/
