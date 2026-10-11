@@ -904,7 +904,6 @@ class ClipLinkEngine(context: Context) {
         log("paired: ${shortIdOf(conn.peerDeviceId)}")
         syncManager.registerConnection(conn)
         refreshDevices()
-        showToast("Paired.")
     }
 
     /**
@@ -1168,13 +1167,6 @@ class ClipLinkEngine(context: Context) {
         val normalized = Protocol.normalizeDeviceName(name).orEmpty()
         deviceSettings.deviceNameOverride = normalized
         _deviceNameOverride.value = normalized
-        showToast(
-            if (normalized.isEmpty()) {
-                "Using this phone's name, “${_defaultDeviceName.value}”."
-            } else {
-                "Device name saved."
-            },
-        )
     }
 
     fun trustDevice(deviceId: String) {
@@ -1190,19 +1182,15 @@ class ClipLinkEngine(context: Context) {
     }
 
     fun untrustDevice(deviceId: String) {
-        val label = displayNameOf(deviceId, knownNameOf(deviceId)) // before the record goes
         trustStore.untrust(deviceId)
         // And its link with it: a removed device must not keep receiving what
         // is copied here, asking for files, or showing as connected.
         syncManager.close(deviceId, "removed")
         connectionAddresses.remove(deviceId)
         refreshDevices()
-        // Explicit confirmation matters: a just-untrusted device that is still
-        // beaconing doesn't vanish from the list, it reappears as "discovered"
-        // with a Trust button - so without this, Remove looks like it did
-        // nothing at all.
+        // No toast: the device leaves "trusted" - or, if it is still beaconing,
+        // comes back as "discovered" with a Trust button, which is the answer.
         log("untrusted ${shortIdOf(deviceId)}")
-        showToast("Removed $label")
     }
 
     /**
@@ -1241,7 +1229,7 @@ class ClipLinkEngine(context: Context) {
     /**
      * Reads the system clipboard and syncs it. Only works while the app is in
      * the foreground - that is an Android 10+ platform rule, not a choice
-     * here. Never throws: a failure is logged (and toasted, if the user asked).
+     * here. Never throws: a failure is logged, not toasted.
      */
     fun captureAndBroadcast(quiet: Boolean = false) {
         scope.launch {
@@ -1254,9 +1242,9 @@ class ClipLinkEngine(context: Context) {
                         // tap was noise. `quiet` is for the automatic on-open capture,
                         // whose failures are not worth interrupting for either.
                         null -> Unit
-                        is Capture.Text -> broadcastText(capture.text, quiet)
-                        is Capture.Image -> broadcastImage(capture.pngBytes, quiet)
-                        is Capture.Payload -> broadcastFile(capture, quiet)
+                        is Capture.Text -> broadcastText(capture.text)
+                        is Capture.Image -> broadcastImage(capture.pngBytes)
+                        is Capture.Payload -> broadcastFile(capture)
                         is Capture.TooLarge -> if (!quiet) showToast("${capture.fileName} is over 1 GB, too big to sync.")
                         Capture.Ours -> Unit
                     }
@@ -1266,7 +1254,6 @@ class ClipLinkEngine(context: Context) {
                     // A Keystore that won't sign, a disk that won't write, an
                     // image too big for the heap: this capture's problem only.
                     log("couldn't sync the clipboard: ${describeError(e)}")
-                    if (!quiet) showToast("Couldn't sync the clipboard.")
                 }
             }
         }
@@ -1367,15 +1354,11 @@ class ClipLinkEngine(context: Context) {
     private suspend fun readyOwnId(): String? =
         withTimeoutOrNull(READY_TIMEOUT_MS) { _ownDeviceId.first { it.isNotEmpty() } }
 
-    /** A capture [readyOwnId] gave up on - before its hash was noted, so trying again works. */
-    private fun notReady(quiet: Boolean) {
-        if (!quiet) showToast("ClipLink is still starting - try again in a moment.")
-    }
-
-    private suspend fun broadcastText(text: String, quiet: Boolean = false) {
+    private suspend fun broadcastText(text: String) {
         val hash = FileStore.hashOf(text.toByteArray(Charsets.UTF_8))
         if (hash == clipboard.lastKnownHash) return
-        val ownId = readyOwnId() ?: return notReady(quiet)
+        // Gave up waiting for the id: before the hash is noted, so a later try works.
+        val ownId = readyOwnId() ?: return
         // Signed BEFORE the hash is noted: a Keystore that refuses must leave
         // the clipboard unsynced, not marked as synced and never retried.
         val entry = Signing.sign(identity, text, ClipboardEntry.TYPE_TEXT, ownId)
@@ -1384,10 +1367,11 @@ class ClipLinkEngine(context: Context) {
         // No "Synced text." toast: the new card at the top of Synced is the answer.
     }
 
-    private suspend fun broadcastImage(pngBytes: ByteArray, quiet: Boolean = false) {
+    private suspend fun broadcastImage(pngBytes: ByteArray) {
         val hash = FileStore.hashOf(pngBytes)
         if (hash == clipboard.lastKnownHash) return
-        val ownId = readyOwnId() ?: return notReady(quiet)
+        // Gave up waiting for the id: before the hash is noted, so a later try works.
+        val ownId = readyOwnId() ?: return
         // Images travel inline as base64 in the entry itself, matching the
         // other two platforms - they are NOT sent through the file-chunk path.
         val content = B64.encode(pngBytes)
@@ -1399,10 +1383,11 @@ class ClipLinkEngine(context: Context) {
     // A copy that goes no further here is left in the store for the next
     // start's sweep (FileStore.sweepUnreferenced) rather than deleted now: a
     // share of the same file may be about to record an entry for it.
-    private suspend fun broadcastFile(file: Capture.Payload, quiet: Boolean = false) {
+    private suspend fun broadcastFile(file: Capture.Payload) {
         val hash = file.hash
         if (hash == clipboard.lastKnownHash) return
-        val ownId = readyOwnId() ?: return notReady(quiet)
+        // Gave up waiting for the id: before the hash is noted, so a later try works.
+        val ownId = readyOwnId() ?: return
         // The bytes are in the store already (see ClipboardBridge.capture),
         // BEFORE the entry goes out: the receiver broadcasts a file_request
         // the instant it sees an entry it has no bytes for.
@@ -1450,7 +1435,6 @@ class ClipLinkEngine(context: Context) {
             step("clearing the history") {
                 historyStore.clear()
                 refreshItems()
-                showToast("History cleared.")
             }
         }
     }
