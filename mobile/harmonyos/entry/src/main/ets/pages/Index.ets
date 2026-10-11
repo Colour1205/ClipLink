@@ -44,7 +44,7 @@ import { deviceFingerprint, effectiveDeviceName, getLocalDeviceName, normalizeDe
 import { FileStore } from '../storage/FileStore';
 import { FilePayload } from '../storage/FilePayload';
 import { safeFileName } from '../storage/FileNames';
-import { CopyRefusal, SHARED_IN_EVENT, SharedIn, removeQuietly, takePendingShares } from '../share/ShareIntake';
+import { SHARED_IN_EVENT, SharedIn, removeQuietly, takePendingShares } from '../share/ShareIntake';
 import { entryKey } from '../storage/DeletedEntries';
 import { Discovery, PeerBeacon } from '../networking/Discovery';
 import { TcpServer, connectTcp } from '../networking/TcpTransport';
@@ -473,15 +473,6 @@ function shareOutcomeMessage(context: common.Context, files: number, texts: numb
     message = resText(context, $r('app.string.share_join'), message, parts[i]);
   }
   return message;
-}
-
-// The toast for a pasted file the watcher wouldn't take (see
-// ShareIntake's copyFileIn) - the same rules as a share, said the same way.
-function pasteRefusalMessage(context: common.Context, refused: CopyRefusal): string {
-  if (refused === 'too-large') return resText(context, $r('app.string.refuse_too_large'));
-  if (refused === 'folder') return resText(context, $r('app.string.refuse_folder'));
-  if (refused === 'own') return resText(context, $r('app.string.item_already_in_cliplink'));
-  return resText(context, $r('app.string.refuse_unreadable'));
 }
 
 // Full-text view for the synced-item long-press menu's "Select text" option.
@@ -1530,7 +1521,6 @@ struct Index {
     this.syncManager?.registerConnection(conn);
     this.rememberNameOnceProven(conn);
     this.log(`paired: ${shortDeviceId(conn.peerDeviceId)}`);
-    promptAction.showToast({ message: $r('app.string.toast_paired') });
   }
 
   // Ignore: closes the waiting connection and nothing else - nothing is
@@ -1854,8 +1844,6 @@ struct Index {
 
   async untrustDevice(deviceId: string): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
-    // Before the record (and the name it may hold) is gone.
-    const label: string = this.peerLabel(deviceId);
     await this.trustStore.untrust(context, deviceId);
     // Its live connection goes too, as on Windows: left open, it kept
     // receiving everything sent from here, and could still ask for any
@@ -1863,13 +1851,9 @@ struct Index {
     this.syncManager?.disconnect(deviceId);
     if (this.pendingPairingConn?.peerDeviceId === deviceId) this.rejectPairing();
     await this.refreshTrustedDevices();
-    // Explicit confirmation matters here: a just-untrusted device doesn't
-    // vanish from the Devices list if it's still actively beaconing (it
-    // reappears as "discovered" with a Trust button instead of "trusted"
-    // with Remove) - without this, tapping Remove on a device that's still
-    // on the LAN looks like it silently did nothing.
+    // No toast: the device leaves "trusted" - or, if it is still beaconing,
+    // comes back as "discovered" with a Trust button, which is the answer.
     this.log(`untrusted ${shortDeviceId(deviceId)}`);
-    promptAction.showToast({ message: this.str($r('app.string.toast_removed_device'), label) });
   }
 
   // Blocking a trusted device also removes it, so that one asks first.
@@ -1927,7 +1911,6 @@ struct Index {
       const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, deviceId);
       await pasteboard.getSystemPasteboard().setData(data);
       this.noteOwnClipboardWrite();
-      promptAction.showToast({ message: $r('app.string.toast_device_id_copied') });
     } catch (e) {
       promptAction.showToast({ message: $r('app.string.toast_copy_failed') });
     }
@@ -2045,7 +2028,6 @@ struct Index {
       this.passcodeChanging = false;
       this.passphraseInput = '';
       await this.refreshPassphraseState();
-      promptAction.showToast({ message: $r('app.string.toast_passcode_cleared') });
     } catch (e) {
       const be = e as BusinessError;
       promptAction.showToast({ message: this.str($r('app.string.toast_passcode_clear_failed'), `${be.message ?? e}`), duration: 3000 });
@@ -2133,7 +2115,8 @@ struct Index {
       this.deviceNameOverride = saved;
       this.deviceNameInput = saved;
       this.refreshPairingPayload();
-      promptAction.showToast({ message: saved.length > 0 ? $r('app.string.toast_device_name_saved') : $r('app.string.toast_device_name_system') });
+      // No toast: back to Me, whose row shows the name (unless the user already left).
+      if (this.meScreen === 'devicename') this.setMeScreen('main');
     } catch (e) {
       const be = e as BusinessError;
       promptAction.showToast({ message: this.str($r('app.string.toast_save_failed'), `${be.message ?? e}`), duration: 3000 });
@@ -2182,7 +2165,6 @@ struct Index {
       this.passphraseInput = '';
       this.passcodeChanging = false;
       await this.refreshPassphraseState();
-      promptAction.showToast({ message: $r('app.string.toast_passcode_set'), duration: 3000 });
     } catch (e) {
       const be = e as BusinessError;
       promptAction.showToast({ message: this.str($r('app.string.toast_passcode_set_failed'), `${be.message ?? e}`), duration: 3000 });
@@ -2373,7 +2355,6 @@ struct Index {
     const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.myPairingPayload);
     await pasteboard.getSystemPasteboard().setData(data);
     this.noteOwnClipboardWrite();
-    promptAction.showToast({ message: $r('app.string.toast_pairing_info_copied'), duration: 3000 });
   }
 
   async copyDeviceId(): Promise<void> {
@@ -2382,7 +2363,6 @@ struct Index {
       const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.ownDeviceId);
       await pasteboard.getSystemPasteboard().setData(data);
       this.noteOwnClipboardWrite();
-      promptAction.showToast({ message: $r('app.string.toast_device_id_copied') });
     } catch (e) {
       promptAction.showToast({ message: $r('app.string.toast_copy_failed') });
     }
@@ -2405,8 +2385,7 @@ struct Index {
 
   async onPasteButtonClick(result: PasteButtonOnClickResult) {
     if (result !== PasteButtonOnClickResult.SUCCESS) {
-      promptAction.showToast({ message: $r('app.string.toast_paste_not_granted') });
-      return;
+      return; // the system did not grant the read: nothing was read, so nothing to say
     }
     const context = getContext(this) as common.UIAbilityContext;
     const change = await this.watcher.readCurrentClipboard(context);
@@ -2417,11 +2396,9 @@ struct Index {
       return;
     }
     if (change.type === 'unsupported') {
-      promptAction.showToast({
-        message: change.refused !== undefined
-          ? pasteRefusalMessage(getContext(this), change.refused)
-          : this.str($r('app.string.toast_unsupported_clipboard'), `${change.detail}`),
-      });
+      // Not something ClipLink syncs (or a file it refused): no toast, the
+      // Activity log has why.
+      this.log(`paste not synced: ${change.refused !== undefined ? change.refused : change.detail}`);
       return;
     }
 
@@ -2436,14 +2413,14 @@ struct Index {
       const path: string = change.path ?? '';
       if (fileStore === null) {
         removeQuietly(path);
-        this.pasteFailed($r('app.string.toast_file_store_not_ready_yet'));
+        this.pasteFailed();
         return;
       }
       // The watcher's cache copy moves in, already hashed (an empty file's
       // too: its hash is the known constant - see sha256File).
       if (!fileStore.adopt(path, change.hash)) {
         this.log('could not store the pasted file');
-        this.pasteFailed($r('app.string.toast_paste_save_failed'));
+        this.pasteFailed();
         return;
       }
       const payload: FilePayload = { FileName: safeFileName(change.fileName, 'file'), FileHash: change.hash, FileSize: change.size ?? 0 };
@@ -2454,7 +2431,7 @@ struct Index {
       await this.recordLocalEntry(change.type, entryContent);
     } catch (e) {
       this.log(`could not sync the paste (${e})`);
-      this.pasteFailed($r('app.string.toast_paste_sync_failed'));
+      this.pasteFailed();
       return;
     }
 
@@ -2462,12 +2439,11 @@ struct Index {
     // Devices tab says whether anything is connected).
   }
 
-  // A paste that was read but couldn't be synced: says so, and has the
-  // watcher forget the read, so the next tap tries again rather than finding
-  // the clipboard "unchanged since last sync".
-  private pasteFailed(message: Resource): void {
+  // A paste that was read but couldn't be synced (logged by the caller, no
+  // toast): the watcher forgets the read, so the next tap tries again rather
+  // than finding the clipboard "unchanged since last sync".
+  private pasteFailed(): void {
     this.watcher.forget();
-    promptAction.showToast({ message: message });
   }
 
   // Something this device originated - a PasteButton read, or something
@@ -2596,7 +2572,7 @@ struct Index {
   copyItemContent(item: SyncedItem): void {
     const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, item.content);
     pasteboard.getSystemPasteboard().setData(data)
-      .then(() => { this.noteOwnClipboardWrite(); promptAction.showToast({ message: $r('app.string.toast_copied') }); })
+      .then(() => { this.noteOwnClipboardWrite(); })
       .catch(() => { promptAction.showToast({ message: $r('app.string.toast_copy_failed') }); });
   }
 
@@ -2723,8 +2699,7 @@ struct Index {
     try {
       payload = JSON.parse(item.content) as FilePayload;
     } catch (e) {
-      promptAction.showToast({ message: $r('app.string.toast_not_a_file') });
-      return;
+      return; // not a file entry: nothing to open
     }
     if (!fileStore.exists(payload.FileHash)) {
       promptAction.showToast({ message: $r('app.string.toast_file_not_downloaded') });

@@ -189,18 +189,6 @@
       "value": "The other device cancelled the pairing request - try again."
     },
     {
-      "name": "toast_paired",
-      "value": "Paired."
-    },
-    {
-      "name": "toast_removed_device",
-      "value": "Removed %1$s"
-    },
-    {
-      "name": "toast_passcode_cleared",
-      "value": "Passcode cleared."
-    },
-    {
       "name": "toast_passcode_clear_failed",
       "value": "Failed to clear passcode: %1$s"
     },
@@ -221,20 +209,8 @@
       "value": "Failed to save: %1$s"
     },
     {
-      "name": "toast_device_name_saved",
-      "value": "Device name saved."
-    },
-    {
-      "name": "toast_device_name_system",
-      "value": "Using the system device name."
-    },
-    {
       "name": "toast_passcode_empty",
       "value": "Enter a passcode first."
-    },
-    {
-      "name": "toast_passcode_set",
-      "value": "Passcode set — matching devices will auto-trust."
     },
     {
       "name": "toast_passcode_set_failed",
@@ -245,44 +221,12 @@
       "value": "Enter an address first."
     },
     {
-      "name": "toast_pairing_info_copied",
-      "value": "Pairing info copied — paste it under Pair by address on the other device."
-    },
-    {
-      "name": "toast_device_id_copied",
-      "value": "Device ID copied."
-    },
-    {
       "name": "toast_copy_failed",
       "value": "Could not copy — try again."
     },
     {
-      "name": "toast_copied",
-      "value": "Copied to clipboard."
-    },
-    {
-      "name": "toast_paste_not_granted",
-      "value": "Tap did not grant access — try again."
-    },
-    {
-      "name": "toast_unsupported_clipboard",
-      "value": "Unsupported clipboard content: %1$s"
-    },
-    {
-      "name": "toast_file_store_not_ready_yet",
-      "value": "File store not ready yet — try again."
-    },
-    {
       "name": "toast_file_store_not_ready",
       "value": "File store not ready — try again."
-    },
-    {
-      "name": "toast_paste_save_failed",
-      "value": "Could not save the file — try again."
-    },
-    {
-      "name": "toast_paste_sync_failed",
-      "value": "Could not sync that — try again."
     },
     {
       "name": "toast_self_test_passed",
@@ -291,10 +235,6 @@
     {
       "name": "toast_self_test_failed",
       "value": "Self-test failed: %1$s"
-    },
-    {
-      "name": "toast_not_a_file",
-      "value": "That item is not a file."
     },
     {
       "name": "toast_file_not_downloaded",
@@ -327,18 +267,6 @@
     {
       "name": "item_already_in_cliplink",
       "value": "That is already in ClipLink."
-    },
-    {
-      "name": "refuse_too_large",
-      "value": "That file is over 1 GB — too large to sync."
-    },
-    {
-      "name": "refuse_folder",
-      "value": "Only files can be synced, not folders."
-    },
-    {
-      "name": "refuse_unreadable",
-      "value": "Couldn't read that file."
     },
     {
       "name": "share_what_text",
