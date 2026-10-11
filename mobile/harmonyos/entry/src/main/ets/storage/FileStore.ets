@@ -13,6 +13,11 @@ import { FilePayload } from './FilePayload';
 const SUBDIR = 'cliplink_files';
 const TEMP_SUFFIX = '.tmp';
 const HASH_CHUNK_SIZE = 256 * 1024;
+// Copies of a file under its real name live here, in the app's cache (see namedCopy).
+const NAMED_SUBDIR = 'named';
+// A drag's start callback cannot wait, so a copy made for one is made there and
+// then: fine up to this size, not for a file of a gigabyte (see namedCopySync).
+const NAMED_COPY_SYNC_MAX_BYTES = 128 * 1024 * 1024;
 
 // SHA-256 of no bytes at all: every empty file's hash.
 export const EMPTY_FILE_HASH: string = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
@@ -87,6 +92,7 @@ export async function sha256File(path: string): Promise<string> {
 
 export class FileStore {
   private baseDir: string;
+  private cacheDir: string;
   // Lowercase hashes this run has stored, is receiving (see newTempPath) or
   // has found here and may be about to rely on (see exists) - whatever the
   // history said, deleteUnreferenced leaves these alone.
@@ -96,8 +102,72 @@ export class FileStore {
 
   constructor(context: common.UIAbilityContext) {
     this.baseDir = `${context.filesDir}/${SUBDIR}`;
+    this.cacheDir = context.cacheDir;
     if (!fs.accessSync(this.baseDir)) {
       fs.mkdirSync(this.baseDir);
+    }
+  }
+
+  // The store keeps a file by the hash of its bytes, so the file itself has
+  // no name and no extension - which is what a share sheet, a previewer or an
+  // app a file is dragged into would name it by. These make a copy under the
+  // name the sender gave it, at <cache>/named/<hash>/<name>, and hand back
+  // its path. One copy per file and name, reused while it matches the stored
+  // file's size; the cache is the system's to clear, and clearNamedCopies
+  // clears it at start.
+  private namedPath(hash: string, fileName: string): string {
+    return `${this.cacheDir}/${NAMED_SUBDIR}/${checked(hash).toLowerCase()}/${fileName}`;
+  }
+
+  private hasNamedCopy(path: string, hash: string): boolean {
+    return fs.accessSync(path) && fs.statSync(path).size === fs.statSync(this.getPath(hash)).size;
+  }
+
+  private ensureNamedDir(path: string): void {
+    const dir: string = path.substring(0, path.lastIndexOf('/'));
+    if (!fs.accessSync(dir)) fs.mkdirSync(dir, true);
+  }
+
+  // The copy, made without blocking: null if the file isn't stored or the
+  // copy can't be made.
+  async namedCopy(hash: string, fileName: string): Promise<string | null> {
+    if (!this.exists(hash)) return null;
+    try {
+      const path: string = this.namedPath(hash, fileName);
+      if (!this.hasNamedCopy(path, hash)) {
+        this.ensureNamedDir(path);
+        await fs.copyFile(this.getPath(hash), path);
+      }
+      return path;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // The same for a caller that cannot wait (a drag's start callback): the copy
+  // is made on the spot, so only for a file up to NAMED_COPY_SYNC_MAX_BYTES.
+  // Null for a bigger one with no copy yet - the caller falls back to the
+  // stored file and starts namedCopy so the next time there is one.
+  namedCopySync(hash: string, fileName: string): string | null {
+    if (!this.exists(hash)) return null;
+    try {
+      const path: string = this.namedPath(hash, fileName);
+      if (this.hasNamedCopy(path, hash)) return path;
+      if (fs.statSync(this.getPath(hash)).size > NAMED_COPY_SYNC_MAX_BYTES) return null;
+      this.ensureNamedDir(path);
+      fs.copyFileSync(this.getPath(hash), path);
+      return path;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  clearNamedCopies(): void {
+    try {
+      const dir: string = `${this.cacheDir}/${NAMED_SUBDIR}`;
+      if (fs.accessSync(dir)) fs.rmdirSync(dir);
+    } catch (e) {
+      // the cache is the system's to clear anyway
     }
   }
 

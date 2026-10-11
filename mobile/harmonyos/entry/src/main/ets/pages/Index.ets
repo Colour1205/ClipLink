@@ -18,10 +18,11 @@ import { common, Want, WantAgent, wantConstant, wantAgent } from '@kit.AbilityKi
 import { BusinessError } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { window, promptAction, curves, LengthMetrics } from '@kit.ArkUI';
-import { HdsNavigation, HdsNavDestination, HdsNavDestinationTitleMode, HdsNavigationTitleBarOptions,
+import { HdsNavigation, HdsNavDestination, HdsNavDestinationTitleMode, HdsNavigationTitleMode, HdsNavigationTitleBarOptions, NavBarWidthRangeOptions,
   HdsNavigationMenuItemOptions, ScrollEffectType, TitleSize, hdsMaterial } from '@kit.UIDesignKit';
 import { scanBarcode } from '@kit.ScanKit';
 import { systemShare } from '@kit.ShareKit';
+import { pdfService, PdfView, pdfViewManager } from '@kit.PDFKit';
 import { filePreview } from '@kit.PreviewKit';
 import { uniformTypeDescriptor } from '@kit.ArkData';
 import { util } from '@kit.ArkTS';
@@ -114,6 +115,11 @@ function tapHaptic(): void {
 // at the same moment.
 const PAIRING_REQUEST_TTL_MS: number = 3 * 60 * 1000;
 const PAIRING_NOTIFICATION_ID: number = 2001;
+// The one notification for items that arrive while the app is out of view
+// (see notifyReceivedItem); each new item replaces it.
+const RECEIVED_NOTIFICATION_ID: number = 2002;
+// How much of a text item's first line a notification shows.
+const NOTIFICATION_PREVIEW_CHARS: number = 60;
 
 // A blocked device's card is dark gray in either theme, so it reads as
 // switched off at a glance; its text is light to match.
@@ -295,6 +301,34 @@ function themeFor(key: string): ThemeOption {
 // screen), how strong it is at the bottom edge, and how many colour stops
 // trace its eased falloff (see Index's bottomGlow). Tall and faint, so it
 // reads as a wash rather than a band.
+// The Synced list's lane width range (vp). The list shows as many lanes as fit
+// with each between these, so a card is never narrower than a phone's nor so
+// wide that its text runs into one long line. The grid's cards are narrower,
+// by design: one column per SYNCED_GRID_TRACK_VP of width.
+const SYNCED_GRID_TRACK_VP: number = 200;
+const SYNCED_LIST_LANE_MIN_VP: number = 400;
+const SYNCED_LIST_LANE_MAX_VP: number = 640;
+// When a page has room for a list beside its detail: the OS multi-device rule
+// for a single/double-column layout (the page-layout guide, and what
+// NavigationMode.AUTO_WITH_ASPECT_RATIO applies) - the window is at least
+// 600vp wide and no taller than 1.2 times its width. A tablet held sideways
+// qualifies; the same tablet held upright, or a phone, stays one column.
+const SPLIT_MIN_WIDTH_VP: number = 600;
+const SPLIT_MAX_ASPECT: number = 1.2;
+// How much of the window the card pane takes in the Synced split (the rest is
+// the preview), and the narrowest either pane is allowed to be dragged to.
+const SYNCED_CARDS_PANE_FRACTION: number = 0.62;
+const SPLIT_PANE_MIN_VP: number = 320;
+// How far a finger may move on a card before it no longer counts as pressing
+// it (see cardTouch).
+const CARD_PRESS_MOVE_SLOP_VP: number = 10;
+// The Devices split: the device list on the left takes this share, the
+// selected device's detail the rest.
+const DEVICES_LIST_PANE_FRACTION: number = 0.42;
+// The widest a Me sub-screen's content (pairing, passcode, ...) is allowed to
+// be: a form stretched across a tablet is hard to read, so it keeps a
+// phone-like column and sits in the middle (the guide's indent layout).
+const SUB_SCREEN_MAX_WIDTH_VP: number = 680;
 const GLOW_HEIGHT_ABOVE_INSET: number = 460;
 const GLOW_OPACITY: number = 0.13;
 const GLOW_STOPS: number = 8;
@@ -329,6 +363,60 @@ function mimeTypeForFileName(fileName: string): string {
     return mimes.length > 0 ? mimes[0] : 'application/octet-stream';
   } catch (e) {
     return 'application/octet-stream';
+  }
+}
+
+// The UTD of a file by its name's extension, for the share sheet - which
+// shows the right icon and offers the right apps for it. 'general.file' when
+// the extension says nothing.
+function utdForFileName(fileName: string): string {
+  const dot: number = fileName.lastIndexOf('.');
+  if (dot < 0) return 'general.file';
+  try {
+    const typeId: string = uniformTypeDescriptor.getUniformDataTypeByFilenameExtension(fileName.substring(dot));
+    return typeId.length > 0 ? typeId : 'general.file';
+  } catch (e) {
+    return 'general.file';
+  }
+}
+
+// 473.93 KB, 2.1 MB: a file's size as people read it.
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+// What the preview shows of a file, by its name: a PDF is rendered, plain-text
+// types are read, anything else gets a card with its name and size.
+const TEXT_PREVIEW_EXTENSIONS: string[] = ['txt', 'md', 'log', 'json', 'csv', 'xml', 'yaml', 'yml', 'ini', 'conf', 'cfg'];
+// How much of a text file the preview reads: the start is what you look at,
+// and the whole of a large log would be slow to draw.
+const TEXT_PREVIEW_MAX_BYTES: number = 256 * 1024;
+
+type FilePreviewKind = 'pdf' | 'text' | 'other';
+
+function filePreviewKindOf(fileName: string): FilePreviewKind {
+  const dot: number = fileName.lastIndexOf('.');
+  if (dot < 0) return 'other';
+  const ext: string = fileName.substring(dot + 1).toLowerCase();
+  if (ext === 'pdf') return 'pdf';
+  return TEXT_PREVIEW_EXTENSIONS.includes(ext) ? 'text' : 'other';
+}
+
+// The first TEXT_PREVIEW_MAX_BYTES of a file, as text ('' if it can't be read).
+function readTextHead(path: string): string {
+  let file: fs.File | null = null;
+  try {
+    file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+    const buffer: ArrayBuffer = new ArrayBuffer(TEXT_PREVIEW_MAX_BYTES);
+    const count: number = fs.readSync(file.fd, buffer);
+    return util.TextDecoder.create('utf-8').decodeToString(new Uint8Array(buffer, 0, count));
+  } catch (e) {
+    return '';
+  } finally {
+    if (file !== null) fs.closeSync(file);
   }
 }
 
@@ -455,6 +543,74 @@ struct SaveImageDialog {
   }
 }
 
+// A PDF shown in the app with PDF Kit's PdfView: scrollable and zoomable, so
+// the preview of a PDF is the PDF itself, with opening it in another app one
+// tap away in the title bar. It loads the stored file by its path (the name
+// has no extension, which the loader does not need) and loads again if the path
+// changes - the preview pane of the split layout shows whichever item is
+// selected.
+@Component
+struct PdfPreviewPane {
+  @Prop @Watch('onPathChanged') filePath: string = '';
+  @State failed: boolean = false;
+  private controller: pdfViewManager.PdfController = new pdfViewManager.PdfController();
+  private loadGeneration: number = 0;
+
+  aboutToAppear(): void {
+    void this.load();
+  }
+
+  aboutToDisappear(): void {
+    try {
+      this.controller.releaseDocument();
+    } catch (e) {
+      // nothing was loaded
+    }
+  }
+
+  onPathChanged(): void {
+    void this.load();
+  }
+
+  private async load(): Promise<void> {
+    const generation: number = ++this.loadGeneration;
+    this.failed = false;
+    try {
+      const result: pdfService.ParseResult = await this.controller.loadDocument(this.filePath);
+      if (generation !== this.loadGeneration) return;
+      if (result !== pdfService.ParseResult.PARSE_SUCCESS) {
+        this.failed = true;
+        return;
+      }
+      this.controller.setPageLayout(pdfService.PageLayout.LAYOUT_SINGLE);
+      this.controller.setPageContinuous(true);
+    } catch (e) {
+      if (generation === this.loadGeneration) this.failed = true;
+    }
+  }
+
+  build() {
+    Stack() {
+      PdfView({
+        controller: this.controller,
+        pageFit: pdfService.PageFit.FIT_WIDTH,
+        showScroll: true
+      })
+        .width('100%')
+        .height('100%')
+      if (this.failed) {
+        Text($r('app.string.file_preview_failed'))
+          .fontSize(14)
+          .fontColor($r('sys.color.font_secondary'))
+          .textAlign(TextAlign.Center)
+          .padding(24)
+      }
+    }
+    .width('100%')
+    .height('100%')
+  }
+}
+
 @Entry
 @Component
 struct Index {
@@ -471,6 +627,23 @@ struct Index {
   // Window height, for placing the bottom glow's colour stops (see
   // bottomGlow) - a gradient's stops are fractions of the page's height.
   @State windowHeightVp: number = 0;
+  // Window width, for the responsive layouts (see isSplitLayout and the
+  // list/grid/Me columns): kept from the same windowSizeChange listener that
+  // keeps the height, so rotation, split screen and free-window resizing all
+  // re-lay the page out.
+  @State windowWidthVp: number = 0;
+  // The Synced pane's own width (the whole window in one column, the card
+  // pane in the split), measured: the grid's column count follows it.
+  @State syncedPaneWidthVp: number = 0;
+  // The card under the finger, and the card whose long-press menu is open
+  // (see cardFillFor); '' when there is none.
+  @State pressedCardKey: string = '';
+  @State menuCardKey: string = '';
+  private touchStartX: number = 0;
+  private touchStartY: number = 0;
+  // The Devices list pane's measured width: the add-device button sits at
+  // its bottom-right corner in the split.
+  @State devicesPaneWidthVp: number = 0;
   // Light/dark, kept in AppStorage by EntryAbility. Colours that get an
   // alpha applied in code (see colorWithAlpha) are resolved from their
   // resources per mode, so they must re-resolve when this flips.
@@ -497,6 +670,10 @@ struct Index {
   @State savingDeviceName: boolean = false;
   // Mirror of DeviceSettings.getAutoApply, pushed into SyncManager too.
   @State autoApply: boolean = true;
+  // "Notify about new items" (see notifyReceivedItem), and how many arrived
+  // since the app was last in view - what the notification counts.
+  @State notifyReceived: boolean = true;
+  private unseenReceived: number = 0;
   // DeviceSettings.getNoticeNewCopies - see onPageShow.
   @State noticeOnOpen: boolean = true;
   // DeviceSettings.getAccentThemeSync - a key from THEMES, see accent().
@@ -504,7 +681,8 @@ struct Index {
   // Appearance: the bottom glow (see bottomGlow) and how see-through card
   // surfaces are, 0-100% (see cardFill).
   @State bottomGlowOn: boolean = true;
-  @State cardTransparency: number = 0;
+  // 35% until the saved value is read (DeviceSettings' default, the same on every platform).
+  @State cardTransparency: number = 35;
   private readonly themes: ThemeOption[] = THEMES;
   // Resolved ARGB per `${colorMode}:${resource id}` - see resolveColor.
   private resolvedColors: Map<string, number> = new Map();
@@ -591,6 +769,7 @@ struct Index {
   };
   private onWindowSizeChange = (size: window.Size): void => {
     this.windowHeightVp = px2vp(size.height);
+    this.windowWidthVp = px2vp(size.width);
   };
   private syncManager: SyncManager | null = null;
   private fileStore: FileStore | null = null;
@@ -636,6 +815,12 @@ struct Index {
   // never scroll behind anything and its header had no material. It gets
   // the same stack/destination treatment as the other two now.
   private devicesNavStack: NavPathStack = new NavPathStack();
+  // The Synced tab's split layout has its own stack: the preview is its only
+  // route, always on show, so nothing here has to be kept in step with
+  // syncedNavStack (the one-column layout's list -> preview stack).
+  private syncedSplitStack: NavPathStack = new NavPathStack();
+  // The same for Devices: the selected device's detail is the one route.
+  private devicesSplitStack: NavPathStack = new NavPathStack();
   // One Scroller per scrollable that sits under an HDS title bar, handed to
   // that page's bindToScrollable. The gradient blur is driven by the bound
   // scroller's offset, so it must be the exact instance the List/Scroll/
@@ -689,6 +874,8 @@ struct Index {
     this.syncedNavStack.pushPath({ name: 'syncedList' }, false);
     this.meNavStack.pushPath({ name: 'meMain' }, false);
     this.devicesNavStack.pushPath({ name: 'devicesMain' }, false);
+    this.syncedSplitStack.pushPath({ name: 'splitPreview' }, false);
+    this.devicesSplitStack.pushPath({ name: 'splitDevice' }, false);
 
     const context = getContext(this) as common.UIAbilityContext;
     window.getLastWindow(context).then((win: window.Window) => {
@@ -701,6 +888,7 @@ struct Index {
       this.mainWindow = win;
       win.on('avoidAreaChange', this.onAvoidAreaChange);
       this.windowHeightVp = px2vp(win.getWindowProperties().windowRect.height);
+      this.windowWidthVp = px2vp(win.getWindowProperties().windowRect.width);
       win.on('windowSizeChange', this.onWindowSizeChange);
     }).catch(() => { /* fall back to zero insets if the query fails */ });
 
@@ -711,15 +899,22 @@ struct Index {
 
     const fileStore = new FileStore(context);
     this.fileStore = fileStore;
+    // Copies of files under their real names (see FileStore.namedCopy) are only
+    // needed while something reads them: those from the last run go.
+    fileStore.clearNamedCopies();
     const syncManager = new SyncManager(fileStore, this.trustStore, context);
     syncManager.onEntryApplied((entry: ClipboardEntry, result: ApplyResult, fromPeer: boolean) => {
-      netLog(`entry received: type=${entry.Type} result=${result}`);
+      netLog(`entry received: type=${entry.Type} result=${result} fromPeer=${fromPeer} visible=${this.appVisible}`);
       if (result === 'applied') this.noteOwnClipboardWrite();
       // An entry can be reported again - sent twice, or a file listed from
       // history before its bytes arrived - so any copy already listed goes
       // first: a repeated ForEach key breaks the list.
       const item: SyncedItem = this.syncedItemFor(entry, fromPeer);
+      const alreadyListed: boolean = this.syncedItems.some((i: SyncedItem) => i.id === item.id);
       this.syncedItems = [item, ...this.syncedItems.filter((i: SyncedItem) => i.id !== item.id)].slice(0, 50);
+      // Only what is new to the list: an entry reported a second time (see
+      // above) is not news.
+      if (fromPeer && !alreadyListed && !this.appVisible) void this.notifyReceivedItem(item);
     });
     // An older item's bytes, fetched again (see SyncManager.onFileStored):
     // the list is laid out again, so its card gets the key - and the image
@@ -876,6 +1071,7 @@ struct Index {
     // Back in view with a request waiting that only got a notification: the
     // dialog takes over, and the notification goes.
     this.cancelPairingNotification();
+    this.clearReceivedNotification();
     if (this.pendingPairingConn !== null && !this.pairingDialogShown) this.presentPairingDialog();
     void this.restartDiscovery();
     void this.reconnectOffLanPeers();
@@ -1027,13 +1223,6 @@ struct Index {
   private countStr(res: Resource, count: number): string {
     void this.language;
     return resCount(getContext(this), res, count);
-  }
-
-  // The word for an item's type inside a sentence ("Synced text to ...").
-  private kindWord(type: string): string {
-    if (type === 'image') return this.str($r('app.string.kind_image'));
-    if (type === 'file') return this.str($r('app.string.kind_file'));
-    return this.str($r('app.string.kind_text'));
   }
 
   // "a or b or c" - the "or" is the language's. Only ever shown to the user.
@@ -1399,6 +1588,9 @@ struct Index {
       const who: string = claimed !== null ? claimed : this.str($r('app.string.pairing_request_unnamed'));
       const request: notificationManager.NotificationRequest = {
         id: PAIRING_NOTIFICATION_ID,
+        // A service reminder, not the default "other": that one is folded into
+        // the shade's "more notifications" and never pops up a banner.
+        notificationSlotType: notificationManager.SlotType.SERVICE_INFORMATION,
         content: {
           notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
           normal: {
@@ -1427,6 +1619,91 @@ struct Index {
 
   private cancelPairingNotification(): void {
     notificationManager.cancel(PAIRING_NOTIFICATION_ID).catch(() => { /* none showing - fine */ });
+  }
+
+  // ---- the notification, for an item that arrives while the app is out of view ----
+
+  // One notification, replaced as more arrive: "New from <device>" for the
+  // first, "3 new items synced" after. Opening the app (onPageShow) clears it
+  // and starts the count over. Only while the process is running - HarmonyOS
+  // suspends an app soon after it leaves the screen, and this app has no
+  // background-running grant (see the README), so an item sent later is
+  // listed, not announced.
+  private async notifyReceivedItem(item: SyncedItem): Promise<void> {
+    if (!this.notifyReceived) return;
+    this.unseenReceived += 1;
+    const count: number = this.unseenReceived;
+    try {
+      const enabled: boolean = await notificationManager.isNotificationEnabled();
+      netLog(`new-item notification: enabled=${enabled} count=${count}`);
+      if (!enabled) return;
+      const context = getContext(this) as common.UIAbilityContext;
+      const open: WantAgent = await this.openWantAgent(context, 23);
+      // Back in view while the agent was being made.
+      if (this.appVisible) return;
+      const request: notificationManager.NotificationRequest = {
+        id: RECEIVED_NOTIFICATION_ID,
+        // See the pairing notification: the default slot is folded away.
+        notificationSlotType: notificationManager.SlotType.SERVICE_INFORMATION,
+        content: {
+          notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
+          normal: {
+            title: count === 1
+              ? this.str($r('app.string.notif_received_title'), this.sourceLabelFor(item.deviceId))
+              : this.countStr($r('app.plural.notif_received_many_title'), count),
+            text: this.receivedPreview(item),
+          },
+        },
+        wantAgent: open,
+        tapDismissed: true,
+      };
+      await notificationManager.publish(request);
+      netLog('new-item notification: posted');
+      if (this.appVisible) this.clearReceivedNotification();
+    } catch (e) {
+      const be = e as BusinessError;
+      this.log(`couldn't show the new-item notification: ${be.message ?? e}`);
+    }
+  }
+
+  private clearReceivedNotification(): void {
+    this.unseenReceived = 0;
+    notificationManager.cancel(RECEIVED_NOTIFICATION_ID).catch(() => { /* none showing - fine */ });
+  }
+
+  // What the notification says about an item. It can end up on the lock
+  // screen, so: no keys or tokens, a link as its host only, and a short first
+  // line of text (the same rules as iOS's notification).
+  private receivedPreview(item: SyncedItem): string {
+    if (item.type === 'image') return this.str($r('app.string.item_image'));
+    if (item.type === 'file') return item.preview.length > 0 ? item.preview : this.str($r('app.string.item_file'));
+    if (this.looksLikeOpaqueData(item.preview)) return this.str($r('app.string.notif_received_key'));
+    const text: string = item.content.trim();
+    if (text.startsWith('http://') || text.startsWith('https://')) {
+      const host: RegExpMatchArray | null = text.match(/^https?:\/\/([^\/?#\s]+)/);
+      return host !== null ? host[1] : this.str($r('app.string.notif_received_link'));
+    }
+    let firstLine: string = '';
+    for (const line of text.split('\n')) {
+      if (line.trim().length > 0) {
+        firstLine = line.trim();
+        break;
+      }
+    }
+    if (firstLine.length === 0) return this.str($r('app.string.notif_received_text'));
+    return firstLine.length > NOTIFICATION_PREVIEW_CHARS ? `${firstLine.slice(0, NOTIFICATION_PREVIEW_CHARS)}…` : firstLine;
+  }
+
+  // A notification that only brings the app up: its Want carries no
+  // parameters, so EntryAbility.onNewWant has nothing to act on.
+  private async openWantAgent(context: common.UIAbilityContext, requestCode: number): Promise<WantAgent> {
+    const info: wantAgent.WantAgentInfo = {
+      wants: [{ bundleName: context.abilityInfo.bundleName, abilityName: context.abilityInfo.name }],
+      actionType: wantAgent.OperationType.START_ABILITY,
+      requestCode: requestCode,
+      wantAgentFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG],
+    };
+    return wantAgent.getWantAgent(info);
   }
 
   private async connectToBeacon(beacon: PeerBeacon): Promise<void> {
@@ -1622,7 +1899,6 @@ struct Index {
     const context = getContext(this) as common.UIAbilityContext;
     // Its name before the trust record goes, so the blocked row still has one.
     const name: string | null = this.peerName(deviceId, null);
-    const label: string = this.peerLabel(deviceId);
     // Blocked first: the next handshake from it is refused from here on,
     // whatever the rest of this takes to finish.
     await this.blockStore.block(context, deviceId, name !== null ? name : undefined);
@@ -1634,18 +1910,15 @@ struct Index {
     if (pending !== null && sameIdentityKey(pending.peerDeviceId, deviceId)) this.rejectPairing();
     await this.refreshTrustedDevices();
     this.log(`blocked ${shortDeviceId(deviceId)}`);
-    promptAction.showToast({ message: this.str($r('app.string.toast_blocked'), label) });
   }
 
   // Lets a blocked device be heard again. It is not trusted again: it has to
   // pair like any other.
   async unblockDevice(deviceId: string): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
-    const label: string = this.peerLabel(deviceId, this.blockedDevices.find((d: BlockedDevice) => sameIdentityKey(d.deviceId, deviceId))?.name ?? null);
     await this.blockStore.unblock(context, deviceId);
     await this.refreshBlockedDevices();
     this.log(`unblocked ${shortDeviceId(deviceId)}`);
-    promptAction.showToast({ message: this.str($r('app.string.toast_unblocked'), label) });
   }
 
   // Copies another device's id, from its card menu or detail screen.
@@ -1687,6 +1960,7 @@ struct Index {
     this.autoApply = await this.deviceSettings.getAutoApply(context);
     this.syncManager?.setAutoApply(this.autoApply);
     this.noticeOnOpen = await this.deviceSettings.getNoticeNewCopies(context);
+    this.notifyReceived = await this.deviceSettings.getNotifyReceived(context);
     // onPageShow has usually already run by now using the default (on), so
     // settle the hint against the real setting.
     this.pendingChange = this.noticeOnOpen && this.watcher.hasUnseenChange();
@@ -1697,6 +1971,15 @@ struct Index {
     this.syncManager?.setAutoApply(value);
     const context = getContext(this) as common.UIAbilityContext;
     await this.deviceSettings.setAutoApply(context, value);
+  }
+
+  private async setNotifyReceived(value: boolean): Promise<void> {
+    this.notifyReceived = value;
+    // Asked for at start already; this is the second chance for someone who
+    // said no then and has turned the option on now.
+    if (value) void this.ensureNotificationPermission();
+    const context = getContext(this) as common.UIAbilityContext;
+    await this.deviceSettings.setNotifyReceived(context, value);
   }
 
   private async setNoticeNewCopies(value: boolean): Promise<void> {
@@ -1810,10 +2093,11 @@ struct Index {
     await this.syncManager?.deleteEntry(item.id);
     const previewOpen: boolean = this.syncedNavStack.size() > 1 && this.selectedItemId === item.id;
     this.syncedItems = this.syncedItems.filter((i: SyncedItem) => i.id !== item.id);
-    if (previewOpen) {
+    if (previewOpen && !this.isSplitLayout()) {
       this.closeItemDetail();
     }
-    promptAction.showToast({ message: $r('app.string.toast_item_deleted') });
+    // The split's preview moves on to the next item by itself (previewItem).
+    if (this.selectedItemId === item.id) this.selectedItemId = '';
   }
 
   async saveTailscaleIp(): Promise<void> {
@@ -1826,6 +2110,8 @@ struct Index {
       this.tailscaleIp = trimmed;
       this.refreshPairingPayload();
       promptAction.showToast({ message: trimmed.length > 0 ? $r('app.string.toast_tailscale_saved') : $r('app.string.toast_tailscale_cleared') });
+      // Back to Me, so it is clear it took (unless the user already left).
+      if (this.meScreen === 'network') this.setMeScreen('main');
     } catch (e) {
       const be = e as BusinessError;
       promptAction.showToast({ message: this.str($r('app.string.toast_save_failed'), `${be.message ?? e}`), duration: 3000 });
@@ -2127,7 +2413,7 @@ struct Index {
     this.markClipboardSeen();
     this.pendingChange = false;
     if (change === null) {
-      promptAction.showToast({ message: $r('app.string.toast_clipboard_unchanged') });
+      // Unchanged since the last sync: nothing new to show, and nothing to say.
       return;
     }
     if (change.type === 'unsupported') {
@@ -2172,12 +2458,8 @@ struct Index {
       return;
     }
 
-    const count = this.syncManager?.connectionCount ?? 0;
-    promptAction.showToast({
-      message: count > 0
-        ? this.str($r('app.string.toast_synced_to_devices'), this.kindWord(change.type), this.countStr($r('app.plural.devices_count'), count))
-        : this.str($r('app.string.toast_captured_no_devices'), this.kindWord(change.type)),
-    });
+    // No toast: the new card at the top of Synced is the answer (and the
+    // Devices tab says whether anything is connected).
   }
 
   // A paste that was read but couldn't be synced: says so, and has the
@@ -2277,10 +2559,15 @@ struct Index {
     }
     netLog(`share: files=${files} texts=${texts} tooLarge=${tooLarge} folders=${folders} unreadable=${unreadable} own=${own}`);
     const count = this.syncManager?.connectionCount ?? 0;
-    promptAction.showToast({
-      message: shareOutcomeMessage(getContext(this), files, texts, tooLarge, folders, unreadable, own, count),
-      duration: 3000,
-    });
+    // The new cards are on screen (the Synced tab is shown, below), so a plain
+    // success needs no toast: only something skipped, nobody to send it to, or
+    // nothing shared does.
+    if (files + texts === 0 || count === 0 || tooLarge + folders + unreadable + own > 0) {
+      promptAction.showToast({
+        message: shareOutcomeMessage(getContext(this), files, texts, tooLarge, folders, unreadable, own, count),
+        duration: 3000,
+      });
+    }
     // Show where it went, unless that would pull the user out of pairing.
     if (files + texts > 0 && !this.pairingOpen) {
       this.currentTabIndex = 0;
@@ -2338,15 +2625,91 @@ struct Index {
   // FLAG_AUTH_READ_URI_PERMISSION is the only public way to lend another
   // app read access to a file in this sandbox - grantUriPermission is
   // system-api only.
-  // A card with something to show opens the in-app detail view; a file we
-  // cannot preview has nothing to show, so hand it straight to the system
-  // instead of opening an empty viewer.
+  // Tapping any card opens the in-app preview - a file too (a PDF is shown, a
+  // text file read, anything else gets a card with Open and Save). Handing the
+  // file to another app is the title bar's Open.
   private activateItem(item: SyncedItem): void {
-    if (item.type === 'file' && this.imagePreviewUri(item) === null) {
-      void this.openFileWithSystem(item);
-      return;
-    }
     this.openItemDetail(item);
+  }
+
+  // Whether the page is wide enough for a list beside its detail (see
+  // SPLIT_MIN_WIDTH_VP). Read from windowWidthVp/windowHeightVp, which the
+  // window's size listener keeps, so rotating or resizing re-lays the page out.
+  isSplitLayout(): boolean {
+    return this.windowWidthVp >= SPLIT_MIN_WIDTH_VP && this.windowHeightVp > 0 &&
+      this.windowHeightVp / this.windowWidthVp <= SPLIT_MAX_ASPECT;
+  }
+
+  // How far the divider of a split can be dragged: neither pane narrower than
+  // SPLIT_PANE_MIN_VP.
+  splitPaneRange(): NavBarWidthRangeOptions {
+    return { minWidth: SPLIT_PANE_MIN_VP, maxWidth: Math.max(SPLIT_PANE_MIN_VP, this.windowWidthVp - SPLIT_PANE_MIN_VP) };
+  }
+
+  // The Synced grid's columns: two on a phone, and on anything wider as many
+  // as fit at SYNCED_GRID_TRACK_VP each in the pane the grid is in (measured,
+  // so it follows a divider being dragged or the window being resized), shared
+  // out evenly. (The OS's repeat(auto-fill, track) form of columnsTemplate
+  // also counts columns by width, but leaves the remainder empty at the edge.)
+  syncedGridColumns(): string {
+    if (this.syncedPaneWidthVp < SPLIT_MIN_WIDTH_VP) return '1fr 1fr';
+    const columns: number = Math.max(2, Math.min(8, Math.floor((this.syncedPaneWidthVp - 32 + 10) / (SYNCED_GRID_TRACK_VP + 10))));
+    return Array<string>(columns).fill('1fr').join(' ');
+  }
+
+  // How many columns the Me page's sections go in: one on a phone, two at
+  // medium widths, three on a wide window.
+  meColumns(): number {
+    if (this.windowWidthVp < 600) return 1;
+    return this.windowWidthVp < 1100 ? 2 : 3;
+  }
+
+  meColumnsTemplate(): string {
+    return Array<string>(this.meColumns()).fill('1fr').join(' ');
+  }
+
+  // The width, in vp, of one pane of a split, as a fraction of the window.
+  splitPaneWidthVp(fraction: number): number {
+    return Math.round(Math.max(SPLIT_PANE_MIN_VP, Math.min(this.windowWidthVp - SPLIT_PANE_MIN_VP, this.windowWidthVp * fraction)));
+  }
+
+  // The preview's item as a list of one (or none), for syncedPreviewPane.
+  previewItems(): SyncedItem[] {
+    const item: SyncedItem | undefined = this.previewItem();
+    return item === undefined ? [] : [item];
+  }
+
+  // What makes the preview a different one: the item, and for a file whether
+  // its bytes are here yet - the pane is built again when they arrive.
+  previewKey(item: SyncedItem): string {
+    if (item.type !== 'file') return item.id;
+    return `${item.id}|${this.fileLocalPath(item) !== ''}`;
+  }
+
+  // The item the split layout's preview shows: the selected one if it is
+  // still there, else the newest.
+  previewItem(): SyncedItem | undefined {
+    const selected: SyncedItem | undefined = this.syncedItems.find((i: SyncedItem) => i.id === this.selectedItemId);
+    return selected !== undefined ? selected : this.syncedItems[0];
+  }
+
+  // The geometryTransition id of a card and of its preview. Empty in the split
+  // layout, where both are on screen at once and there is no push to morph:
+  // an empty id takes part in no shared transition.
+  gtId(itemId: string): string {
+    return this.isSplitLayout() ? '' : itemId;
+  }
+
+  // The outline that marks the card whose item the split's preview shows.
+  // Every card in the split carries the same 2vp border and only its colour
+  // changes (transparent when it is not the selected one): a border that came
+  // and went would resize the card, and the grid would lay its cards out again
+  // in a different order each time one was tapped.
+  cardSelectBorder(itemId: string): BorderOptions {
+    if (!this.isSplitLayout()) return { width: 0 };
+    const selected: boolean = this.previewItem()?.id === itemId;
+    const color: ResourceColor = selected ? this.accent() : Color.Transparent;
+    return { width: 2, color: color };
   }
 
   async openFileWithSystem(item: SyncedItem): Promise<void> {
@@ -2367,8 +2730,14 @@ struct Index {
       promptAction.showToast({ message: $r('app.string.toast_file_not_downloaded') });
       return;
     }
-    const uri: string = fileUri.getUriFromPath(fileStore.getPath(payload.FileHash));
     const fileName: string = safeFileName(payload.FileName, 'file');
+    // The copy under its real name, not the stored file named by its hash:
+    // that is what the previewer or the other app shows and opens by.
+    const uri: string | null = await this.namedFileUri(payload);
+    if (uri === null) {
+      promptAction.showToast({ message: this.str($r('app.string.toast_open_file_failed'), -1) });
+      return;
+    }
     const mime: string = mimeTypeForFileName(fileName);
 
     if (canIUse('SystemCapability.FileManagement.FilePreview.Core')) {
@@ -2429,8 +2798,15 @@ struct Index {
           promptAction.showToast({ message: $r('app.string.toast_file_not_downloaded') });
           return;
         }
-        uri = fileUri.getUriFromPath(fileStore.getPath(payload.FileHash));
-        utd = 'general.file';
+        // The copy under its real name - shared as the stored file, it went out
+        // named by its hash with no extension.
+        const named: string | null = await this.namedFileUri(payload);
+        if (named === null) {
+          promptAction.showToast({ message: $r('app.string.toast_share_sheet_failed') });
+          return;
+        }
+        uri = named;
+        utd = utdForFileName(safeFileName(payload.FileName, 'file'));
       }
       const sharedData = new systemShare.SharedData({ utd, uri });
       const controller = new systemShare.ShareController(sharedData);
@@ -2469,7 +2845,7 @@ struct Index {
       } finally {
         fs.closeSync(file);
       }
-      promptAction.showToast({ message: $r('app.string.toast_saved_to_gallery') });
+      // No toast: the save went through the system's own dialog.
     } catch (e) {
       promptAction.showToast({ message: $r('app.string.toast_save_image_failed') });
     }
@@ -2509,7 +2885,7 @@ struct Index {
         fs.closeSync(srcFile);
         fs.closeSync(destFile);
       }
-      promptAction.showToast({ message: $r('app.string.toast_file_saved') });
+      // No toast: the file went through the system's picker.
     } catch (e) {
       promptAction.showToast({ message: $r('app.string.toast_save_file_failed') });
     }
@@ -2600,8 +2976,17 @@ struct Index {
         const payload = JSON.parse(item.content) as FilePayload;
         const fileStore = this.fileStore;
         if (fileStore === null || !fileStore.exists(payload.FileHash)) return null;
-        const uri = fileUri.getUriFromPath(fileStore.getPath(payload.FileHash));
         const fileName: string = safeFileName(payload.FileName, 'file');
+        // The copy under its real name, not the stored file named by its hash:
+        // that is the name the app it is dropped into gives the file. One too
+        // big to copy while the drag starts goes as the stored file this time,
+        // and the copy is started for the next.
+        let path: string | null = fileStore.namedCopySync(payload.FileHash, fileName);
+        if (path === null) {
+          void fileStore.namedCopy(payload.FileHash, fileName);
+          path = fileStore.getPath(payload.FileHash);
+        }
+        const uri = fileUri.getUriFromPath(path);
         if (isImageFileName(fileName)) {
           const image = new unifiedDataChannel.Image();
           image.imageUri = uri;
@@ -2619,11 +3004,7 @@ struct Index {
     return null;
   }
 
-  // File entries have no meaningful full-screen preview unless they're
-  // recognizably an image (see imagePreviewUri) - otherwise tapping one
-  // does nothing beyond the shared clickEffect() every card already gets.
   openItemDetail(item: SyncedItem): void {
-    if (item.type === 'file' && this.imagePreviewUri(item) === null) return;
     this.imageZoomScale = 1;
     this.imageZoomBase = 1;
     this.imageOffsetX = 0;
@@ -2635,6 +3016,9 @@ struct Index {
     // syncedPageMap) reads this synchronously the moment the push mounts
     // it, so it has to already be correct by then.
     this.selectedItemId = item.id;
+    // In the split layout the preview is already on screen beside the cards:
+    // selecting is all it takes.
+    if (this.isSplitLayout()) return;
     // Per Huawei's own Navigation shared-element-transition guide
     // (arkts-navigation-animation#共享元素转场): the push call itself must run
     // inside animateTo, and pushPath's own default transition must be
@@ -2824,12 +3208,25 @@ struct Index {
     return items;
   }
 
+  // deviceMenuItems as the menu a long press opens (bindContextMenu takes a
+  // builder, bindMenu on the three dots takes the list itself).
+  @Builder
+  deviceContextMenu(deviceId: string) {
+    Menu() {
+      ForEach(this.deviceMenuItems(deviceId), (element: MenuElement, index: number) => {
+        MenuItem({ content: element.value }).onClick(() => { element.action(); })
+      }, (element: MenuElement, index: number) => `${index}`)
+    }
+  }
+
   // A device in full: every address it can be reached at, and the rest of what
   // is known about it. Pushed on the Devices tab's own stack like the item
   // preview is on Synced's, and closed the same way.
   openDeviceDetail(deviceId: string): void {
     // Set BEFORE the push: the destination's builder reads it the moment it mounts.
     this.openDeviceId = deviceId;
+    // In the split the detail is already on screen: selecting is enough.
+    if (this.isSplitLayout()) return;
     this.getUIContext().animateTo({ curve: curves.interpolatingSpring(0, 1, 328, 36) }, () => {
       this.devicesNavStack.pushPath({ name: 'deviceDetail' }, false);
     });
@@ -3007,6 +3404,40 @@ struct Index {
       return this.cardSurface();
     }
     return this.colorWithAlpha($r('app.color.card_surface'), 1 - this.cardTransparency / 100);
+  }
+
+  // A card's fill with its long-press menu in mind. The menu lifts a snapshot
+  // of the card over the original, and a snapshot of a see-through card lets
+  // the original show through it (the text twice, a few pixels apart). So a
+  // card is solid from the moment it is pressed until its menu closes, and
+  // back to the slider's transparency after. `key` is the card's own: an
+  // item's id, or deviceCardKey for a device.
+  cardFillFor(key: string): ResourceColor {
+    return this.pressedCardKey === key || this.menuCardKey === key ? this.cardSurface() : this.cardFill();
+  }
+
+  deviceCardKey(deviceId: string): string {
+    return `device:${deviceId}`;
+  }
+
+  // Wired to a card's onTouch. Solid on the finger going down; plain again
+  // when it lifts, the touch is taken over (a scroll or a drag cancels it) or
+  // the finger moves more than a few vp - a scroll that starts on a card
+  // should not leave it solid.
+  cardTouch(key: string, event: TouchEvent): void {
+    const point: TouchObject = event.changedTouches[0];
+    if (event.type === TouchType.Down) {
+      this.touchStartX = point.x;
+      this.touchStartY = point.y;
+      this.pressedCardKey = key;
+    } else if (event.type === TouchType.Move) {
+      if (this.pressedCardKey === key &&
+        (Math.abs(point.x - this.touchStartX) > CARD_PRESS_MOVE_SLOP_VP || Math.abs(point.y - this.touchStartY) > CARD_PRESS_MOVE_SLOP_VP)) {
+        this.pressedCardKey = '';
+      }
+    } else if (this.pressedCardKey === key) {
+      this.pressedCardKey = '';
+    }
   }
 
   // A colour resource's ARGB for the current light/dark mode. Cached per
@@ -3222,7 +3653,7 @@ struct Index {
     .width('100%')
     .padding(12)
     .borderRadius(18)
-    .backgroundColor(this.cardFill())
+    .backgroundColor(this.cardFillFor(item.id))
     .alignItems(VerticalAlign.Center)
     // Per the official Shape Clipping reference: a child that still ends
     // up measuring wider than its parent (e.g. any other future
@@ -3232,15 +3663,17 @@ struct Index {
     // WaterFlow neighbor regardless of content, matching Huawei's own
     // example of pairing clip(true) with borderRadius.
     .clip(true)
+    .border(this.cardSelectBorder(item.id))
     // Shared id with itemDetailView below - this is what makes the card
     // visually morph into the full-screen view instead of just cutting
-    // between them ("一镜到底").
-    .geometryTransition(item.id, { follow: true })
+    // between them ("一镜到底"). Not in the split layout (see gtId).
+    .geometryTransition(this.gtId(item.id), { follow: true })
     // The "consistent animation for all clicks" - a single universal
     // attribute rather than a hand-built press-state gesture, so every
     // tappable surface (including file cards, which don't navigate
     // anywhere) gets identical feedback.
     .clickEffect({ level: ClickEffectLevel.MIDDLE })
+    .onTouch((event: TouchEvent) => { this.cardTouch(item.id, event); })
     .onClick(() => { tapHaptic(); this.activateItem(item); })
     // Lets a card be dragged straight out into another app (e.g. dropping
     // a synced image into a chat) - draggable() + onDragStart() are the
@@ -3270,6 +3703,8 @@ struct Index {
     .bindContextMenu(this.itemActionMenu(item), ResponseType.LongPress, {
       systemMaterial: this.menuMaterial(),
       hapticFeedbackMode: HapticFeedbackMode.ENABLED,
+      aboutToAppear: () => { this.menuCardKey = item.id; },
+      onDisappear: () => { this.menuCardKey = ''; },
       // See syncedGridCard's identical options for why preview is set.
       preview: MenuPreviewMode.IMAGE,
       previewBorderRadius: 18,
@@ -3355,11 +3790,13 @@ struct Index {
     .width('100%')
     .padding(12)
     .borderRadius(18)
-    .backgroundColor(this.cardFill())
+    .backgroundColor(this.cardFillFor(item.id))
     .alignItems(HorizontalAlign.Start)
     .clip(true)
-    .geometryTransition(item.id, { follow: true })
+    .border(this.cardSelectBorder(item.id))
+    .geometryTransition(this.gtId(item.id), { follow: true })
     .clickEffect({ level: ClickEffectLevel.MIDDLE })
+    .onTouch((event: TouchEvent) => { this.cardTouch(item.id, event); })
     .onClick(() => { tapHaptic(); this.activateItem(item); })
     .draggable(true)
     .onDragStart((event: DragEvent) => {
@@ -3372,6 +3809,8 @@ struct Index {
     .bindContextMenu(this.itemActionMenu(item), ResponseType.LongPress, {
       systemMaterial: this.menuMaterial(),
       hapticFeedbackMode: HapticFeedbackMode.ENABLED,
+      aboutToAppear: () => { this.menuCardKey = item.id; },
+      onDisappear: () => { this.menuCardKey = ''; },
       preview: MenuPreviewMode.IMAGE,
       previewBorderRadius: 18,
       targetSpace: LengthMetrics.vp(12),
@@ -3415,17 +3854,19 @@ struct Index {
       .width('100%')
       .padding(8)
       .borderRadius(18)
-      .backgroundColor(this.cardFill())
+      .backgroundColor(this.cardFillFor(item.id))
       .alignItems(HorizontalAlign.Start)
       // See syncedItemCard's identical comment - clip(true) backstop so
       // this card can never bleed into its WaterFlow neighbor.
       .clip(true)
+      .border(this.cardSelectBorder(item.id))
       // Same shared-id morph, click/drag/long-press wiring as
       // syncedItemCard - only one of the two card variants is ever
       // mounted for a given item at a time (list XOR grid mode), so
       // reusing item.id here doesn't conflict with the other variant.
-      .geometryTransition(item.id, { follow: true })
+      .geometryTransition(this.gtId(item.id), { follow: true })
       .clickEffect({ level: ClickEffectLevel.MIDDLE })
+      .onTouch((event: TouchEvent) => { this.cardTouch(item.id, event); })
       .onClick(() => { tapHaptic(); this.activateItem(item); })
       .draggable(true)
       .onDragStart((event: DragEvent) => {
@@ -3438,6 +3879,8 @@ struct Index {
       .bindContextMenu(this.itemActionMenu(item), ResponseType.LongPress, {
         systemMaterial: this.menuMaterial(),
         hapticFeedbackMode: HapticFeedbackMode.ENABLED,
+        aboutToAppear: () => { this.menuCardKey = item.id; },
+        onDisappear: () => { this.menuCardKey = ''; },
         // Without preview, THIS overload of bindContextMenu documents the
         // menu as appearing "at the click position" - i.e. anchored to the
         // finger, which is on top of the card, which is why it covered it.
@@ -3543,6 +3986,8 @@ struct Index {
         // Padding is fine here: an image preview doesn't scroll.
         .padding({ left: 20, right: 20, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE })
         .justifyContent(FlexAlign.Center)
+      } else if (item.type === 'file') {
+        this.fileDetailView(item)
       } else {
         // The Scroll fills the whole screen and the clearance goes on the
         // content INSIDE it - same fix as the Synced list. With the padding
@@ -3590,7 +4035,7 @@ struct Index {
     // FAQ ("给内容组件设置geometryTransition属性，不要设置到NavDestination上") -
     // NOT the NavDestination wrapping it in syncedPageMap. id must match
     // syncedItemCard's exactly (item.id) for the morph to connect the two.
-    .geometryTransition(item.id, { follow: true })
+    .geometryTransition(this.gtId(item.id), { follow: true })
     .transition(TransitionEffect.OPACITY)
   }
 
@@ -3598,11 +4043,134 @@ struct Index {
   // Height of the HDS title bar in HdsNavDestinationTitleMode.MINI (fixed
   // at 56vp per the enum's own doc), BELOW the status bar. Content starts
   // this far down (plus topInsetVp) at rest and scrolls up underneath it.
+  // The parsed payload of a 'file' item, or null if it does not parse.
+  private filePayloadOf(item: SyncedItem): FilePayload | null {
+    try {
+      return JSON.parse(item.content) as FilePayload;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Where a file's bytes are stored, or '' while they have not arrived (or
+  // for an empty file, which has nothing to show).
+  private fileLocalPath(item: SyncedItem): string {
+    const payload: FilePayload | null = this.filePayloadOf(item);
+    const fileStore: FileStore | null = this.fileStore;
+    if (payload === null || fileStore === null || payload.FileSize === 0 || !fileStore.exists(payload.FileHash)) return '';
+    return fileStore.getPath(payload.FileHash);
+  }
+
+  // The start of a text file, read once per file (a build of the preview runs
+  // whenever anything on the page changes).
+  private textPreviewCache: Map<string, string> = new Map<string, string>();
+
+  private textPreviewOf(item: SyncedItem, path: string): string {
+    const key: string = item.id;
+    const cached: string | undefined = this.textPreviewCache.get(key);
+    if (cached !== undefined) return cached;
+    const text: string = readTextHead(path);
+    this.textPreviewCache.set(key, text);
+    return text;
+  }
+
+  // A file in the preview, whatever its type: a PDF as itself, a text file as
+  // its start, anything else as a card with its name, size and what can be
+  // done with it. The title bar's Open hands it to another app.
+  @Builder
+  fileDetailView(item: SyncedItem) {
+    if (filePreviewKindOf(safeFileName((this.filePayloadOf(item)?.FileName) ?? '', 'file')) === 'pdf' && this.fileLocalPath(item) !== '') {
+      PdfPreviewPane({ filePath: this.fileLocalPath(item) })
+        .width('100%')
+        .height('100%')
+        .padding({ top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE })
+    } else if (filePreviewKindOf(safeFileName((this.filePayloadOf(item)?.FileName) ?? '', 'file')) === 'text' && this.fileLocalPath(item) !== '') {
+      Scroll(this.detailScroller) {
+        Column({ space: 16 }) {
+          Text(this.textPreviewOf(item, this.fileLocalPath(item)))
+            .fontSize(14)
+            .fontColor($r('sys.color.font_primary'))
+            .copyOption(CopyOptions.LocalDevice)
+          if ((this.filePayloadOf(item)?.FileSize ?? 0) > TEXT_PREVIEW_MAX_BYTES) {
+            Text($r('app.string.file_preview_truncated')).fontSize(12).fontColor($r('sys.color.font_secondary'))
+          }
+          Text(this.bylineText(item)).fontSize(12).fontColor($r('sys.color.font_secondary'))
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding({ left: 20, right: 20, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE })
+      }
+      .width('100%')
+      .height('100%')
+      .align(Alignment.TopStart)
+      .edgeEffect(EdgeEffect.Spring)
+    } else {
+      this.fileInfoCard(item)
+    }
+  }
+
+  @Builder
+  fileInfoCard(item: SyncedItem) {
+    Column({ space: 14 }) {
+      this.typeChip(item, 72)
+      Text(safeFileName((this.filePayloadOf(item)?.FileName) ?? '', 'file'))
+        .fontSize(18)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('sys.color.font_primary'))
+        .maxLines(3)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .textAlign(TextAlign.Center)
+      Text(formatFileSize(this.filePayloadOf(item)?.FileSize ?? 0))
+        .fontSize(13)
+        .fontColor($r('sys.color.font_secondary'))
+      if (this.fileLocalPath(item) !== '') {
+        Button($r('app.string.file_preview_open_in_app'))
+          .fontSize(14)
+          .fontColor($r('sys.color.font_on_primary'))
+          .backgroundColor(this.accent())
+          .padding({ left: 20, right: 20 })
+          .onClick(() => { tapHaptic(); void this.openFileWithSystem(item); })
+        Button($r('app.string.action_save_file'))
+          .fontSize(14)
+          .fontColor($r('sys.color.font_secondary'))
+          .backgroundColor($r('sys.color.comp_background_tertiary'))
+          .padding({ left: 20, right: 20 })
+          .onClick(() => { tapHaptic(); void this.saveFileToDocuments(item); })
+      } else if ((this.filePayloadOf(item)?.FileSize ?? 0) > 0) {
+        // Listed before its bytes arrived (from history, say): nothing to
+        // show or open yet.
+        Text($r('app.string.toast_file_not_downloaded'))
+          .fontSize(13)
+          .fontColor($r('sys.color.font_secondary'))
+          .textAlign(TextAlign.Center)
+      }
+      Text(this.bylineText(item)).fontSize(12).fontColor($r('sys.color.font_secondary'))
+    }
+    .width('100%')
+    .height('100%')
+    .padding({ left: 24, right: 24, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE })
+    .justifyContent(FlexAlign.Center)
+    .alignItems(HorizontalAlign.Center)
+  }
+
+  // A stored file's copy under its real name, as a URI (see FileStore.namedCopy):
+  // what Share and Open hand to the system, so they carry the name the sender
+  // gave the file rather than its hash. Null if it can't be made.
+  private async namedFileUri(payload: FilePayload): Promise<string | null> {
+    const fileStore: FileStore | null = this.fileStore;
+    if (fileStore === null) return null;
+    const path: string | null = await fileStore.namedCopy(payload.FileHash, safeFileName(payload.FileName, 'file'));
+    return path === null ? null : fileUri.getUriFromPath(path);
+  }
+
   private readonly TITLE_BAR_HEIGHT: number = 56;
   // What a scrollable has to reserve at the bottom so its last item can
   // settle clear of the floating tab pill (content still scrolls THROUGH
   // this region - it's clearance for the resting position, not a wall).
   private readonly TAB_PILL_CLEARANCE: number = 84;
+  // On top of that, the Me tab and its sub-screens end with some air: the pill's
+  // clearance alone left their last card touching it.
+  private readonly ME_END_GAP: number = 28;
   // The Synced tab additionally has the paste dock sitting above the pill,
   // so its scrollables need to reserve that too or the last card comes to
   // rest underneath the paste button.
@@ -3771,6 +4339,77 @@ struct Index {
   // plain container.
   @Builder
   syncedTab() {
+    if (this.isSplitLayout()) {
+      this.syncedSplitTab()
+    } else {
+      this.syncedOneColumnTab()
+    }
+  }
+
+  // The cards on the left, the preview on the right: a Navigation in Split
+  // mode. The cards (list or grid) are its navigation bar; the preview is its
+  // one route, so a tap only changes what the preview shows - nothing is
+  // pushed or popped. The divider can be dragged within the range below. The
+  // one-column layout is syncedOneColumnTab.
+  @Builder
+  syncedSplitTab() {
+    HdsNavigation(this.syncedSplitStack) {
+      this.syncedListContent()
+    }
+    .titleBar(this.syncedTitleBar(this.syncedViewMode))
+    .titleMode(HdsNavigationTitleMode.MINI)
+    .bindToScrollable([this.syncedListScroller, this.syncedFlowScroller])
+    .hideBackButton(true)
+    .mode(NavigationMode.Split)
+    .navBarPosition(NavBarPosition.Start)
+    .navBarWidth(this.splitPaneWidthVp(SYNCED_CARDS_PANE_FRACTION))
+    .navBarWidthRange(this.splitPaneRange())
+    .minContentWidth(SPLIT_PANE_MIN_VP)
+    .navDestination(this.syncedSplitPageMap)
+    .width('100%')
+    .height('100%')
+  }
+
+  @Builder
+  syncedSplitPageMap(name: string) {
+    if (name === 'splitPreview') {
+      HdsNavDestination() {
+        this.syncedPreviewPane()
+      }
+      .titleBar(this.detailTitleBar(this.previewItem()?.id ?? ''))
+      .titleMode(HdsNavDestinationTitleMode.MINI)
+      .bindToScrollable([this.detailScroller])
+      // The only route of its stack: nothing to go back to.
+      .hideBackButton(true)
+      .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    }
+  }
+
+  // What the split's preview pane shows: the selected item, else the newest,
+  // else a note that there is nothing to preview.
+  //
+  // The item goes through a ForEach of one, keyed by what the preview depends
+  // on (see previewKey), not into the builder directly: a builder is handed
+  // its argument once, when the branch it is in is built, so selecting another
+  // item changed nothing in the pane - the branch (an `if` that stays true)
+  // was never rebuilt. A ForEach re-reads its array, and a new key replaces
+  // the old child with a new one.
+  @Builder
+  syncedPreviewPane() {
+    Stack() {
+      ForEach(this.previewItems(), (item: SyncedItem) => {
+        this.itemDetailView(item)
+      }, (item: SyncedItem) => this.previewKey(item))
+      if (this.previewItem() === undefined) {
+        this.emptyState($r('app.string.synced_preview_none_title'), $r('app.string.synced_preview_none_detail'), $r('app.media.ic_empty_synced'))
+      }
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  @Builder
+  syncedOneColumnTab() {
     HdsNavigation(this.syncedNavStack) {
       // Intentionally empty - hideNavBar means this NavBar content is
       // never actually shown. 'syncedList' (pushed in aboutToAppear) is
@@ -3965,6 +4604,13 @@ struct Index {
         .width('100%')
         .height('100%')
         .padding({ left: 16, right: 16 })
+        // As many lanes as the list's own width allows with each lane between
+        // these two widths (the lanes(LengthConstrain) form of the OS List
+        // API): one on a phone, several on a tablet, and each card stays wide
+        // enough to show a good stretch of its text. It follows the List's
+        // width, not the window's, so the same list is right inside a split
+        // pane too.
+        .lanes({ minLength: SYNCED_LIST_LANE_MIN_VP, maxLength: SYNCED_LIST_LANE_MAX_VP }, 10)
         // contentStartOffset/contentEndOffset, NOT top/bottom padding.
         // A List paints its own background across its full border box but
         // CLIPS its items to the padding box, so padding-based clearance
@@ -4005,7 +4651,9 @@ struct Index {
         }
         .width('100%')
         .height('100%')
-        .columnsTemplate('1fr 1fr')
+        // Two columns on a phone; wider than that, as many as fit at a
+        // reasonable card width (see syncedGridColumns).
+        .columnsTemplate(this.syncedGridColumns())
         .columnsGap(10)
         .rowsGap(10)
         // Per the official WaterFlow reference: "When the main axis size
@@ -4097,6 +4745,7 @@ struct Index {
     .linearGradient(this.bottomGlow())
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    .onAreaChange((oldValue: Area, newValue: Area) => { this.syncedPaneWidthVp = Number(newValue.width); })
   }
 
   @Builder
@@ -4176,10 +4825,13 @@ struct Index {
       }
 
       // The three dots: block (or unblock) and copy the id.
+      // A 48vp tap target with the dots drawn at 32 inside it. (A component's
+      // width includes its padding, so the earlier 22 wide with 6 around it drew
+      // them at 10 - the card's hardest control to see and to hit.)
       Image(this.liveRow(deviceId).blocked ? $r('app.media.ic_more_on_dark') : $r('app.media.ic_more'))
-        .width(22)
-        .height(22)
-        .padding(6)
+        .width(48)
+        .height(48)
+        .padding(8)
         .bindMenu(this.deviceMenuItems(deviceId))
     }
     .width('100%')
@@ -4192,11 +4844,24 @@ struct Index {
     // pair did not: the device name follows the theme to near-white in
     // dark mode, and against a card frozen at white that was invisible.
     // A blocked device is the one exception: dark gray in either theme.
-    .backgroundColor(this.liveRow(deviceId).blocked ? BLOCKED_CARD : this.cardFill())
+    .backgroundColor(this.liveRow(deviceId).blocked ? BLOCKED_CARD : this.cardFillFor(this.deviceCardKey(deviceId)))
     .alignItems(VerticalAlign.Center)
     .clickEffect({ level: ClickEffectLevel.MIDDLE })
     // Anywhere on the card opens the device; its own buttons and menu take their taps first.
+    .border(this.deviceSelectBorder(deviceId))
+    .onTouch((event: TouchEvent) => { this.cardTouch(this.deviceCardKey(deviceId), event); })
     .onClick(() => { tapHaptic(); this.openDeviceDetail(deviceId); })
+    // The three dots' menu, on a long press of the card as well (the same
+    // options as a Synced card's menu).
+    .bindContextMenu(this.deviceContextMenu(deviceId), ResponseType.LongPress, {
+      systemMaterial: this.menuMaterial(),
+      hapticFeedbackMode: HapticFeedbackMode.ENABLED,
+      aboutToAppear: () => { this.menuCardKey = this.deviceCardKey(deviceId); },
+      onDisappear: () => { this.menuCardKey = ''; },
+      preview: MenuPreviewMode.IMAGE,
+      previewBorderRadius: 18,
+      targetSpace: LengthMetrics.vp(12),
+    })
   }
 
   // One device in full - the Devices tab's counterpart of the item preview.
@@ -4427,6 +5092,7 @@ struct Index {
     .linearGradient(this.bottomGlow())
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    .onAreaChange((oldValue: Area, newValue: Area) => { this.devicesPaneWidthVp = Number(newValue.width); })
   }
 
   // Bottom-right "+" on the Devices tab: the primary thing you come to
@@ -4454,7 +5120,7 @@ struct Index {
     .height('100%')
     .justifyContent(FlexAlign.End)
     .alignItems(HorizontalAlign.End)
-    .padding({ right: 20, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE + 10 })
+    .padding({ right: this.deviceFabRightVp(), bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE + 10 })
     // See pasteDock's note on None vs Transparent.
     .hitTestBehavior(HitTestMode.None)
   }
@@ -4488,6 +5154,92 @@ struct Index {
 
   @Builder
   devicesTab() {
+    if (this.isSplitLayout()) {
+      this.devicesSplitTab()
+    } else {
+      this.devicesOneColumnTab()
+    }
+  }
+
+  // Device cards on the left, the selected device's detail on the right: the
+  // Synced split's arrangement (see syncedSplitTab). A tap selects a device
+  // and the detail follows; nothing is pushed.
+  @Builder
+  devicesSplitTab() {
+    HdsNavigation(this.devicesSplitStack) {
+      this.devicesContent()
+    }
+    .titleBar(this.hdsTitleBar($r('app.string.tab_devices'), true, []))
+    .titleMode(HdsNavigationTitleMode.MINI)
+    .bindToScrollable([this.devicesScroller])
+    .hideBackButton(true)
+    .mode(NavigationMode.Split)
+    .navBarPosition(NavBarPosition.Start)
+    .navBarWidth(this.splitPaneWidthVp(DEVICES_LIST_PANE_FRACTION))
+    .navBarWidthRange(this.splitPaneRange())
+    .minContentWidth(SPLIT_PANE_MIN_VP)
+    .navDestination(this.devicesSplitPageMap)
+    .width('100%')
+    .height('100%')
+  }
+
+  @Builder
+  devicesSplitPageMap(name: string) {
+    if (name === 'splitDevice') {
+      HdsNavDestination() {
+        this.devicesDetailPane()
+      }
+      .titleBar(this.hdsTitleBar('', false, []))
+      .titleMode(HdsNavDestinationTitleMode.MINI)
+      .bindToScrollable([this.deviceDetailScroller])
+      .hideBackButton(true)
+      .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    }
+  }
+
+  // The device the split's detail shows: the selected one if it is still
+  // listed, else the first in the list; nothing while there are no devices.
+  shownDeviceId(): string {
+    const ids: string[] = this.deviceRowIds();
+    if (this.openDeviceId.length > 0 && ids.includes(this.openDeviceId)) return this.openDeviceId;
+    return ids.length > 0 ? ids[0] : '';
+  }
+
+  // As syncedPreviewPane: the device goes through a ForEach of one, keyed by its
+  // id, so selecting another device builds its detail instead of leaving the
+  // first one's on show.
+  @Builder
+  devicesDetailPane() {
+    Stack() {
+      ForEach(this.shownDeviceId().length > 0 ? [this.shownDeviceId()] : [], (deviceId: string) => {
+        this.deviceDetailView(deviceId)
+      }, (deviceId: string) => deviceId)
+      if (this.shownDeviceId().length === 0) {
+        this.emptyState($r('app.string.devices_detail_none_title'), $r('app.string.devices_detail_none_detail'), $r('app.media.ic_empty_synced'))
+      }
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  // The outline of the selected device's card in the split. Same rule as the
+  // Synced cards (see cardSelectBorder): a constant width, only the colour
+  // changes, so selecting never resizes a card.
+  deviceSelectBorder(deviceId: string): BorderOptions {
+    if (!this.isSplitLayout()) return { width: 0 };
+    const color: ResourceColor = this.shownDeviceId() === deviceId ? this.accent() : Color.Transparent;
+    return { width: 2, color: color };
+  }
+
+  // Where the add-device button sits: the screen's right edge, or in the split
+  // the right edge of the device list pane.
+  deviceFabRightVp(): number {
+    if (!this.isSplitLayout() || this.devicesPaneWidthVp <= 0) return 20;
+    return Math.max(20, this.windowWidthVp - this.devicesPaneWidthVp + 20);
+  }
+
+  @Builder
+  devicesOneColumnTab() {
     HdsNavigation(this.devicesNavStack) {
     }
     .hideNavBar(true)
@@ -4779,138 +5531,33 @@ struct Index {
   // clumped together.
   @Builder
   meMainContent() {
+    if (this.meColumns() > 1) {
+      this.meMainColumns()
+    } else {
+      this.meMainOneColumn()
+    }
+  }
+
+  // The Me page as one column: every section stacked, in a Scroll. Phones,
+  // and any window narrower than the multi-column layout (see meColumns).
+  @Builder
+  meMainOneColumn() {
       Scroll(this.meMainScroller) {
         Column({ space: 16 }) {
           // No in-flow page title here - "Me" lives in the HDS title bar
           // (see mePageMap), which this content scrolls underneath.
-          this.sectionHeader($r('app.string.me_section_device'))
-          Column() {
-            Column({ space: 4 }) {
-              Text($r('app.string.me_device_id_label')).fontSize(12).fontColor($r('sys.color.font_secondary'))
-              Text(this.ownDeviceId.length > 0 ? this.ownDeviceId : $r('app.string.me_generating_identity'))
-                .fontSize(11)
-                .fontColor($r('sys.color.font_primary'))
-                .copyOption(CopyOptions.LocalDevice)
-                .wordBreak(WordBreak.BREAK_ALL)
-              // What another device's pairing prompt shows for this one -
-              // the ID above starts the same for every device, so it's no
-              // use for comparing.
-              if (this.ownDeviceId.length > 0) {
-                Text($r('app.string.device_fingerprint_label'))
-                  .fontSize(12)
-                  .fontColor($r('sys.color.font_secondary'))
-                  .margin({ top: 6 })
-                Text(deviceFingerprint(this.ownDeviceId))
-                  .fontSize(15)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor($r('sys.color.font_primary'))
-                Text($r('app.string.device_fingerprint_hint'))
-                  .fontSize(12)
-                  .fontColor($r('sys.color.font_secondary'))
-              }
-              if (this.localAddresses.length > 0) {
-                Text(this.localAddresses.join('  •  '))
-                  .fontSize(12)
-                  .fontColor($r('sys.color.font_secondary'))
-                  .margin({ top: 6 })
-              }
-            }
-            .width('100%')
-            .alignItems(HorizontalAlign.Start)
-            .padding(14)
-            Divider().color($r('sys.color.comp_divider'))
-            // What other devices list this one as - see DeviceName.ets.
-            this.settingsRow({ title: $r('app.string.me_device_name'), value: this.ownDeviceName() ?? $r('app.string.me_not_set'), navigates: true, icon: $r('app.media.ic_device_phone'), onTap: () => { this.deviceNameInput = this.deviceNameOverride; this.setMeScreen('devicename'); } })
-            Divider().color($r('sys.color.comp_divider'))
-            this.settingsRow({ title: $r('app.string.me_copy_device_id'), value: '', navigates: false, icon: $r('app.media.ic_menu_copy'), onTap: () => { void this.copyDeviceId(); } })
-          }
-          .width('100%')
-          .borderRadius(16)
-          .backgroundColor(this.cardFill())
-
-          this.sectionHeader($r('app.string.me_section_sync'))
-          Column() {
-            this.settingsSwitchRow({
-              title: $r('app.string.me_auto_copy_title'),
-              subtitle: $r('app.string.me_auto_copy_subtitle'),
-              isOn: this.autoApply,
-              icon: $r('app.media.ic_settings_autocopy'),
-              onChange: (isOn: boolean) => { void this.setAutoApply(isOn); },
-            })
-            Divider().color($r('sys.color.comp_divider'))
-            // Android's "Send my clipboard when I open ClipLink" can't be
-            // ported as-is (see onPageShow) - this is what HarmonyOS allows.
-            this.settingsSwitchRow({
-              title: $r('app.string.me_notice_title'),
-              subtitle: $r('app.string.me_notice_subtitle'),
-              isOn: this.noticeOnOpen,
-              icon: $r('app.media.ic_settings_notice'),
-              onChange: (isOn: boolean) => { void this.setNoticeNewCopies(isOn); },
-            })
-            // No "Keep syncing in the background" (Android's keepAlive): the
-            // only continuous-task mode open to apps, multiDeviceConnection,
-            // was tried and failed on-device - the system's usage check
-            // ("check failed, not use 6") suspended it and froze the app
-            // about a minute after leaving it, since a plain TCP link to a
-            // PC isn't a HarmonyOS distributed/casting connection.
-          }
-          .width('100%')
-          .borderRadius(16)
-          .backgroundColor(this.cardFill())
-
-          this.sectionHeader($r('app.string.me_section_appearance'))
-          Column() {
-            this.themePicker()
-            Divider().color($r('sys.color.comp_divider'))
-            this.settingsSwitchRow({
-              title: $r('app.string.me_bottom_glow_title'),
-              subtitle: $r('app.string.me_bottom_glow_subtitle'),
-              isOn: this.bottomGlowOn,
-              icon: $r('app.media.ic_settings_glow'),
-              onChange: (isOn: boolean) => { void this.setBottomGlow(isOn); },
-            })
-            Divider().color($r('sys.color.comp_divider'))
-            this.cardTransparencyRow()
-          }
-          .width('100%')
-          .borderRadius(16)
-          .backgroundColor(this.cardFill())
-
-          this.sectionHeader($r('app.string.me_section_pairing'))
-          Column() {
-            this.settingsRow({ title: $r('app.string.me_qr_scan'), value: '', navigates: true, icon: $r('app.media.ic_settings_qr'), onTap: () => { this.setMeScreen('pairing'); } })
-            Divider().color($r('sys.color.comp_divider'))
-            this.settingsRow({ title: $r('app.string.me_passcode_auto_trust'), value: this.hasPassphrase ? $r('app.string.common_on') : $r('app.string.common_off'), navigates: true, icon: $r('app.media.ic_settings_passcode'), onTap: () => { this.setMeScreen('passcode'); } })
-            Divider().color($r('sys.color.comp_divider'))
-            this.settingsRow({ title: $r('app.string.me_tailscale_ip'), value: this.tailscaleIp.length > 0 ? this.tailscaleIp : $r('app.string.me_not_set'), navigates: true, icon: $r('app.media.ic_settings_network'), onTap: () => { this.setMeScreen('network'); } })
-          }
-          .width('100%')
-          .borderRadius(16)
-          .backgroundColor(this.cardFill())
-
-          this.sectionHeader($r('app.string.me_section_support'))
-          Column() {
-            this.settingsRow({ title: $r('app.string.me_diagnostics'), value: '', navigates: true, icon: $r('app.media.ic_settings_diagnostics'), onTap: () => { this.setMeScreen('diagnostics'); } })
-            Divider().color($r('sys.color.comp_divider'))
-            this.settingsRow({ title: $r('app.string.me_activity_log'), value: `${this.syncLog.length}`, navigates: true, icon: $r('app.media.ic_settings_log'), onTap: () => { this.setMeScreen('log'); } })
-          }
-          .width('100%')
-          .borderRadius(16)
-          .backgroundColor(this.cardFill())
-
-          this.sectionHeader($r('app.string.me_section_data'))
-          Column() {
-            this.settingsRow({ title: $r('app.string.me_clear_history'), value: '', navigates: false, icon: $r('app.media.ic_settings_trash'), onTap: () => { this.confirmClearHistory(); } })
-          }
-          .width('100%')
-          .borderRadius(16)
-          .backgroundColor(this.cardFill())
+          this.meSectionDevice()
+          this.meSectionSync()
+          this.meSectionAppearance()
+          this.meSectionPairing()
+          this.meSectionSupport()
+          this.meSectionData()
         }
         .width('100%')
         // topInsetVp restored - meTab's Navigation is no longer shifted as
         // a whole (see meTab's comment), so "Me" needs its own clearance
         // again to stay readable below the status bar.
-        .padding({ left: 16, right: 16, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE })
+        .padding({ left: 16, right: 16, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE + this.ME_END_GAP })
         .alignItems(HorizontalAlign.Start)
       }
       .width('100%')
@@ -4923,6 +5570,224 @@ struct Index {
       .backgroundColor($r('sys.color.background_secondary'))
     .linearGradient(this.bottomGlow())
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+  }
+
+  // One section of the Me page (its header and its card), shared by the
+  // one-column and the multi-column layouts.
+  @Builder
+  meSectionDevice() {
+    Column({ space: 16 }) {
+      this.sectionHeader($r('app.string.me_section_device'))
+      Column() {
+        Column({ space: 4 }) {
+          Text($r('app.string.me_device_id_label')).fontSize(12).fontColor($r('sys.color.font_secondary'))
+          Text(this.ownDeviceId.length > 0 ? this.ownDeviceId : $r('app.string.me_generating_identity'))
+            .fontSize(11)
+            .fontColor($r('sys.color.font_primary'))
+            .copyOption(CopyOptions.LocalDevice)
+            .wordBreak(WordBreak.BREAK_ALL)
+          // What another device's pairing prompt shows for this one -
+          // the ID above starts the same for every device, so it's no
+          // use for comparing.
+          if (this.ownDeviceId.length > 0) {
+            Text($r('app.string.device_fingerprint_label'))
+              .fontSize(12)
+              .fontColor($r('sys.color.font_secondary'))
+              .margin({ top: 6 })
+            Text(deviceFingerprint(this.ownDeviceId))
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor($r('sys.color.font_primary'))
+            Text($r('app.string.device_fingerprint_hint'))
+              .fontSize(12)
+              .fontColor($r('sys.color.font_secondary'))
+          }
+          if (this.localAddresses.length > 0) {
+            Text(this.localAddresses.join('  •  '))
+              .fontSize(12)
+              .fontColor($r('sys.color.font_secondary'))
+              .margin({ top: 6 })
+          }
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(14)
+        Divider().color($r('sys.color.comp_divider'))
+        // What other devices list this one as - see DeviceName.ets.
+        this.settingsRow({ title: $r('app.string.me_device_name'), value: this.ownDeviceName() ?? $r('app.string.me_not_set'), navigates: true, icon: $r('app.media.ic_device_phone'), onTap: () => { this.deviceNameInput = this.deviceNameOverride; this.setMeScreen('devicename'); } })
+        Divider().color($r('sys.color.comp_divider'))
+        this.settingsRow({ title: $r('app.string.me_copy_device_id'), value: '', navigates: false, icon: $r('app.media.ic_menu_copy'), onTap: () => { void this.copyDeviceId(); } })
+      }
+      .width('100%')
+      .borderRadius(16)
+      .backgroundColor(this.cardFill())
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  // One section of the Me page (its header and its card), shared by the
+  // one-column and the multi-column layouts.
+  @Builder
+  meSectionSync() {
+    Column({ space: 16 }) {
+      this.sectionHeader($r('app.string.me_section_sync'))
+      Column() {
+        this.settingsSwitchRow({
+          title: $r('app.string.me_auto_copy_title'),
+          subtitle: $r('app.string.me_auto_copy_subtitle'),
+          isOn: this.autoApply,
+          icon: $r('app.media.ic_settings_autocopy'),
+          onChange: (isOn: boolean) => { void this.setAutoApply(isOn); },
+        })
+        Divider().color($r('sys.color.comp_divider'))
+        // Android's "Send my clipboard when I open ClipLink" can't be
+        // ported as-is (see onPageShow) - this is what HarmonyOS allows.
+        this.settingsSwitchRow({
+          title: $r('app.string.me_notice_title'),
+          subtitle: $r('app.string.me_notice_subtitle'),
+          isOn: this.noticeOnOpen,
+          icon: $r('app.media.ic_settings_notice'),
+          onChange: (isOn: boolean) => { void this.setNoticeNewCopies(isOn); },
+        })
+        Divider().color($r('sys.color.comp_divider'))
+        this.settingsSwitchRow({
+          title: $r('app.string.me_notify_received_title'),
+          subtitle: $r('app.string.me_notify_received_subtitle'),
+          isOn: this.notifyReceived,
+          icon: $r('app.media.ic_settings_bell'),
+          onChange: (isOn: boolean) => { void this.setNotifyReceived(isOn); },
+        })
+        // No "Keep syncing in the background" (Android's keepAlive): the
+        // only continuous-task mode open to apps, multiDeviceConnection,
+        // was tried and failed on-device - the system's usage check
+        // ("check failed, not use 6") suspended it and froze the app
+        // about a minute after leaving it, since a plain TCP link to a
+        // PC isn't a HarmonyOS distributed/casting connection.
+      }
+      .width('100%')
+      .borderRadius(16)
+      .backgroundColor(this.cardFill())
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  // One section of the Me page (its header and its card), shared by the
+  // one-column and the multi-column layouts.
+  @Builder
+  meSectionAppearance() {
+    Column({ space: 16 }) {
+      this.sectionHeader($r('app.string.me_section_appearance'))
+      Column() {
+        this.themePicker()
+        Divider().color($r('sys.color.comp_divider'))
+        this.settingsSwitchRow({
+          title: $r('app.string.me_bottom_glow_title'),
+          subtitle: $r('app.string.me_bottom_glow_subtitle'),
+          isOn: this.bottomGlowOn,
+          icon: $r('app.media.ic_settings_glow'),
+          onChange: (isOn: boolean) => { void this.setBottomGlow(isOn); },
+        })
+        Divider().color($r('sys.color.comp_divider'))
+        this.cardTransparencyRow()
+      }
+      .width('100%')
+      .borderRadius(16)
+      .backgroundColor(this.cardFill())
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  // One section of the Me page (its header and its card), shared by the
+  // one-column and the multi-column layouts.
+  @Builder
+  meSectionPairing() {
+    Column({ space: 16 }) {
+      this.sectionHeader($r('app.string.me_section_pairing'))
+      Column() {
+        this.settingsRow({ title: $r('app.string.me_qr_scan'), value: '', navigates: true, icon: $r('app.media.ic_settings_qr'), onTap: () => { this.setMeScreen('pairing'); } })
+        Divider().color($r('sys.color.comp_divider'))
+        this.settingsRow({ title: $r('app.string.me_passcode_auto_trust'), value: this.hasPassphrase ? $r('app.string.common_on') : $r('app.string.common_off'), navigates: true, icon: $r('app.media.ic_settings_passcode'), onTap: () => { this.setMeScreen('passcode'); } })
+        Divider().color($r('sys.color.comp_divider'))
+        this.settingsRow({ title: $r('app.string.me_tailscale_ip'), value: this.tailscaleIp.length > 0 ? this.tailscaleIp : $r('app.string.me_not_set'), navigates: true, icon: $r('app.media.ic_settings_network'), onTap: () => { this.setMeScreen('network'); } })
+      }
+      .width('100%')
+      .borderRadius(16)
+      .backgroundColor(this.cardFill())
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  // One section of the Me page (its header and its card), shared by the
+  // one-column and the multi-column layouts.
+  @Builder
+  meSectionSupport() {
+    Column({ space: 16 }) {
+      this.sectionHeader($r('app.string.me_section_support'))
+      Column() {
+        this.settingsRow({ title: $r('app.string.me_diagnostics'), value: '', navigates: true, icon: $r('app.media.ic_settings_diagnostics'), onTap: () => { this.setMeScreen('diagnostics'); } })
+        Divider().color($r('sys.color.comp_divider'))
+        this.settingsRow({ title: $r('app.string.me_activity_log'), value: `${this.syncLog.length}`, navigates: true, icon: $r('app.media.ic_settings_log'), onTap: () => { this.setMeScreen('log'); } })
+      }
+      .width('100%')
+      .borderRadius(16)
+      .backgroundColor(this.cardFill())
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  // One section of the Me page (its header and its card), shared by the
+  // one-column and the multi-column layouts.
+  @Builder
+  meSectionData() {
+    Column({ space: 16 }) {
+      this.sectionHeader($r('app.string.me_section_data'))
+      Column() {
+        this.settingsRow({ title: $r('app.string.me_clear_history'), value: '', navigates: false, icon: $r('app.media.ic_settings_trash'), onTap: () => { this.confirmClearHistory(); } })
+      }
+      .width('100%')
+      .borderRadius(16)
+      .backgroundColor(this.cardFill())
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  // The Me page in several columns on a wide window: the sections laid out as
+  // a WaterFlow, each section one item, so a tall section and a short one
+  // pack into the columns without gaps. The column count follows the window's
+  // width (see meColumns).
+  @Builder
+  meMainColumns() {
+    WaterFlow({ scroller: this.meMainScroller }) {
+      FlowItem() { this.meSectionDevice() }.width('100%')
+      FlowItem() { this.meSectionSync() }.width('100%')
+      FlowItem() { this.meSectionAppearance() }.width('100%')
+      FlowItem() { this.meSectionPairing() }.width('100%')
+      FlowItem() { this.meSectionSupport() }.width('100%')
+      FlowItem() { this.meSectionData() }.width('100%')
+    }
+    .width(LayoutPolicy.matchParent)
+    .height(LayoutPolicy.matchParent)
+    .columnsTemplate(this.meColumnsTemplate())
+    .columnsGap(16)
+    .rowsGap(16)
+    .padding({ left: 16, right: 16 })
+    // Clearance under the floating title bar and over the tab pill, as
+    // offsets rather than padding so the sections scroll underneath them (see
+    // syncedListContent for why).
+    .contentStartOffset(this.topInsetVp + this.TITLE_BAR_HEIGHT + 8)
+    .contentEndOffset(this.bottomInsetVp + this.TAB_PILL_CLEARANCE + this.ME_END_GAP)
+    .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
+    .transition(TransitionEffect.OPACITY.combine(TransitionEffect.move(TransitionEdge.START)))
+    .backgroundColor($r('sys.color.background_secondary'))
+    .linearGradient(this.bottomGlow())
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 
   // Pairing: QR display + scan, mirrors Windows's QrCodeForm/
@@ -5019,7 +5884,8 @@ struct Index {
       // padding is what keeps the initial view starting below the bar
       // instead of hidden under it - scrolling still passes content
       // behind it afterward, which is the point of STACK over STANDARD.
-      .padding({ left: 16, right: 16, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE })
+      .padding({ left: 16, right: 16, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE + this.ME_END_GAP })
+      .constraintSize({ maxWidth: SUB_SCREEN_MAX_WIDTH_VP })
       .alignItems(HorizontalAlign.Center)
     }
     .width('100%')
@@ -5098,7 +5964,8 @@ struct Index {
       }
       .width('100%')
       // No topInsetVp compensation - see pairingScreenContent's comment.
-      .padding({ left: 16, right: 16, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE })
+      .padding({ left: 16, right: 16, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE + this.ME_END_GAP })
+      .constraintSize({ maxWidth: SUB_SCREEN_MAX_WIDTH_VP })
       .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
@@ -5146,7 +6013,8 @@ struct Index {
       }
       .width('100%')
       // No topInsetVp compensation - see pairingScreenContent's comment.
-      .padding({ left: 16, right: 16, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE })
+      .padding({ left: 16, right: 16, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE + this.ME_END_GAP })
+      .constraintSize({ maxWidth: SUB_SCREEN_MAX_WIDTH_VP })
       .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
@@ -5188,7 +6056,8 @@ struct Index {
         .alignItems(HorizontalAlign.Start)
       }
       .width('100%')
-      .padding({ left: 16, right: 16, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE })
+      .padding({ left: 16, right: 16, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE + this.ME_END_GAP })
+      .constraintSize({ maxWidth: SUB_SCREEN_MAX_WIDTH_VP })
       .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
@@ -5218,7 +6087,8 @@ struct Index {
       }
       .width('100%')
       // No topInsetVp compensation - see pairingScreenContent's comment.
-      .padding({ left: 16, right: 16, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE })
+      .padding({ left: 16, right: 16, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE + this.ME_END_GAP })
+      .constraintSize({ maxWidth: SUB_SCREEN_MAX_WIDTH_VP })
       .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
@@ -5255,7 +6125,8 @@ struct Index {
       }
       .width('100%')
       // No topInsetVp compensation - see pairingScreenContent's comment.
-      .padding({ left: 16, right: 16, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE })
+      .padding({ left: 16, right: 16, top: this.topInsetVp + this.TITLE_BAR_HEIGHT + 8, bottom: this.bottomInsetVp + this.TAB_PILL_CLEARANCE + this.ME_END_GAP })
+      .constraintSize({ maxWidth: SUB_SCREEN_MAX_WIDTH_VP })
       .alignItems(HorizontalAlign.Start)
     }
     .width('100%')

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#D8D8DE" stroke="none">
   <!-- The same three dots, light in either theme: for a blocked device's dark gray card, which is dark whatever the theme. -->
-  <circle cx="12" cy="5.5" r="1.75"/>
-  <circle cx="12" cy="12" r="1.75"/>
-  <circle cx="12" cy="18.5" r="1.75"/>
+  <circle cx="12" cy="5.5" r="1.5"/>
+  <circle cx="12" cy="12" r="1.5"/>
+  <circle cx="12" cy="18.5" r="1.5"/>
 </svg>

@@ -14,6 +14,19 @@
       ]
     },
     {
+      "name": "notif_received_many_title",
+      "value": [
+        {
+          "quantity": "one",
+          "value": "%d new item synced"
+        },
+        {
+          "quantity": "other",
+          "value": "%d new items synced"
+        }
+      ]
+    },
+    {
       "name": "devices_count",
       "value": [
         {

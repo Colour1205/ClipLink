@@ -21,10 +21,13 @@ const TAILSCALE_IP_KEY = 'tailscale_ip';
 // has no working equivalent (see Index.ets's Sync section).
 const AUTO_APPLY_KEY = 'auto_apply';
 const NOTICE_NEW_COPIES_KEY = 'notice_new_copies';
+const NOTIFY_RECEIVED_KEY = 'notify_received_items';
 const ACCENT_THEME_KEY = 'accent_theme';
 const LAST_SEEN_CLIP_COUNT_KEY = 'last_seen_clip_count';
 const BOTTOM_GLOW_KEY = 'bottom_glow';
 const CARD_TRANSPARENCY_KEY = 'card_transparency';
+// The Card transparency slider's default (percent), the same on every platform that has the slider.
+const DEFAULT_CARD_TRANSPARENCY = 35;
 // The user's own name for this device (see DeviceName.ets); '' means use
 // the system's.
 const DEVICE_NAME_KEY = 'device_name';
@@ -65,6 +68,15 @@ export class DeviceSettings {
     return this.setBool(context, NOTICE_NEW_COPIES_KEY, value);
   }
 
+  // A notification for an item that arrives while ClipLink is out of view.
+  getNotifyReceived(context: common.UIAbilityContext): Promise<boolean> {
+    return this.getBool(context, NOTIFY_RECEIVED_KEY, true);
+  }
+
+  setNotifyReceived(context: common.UIAbilityContext, value: boolean): Promise<void> {
+    return this.setBool(context, NOTIFY_RECEIVED_KEY, value);
+  }
+
   // Key of the chosen colour theme (see Index.ets's THEMES); '' means the
   // default. Synchronous so the page can read it in aboutToAppear, before
   // its first frame, instead of flashing the default colour and switching.
@@ -93,7 +105,7 @@ export class DeviceSettings {
   // Percent, 0 = opaque cards (the default).
   getCardTransparencySync(context: common.UIAbilityContext): number {
     const prefs = preferences.getPreferencesSync(context, { name: PREFERENCES_NAME });
-    return prefs.getSync(CARD_TRANSPARENCY_KEY, 0) as number;
+    return prefs.getSync(CARD_TRANSPARENCY_KEY, DEFAULT_CARD_TRANSPARENCY) as number;
   }
 
   async setCardTransparency(context: common.UIAbilityContext, percent: number): Promise<void> {

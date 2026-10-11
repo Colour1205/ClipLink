@@ -97,18 +97,6 @@
       "value": "保存文件"
     },
     {
-      "name": "kind_text",
-      "value": "文本"
-    },
-    {
-      "name": "kind_image",
-      "value": "图片"
-    },
-    {
-      "name": "kind_file",
-      "value": "文件"
-    },
-    {
       "name": "item_image",
       "value": "图片"
     },
@@ -221,10 +209,6 @@
       "value": "历史记录已清除。"
     },
     {
-      "name": "toast_item_deleted",
-      "value": "项目已删除。"
-    },
-    {
       "name": "toast_tailscale_saved",
       "value": "Tailscale IP 已保存。"
     },
@@ -281,10 +265,6 @@
       "value": "未获得访问授权，请重试。"
     },
     {
-      "name": "toast_clipboard_unchanged",
-      "value": "剪贴板自上次同步后没有变化。"
-    },
-    {
       "name": "toast_unsupported_clipboard",
       "value": "不支持的剪贴板内容：%1$s"
     },
@@ -303,14 +283,6 @@
     {
       "name": "toast_paste_sync_failed",
       "value": "无法同步该内容，请重试。"
-    },
-    {
-      "name": "toast_synced_to_devices",
-      "value": "已将%1$s同步到%2$s。"
-    },
-    {
-      "name": "toast_captured_no_devices",
-      "value": "已获取%1$s——尚无已连接的设备。"
     },
     {
       "name": "toast_self_test_passed",
@@ -345,16 +317,8 @@
       "value": "保存未获授权。"
     },
     {
-      "name": "toast_saved_to_gallery",
-      "value": "已保存到相册。"
-    },
-    {
       "name": "toast_save_image_failed",
       "value": "无法保存图片。"
-    },
-    {
-      "name": "toast_file_saved",
-      "value": "文件已保存。"
     },
     {
       "name": "toast_save_file_failed",
@@ -745,14 +709,6 @@
       "value": "已屏蔽"
     },
     {
-      "name": "toast_blocked",
-      "value": "已屏蔽 %1$s"
-    },
-    {
-      "name": "toast_unblocked",
-      "value": "已取消屏蔽 %1$s"
-    },
-    {
       "name": "toast_unblock_first",
       "value": "该设备已被屏蔽，请先取消屏蔽。"
     },
@@ -767,6 +723,30 @@
     {
       "name": "notif_pairing_title",
       "value": "配对请求"
+    },
+    {
+      "name": "notif_received_title",
+      "value": "来自 %1$s 的新内容"
+    },
+    {
+      "name": "notif_received_key",
+      "value": "密钥或令牌"
+    },
+    {
+      "name": "notif_received_link",
+      "value": "链接"
+    },
+    {
+      "name": "notif_received_text",
+      "value": "文本"
+    },
+    {
+      "name": "me_notify_received_title",
+      "value": "新内容通知"
+    },
+    {
+      "name": "me_notify_received_subtitle",
+      "value": "ClipLink 不在前台时收到新内容，会弹出带简短预览的通知。HarmonyOS 会在你离开应用后不久将其挂起，因此只覆盖离开后的短暂时间。"
     },
     {
       "name": "notif_pairing_text",
@@ -811,6 +791,34 @@
     {
       "name": "device_detail_pairing_open",
       "value": "对方的配对页面已打开"
+    },
+    {
+      "name": "synced_preview_none_title",
+      "value": "没有可预览的内容"
+    },
+    {
+      "name": "synced_preview_none_detail",
+      "value": "从列表中选择文本或图片后，会在这里显示。"
+    },
+    {
+      "name": "devices_detail_none_title",
+      "value": "还没有设备"
+    },
+    {
+      "name": "devices_detail_none_detail",
+      "value": "配对设备后，它的详细信息会显示在这里。"
+    },
+    {
+      "name": "file_preview_failed",
+      "value": "无法在此预览该文件，请点击“打开”在其他应用中打开。"
+    },
+    {
+      "name": "file_preview_truncated",
+      "value": "仅显示文件开头部分。"
+    },
+    {
+      "name": "file_preview_open_in_app",
+      "value": "在其他应用中打开"
     }
   ]
 }

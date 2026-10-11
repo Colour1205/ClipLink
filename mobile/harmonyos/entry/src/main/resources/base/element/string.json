@@ -97,18 +97,6 @@
       "value": "Save file"
     },
     {
-      "name": "kind_text",
-      "value": "text"
-    },
-    {
-      "name": "kind_image",
-      "value": "image"
-    },
-    {
-      "name": "kind_file",
-      "value": "file"
-    },
-    {
       "name": "item_image",
       "value": "Image"
     },
@@ -221,10 +209,6 @@
       "value": "History cleared."
     },
     {
-      "name": "toast_item_deleted",
-      "value": "Item deleted."
-    },
-    {
       "name": "toast_tailscale_saved",
       "value": "Tailscale IP saved."
     },
@@ -281,10 +265,6 @@
       "value": "Tap did not grant access — try again."
     },
     {
-      "name": "toast_clipboard_unchanged",
-      "value": "Clipboard unchanged since last sync."
-    },
-    {
       "name": "toast_unsupported_clipboard",
       "value": "Unsupported clipboard content: %1$s"
     },
@@ -303,14 +283,6 @@
     {
       "name": "toast_paste_sync_failed",
       "value": "Could not sync that — try again."
-    },
-    {
-      "name": "toast_synced_to_devices",
-      "value": "Synced %1$s to %2$s."
-    },
-    {
-      "name": "toast_captured_no_devices",
-      "value": "Captured %1$s — no devices connected yet."
     },
     {
       "name": "toast_self_test_passed",
@@ -345,16 +317,8 @@
       "value": "Save was not authorized."
     },
     {
-      "name": "toast_saved_to_gallery",
-      "value": "Saved to gallery."
-    },
-    {
       "name": "toast_save_image_failed",
       "value": "Could not save image."
-    },
-    {
-      "name": "toast_file_saved",
-      "value": "File saved."
     },
     {
       "name": "toast_save_file_failed",
@@ -745,14 +709,6 @@
       "value": "Blocked"
     },
     {
-      "name": "toast_blocked",
-      "value": "Blocked %1$s"
-    },
-    {
-      "name": "toast_unblocked",
-      "value": "Unblocked %1$s"
-    },
-    {
       "name": "toast_unblock_first",
       "value": "That device is blocked. Unblock it first."
     },
@@ -767,6 +723,30 @@
     {
       "name": "notif_pairing_title",
       "value": "Pairing request"
+    },
+    {
+      "name": "notif_received_title",
+      "value": "New from %1$s"
+    },
+    {
+      "name": "notif_received_key",
+      "value": "Key or token"
+    },
+    {
+      "name": "notif_received_link",
+      "value": "Link"
+    },
+    {
+      "name": "notif_received_text",
+      "value": "Text"
+    },
+    {
+      "name": "me_notify_received_title",
+      "value": "Notify about new items"
+    },
+    {
+      "name": "me_notify_received_subtitle",
+      "value": "A notification with a short preview when something arrives while ClipLink is out of view. HarmonyOS suspends apps soon after you leave them, so it covers the first moments only."
     },
     {
       "name": "notif_pairing_text",
@@ -811,6 +791,34 @@
     {
       "name": "device_detail_pairing_open",
       "value": "Its pairing screen is open"
+    },
+    {
+      "name": "synced_preview_none_title",
+      "value": "Nothing to preview"
+    },
+    {
+      "name": "synced_preview_none_detail",
+      "value": "Text and images show here when you select them from the list."
+    },
+    {
+      "name": "devices_detail_none_title",
+      "value": "No device yet"
+    },
+    {
+      "name": "devices_detail_none_detail",
+      "value": "Pair a device and its details show here."
+    },
+    {
+      "name": "file_preview_failed",
+      "value": "This file can't be previewed here. Use Open to open it in another app."
+    },
+    {
+      "name": "file_preview_truncated",
+      "value": "Showing the start of the file."
+    },
+    {
+      "name": "file_preview_open_in_app",
+      "value": "Open in another app"
     }
   ]
 }
