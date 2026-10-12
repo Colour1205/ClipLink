@@ -3,13 +3,27 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    // First visit: the page opens in the browser's language (Chinese or English). The
+    // language links add ?lang= so a visitor's own choice sticks, and is not undone.
+    (function () {
+      try {
+        var m = /[?&]lang=(en|zh)\b/.exec(location.search), pref = m && m[1];
+        try { if (pref) localStorage.setItem('lang', pref); else pref = localStorage.getItem('lang'); } catch (e) { /* no storage: fine */ }
+        var want = pref || (/^zh/i.test(navigator.language || '') ? 'zh' : 'en');
+        var onZh = /\/zh(\/|$)/.test(location.pathname);
+        if (want === 'zh' && !onZh) location.replace(location.pathname.replace(/([^\/]*)$/, 'zh/$1') + location.search + location.hash);
+        else if (want === 'en' && onZh) location.replace(location.pathname.replace(/\/zh\/([^\/]*)$/, '/$1') + location.search + location.hash);
+      } catch (e) { /* stay where we are */ }
+    })();
+  </script>
   <title>Code signing policy - ClipLink</title>
   <meta name="description" content="How ClipLink for Windows is built and code signed, who can approve a release, and what the program does with your data.">
   <meta name="color-scheme" content="light dark">
   <link rel="icon" type="image/png" href="assets/icon-64.png">
   <link rel="stylesheet" href="assets/style.css">
-  <link rel="alternate" hreflang="en" href="https://colour1205.github.io/ClipLink/code-signing-policy.html">
-  <link rel="alternate" hreflang="zh-Hans" href="https://colour1205.github.io/ClipLink/zh/code-signing-policy.html">
+  <link rel="alternate" hreflang="en" href="https://cliplink.uaena.io/code-signing-policy.html">
+  <link rel="alternate" hreflang="zh-Hans" href="https://cliplink.uaena.io/zh/code-signing-policy.html">
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
@@ -19,7 +33,7 @@
       <nav class="nav" aria-label="Main">
         <a class="keep" href="./#download">Download</a>
         <a href="https://github.com/Colour1205/ClipLink">GitHub</a>
-        <a class="lang" href="zh/code-signing-policy.html" hreflang="zh-Hans" lang="zh-Hans">中文</a>
+        <a class="lang" href="zh/code-signing-policy.html?lang=zh" hreflang="zh-Hans" lang="zh-Hans">中文</a>
       </nav>
     </div>
   </header>

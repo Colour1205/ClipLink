@@ -85,6 +85,7 @@ body {
   -webkit-text-size-adjust: 100%;
   position: relative;
   overflow-x: hidden;
+  padding-top: 88px; /* room for the fixed top bar */
 }
 
 /* The colour field behind the glass: four soft blobs that drift slowly. */
@@ -133,7 +134,7 @@ a:hover { text-decoration-thickness: 2px; }
 .wrap { max-width: var(--max); margin: 0 auto; padding: 0 22px; }
 
 /* ---- the glass itself ---- */
-.card, details, .callout, .art-panel, .chip, .btn:not(.primary), .site-header .wrap, .lang-hint {
+.card, details, .callout, .art-panel, .chip, .btn:not(.primary), .site-header .wrap {
   background: var(--glass);
   border: 1px solid var(--glass-border);
   box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-border);
@@ -142,13 +143,13 @@ a:hover { text-decoration-thickness: 2px; }
 }
 
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .card, details, .callout, .art-panel, .chip, .btn:not(.primary), .site-header .wrap, .lang-hint {
+  .card, details, .callout, .art-panel, .chip, .btn:not(.primary), .site-header .wrap {
     background: var(--glass-solid);
   }
 }
 
 /* ---- header: a floating glass bar ---- */
-.site-header { position: sticky; top: 12px; z-index: 10; padding: 0 12px; margin-top: 12px; }
+.site-header { position: fixed; top: 12px; left: 0; right: 0; z-index: 50; padding: 0 12px; }
 .site-header .wrap {
   display: flex; align-items: center; gap: 14px;
   max-width: var(--max); min-height: 64px; padding: 0 14px 0 20px;
@@ -161,13 +162,9 @@ a:hover { text-decoration-thickness: 2px; }
 .nav a:hover { background: var(--accent-soft); }
 .nav .lang { background: var(--glass-strong); margin-left: 6px; font-weight: 600; }
 
-.lang-hint { display: none; margin: 12px 12px 0; border-radius: 26px; font-size: 0.95rem; }
-.lang-hint.show { display: block; }
-.lang-hint .wrap { display: flex; align-items: center; gap: 12px; padding-top: 9px; padding-bottom: 9px; }
-.lang-hint button { margin-left: auto; background: none; border: 0; color: var(--text); font-size: 1.3rem; line-height: 1; cursor: pointer; padding: 4px 8px; }
 
 /* ---- hero ---- */
-.hero { padding: 72px 0 36px; }
+.hero { padding: 40px 0 36px; }
 .hero .wrap { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: 44px; align-items: center; }
 .eyebrow {
   display: inline-block; font-size: 0.85rem; font-weight: 700; letter-spacing: 0.01em;
@@ -288,11 +285,11 @@ code { background: var(--accent-soft); padding: 1px 7px; border-radius: 7px; fon
 }
 @media (max-width: 620px) {
   body { font-size: 16px; }
-  .card, details, .callout, .art-panel, .chip, .btn:not(.primary), .site-header .wrap, .lang-hint {
+  .card, details, .callout, .art-panel, .chip, .btn:not(.primary), .site-header .wrap {
     -webkit-backdrop-filter: blur(16px) saturate(150%);
     backdrop-filter: blur(16px) saturate(150%);
   }
-  .hero { padding-top: 44px; }
+  .hero { padding-top: 20px; }
   .grid.features, .grid.steps, .grid.downloads { grid-template-columns: 1fr; }
   .nav a:not(.lang):not(.keep) { display: none; }
   .site-footer .grow { margin-left: 0; }
@@ -303,14 +300,13 @@ code { background: var(--accent-soft); padding: 1px 7px; border-radius: 7px; fon
 /* Squircles (continuous corners) where the browser can draw them; the plain
    rounded corners above are the fallback. */
 @supports (corner-shape: squircle) {
-  .card, details, .callout, .art-panel, .site-header .wrap, .lang-hint, .ico, .shape.sq {
+  .card, details, .callout, .art-panel, .site-header .wrap, .ico, .shape.sq {
     corner-shape: squircle;
   }
   .card { border-radius: 52px; }
   .art-panel { border-radius: 84px; }
   .site-header .wrap { border-radius: 48px; }
   details, .callout { border-radius: 40px; }
-  .lang-hint { border-radius: 40px; }
   .ico { border-radius: 24px; }
 }
 
@@ -393,4 +389,51 @@ section { position: relative; }
 @media (max-width: 620px) {
   .showcase { grid-template-columns: 1fr; max-width: 360px; margin: 0 auto; }
   .shot-phone { right: -8px; bottom: -30px; width: 30%; border-width: 4px; }
+}
+
+/* ================= "See it in action" as a swipeable stack (small phones) ================= */
+
+.showcase.is-stack {
+  display: grid; grid-template-columns: minmax(0, 330px); justify-content: center;
+  padding-bottom: 52px; touch-action: pan-y; outline-offset: 8px;
+}
+.showcase.is-stack .frame {
+  grid-area: 1 / 1; align-self: start; width: 100%; max-width: none; margin: 0;
+  transform-origin: 50% 0; user-select: none; -webkit-user-select: none;
+  transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), filter 0.4s, opacity 0.4s;
+  will-change: transform, filter;
+  /* Blurred glass over blurred glass is slow: the stack uses a plain tint. */
+  background: var(--glass-strong);
+  -webkit-backdrop-filter: none; backdrop-filter: none;
+}
+.showcase.is-stack .frame img { pointer-events: none; -webkit-user-drag: none; }
+.showcase.is-stack .frame-win { align-self: start; }
+.showcase.is-stack.dragging .frame { transition: none; }
+
+/* In front: follows the finger. */
+.showcase.is-stack .frame[data-pos="0"] {
+  z-index: 5; filter: none; opacity: 1;
+  transform: translate3d(var(--dx, 0px), 0, 0) rotate(var(--rot, 0deg));
+}
+/* Behind: lower, smaller and blurred, so the one in focus stands out. */
+.showcase.is-stack .frame[data-pos="1"] { z-index: 4; transform: translate3d(0, 20px, 0) scale(0.94); filter: blur(5px); opacity: 0.95; }
+.showcase.is-stack .frame[data-pos="2"] { z-index: 3; transform: translate3d(0, 40px, 0) scale(0.88); filter: blur(9px); opacity: 0.8; }
+.showcase.is-stack .frame[data-pos="3"] { z-index: 2; transform: translate3d(0, 56px, 0) scale(0.84); filter: blur(12px); opacity: 0; pointer-events: none; }
+/* Already seen: off to the left. */
+.showcase.is-stack .frame[data-pos="-1"] { z-index: 6; transform: translate3d(-110%, 0, 0) rotate(-9deg); opacity: 0; pointer-events: none; }
+
+.stack-dots { display: flex; justify-content: center; gap: 4px; margin-top: 2px; }
+.stack-dot {
+  width: 30px; height: 30px; padding: 0; border: 0; background: none; cursor: pointer; position: relative;
+}
+.stack-dot::before {
+  content: ""; position: absolute; left: 50%; top: 50%; width: 10px; height: 10px; margin: -5px 0 0 -5px;
+  border-radius: 50%; background: var(--muted); opacity: 0.45;
+  transition: width 0.25s, margin 0.25s, opacity 0.25s, background 0.25s;
+}
+.stack-dot[aria-current="true"]::before { width: 26px; margin-left: -13px; border-radius: 999px; background: var(--accent); opacity: 1; }
+.stack-hint { text-align: center; color: var(--muted); font-size: 0.9rem; margin: 6px 0 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .showcase.is-stack .frame { transition: none; }
 }

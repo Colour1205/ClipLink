@@ -3,18 +3,32 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    // First visit: the page opens in the browser's language (Chinese or English). The
+    // language links add ?lang= so a visitor's own choice sticks, and is not undone.
+    (function () {
+      try {
+        var m = /[?&]lang=(en|zh)\b/.exec(location.search), pref = m && m[1];
+        try { if (pref) localStorage.setItem('lang', pref); else pref = localStorage.getItem('lang'); } catch (e) { /* no storage: fine */ }
+        var want = pref || (/^zh/i.test(navigator.language || '') ? 'zh' : 'en');
+        var onZh = /\/zh(\/|$)/.test(location.pathname);
+        if (want === 'zh' && !onZh) location.replace(location.pathname.replace(/([^\/]*)$/, 'zh/$1') + location.search + location.hash);
+        else if (want === 'en' && onZh) location.replace(location.pathname.replace(/\/zh\/([^\/]*)$/, '/$1') + location.search + location.hash);
+      } catch (e) { /* stay where we are */ }
+    })();
+  </script>
   <title>ClipLink - 在你自己的设备之间同步剪贴板</title>
   <meta name="description" content="ClipLink 在你的 Windows、Android、鸿蒙和 iOS 设备之间直接同步剪贴板：文字、图片和文件。无账号，无云端。免费开源。">
   <meta name="color-scheme" content="light dark">
   <link rel="icon" type="image/png" href="../assets/icon-64.png">
   <link rel="stylesheet" href="../assets/style.css">
-  <link rel="alternate" hreflang="en" href="https://colour1205.github.io/ClipLink/">
-  <link rel="alternate" hreflang="zh-Hans" href="https://colour1205.github.io/ClipLink/zh/">
-  <link rel="alternate" hreflang="x-default" href="https://colour1205.github.io/ClipLink/">
+  <link rel="alternate" hreflang="en" href="https://cliplink.uaena.io/">
+  <link rel="alternate" hreflang="zh-Hans" href="https://cliplink.uaena.io/zh/">
+  <link rel="alternate" hreflang="x-default" href="https://cliplink.uaena.io/">
   <meta property="og:type" content="website">
   <meta property="og:title" content="ClipLink - 在你自己的设备之间同步剪贴板">
   <meta property="og:description" content="在一台设备上复制，在另一台设备上粘贴。直接连接、加密传输、无云端。支持 Windows、Android、鸿蒙和 iOS。">
-  <meta property="og:image" content="https://colour1205.github.io/ClipLink/assets/icon-256.png">
+  <meta property="og:image" content="https://cliplink.uaena.io/assets/icon-256.png">
   <script src="../assets/site.js" defer></script>
 </head>
 <body>
@@ -28,7 +42,7 @@
         <a class="keep" href="#download">下载</a>
         <a href="#faq">常见问题</a>
         <a href="https://github.com/Colour1205/ClipLink">GitHub</a>
-        <a class="lang" href="../" hreflang="en" lang="en">English</a>
+        <a class="lang" href="../?lang=en" hreflang="en" lang="en">English</a>
       </nav>
     </div>
   </header>
@@ -61,7 +75,7 @@
       <div class="wrap">
         <h2>实际效果</h2>
         <p class="sub">同样的内容，在 Windows、iOS、Android 和鸿蒙之间同步。</p>
-        <div class="showcase">
+        <div class="showcase" data-hint="左右滑动查看更多">
           <figure class="frame frame-win"><img src="../assets/shot-windows.webp" width="950" height="676" alt="Windows 上的 ClipLink" loading="lazy"><figcaption>Windows</figcaption></figure>
           <figure class="frame"><img src="../assets/shot-ios.webp" width="560" height="1212" alt="iOS 上的 ClipLink" loading="lazy"><figcaption>iOS</figcaption></figure>
           <figure class="frame"><img src="../assets/shot-android.webp" width="560" height="1239" alt="Android 上的 ClipLink" loading="lazy"><figcaption>Android</figcaption></figure>

@@ -1,31 +1,12 @@
-// ClipLink site: three small enhancements. The page works without any of them.
+// ClipLink site: small enhancements. The page works without any of them.
+// (The language choice is made by a tiny inline script in each page's <head>,
+// so the right language shows without a flash.)
 (function () {
   'use strict';
 
   var REPO = 'Colour1205/ClipLink';
 
-  function safe(fn) {
-    try { return fn(); } catch (e) { return null; }
-  }
-
-  // 1. A dismissible hint to switch language, for browsers set to Chinese.
-  var hint = document.getElementById('lang-hint');
-  if (hint) {
-    var browserLang = (navigator.language || '').toLowerCase();
-    var dismissed = safe(function () { return localStorage.getItem('lang-hint-dismissed'); });
-    if (browserLang.indexOf(hint.getAttribute('data-for') || '-') === 0 && !dismissed) {
-      hint.classList.add('show');
-    }
-    var close = hint.querySelector('button');
-    if (close) {
-      close.addEventListener('click', function () {
-        hint.classList.remove('show');
-        safe(function () { localStorage.setItem('lang-hint-dismissed', '1'); });
-      });
-    }
-  }
-
-  // 2. Mark the download card for the visitor's own platform.
+  // ---- 1. Mark the download card for the visitor's own platform. ----
   var ua = navigator.userAgent || '';
   var mine = /HarmonyOS|OpenHarmony/i.test(ua) ? 'harmonyos'
     : /Android/i.test(ua) ? 'android'
@@ -40,9 +21,157 @@
     }
   }
 
-  // 3. Point the download buttons at the newest release's files. Without this
-  // (or if GitHub can't be reached) they keep their fallback link to the
-  // Releases page, and a platform with no file yet stays "coming soon".
+  // ---- 2. On small phones, "See it in action" is a swipeable stack. ----
+  // The frames sit on top of each other: the one in front can be dragged
+  // left or right to go to the next (or back), the ones behind are blurred,
+  // and vertical swipes still scroll the page (touch-action: pan-y). Wider
+  // screens, and browsers without JavaScript, keep the plain grid.
+  var box = document.querySelector('.showcase');
+  if (box && window.matchMedia) {
+    initStack(box);
+  }
+
+  function initStack(root) {
+    var frames = Array.prototype.slice.call(root.querySelectorAll('.frame'));
+    if (frames.length < 2) return;
+    var query = window.matchMedia('(max-width: 620px)');
+    var active = 0;
+    var dots = null;
+    var hint = null;
+    var drag = null; // { x, y, id, horizontal, dx }
+
+    function build() {
+      root.classList.add('is-stack');
+      root.setAttribute('role', 'region');
+      root.setAttribute('aria-roledescription', 'carousel');
+      root.setAttribute('tabindex', '0');
+      dots = document.createElement('div');
+      dots.className = 'stack-dots';
+      frames.forEach(function (frame, i) {
+        var caption = frame.querySelector('figcaption');
+        var dot = document.createElement('button');
+        dot.type = 'button';
+        dot.className = 'stack-dot';
+        dot.setAttribute('aria-label', caption ? caption.textContent : String(i + 1));
+        dot.addEventListener('click', function () { go(i); });
+        dots.appendChild(dot);
+      });
+      root.parentNode.insertBefore(dots, root.nextSibling);
+      var text = root.getAttribute('data-hint');
+      if (text) {
+        hint = document.createElement('p');
+        hint.className = 'stack-hint';
+        hint.textContent = text;
+        dots.parentNode.insertBefore(hint, dots.nextSibling);
+      }
+      render();
+    }
+
+    function destroy() {
+      root.classList.remove('is-stack', 'dragging');
+      root.removeAttribute('role');
+      root.removeAttribute('aria-roledescription');
+      root.removeAttribute('tabindex');
+      frames.forEach(function (frame) {
+        frame.removeAttribute('data-pos');
+        frame.removeAttribute('aria-hidden');
+        frame.inert = false;
+        frame.style.removeProperty('--dx');
+        frame.style.removeProperty('--rot');
+      });
+      if (dots) { dots.remove(); dots = null; }
+      if (hint) { hint.remove(); hint = null; }
+      active = 0;
+    }
+
+    function render() {
+      frames.forEach(function (frame, i) {
+        var pos = Math.max(-1, Math.min(3, i - active));
+        frame.setAttribute('data-pos', String(pos));
+        frame.setAttribute('aria-hidden', pos === 0 ? 'false' : 'true');
+        frame.inert = pos !== 0;
+        if (pos === 0) {
+          frame.style.removeProperty('--dx');
+          frame.style.removeProperty('--rot');
+        }
+      });
+      if (dots) {
+        Array.prototype.forEach.call(dots.children, function (dot, i) {
+          if (i === active) dot.setAttribute('aria-current', 'true');
+          else dot.removeAttribute('aria-current');
+        });
+      }
+    }
+
+    function go(index) {
+      active = Math.max(0, Math.min(frames.length - 1, index));
+      render();
+    }
+
+    function setDrag(dx) {
+      var front = frames[active];
+      front.style.setProperty('--dx', dx + 'px');
+      front.style.setProperty('--rot', (dx / 28).toFixed(2) + 'deg');
+    }
+
+    root.addEventListener('pointerdown', function (event) {
+      if (!root.classList.contains('is-stack') || (event.pointerType === 'mouse' && event.button !== 0)) return;
+      if (event.target.closest && event.target.closest('a, button')) return;
+      drag = { x: event.clientX, y: event.clientY, id: event.pointerId, horizontal: false, dx: 0 };
+    });
+
+    root.addEventListener('pointermove', function (event) {
+      if (!drag || event.pointerId !== drag.id) return;
+      var dx = event.clientX - drag.x;
+      var dy = event.clientY - drag.y;
+      if (!drag.horizontal) {
+        if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) { drag = null; return; } // a scroll: not ours
+        if (Math.abs(dx) < 8) return;
+        drag.horizontal = true;
+        root.classList.add('dragging');
+        try { root.setPointerCapture(event.pointerId); } catch (e) { /* not capturable: fine */ }
+      }
+      // Past either end, the stack resists.
+      var atEnd = (dx > 0 && active === 0) || (dx < 0 && active === frames.length - 1);
+      drag.dx = atEnd ? dx * 0.3 : dx;
+      setDrag(drag.dx);
+    });
+
+    function release(event) {
+      if (!drag || event.pointerId !== drag.id) return;
+      var finished = drag;
+      drag = null;
+      root.classList.remove('dragging');
+      if (!finished.horizontal) return;
+      var threshold = Math.min(90, root.clientWidth * 0.2);
+      if (finished.dx < -threshold) go(active + 1);
+      else if (finished.dx > threshold) go(active - 1);
+      else render(); // snap back
+    }
+    root.addEventListener('pointerup', release);
+    root.addEventListener('pointercancel', release);
+
+    root.addEventListener('keydown', function (event) {
+      if (!root.classList.contains('is-stack')) return;
+      if (event.key === 'ArrowRight') { go(active + 1); event.preventDefault(); }
+      else if (event.key === 'ArrowLeft') { go(active - 1); event.preventDefault(); }
+    });
+
+    function sync() {
+      if (query.matches) {
+        if (!root.classList.contains('is-stack')) build();
+      } else if (root.classList.contains('is-stack')) {
+        destroy();
+      }
+    }
+    if (query.addEventListener) query.addEventListener('change', sync);
+    else if (query.addListener) query.addListener(sync);
+    sync();
+  }
+
+  // ---- 3. Point the download buttons at the newest release's files. ----
+  // Without this (or if GitHub can't be reached) they keep their fallback link
+  // to the Releases page, and a platform with no file yet stays "coming soon".
   var buttons = document.querySelectorAll('[data-asset]');
   if (!buttons.length || !window.fetch) return;
 
