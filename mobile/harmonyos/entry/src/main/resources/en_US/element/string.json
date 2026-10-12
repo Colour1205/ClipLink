@@ -458,7 +458,7 @@
     },
     {
       "name": "me_notice_subtitle",
-      "value": "HarmonyOS only lets ClipLink read the clipboard when you tap Paste, so this highlights Paste when you've copied something new, including while ClipLink was closed."
+      "value": "When ClipLink can't read the clipboard by itself, this highlights Paste when you've copied something new, including while ClipLink was closed."
     },
     {
       "name": "me_theme",
@@ -747,6 +747,22 @@
     {
       "name": "file_preview_open_in_app",
       "value": "Open in another app"
+    },
+    {
+      "name": "me_auto_capture_title",
+      "value": "Send my clipboard when I open ClipLink"
+    },
+    {
+      "name": "me_auto_capture_subtitle",
+      "value": "When you open ClipLink, what you copied in another app is sent to your paired devices. Needs clipboard access."
+    },
+    {
+      "name": "toast_clipboard_access_off",
+      "value": "Clipboard access is off for ClipLink. Turn it on in system settings."
+    },
+    {
+      "name": "READ_PASTEBOARD_reason",
+      "value": "ClipLink reads your clipboard when you open the app, so it can send what you just copied to your other devices."
     }
   ]
 }

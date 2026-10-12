@@ -22,6 +22,8 @@ const TAILSCALE_IP_KEY = 'tailscale_ip';
 const AUTO_APPLY_KEY = 'auto_apply';
 const NOTICE_NEW_COPIES_KEY = 'notice_new_copies';
 const NOTIFY_RECEIVED_KEY = 'notify_received_items';
+const AUTO_CAPTURE_KEY = 'auto_capture_on_open';
+const PASTEBOARD_ASKED_KEY = 'pasteboard_permission_asked';
 const ACCENT_THEME_KEY = 'accent_theme';
 const LAST_SEEN_CLIP_COUNT_KEY = 'last_seen_clip_count';
 const BOTTOM_GLOW_KEY = 'bottom_glow';
@@ -66,6 +68,26 @@ export class DeviceSettings {
 
   setNoticeNewCopies(context: common.UIAbilityContext, value: boolean): Promise<void> {
     return this.setBool(context, NOTICE_NEW_COPIES_KEY, value);
+  }
+
+  // "Send my clipboard when I open ClipLink": needs READ_PASTEBOARD (see
+  // clipboard/PasteboardPermission.ets), and on by default like Android's.
+  getAutoCapture(context: common.UIAbilityContext): Promise<boolean> {
+    return this.getBool(context, AUTO_CAPTURE_KEY, true);
+  }
+
+  setAutoCapture(context: common.UIAbilityContext, value: boolean): Promise<void> {
+    return this.setBool(context, AUTO_CAPTURE_KEY, value);
+  }
+
+  // Whether the clipboard-access prompt has been shown once on its own, at
+  // first run - so a refusal is not asked again at every start.
+  getPasteboardAsked(context: common.UIAbilityContext): Promise<boolean> {
+    return this.getBool(context, PASTEBOARD_ASKED_KEY, false);
+  }
+
+  setPasteboardAsked(context: common.UIAbilityContext, value: boolean): Promise<void> {
+    return this.setBool(context, PASTEBOARD_ASKED_KEY, value);
   }
 
   // A notification for an item that arrives while ClipLink is out of view.

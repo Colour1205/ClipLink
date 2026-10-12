@@ -18,6 +18,13 @@
 // This means HarmonyOS sync can only ever be "detect + prompt", never
 // "detect + silently pull", unlike Windows or (likely) Android. Worth
 // keeping in mind for the eventual UI design in step 9.
+//
+// UPDATE 2026-10-12: Huawei approved READ_PASTEBOARD through the ACL process,
+// for use while the app is in use only. With it granted (see
+// PasteboardPermission.ets) getData() works without a tap, so ClipLink reads
+// the clipboard by itself when it comes forward (Index.ets's captureOnOpen).
+// Still nothing in the background, and the PasteButton stays as the fallback
+// for a user who refuses the permission.
 
 import pasteboard from '@ohos.pasteboard';
 import { image } from '@kit.ImageKit';
@@ -153,7 +160,8 @@ export class ClipboardWatcher {
 
   // Only valid to call from inside a PasteButton onClick handler, in the
   // window after a SUCCESS result — that's what grants the temporary
-  // pasteboard read privilege this needs. context is only used for the
+  // pasteboard read privilege this needs - or while READ_PASTEBOARD is
+  // granted (and the app is in front). context is only used for the
   // file branch (see below) - needed to copy a cross-app URI into this
   // app's own sandbox before it can be read.
   async readCurrentClipboard(context: common.UIAbilityContext): Promise<ClipboardChange | null> {

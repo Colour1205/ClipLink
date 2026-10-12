@@ -17,6 +17,7 @@ import hilog from '@ohos.hilog';
 import { common, Want, WantAgent, wantConstant, wantAgent } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
+import { isPasteboardReadGranted, requestPasteboardRead } from '../clipboard/PasteboardPermission';
 import { window, promptAction, curves, LengthMetrics } from '@kit.ArkUI';
 import { HdsNavigation, HdsNavDestination, HdsNavDestinationTitleMode, HdsNavigationTitleMode, HdsNavigationTitleBarOptions, NavBarWidthRangeOptions,
   HdsNavigationMenuItemOptions, ScrollEffectType, TitleSize, hdsMaterial } from '@kit.UIDesignKit';
@@ -665,6 +666,12 @@ struct Index {
   // since the app was last in view - what the notification counts.
   @State notifyReceived: boolean = true;
   private unseenReceived: number = 0;
+  // "Send my clipboard when I open ClipLink". autoCaptureWanted is the stored
+  // choice; autoCapture is what is true now - wanted AND the system has
+  // granted READ_PASTEBOARD (which the user can take away in Settings).
+  @State autoCapture: boolean = false;
+  private autoCaptureWanted: boolean = true;
+  private captureBusy: boolean = false;
   // DeviceSettings.getNoticeNewCopies - see onPageShow.
   @State noticeOnOpen: boolean = true;
   // DeviceSettings.getAccentThemeSync - a key from THEMES, see accent().
@@ -1001,6 +1008,9 @@ struct Index {
         this.log(`discovery failed to start: ${e.message}`);
       });
       void this.refreshPassphraseState();
+      // The key and the engine are ready: what was copied before the app
+      // opened can go now (see captureOnOpen).
+      void this.captureOnOpen();
       // Must run AFTER ownDeviceId is actually set, not just after this
       // .then() is scheduled - reconnectOffLanPeers's tie-breaker compares
       // against this.ownDeviceId, and calling it any earlier (e.g. from
@@ -1070,6 +1080,11 @@ struct Index {
     // The phone may have been renamed in Settings while ClipLink was in the
     // background - with no override set, that's the name to go by now.
     this.refreshSystemDeviceName();
+    // The permission can have been given or taken away in Settings meanwhile.
+    this.autoCapture = this.autoCaptureWanted && isPasteboardReadGranted();
+    // A moment for the window to take focus: the system lets only the app in
+    // front read the clipboard.
+    setTimeout(() => { void this.captureOnOpen(); }, 300);
     // HarmonyOS's closest equivalent of Android's "send my clipboard when I
     // open ClipLink": reading the clipboard needs READ_PASTEBOARD (an ACL-only
     // restricted permission) or a PasteButton tap, so the app can't send it
@@ -1944,6 +1959,16 @@ struct Index {
     this.syncManager?.setAutoApply(this.autoApply);
     this.noticeOnOpen = await this.deviceSettings.getNoticeNewCopies(context);
     this.notifyReceived = await this.deviceSettings.getNotifyReceived(context);
+    this.autoCaptureWanted = await this.deviceSettings.getAutoCapture(context);
+    this.autoCapture = this.autoCaptureWanted && isPasteboardReadGranted();
+    // First run: ask for clipboard access once, with the reason from
+    // module.json5. A refusal is not asked again at every start; the switch
+    // in Me asks when it is turned on.
+    if (this.autoCaptureWanted && !this.autoCapture && !(await this.deviceSettings.getPasteboardAsked(context))) {
+      await this.deviceSettings.setPasteboardAsked(context, true);
+      this.autoCapture = await requestPasteboardRead(context);
+    }
+    void this.captureOnOpen();
     // onPageShow has usually already run by now using the default (on), so
     // settle the hint against the real setting.
     this.pendingChange = this.noticeOnOpen && this.watcher.hasUnseenChange();
@@ -1954,6 +1979,42 @@ struct Index {
     this.syncManager?.setAutoApply(value);
     const context = getContext(this) as common.UIAbilityContext;
     await this.deviceSettings.setAutoApply(context, value);
+  }
+
+  // The Me switch. The switch shows what was chosen at once; if the system
+  // then refuses clipboard access, it goes back, with the reason.
+  private async setAutoCapture(value: boolean): Promise<void> {
+    this.autoCapture = value;
+    this.autoCaptureWanted = value;
+    const context = getContext(this) as common.UIAbilityContext;
+    await this.deviceSettings.setAutoCapture(context, value);
+    if (!value) return;
+    if (!isPasteboardReadGranted() && !(await requestPasteboardRead(context))) {
+      this.autoCapture = false;
+      promptAction.showToast({ message: $r('app.string.toast_clipboard_access_off') });
+      return;
+    }
+    void this.captureOnOpen();
+  }
+
+  // Sends what was copied in another app, by itself, when ClipLink comes
+  // forward - the one moment HarmonyOS lets it (READ_PASTEBOARD, in use only;
+  // nothing is read in the background). Only if the user wants it and the
+  // system has granted it; only if the clipboard has changed since the last
+  // look (getChangeCount needs no permission, and the last look is saved, so a
+  // restart does not send the same copy again); and not before the key and the
+  // sync engine exist - startup calls this again when they do.
+  private async captureOnOpen(): Promise<void> {
+    if (!this.appVisible || !this.autoCaptureWanted || this.captureBusy) return;
+    if (this.syncManager === null || this.ownDeviceId.length === 0) return;
+    if (!isPasteboardReadGranted() || !this.watcher.hasUnseenChange()) return;
+    this.captureBusy = true;
+    try {
+      netLog('auto-capture: reading the clipboard');
+      await this.syncClipboard();
+    } finally {
+      this.captureBusy = false;
+    }
   }
 
   private async setNotifyReceived(value: boolean): Promise<void> {
@@ -2387,6 +2448,12 @@ struct Index {
     if (result !== PasteButtonOnClickResult.SUCCESS) {
       return; // the system did not grant the read: nothing was read, so nothing to say
     }
+    await this.syncClipboard();
+  }
+
+  // Reads the clipboard and syncs it: the PasteButton's tap, or - with
+  // READ_PASTEBOARD - ClipLink coming forward (captureOnOpen).
+  private async syncClipboard(): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
     const change = await this.watcher.readCurrentClipboard(context);
     this.markClipboardSeen();
@@ -5614,6 +5681,14 @@ struct Index {
           isOn: this.autoApply,
           icon: $r('app.media.ic_settings_autocopy'),
           onChange: (isOn: boolean) => { void this.setAutoApply(isOn); },
+        })
+        Divider().color($r('sys.color.comp_divider'))
+        this.settingsSwitchRow({
+          title: $r('app.string.me_auto_capture_title'),
+          subtitle: $r('app.string.me_auto_capture_subtitle'),
+          isOn: this.autoCapture,
+          icon: $r('app.media.ic_settings_send'),
+          onChange: (isOn: boolean) => { void this.setAutoCapture(isOn); },
         })
         Divider().color($r('sys.color.comp_divider'))
         // Android's "Send my clipboard when I open ClipLink" can't be

@@ -28,13 +28,28 @@
     ],
     "requestPermissions": [
       {
+        // Restricted (ACL): approved by Huawei on 2026-10-12, used only while
+        // the app is in use (usedScene.when "inuse"), by EntryAbility, which
+        // reads the clipboard when ClipLink comes forward (Index.ets's
+        // captureOnOpen). Without a signing profile that carries the ACL this
+        // line makes the app uninstallable - DevEco's "ACL Permission
+        // Configuration" dialog (Abilities: EntryAbility) writes both.
+        "name": "ohos.permission.READ_PASTEBOARD",
+        "reason": "$string:READ_PASTEBOARD_reason",
+        "usedScene": {
+          "when": "inuse",
+          "abilities": [
+            "EntryAbility"
+          ]
+        }
+      },
+      {
         "name": "ohos.permission.INTERNET"
       },
       {
         // Normal/system_grant permission (confirmed against the official
-        // permission reference) - unlike READ_PASTEBOARD, this is safe to
-        // just declare: no ACL/AppGallery restricted-permission process,
-        // no runtime user dialog. Needed for the long-press menu's
+        // permission reference): no ACL/AppGallery restricted-permission
+        // process, no runtime user dialog. Needed for the long-press menu's
         // hapticFeedbackMode - see syncedItemCard's bindContextMenu.
         "name": "ohos.permission.VIBRATE"
       },
@@ -108,7 +123,7 @@
             "name": "ohos.extension.backup",
             "resource": "$profile:backup_config"
           }
-        ],
+        ]
       }
     ]
   }
