@@ -53,6 +53,8 @@ import io.uaena.cliplink.engine.DeviceRow
 /** What a row says about its device, on the card and on the detail screen - one wording, so they cannot disagree. */
 internal fun deviceStatusLabel(device: DeviceRow): String = when {
     device.blocked -> "Blocked"
+    // We trust it and dialled it; it has not accepted yet, so nothing is exchanged.
+    device.waiting -> "Trusted — waiting for it to accept"
     device.connected -> "Connected"
     // On the network but the link is not up yet - it is dialling us, or we are dialling it.
     device.trusted && device.online -> "Trusted — connecting…"

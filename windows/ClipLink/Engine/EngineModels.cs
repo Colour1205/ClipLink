@@ -59,7 +59,7 @@ public record PairingInfo(string PublicKey, string? Address = null, string? Name
 // and even when silent, so it can be unblocked. ConnectedAddress: the address
 // the live connection runs over, only while there is one - the one address a
 // device card shows (Addresses is the full list, for the detail view).
-public record DeviceListing(string PublicKey, string? Name, bool Trusted, bool Connected, bool PairingOpen, IReadOnlyList<string> Addresses, bool Blocked = false, string? ConnectedAddress = null);
+public record DeviceListing(string PublicKey, string? Name, bool Trusted, bool Connected, bool PairingOpen, IReadOnlyList<string> Addresses, bool Blocked = false, string? ConnectedAddress = null, bool Waiting = false);
 
 // A pairing request waiting for Accept/Reject: the peer's (signature-
 // verified) device id, the display name its handshake or beacon carried

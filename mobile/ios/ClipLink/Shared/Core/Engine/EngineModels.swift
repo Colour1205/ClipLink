@@ -136,6 +136,9 @@ public struct DeviceRow: Identifiable, Equatable {
     public let nearby: Bool
     /// The user blocked this device: its requests never come through.
     public var blocked = false
+    /// Trusted here and linked, but the other device has not accepted yet - it may still
+    /// be asking its user. Not `connected`: nothing is exchanged until it does.
+    public var waiting = false
     /// The address of the connection that is up right now - the one the
     /// device card shows. Nil unless `connected`.
     public var connectionAddress: String?

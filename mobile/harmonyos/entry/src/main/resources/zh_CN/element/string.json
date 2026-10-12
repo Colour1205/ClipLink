@@ -377,6 +377,10 @@
       "value": "已连接"
     },
     {
+      "name": "devices_status_waiting",
+      "value": "已信任 · 等待对方接受"
+    },
+    {
       "name": "devices_status_trusted",
       "value": "已信任 · 未连接"
     },

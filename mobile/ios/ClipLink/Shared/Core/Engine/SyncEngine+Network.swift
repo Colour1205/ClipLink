@@ -261,11 +261,19 @@ extension SyncEngine {
             trust.trust(id, address: beacon.address)
         }
 
-        guard links[id] == nil, !connectingTo.contains(id), DeviceOrder.shouldDial(peerId: id, ownId: ownId) else { return }
+        if links[id] != nil {
+            dialFallback.connected(id)
+            return
+        }
+        guard !connectingTo.contains(id) else { return }
+        let shouldDial = DeviceOrder.shouldDial(peerId: id, ownId: ownId)
         if trust.isTrusted(id) {
             guard !isBackedOff(id) else { return }
-            dial(deviceId: id, candidates: [beacon.senderIP], port: UInt16(clamping: beacon.tcpPort), ignoreTieBreaker: false) { _ in }
-        } else if pairingOpen, beacon.pairing, pendingRequests.count < Self.maxPendingRequests {
+            // The other device should dial; if it has not after a while it does not trust
+            // this one, and the dial from here is what asks it (see DialFallback).
+            guard shouldDial || dialFallback.due(id) else { return }
+            dial(deviceId: id, candidates: [beacon.senderIP], port: UInt16(clamping: beacon.tcpPort), ignoreTieBreaker: !shouldDial) { _ in }
+        } else if shouldDial, pairingOpen, beacon.pairing, pendingRequests.count < Self.maxPendingRequests {
             dial(deviceId: id, candidates: [beacon.senderIP], port: UInt16(clamping: beacon.tcpPort), ignoreTieBreaker: false, purpose: .pairing) { _ in }
         }
     }

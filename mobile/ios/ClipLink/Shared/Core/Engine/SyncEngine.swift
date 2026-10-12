@@ -130,6 +130,8 @@ public final class SyncEngine {
     var pendingRequests: [PendingPairing] = []
     /// Devices whose pairing requests are held back for a while - see `RequestQuiet`.
     var requestQuiet = RequestQuiet()
+    /// Trusted devices that should have dialled this one and have not - see `DialFallback`.
+    var dialFallback = DialFallback()
     /// The request the user is looking at (the oldest).
     var pending: PendingPairing? { pendingRequests.first }
     /// When requests out of the blue were last let through, for the budget.
@@ -655,7 +657,8 @@ public final class SyncEngine {
             trust.untrust(deviceId)
             // Still trusted at the other end, it redials, and each connection used to
             // be a new request here: quiet for a while (see RequestQuiet).
-            requestQuiet.quiet(deviceId, for: RequestQuiet.afterRemoved, removed: true)
+            // A device that is not connected cannot be told now, and a link held for a
+            // request cannot send, so nothing is remembered for it here (see RequestQuiet).
             if let link = links.removeValue(forKey: deviceId) { unpairAndClose(link) }
             backoff[deviceId] = nil
             awaitingInbound[deviceId] = nil
@@ -917,7 +920,8 @@ public final class SyncEngine {
         s.ownDeviceId = ownId
         s.items = history.newestFirst.map(makeItem)
         s.devices = buildDeviceRows()
-        s.connectedCount = links.count
+        // Only links whose peer has answered count.
+        s.connectedCount = links.values.filter(\.hasReceivedSessionLine).count
         s.network = status
         s.log = logLines
         s.pairingOpen = pairingOpen
@@ -986,11 +990,14 @@ public final class SyncEngine {
             }
             let lastSeen = [sighting?.lastSeen, links[id]?.connectedAt].compactMap { $0 }.max()
             let connectionAddress = links[id]?.remoteAddress.flatMap { $0.isEmpty ? nil : $0 }
-            return DeviceRow(
+            // Linked is not connected: a device that is trusted here and was dialled may
+            // not have accepted yet (`waiting`) - nothing is exchanged until it has.
+            let proven = links[id]?.hasReceivedSessionLine == true
+            var row = DeviceRow(
                 deviceId: id,
                 name: nicknames[id] ?? peerName(for: id),
                 trusted: trusted != nil,
-                connected: links[id] != nil,
+                connected: proven,
                 addresses: addresses,
                 pairing: sighting?.pairing == true && now.timeIntervalSince(sighting?.pairingSeen ?? .distantPast) < 10,
                 lastSeen: lastSeen,
@@ -999,6 +1006,8 @@ public final class SyncEngine {
                 connectionAddress: connectionAddress,
                 addressDetails: addressDetails(for: id, connectionAddress: connectionAddress)
             )
+            row.waiting = trusted != nil && links[id] != nil && !proven
+            return row
         }
         // Stable: sorting by connection state and last-seen time made a row
         // jump to the top on every beacon or new connection.

@@ -128,6 +128,8 @@ public sealed partial class ClipLinkEngine : IDisposable
     private readonly ConcurrentDictionary<string, SeenPeer> seenPeers = new();
     // Devices whose pairing requests are held back for a while - see RequestQuiet.
     private readonly RequestQuiet requestQuiet = new();
+    // Trusted devices that should have dialled this one and have not - see DialFallback.
+    private readonly DialFallback dialFallback = new();
     // One GetFileToOpen at a time picks and writes a copy, so two opens of
     // the same entry at once don't both write the same new file.
     private readonly object openCopiesGate = new();
@@ -474,8 +476,12 @@ public sealed partial class ClipLinkEngine : IDisposable
             // differ in letter case the two sides disagreed about who dials,
             // so after an off-LAN (Tailscale) pairing neither side would
             // reconnect - or both would.
-            if (!connectionsByDeviceId.ContainsKey(other_device_id) && string.CompareOrdinal(other_device_id, ownId) < 0
-                && isTrusted && connectingTo.TryAdd(other_device_id, 0))
+            if (connectionsByDeviceId.ContainsKey(other_device_id)) dialFallback.Connected(other_device_id);
+            // (Or, for a trusted device that should have dialled this one and has not after
+            // a while - one that does not trust this PC - dial it anyway: see DialFallback.)
+            if (!connectionsByDeviceId.ContainsKey(other_device_id) && isTrusted
+                && (string.CompareOrdinal(other_device_id, ownId) < 0 || dialFallback.Due(other_device_id))
+                && connectingTo.TryAdd(other_device_id, 0))
             {
                 Console.WriteLine($"Discovered peer {other_device_id} at {other_port}");
                 try

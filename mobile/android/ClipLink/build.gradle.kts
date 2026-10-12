@@ -24,16 +24,6 @@ plugins {
 // command-line build started with a different TEMP. The build then landed
 // somewhere other than where the IDE looks, and Run installed a stale APK -
 // seen as INSTALL_FAILED_NO_MATCHING_ABIS from an old emulator-only build.
-val syncedFolderNames = listOf("onedrive", "dropbox", "google drive", "icloud")
-val projectPath = rootDir.absolutePath.replace('\\', '/').lowercase()
-val insideSyncedFolder = syncedFolderNames.any { projectPath.contains("/$it") }
+// Build output redirection is configured in settings.gradle.kts via gradle.beforeProject
+// so AGP initializes task outputs with the custom build directory before plugins run.
 
-if (insideSyncedFolder) {
-    val defaultBuildRoot = System.getenv("LOCALAPPDATA")?.let { "$it/cliplink-build" }
-        ?: "${System.getProperty("user.home")}/.cliplink-build"
-    val buildRoot = providers.gradleProperty("cliplink.buildRoot").orNull ?: defaultBuildRoot
-    allprojects {
-        layout.buildDirectory.set(file("$buildRoot/${rootProject.name}/${project.name}"))
-    }
-    logger.lifecycle("ClipLink: build output redirected to $buildRoot (project is inside a synced folder)")
-}

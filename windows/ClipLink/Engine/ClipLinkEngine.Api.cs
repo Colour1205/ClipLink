@@ -182,11 +182,16 @@ public sealed partial class ClipLinkEngine
         trustStore.Untrust(deviceId);
         // Still trusted at the other end, it redials, and each connection used
         // to be a new request here: quiet for a while (see RequestQuiet).
-        requestQuiet.Quiet(deviceId, RequestQuiet.AfterRemoved, removed: true);
         if (connectionsByDeviceId.TryRemove(deviceId, out var conn))
         {
             // Told, so it drops this device too and stops redialling (HandleUnpair).
             SendUnpairAndClose(conn);
+        }
+        else
+        {
+            // Not connected, so it cannot be told now: its next connection is answered
+            // with "unpair" instead of a prompt, once (see RequestQuiet).
+            requestQuiet.Quiet(deviceId, RequestQuiet.AfterRemoved, removed: true);
         }
         NotifyDevicesChanged();
     }

@@ -181,6 +181,20 @@ export class SyncManager {
     return this.connections.has(deviceId);
   }
 
+  // Linked and answered: the peer accepted this device (its first line decrypted). A
+  // device that is trusted here and was dialled may be linked without that - the peer
+  // may still be asking its user - and is not "connected" for the Devices tab.
+  isProven(deviceId: string): boolean {
+    const conn: PeerConnection | undefined = this.connections.get(deviceId);
+    return conn !== undefined && conn.isSessionProven;
+  }
+
+  get provenCount(): number {
+    let count: number = 0;
+    this.connections.forEach((conn: PeerConnection) => { if (conn.isSessionProven) count++; });
+    return count;
+  }
+
   // Wires up a freshly-handshaken connection into ongoing sync: registers
   // it, starts listening, and sends our current history - same sequence
   // Program.cs runs right after both the accept loop and ConnectToPeer
@@ -189,6 +203,8 @@ export class SyncManager {
     const previous = this.connections.get(conn.peerDeviceId);
     this.connections.set(conn.peerDeviceId, conn);
     this.connectionsChangedCallback?.(this.connections.size);
+    // The peer answering changes what the Devices tab shows (waiting -> connected).
+    conn.onSessionProven(() => { this.connectionsChangedCallback?.(this.connections.size); });
     conn.onMessage((msg: string) => { void this.handleMessage(msg, conn); });
     conn.onDisconnected(() => {
       // Its streams are dead whether or not it was replaced - see

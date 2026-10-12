@@ -24,9 +24,11 @@ import Foundation
 struct RequestQuiet {
     enum State: Equatable { case notQuiet, ignored, removed }
 
-    /// After an ignored request.
-    static let afterIgnored: TimeInterval = 30 * 60
-    /// After the user removed the device: it is not coming back on its own.
+    /// After the user tapped Ignore on its request. Short: Ignore is "not this one", and a
+    /// real request from it after that - the user trusting this device from there - must
+    /// get through.
+    static let afterIgnored: TimeInterval = 2 * 60
+    /// After the user removed a device that could not be told (it was not connected).
     static let afterRemoved: TimeInterval = 6 * 60 * 60
 
     private struct Entry {
