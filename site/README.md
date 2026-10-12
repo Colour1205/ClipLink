@@ -13,4 +13,4 @@ The ClipLink website, published to GitHub Pages by `.github/workflows/pages.yml`
 
 Links are relative, because the site lives under `/ClipLink/`, not at the domain root. Preview it with `python -m http.server` from this folder.
 
-When an Android APK, an AppGallery listing or a TestFlight link exists, update the matching download card in both languages. The Windows card says the installer is unsigned; take that note out (and update the code signing policy's status box) once releases are signed.
+The Android card has two buttons: the APK on the GitHub release (the script above keeps its link on the newest release's `.apk`, the fixed v2.0.0 link is the fallback) and Google Play (`play.google.com/store/apps/details?id=io.uaena.cliplink`, which only opens once the listing is live). When the next Android release is out, the card follows it by itself. When an AppGallery listing or a TestFlight link exists, update the matching download card in both languages. The Windows card says the installer is unsigned; take that note out (and update the code signing policy's status box) once releases are signed.
