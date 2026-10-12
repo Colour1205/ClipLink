@@ -145,6 +145,10 @@
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    Text="Devices running ClipLink on this network show up here. Select Add device to pair one." />
                     </StackPanel>
+
+                    <!-- Where the other devices get ClipLink: the website has the
+                         downloads for Windows, Android, HarmonyOS and iOS. -->
+                    <TextBlock Style="{StaticResource CaptionSecondary}" TextWrapping="Wrap" Margin="1,28,0,0">Get ClipLink on your other devices: <Hyperlink NavigateUri="https://cliplink.uaena.io/">cliplink.uaena.io</Hyperlink></TextBlock>
                 </StackPanel>
             </Grid>
         </ScrollViewer>
@@ -211,8 +215,11 @@
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
-                            <!-- Always dark on white, whatever the theme - scanners expect it. -->
-                            <Border Width="184" Height="184" CornerRadius="8" Background="White" Padding="6"
+                            <!-- Always dark on white, whatever the theme - scanners expect it.
+                                 The code is a link to the website with the pairing info in
+                                 it (see PairingLink), so it has more modules than the bare
+                                 JSON did: a bigger box keeps each one a few pixels wide. -->
+                            <Border Width="224" Height="224" CornerRadius="8" Background="White" Padding="6"
                                     HorizontalAlignment="Left" VerticalAlignment="Top">
                                 <Grid>
                                     <Image x:Name="QrImage" Stretch="Uniform"
@@ -269,6 +276,15 @@
 
                     <TextBlock Style="{StaticResource CaptionSecondary}" TextWrapping="Wrap" Margin="1,16,0,0"
                                Text="Devices on the same network pair by themselves while both have this screen open - the code and the address are only for when they can't find each other." />
+
+                    <TextBlock Text="Get ClipLink on your other devices" Style="{StaticResource SectionHeader}" />
+                    <Border Style="{StaticResource CardBorder}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"
+                                       Text="ClipLink for Windows, Android, HarmonyOS and iOS is on the website." />
+                            <HyperlinkButton Content="cliplink.uaena.io" NavigateUri="https://cliplink.uaena.io/" Padding="0" Margin="0,4,0,0" />
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
             </Grid>
         </ScrollViewer>

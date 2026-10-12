@@ -18,6 +18,13 @@ with the always-on P2P node running inside it.
 Stack: .NET 10 (C#) — WinUI 3, Win32 clipboard access through WinForms, plain
 sockets.
 
+The pairing QR code is a link to the website, `https://cliplink.uaena.io/pair/#<pairing info>`
+(`ClipLink/Engine/PairingLink.cs`; the format is in `docs/protocol.md`), so a phone's own
+scanner opens ClipLink there if it is installed and the website, with the
+downloads, if not. "Copy pairing info" still copies the bare JSON, and the
+pair-by-address box takes either. The Devices page and the pairing view also
+carry the website's address, for the other devices' downloads.
+
 ## Build, publish, run
 
 Needs the .NET 10 SDK (NuGet packages download on the first build). No Visual

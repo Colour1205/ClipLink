@@ -51,6 +51,7 @@ import { Discovery, PeerBeacon } from '../networking/Discovery';
 import { TcpServer, connectTcp } from '../networking/TcpTransport';
 import { HandshakeReport, PeerConnection, PeerVerdict, TcpSocketAdapter, TcpSocketConnectionAdapter, sameIdentityKey } from '../networking/PeerConnection';
 import { PAIRING_ACTION_EVENT, PAIRING_ACTION_OPEN, PAIRING_ACTION_PARAM, PAIRING_ACTION_TRUST, PAIRING_ACTION_IGNORE, PAIRING_DEVICE_PARAM } from '../networking/PairingActions';
+import { PAIRING_LINK_EVENT, takePendingPairingLink, unwrapPairingLink, wrapPairingLink } from '../networking/PairingLink';
 import { SyncManager } from '../networking/SyncManager';
 import { connection } from '@kit.NetworkKit';
 import { signEntry, ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
@@ -330,6 +331,9 @@ const DEVICES_LIST_PANE_FRACTION: number = 0.42;
 // be: a form stretched across a tablet is hard to read, so it keeps a
 // phone-like column and sits in the middle (the guide's indent layout).
 const SUB_SCREEN_MAX_WIDTH_VP: number = 680;
+// The website: the downloads for Windows, Android, HarmonyOS and iOS.
+const WEBSITE_HOST: string = 'cliplink.uaena.io';
+const WEBSITE_URL: string = 'https://cliplink.uaena.io/';
 const GLOW_HEIGHT_ABOVE_INSET: number = 460;
 const GLOW_OPACITY: number = 0.13;
 const GLOW_STOPS: number = 8;
@@ -791,6 +795,10 @@ struct Index {
   private onSharedIn = (): void => {
     void this.drainPendingShares();
   };
+  // A scanner read another device's pairing QR code and opened ClipLink with it.
+  private onPairingLinkEvent = (): void => {
+    void this.drainPairingLink();
+  };
   private connectingTo: Set<string> = new Set();
   private offLanReconnectTimerId: number = -1;
   // Real Navigation/NavDestination stacks, one per tab that needs its own
@@ -948,6 +956,7 @@ struct Index {
     // known, below.
     context.eventHub.on(SHARED_IN_EVENT, this.onSharedIn);
     context.eventHub.on(PAIRING_ACTION_EVENT, this.onPairingAction);
+    context.eventHub.on(PAIRING_LINK_EVENT, this.onPairingLinkEvent);
 
     this.tcpServer.onConnection((conn: socket.TCPSocketConnection) => {
       const identity = new DeviceIdentity();
@@ -1000,6 +1009,8 @@ struct Index {
       this.refreshPairingPayload();
       void this.loadHistoryIntoList();
       void this.drainPendingShares();
+      // A pairing link the app was opened with (a cold start from a scan).
+      void this.drainPairingLink();
       // Same helper the foreground restart uses, and its failure is
       // surfaced rather than swallowed - a bind failure here means no
       // peer is ever discovered, which previously looked like "sync just
@@ -1154,6 +1165,7 @@ struct Index {
     this.mainWindow?.off('windowSizeChange', this.onWindowSizeChange);
     (getContext(this) as common.UIAbilityContext).eventHub.off(SHARED_IN_EVENT, this.onSharedIn);
     (getContext(this) as common.UIAbilityContext).eventHub.off(PAIRING_ACTION_EVENT, this.onPairingAction);
+    (getContext(this) as common.UIAbilityContext).eventHub.off(PAIRING_LINK_EVENT, this.onPairingLinkEvent);
     this.watcher.stopListening();
     void this.discovery.stop();
     this.tcpServer.stop();
@@ -2338,30 +2350,7 @@ struct Index {
     const context = getContext(this) as common.UIAbilityContext;
     try {
       const result = await scanBarcode.startScanForResult(context);
-      let pairingInfo: PairingInfo | null = null;
-      try {
-        pairingInfo = JSON.parse(result.originalValue) as PairingInfo;
-      } catch (e) {
-        // not JSON - fall through to bare-key handling below
-      }
-      const scannedKey: string = pairingInfo !== null && typeof pairingInfo.PublicKey === 'string' ? pairingInfo.PublicKey : '';
-      const publicKey = scannedKey.length > 0 ? scannedKey : result.originalValue;
-      if (publicKey.length === 0) {
-        this.scanStatus = this.str($r('app.string.scan_empty'));
-        return;
-      }
-      const address: string | undefined = pairingInfo !== null && typeof pairingInfo.Address === 'string' ? pairingInfo.Address : undefined;
-      // Optional - codes from older builds carry no name.
-      const sentName: string | undefined = pairingInfo !== null ? pairingInfo.Name : undefined;
-      const scannedName: string | null = typeof sentName === 'string' ? normalizeDeviceName(sentName) : null;
-      if (address === undefined) {
-        this.scanStatus = this.str($r('app.string.scan_no_address'), this.peerLabel(publicKey, scannedName));
-        return;
-      }
-      const candidates = this.addressCandidatesFor(publicKey, address);
-      this.scanStatus = this.str($r('app.string.scan_connecting'), candidates[0]);
-      const dial = await this.connectToFirstReachable(candidates, TCP_PORT);
-      this.scanStatus = this.pairingOutcomeMessage(dial);
+      await this.pairFromScanned(result.originalValue);
     } catch (e) {
       const be = e as BusinessError;
       if (be.code === 1000500002) {
@@ -2372,6 +2361,56 @@ struct Index {
     }
   }
 
+  // What a scan read: the pairing link the QR code carries (see
+  // networking/PairingLink.ets) or, from an older build, the bare pairing
+  // JSON. Also what a link that opened the app comes to (drainPairingLink).
+  private async pairFromScanned(scanned: string): Promise<void> {
+    const text: string = unwrapPairingLink(scanned);
+    let pairingInfo: PairingInfo | null = null;
+    try {
+      pairingInfo = JSON.parse(text) as PairingInfo;
+    } catch (e) {
+      // not JSON - fall through to bare-key handling below
+    }
+    const scannedKey: string = pairingInfo !== null && typeof pairingInfo.PublicKey === 'string' ? pairingInfo.PublicKey : '';
+    const publicKey = scannedKey.length > 0 ? scannedKey : text;
+    if (publicKey.length === 0) {
+      this.scanStatus = this.str($r('app.string.scan_empty'));
+      return;
+    }
+    const address: string | undefined = pairingInfo !== null && typeof pairingInfo.Address === 'string' ? pairingInfo.Address : undefined;
+    // Optional - codes from older builds carry no name.
+    const sentName: string | undefined = pairingInfo !== null ? pairingInfo.Name : undefined;
+    const scannedName: string | null = typeof sentName === 'string' ? normalizeDeviceName(sentName) : null;
+    if (address === undefined) {
+      this.scanStatus = this.str($r('app.string.scan_no_address'), this.peerLabel(publicKey, scannedName));
+      return;
+    }
+    const candidates = this.addressCandidatesFor(publicKey, address);
+    this.scanStatus = this.str($r('app.string.scan_connecting'), candidates[0]);
+    const dial = await this.connectToFirstReachable(candidates, TCP_PORT);
+    this.scanStatus = this.pairingOutcomeMessage(dial);
+  }
+
+  // A scanner read another device's pairing QR code and opened ClipLink with
+  // the link (EntryAbility queued it): show the pairing screen and start pairing,
+  // as if the code had been scanned in the app. (Both devices still have to trust
+  // each other - the code only says where to dial.) Waits for the device key,
+  // like drainPendingShares; the call from the key's arrival picks it up.
+  private async drainPairingLink(): Promise<void> {
+    if (this.ownDeviceId.length === 0) return;
+    const link: string | null = takePendingPairingLink();
+    if (link === null) return;
+    if (this.meScreen !== 'pairing') {
+      this.openPairingFromDevices();
+    }
+    try {
+      await this.pairFromScanned(link);
+    } catch (e) {
+      this.scanStatus = this.str($r('app.string.scan_failed'), `${(e as BusinessError).message}`);
+    }
+  }
+
   // Manual counterpart to scanToPair, for when there's no QR to scan (e.g.
   // Windows has no camera) - type/paste an address directly. Accepts either
   // a bare IP or the full {PublicKey,Address} pairing JSON (only the
@@ -2379,7 +2418,8 @@ struct Index {
   // from the signature-verified handshake, not from anything typed here).
   async pairByAddress(): Promise<void> {
     if (this.pairingInProgress) return;
-    const raw = this.pairByAddressInput.trim();
+    // A pasted pairing link carries the JSON (see networking/PairingLink.ets).
+    const raw = unwrapPairingLink(this.pairByAddressInput.trim()).trim();
     if (raw.length === 0) {
       promptAction.showToast({ message: $r('app.string.toast_address_empty') });
       return;
@@ -3097,6 +3137,14 @@ struct Index {
     // precisely what silently killed connection registration and the paste
     // button when the timestamp rewrite accidentally replaced this line.
     this.syncLog = [`${hh}:${mm}:${ss}  ${message}`, ...this.syncLog].slice(0, 30);
+  }
+
+  // Opens the website in the browser. A failure (no browser) is only logged:
+  // nothing to tell the user that they could act on.
+  private openWebsite(): void {
+    (getContext(this) as common.UIAbilityContext).openLink(WEBSITE_URL).catch((err: BusinessError) => {
+      this.log(`Could not open ${WEBSITE_HOST}: ${err.code} ${err.message}`);
+    });
   }
 
   // Just the ids, in display order: all the Devices list's ForEach needs to
@@ -5063,6 +5111,28 @@ struct Index {
     .width('100%')
   }
 
+  // "Get ClipLink on your other devices": the website's address, a tap opens
+  // it in the browser. On the Devices tab and the pairing screen, where it
+  // comes up that the other device does not have ClipLink yet.
+  @Builder
+  websiteLinkCard() {
+    Row({ space: 12 }) {
+      Column({ space: 2 }) {
+        Text($r('app.string.website_title')).fontSize(14).fontWeight(FontWeight.Medium)
+        Text(WEBSITE_HOST).fontSize(13).fontColor(this.accent())
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      Image($r('app.media.ic_chevron_right')).width(16).height(16)
+    }
+    .width('100%')
+    .padding(16)
+    .borderRadius(16)
+    .backgroundColor(this.cardFill())
+    .clickEffect({ level: ClickEffectLevel.MIDDLE })
+    .onClick(() => { tapHaptic(); this.openWebsite(); })
+  }
+
   @Builder
   devicesContent() {
     List({ space: 10, scroller: this.devicesScroller }) {
@@ -5115,6 +5185,7 @@ struct Index {
           ListItem() { this.deviceCard(deviceId) }
         }, (deviceId: string) => deviceId)
       }
+      ListItem() { this.websiteLinkCard() }
       // The matching clearance under the last card, above the tab pill.
       ListItem() {
         Row().width('100%').height(this.bottomInsetVp + this.TAB_PILL_CLEARANCE - 10)
@@ -5864,7 +5935,10 @@ struct Index {
 
         Column({ space: 12 }) {
           if (this.myPairingPayload.length > 0) {
-            QRCode(this.myPairingPayload)
+            // A link to the website's /pair page with the pairing info in it: the
+            // system scanner opens ClipLink, or the website when it is not installed
+            // (see networking/PairingLink.ets). Copy still copies the bare info.
+            QRCode(wrapPairingLink(this.myPairingPayload))
               .width(220)
               .height(220)
               .color(Color.Black)
@@ -5927,6 +6001,8 @@ struct Index {
         .borderRadius(16)
         .backgroundColor(this.cardFill())
         .alignItems(HorizontalAlign.Start)
+
+        this.websiteLinkCard()
       }
       .width('100%')
       // topInsetVp + a fixed offset here: the HDS title bar floats over

@@ -3,6 +3,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { enqueueShares, intakeShare, isShareWant, SHARED_IN_EVENT, SharedIn, sweepShareCopies } from '../share/ShareIntake';
 import { PAIRING_ACTION_EVENT, PairingAnswer, readPairingAnswer } from '../networking/PairingActions';
+import { PAIRING_LINK_EVENT, queuePairingLink, readPairingLink } from '../networking/PairingLink';
 
 const DOMAIN = 0x0000;
 
@@ -23,6 +24,7 @@ export default class EntryAbility extends UIAbility {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
     sweepShareCopies(this.context);
     this.acceptShare(want, launchParam);
+    this.acceptPairingLink(want);
   }
 
   // ClipLink is a singleton UIAbility, so a share while it's running
@@ -30,6 +32,17 @@ export default class EntryAbility extends UIAbility {
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     this.acceptShare(want, launchParam);
     this.acceptPairingAnswer(want);
+    this.acceptPairingLink(want);
+  }
+
+  // A scanner read another device's pairing QR code, which is a link to the
+  // website's /pair page (see networking/PairingLink.ets): queued for Index.ets,
+  // which shows the pairing screen and starts pairing once its engine is ready.
+  private acceptPairingLink(want: Want): void {
+    const link: string | null = readPairingLink(want);
+    if (link === null) return;
+    queuePairingLink(link);
+    this.context.eventHub.emit(PAIRING_LINK_EVENT);
   }
 
   // A Trust or Ignore button on the pairing notification, or the

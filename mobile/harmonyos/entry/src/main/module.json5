@@ -108,6 +108,29 @@
                 "maxFileSupported": 50
               }
             ]
+          },
+          {
+            // The pairing QR code is a link to https://cliplink.uaena.io/pair/ (see
+            // networking/PairingLink.ets). With ClipLink installed the system
+            // scanner opens it here (App Linking); without, the website opens.
+            // domainVerify: the site's /.well-known/applinking.json names this
+            // app by its appIdentifier (AppGallery Connect > the app > App
+            // information; `bm dump -n io.uaena.cliplink` shows it for an
+            // installed build). pathStartWith covers /pair and /pair/.
+            "entities": [
+              "entity.system.browsable"
+            ],
+            "actions": [
+              "ohos.want.action.viewData"
+            ],
+            "uris": [
+              {
+                "scheme": "https",
+                "host": "cliplink.uaena.io",
+                "pathStartWith": "pair"
+              }
+            ],
+            "domainVerify": true
           }
         ]
       }

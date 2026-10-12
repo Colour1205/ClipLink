@@ -115,7 +115,11 @@ public sealed partial class DevicesPage : Page
         {
             // Looks up the Tailscale address afresh (runs its CLI).
             string payload = await host.Engine.GetPairingPayloadAsync();
-            byte[] png = await Task.Run(() => MakeQr(payload));
+            // The code is a link to the website's /pair page with the pairing
+            // info in it (see PairingLink): a phone's own scanner opens its
+            // ClipLink app, or the website when it has none. Copy still copies
+            // the bare info.
+            byte[] png = await Task.Run(() => MakeQr(PairingLink.Wrap(payload)));
             using var stream = new InMemoryRandomAccessStream();
             await stream.WriteAsync(png.AsBuffer());
             stream.Seek(0);

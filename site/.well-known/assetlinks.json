@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "io.uaena.cliplink",
+      "sha256_cert_fingerprints": [
+        "D0:E2:80:75:FF:C6:D4:77:2D:27:E2:04:04:04:37:D7:36:C6:AF:B3:44:D4:AA:61:A9:FE:4A:98:C3:59:10:40"
+      ]
+    }
+  }
+]

@@ -178,7 +178,7 @@ enum MeFormat {
 
     static var appVersion: String {
         let info = Bundle.main.infoDictionary
-        let version = info?["CFBundleShortVersionString"] as? String ?? "1.0"
+        let version = info?["CFBundleShortVersionString"] as? String ?? "2.0"
         let build = info?["CFBundleVersion"] as? String
         return build.map { "Version \(version) (\($0))" } ?? "Version \(version)"
     }

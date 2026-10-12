@@ -309,9 +309,11 @@ public struct PairingInfo: Equatable {
     }
 
     /// Only the JSON pairing payload - nil for anything else, including a bare
-    /// address (which callers treat as an address to dial, never as a key).
+    /// address (which callers treat as an address to dial, never as a key). The
+    /// payload may come wrapped as a pairing link (what the QR code carries,
+    /// see `PairingLink`).
     public static func parse(_ raw: String) -> PairingInfo? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = PairingLink.unwrap(raw).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               let obj = WireJSON.object(trimmed),
               let key = WireJSON.str(obj, "PublicKey"), !key.isEmpty

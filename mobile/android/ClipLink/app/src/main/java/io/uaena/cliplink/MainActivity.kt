@@ -23,6 +23,7 @@ import androidx.lifecycle.lifecycleScope
 import io.uaena.cliplink.clipboard.ClipboardBridge
 import io.uaena.cliplink.engine.ClipLinkEngine
 import io.uaena.cliplink.engine.SyncedItem
+import io.uaena.cliplink.net.PairingLink
 import io.uaena.cliplink.service.ClipLinkService
 import io.uaena.cliplink.ui.AppActions
 import io.uaena.cliplink.ui.AppState
@@ -49,6 +50,12 @@ class MainActivity : ComponentActivity() {
     private var pairScreenOpen = false
 
     private val uiPrefs by lazy { getSharedPreferences("cliplink_ui", MODE_PRIVATE) }
+
+    /**
+     * A pairing link ClipLink was opened with - a scanner read another
+     * device's pairing QR code (see PairingLink) - until the UI has taken it up.
+     */
+    private var pendingPairLink by mutableStateOf<String?>(null)
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -90,6 +97,8 @@ class MainActivity : ComponentActivity() {
         // permission that is permanently denied, and so its "off" notice, on
         // every rotation.
         if (savedInstanceState == null) {
+            // Not for a recreation: the intent is still this one, and it was taken.
+            pendingPairLink = pairLinkIn(intent)
             requestPermissions()
             // The human-named copies made for sharing are never needed for
             // long, and each doubles a blob's storage: clear out the stale ones.
@@ -149,6 +158,8 @@ class MainActivity : ComponentActivity() {
                         toast = toast,
                     ),
                     pairStatus = pairStatus,
+                    pairLink = pendingPairLink,
+                    onPairLinkTaken = { pendingPairLink = null },
                     actions = AppActions(
                         synced = SyncedActions(
                             onCopy = ::copyItem,
@@ -209,6 +220,17 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    /** A pairing link that arrives while ClipLink is already running (launchMode singleTask). */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pairLinkIn(intent)?.let { pendingPairLink = it }
+    }
+
+    /** The pairing link an intent carries, if it is one of ClipLink's. */
+    private fun pairLinkIn(intent: Intent?): String? =
+        intent?.takeIf { it.action == Intent.ACTION_VIEW }?.dataString?.takeIf { PairingLink.isLink(it) }
 
     override fun onStart() {
         super.onStart()

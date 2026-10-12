@@ -401,6 +401,10 @@
       "value": "已信任的设备以及同一网络中的附近设备会显示在这里。"
     },
     {
+      "name": "website_title",
+      "value": "在其他设备上获取 ClipLink"
+    },
+    {
       "name": "me_section_device",
       "value": "设备"
     },

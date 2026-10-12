@@ -93,7 +93,14 @@ data class AppActions(
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
+fun ClipLinkApp(
+    state: AppState,
+    actions: AppActions,
+    pairStatus: String,
+    /** A pairing link the app was opened with (a scanner read a pairing QR code), until taken up. */
+    pairLink: String? = null,
+    onPairLinkTaken: () -> Unit = {},
+) {
     // All of this is rememberSaveable: the Activity is destroyed and rebuilt
     // for a rotation, a dark-mode or a language switch, and everything held in
     // plain remember went back to the Synced tab, closed the open item and the
@@ -154,6 +161,19 @@ fun ClipLinkApp(state: AppState, actions: AppActions, pairStatus: String) {
         val before = reportedPairing
         reportedPairing = pairing
         if (pairing || before != null) actions.onPairingOpenChange(pairing)
+    }
+
+    // Opened by a scanner reading another device's pairing code: show the pairing
+    // screen and start pairing, as if the code had been scanned in the app. (Both
+    // devices still have to trust each other - the code only says where to dial.)
+    LaunchedEffect(pairLink) {
+        val link = pairLink ?: return@LaunchedEffect
+        scanning = false
+        detailKey = null
+        deviceDetailId = null
+        pairing = true
+        actions.onPair(link)
+        onPairLinkTaken()
     }
 
     LaunchedEffect(state.toast) {

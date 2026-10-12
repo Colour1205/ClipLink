@@ -40,6 +40,7 @@ struct PairingView: View {
                             .foregroundColor(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 4)
+                        card { GetClipLinkRow() }
                     }
                     .padding(.horizontal, Theme.pagePadding)
                     .padding(.top, 8)
@@ -138,7 +139,11 @@ struct PairingView: View {
             VStack(spacing: 14) {
                 Text("This \(ThisDeviceNoun.current)'s Code")
                     .font(.headline)
-                PairingQRCodeView(payload: payload)
+                // A link to the website's /pair page with the pairing info in it:
+                // the system camera opens ClipLink, or the website when it is
+                // not installed (see PairingLink). The text below, and Copy,
+                // still give the bare info.
+                PairingQRCodeView(payload: payload.isEmpty ? "" : PairingLink.wrap(payload))
                 Text("Scan this on the other device with its pairing screen open.")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
