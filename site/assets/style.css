@@ -254,6 +254,9 @@ h2 { font-size: clamp(1.7rem, 3.6vw, 2.4rem); margin: 0 0 12px; letter-spacing: 
 .dl h3 .badge { margin-left: 8px; vertical-align: middle; }
 .dl .note { font-size: 0.86rem; color: var(--muted); }
 .dl .btn { margin-top: auto; width: 100%; padding-left: 14px; padding-right: 14px; text-align: center; }
+/* Two ways to get one platform (a file and a store): kept together at the bottom of the card. */
+.dl .dl-actions { margin-top: auto; display: flex; flex-direction: column; gap: 10px; }
+.dl .dl-actions .btn { margin-top: 0; }
 .dl.is-yours { border-color: var(--accent); box-shadow: var(--glass-shadow), 0 0 0 1px var(--accent), inset 0 1px 0 var(--glass-border); }
 
 /* ---- faq ---- */
