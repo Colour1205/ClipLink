@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Code signing policy - ClipLink</title>
+  <meta name="description" content="How ClipLink for Windows is built and code signed, who can approve a release, and what the program does with your data.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" type="image/png" href="assets/icon-64.png">
+  <link rel="stylesheet" href="assets/style.css">
+  <link rel="alternate" hreflang="en" href="https://colour1205.github.io/ClipLink/code-signing-policy.html">
+  <link rel="alternate" hreflang="zh-Hans" href="https://colour1205.github.io/ClipLink/zh/code-signing-policy.html">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="./"><img src="assets/icon-64.png" alt="" width="32" height="32"> ClipLink</a>
+      <nav class="nav" aria-label="Main">
+        <a class="keep" href="./#download">Download</a>
+        <a href="https://github.com/Colour1205/ClipLink">GitHub</a>
+        <a class="lang" href="zh/code-signing-policy.html" hreflang="zh-Hans" lang="zh-Hans">中文</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main" class="wrap prose">
+    <h1>Code signing policy</h1>
+    <p>ClipLink for Windows is code signed so that Windows can show who published it and warn you if a file was changed after it was built. This page says how releases are made and signed.</p>
+
+    <div class="callout"><strong>Status:</strong> code signing is being set up. The current beta installers are not signed yet, so Windows SmartScreen may warn about them. This page will be updated when signed releases are available.</div>
+
+    <h2>How a release is made</h2>
+    <ul>
+      <li>ClipLink is open source under the <a href="https://github.com/Colour1205/ClipLink/blob/main/LICENSE">Apache License 2.0</a>. Everything that goes into a release is in the <a href="https://github.com/Colour1205/ClipLink">public repository</a>.</li>
+      <li>Release files are built automatically by GitHub Actions from the source in that repository. Nothing is built or changed by hand.</li>
+      <li>The built files are then submitted for signing, and each signing request has to be approved by a maintainer before the file is signed. A request that doesn't match a build of the repository is not approved.</li>
+      <li>Only the programs that ClipLink itself builds are signed: the ClipLink app and its installer. Third-party libraries that ship with the app keep their own publishers' signatures.</li>
+      <li>Signed files are published on the <a href="https://github.com/Colour1205/ClipLink/releases">releases page</a>.</li>
+    </ul>
+
+    <h2>Team roles</h2>
+    <ul>
+      <li><strong>Committers and reviewers:</strong> the repository owner, <a href="https://github.com/Colour1205">Colour1205</a>.</li>
+      <li><strong>Approvers:</strong> the repository owner, <a href="https://github.com/Colour1205">Colour1205</a>.</li>
+    </ul>
+    <p>Changes reach the main branch through pull requests. If more maintainers join, they will be listed here.</p>
+
+    <h2>Privacy</h2>
+    <ul>
+      <li>ClipLink does not send information to any server run by its developers, and it has no accounts.</li>
+      <li>The program does not transfer any information to other networked systems unless the user specifically asks it to. What you copy goes only to devices you have chosen to pair, directly.</li>
+      <li>This website has no cookies and no analytics. When the page loads, your browser asks GitHub's public API for the latest release, so GitHub sees that request.</li>
+    </ul>
+
+    <h2>Reporting a problem</h2>
+    <p>If you think a signed file is wrong, or you found a security problem, please <a href="https://github.com/Colour1205/ClipLink/issues">open an issue</a>.</p>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <span>ClipLink &middot; Apache 2.0</span>
+      <a href="./">Home</a>
+      <a href="https://github.com/Colour1205/ClipLink/releases">Releases</a>
+      <a href="https://github.com/Colour1205/ClipLink/blob/main/LICENSE">Licence</a>
+    </div>
+  </footer>
+</body>
+</html>
