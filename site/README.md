@@ -4,6 +4,7 @@ The ClipLink website, published to GitHub Pages by `.github/workflows/pages.yml`
 
 - `index.html`, `code-signing-policy.html` - English.
 - `zh/` - the same two pages in Simplified Chinese. Change a page, change its twin.
+- `assets/shot-*.webp` - real screenshots (iOS, Android, HarmonyOS, Windows), resized. Replace them when the UI changes; keep the file names so both pages pick them up. The HarmonyOS one is in Chinese.
 - `assets/style.css` - the acrylic / glass design (blurred translucent panels over a soft colour field, squircle corners, floating shapes). Light and dark follow the visitor's system.
 - `assets/site.js` - points the download buttons at the newest release's files via GitHub's public API (a platform with no file yet stays "Coming soon"), marks the visitor's own platform, and offers a switch to Chinese for Chinese-language browsers. The page works without it.
 
