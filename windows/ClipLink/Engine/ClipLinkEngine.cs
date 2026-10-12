@@ -126,6 +126,8 @@ public sealed partial class ClipLinkEngine : IDisposable
     private readonly ConcurrentDictionary<string, byte> connectingTo = new();
     // Latest beacon per other device - see SeenPeer.
     private readonly ConcurrentDictionary<string, SeenPeer> seenPeers = new();
+    // Devices whose pairing requests are held back for a while - see RequestQuiet.
+    private readonly RequestQuiet requestQuiet = new();
     // One GetFileToOpen at a time picks and writes a copy, so two opens of
     // the same entry at once don't both write the same new file.
     private readonly object openCopiesGate = new();

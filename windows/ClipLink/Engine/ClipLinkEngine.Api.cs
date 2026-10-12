@@ -131,6 +131,7 @@ public sealed partial class ClipLinkEngine
         RequireStores();
         if (string.IsNullOrWhiteSpace(deviceId) || DeviceIdentity.IsSameKey(deviceId, ownId)) return false;
         if (blockStore.IsBlocked(deviceId)) return false; // unblock it first
+        requestQuiet.Release(deviceId); // the user asked for it
         if (trustStore.IsTrusted(deviceId)) return true;
         seenPeers.TryGetValue(deviceId, out var seen);
         trustStore.Trust(deviceId, seen?.AdvertisedAddress ?? seen?.LanAddress);
@@ -179,9 +180,13 @@ public sealed partial class ClipLinkEngine
     {
         RequireStores();
         trustStore.Untrust(deviceId);
+        // Still trusted at the other end, it redials, and each connection used
+        // to be a new request here: quiet for a while (see RequestQuiet).
+        requestQuiet.Quiet(deviceId, RequestQuiet.AfterRemoved, removed: true);
         if (connectionsByDeviceId.TryRemove(deviceId, out var conn))
         {
-            conn.Close();
+            // Told, so it drops this device too and stops redialling (HandleUnpair).
+            SendUnpairAndClose(conn);
         }
         NotifyDevicesChanged();
     }
@@ -243,6 +248,8 @@ public sealed partial class ClipLinkEngine
         // closing the pairing UI leaves a request that is waiting alone (it
         // expires on its own, see IgnoreWhenUnanswered).
         pairingState.ModeOpen = open;
+        // Somebody is expecting requests now: no device stays held back.
+        if (open) requestQuiet.Clear();
     }
 
     // The pairing request waiting for Accept/Reject, or null. The same thing
@@ -314,7 +321,10 @@ public sealed partial class ClipLinkEngine
         {
             return false;
         }
-        taken.Value.conn.Close();
+        requestQuiet.Quiet(taken.Value.conn.PeerDeviceId, RequestQuiet.AfterIgnored);
+        // Told too: if it trusts this device, that was never going to become a
+        // pairing, and it can stop asking (HandleUnpair).
+        SendUnpairAndClose(taken.Value.conn);
         RaisePairingResolved(taken.Value.conn.PeerDeviceId, PairingDecision.Rejected);
         return true;
     }
@@ -335,6 +345,8 @@ public sealed partial class ClipLinkEngine
         {
             return PairOutcome.NotRunning;
         }
+        // The user asked to pair: nothing is held back from this.
+        requestQuiet.Clear();
         if (!TryParseAddress(addressOrPayload, out string host, out int targetPort))
         {
             return PairOutcome.InvalidAddress;

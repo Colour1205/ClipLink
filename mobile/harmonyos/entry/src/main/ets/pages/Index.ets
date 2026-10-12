@@ -45,13 +45,14 @@ import { deviceFingerprint, effectiveDeviceName, getLocalDeviceName, normalizeDe
 import { FileStore } from '../storage/FileStore';
 import { FilePayload } from '../storage/FilePayload';
 import { safeFileName } from '../storage/FileNames';
-import { SHARED_IN_EVENT, SharedIn, removeQuietly, takePendingShares } from '../share/ShareIntake';
+import { SHARED_IN_EVENT, SharedIn, enqueueShares, intakePicked, removeQuietly, takePendingShares } from '../share/ShareIntake';
 import { entryKey } from '../storage/DeletedEntries';
 import { Discovery, PeerBeacon } from '../networking/Discovery';
 import { TcpServer, connectTcp } from '../networking/TcpTransport';
 import { HandshakeReport, PeerConnection, PeerVerdict, TcpSocketAdapter, TcpSocketConnectionAdapter, sameIdentityKey } from '../networking/PeerConnection';
 import { PAIRING_ACTION_EVENT, PAIRING_ACTION_OPEN, PAIRING_ACTION_PARAM, PAIRING_ACTION_TRUST, PAIRING_ACTION_IGNORE, PAIRING_DEVICE_PARAM } from '../networking/PairingActions';
 import { PAIRING_LINK_EVENT, takePendingPairingLink, unwrapPairingLink, wrapPairingLink } from '../networking/PairingLink';
+import { QUIET_AFTER_IGNORED_MS, QUIET_AFTER_REMOVED_MS, QuietState, RequestQuiet } from '../networking/RequestQuiet';
 import { SyncManager } from '../networking/SyncManager';
 import { connection } from '@kit.NetworkKit';
 import { signEntry, ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
@@ -799,6 +800,8 @@ struct Index {
   private onPairingLinkEvent = (): void => {
     void this.drainPairingLink();
   };
+  // Devices whose pairing requests are held back for a while - see RequestQuiet.
+  private requestQuiet: RequestQuiet = new RequestQuiet();
   private connectingTo: Set<string> = new Set();
   private offLanReconnectTimerId: number = -1;
   // Real Navigation/NavDestination stacks, one per tab that needs its own
@@ -946,6 +949,7 @@ struct Index {
     // rebuilt a connected-ID set: every link was registered but never
     // listened on, so no traffic flowed and the peer redialled every 2s.
     // Per-row status is derived in deviceRows() instead.
+    syncManager.onUnpaired((deviceId: string) => { void this.handleUnpaired(deviceId); });
     syncManager.onConnectionsChanged((count: number) => {
       netLog(`connections=${count}`);
       this.connectedCount = count;
@@ -1212,6 +1216,8 @@ struct Index {
     const previous = this.meScreen;
     this.meScreen = screen;
     this.pairingOpen = screen === 'pairing';
+    // Somebody is expecting requests now: no device stays held back.
+    if (screen === 'pairing') this.requestQuiet.clear();
     if (screen !== 'passcode') this.passcodeChanging = false;
     if (screen === 'main' && previous !== 'main') {
       this.meNavStack.pop(true);
@@ -1451,6 +1457,15 @@ struct Index {
       }
       return;
     }
+    const quiet: QuietState = this.requestQuiet.state(peerConn.peerDeviceId);
+    if (quiet !== 'none') {
+      // Ignored, or removed, a little while ago: no new prompt for it (see
+      // RequestQuiet). One that was removed is told so again - it may not have
+      // heard the first time.
+      this.log(`a pairing request from ${shortDeviceId(peerConn.peerDeviceId)} was held back - it was ignored or removed a while ago`);
+      this.closeAndTell(peerConn, quiet === 'removed');
+      return;
+    }
     if (this.pendingPairingConn !== null) {
       // Already asking about a different candidate - don't juggle two at
       // once; whichever arrived second just doesn't get to pair this round
@@ -1498,7 +1513,7 @@ struct Index {
   private expirePairingRequest(conn: PeerConnection): void {
     if (this.pendingPairingConn !== conn) return; // answered since
     this.log('a pairing request went unanswered and was ignored');
-    this.rejectPairing(conn.peerDeviceId);
+    this.rejectPairing(conn.peerDeviceId, true);
   }
 
   // Everything that belongs to the waiting request, gone together: the
@@ -1552,11 +1567,36 @@ struct Index {
 
   // Ignore: closes the waiting connection and nothing else - nothing is
   // remembered. Safe with nothing pending. expecting is as for acceptPairing.
-  rejectPairing(expecting?: string): void {
+  rejectPairing(expecting?: string, expired: boolean = false): void {
     const conn = this.pendingPairingConn;
     if (conn !== null && expecting !== undefined && !sameIdentityKey(conn.peerDeviceId, expecting)) return;
-    conn?.close();
+    if (conn !== null) {
+      this.requestQuiet.quiet(conn.peerDeviceId, QUIET_AFTER_IGNORED_MS);
+      // Told too, unless nobody answered: if it trusts this device, that was never
+      // going to become a pairing, and it can stop asking (its onUnpaired).
+      this.closeAndTell(conn, !expired);
+    }
     this.clearPendingPairing();
+  }
+
+  // Closes a connection that is not registered: told first that it is no longer
+  // trusted here when tell is set (see SyncManager.unpairAndClose).
+  private closeAndTell(conn: PeerConnection, tell: boolean): void {
+    if (tell && this.syncManager !== null) {
+      void this.syncManager.unpairAndClose(conn);
+    } else {
+      conn.close();
+    }
+  }
+
+  // The peer removed this device, or ignored its request: drop it here too.
+  private async handleUnpaired(deviceId: string): Promise<void> {
+    if (!this.trustedDevices.some((d: TrustedDevice) => sameIdentityKey(d.publicKey, deviceId))) return;
+    const context = getContext(this) as common.UIAbilityContext;
+    await this.trustStore.untrust(context, deviceId);
+    this.connectionAddresses.delete(deviceId);
+    await this.refreshTrustedDevices();
+    this.log(`${shortDeviceId(deviceId)} removed this device - it is no longer trusted here either`);
   }
 
   // ---- the notification, for a request while the app is out of view ----
@@ -1863,6 +1903,7 @@ struct Index {
       promptAction.showToast({ message: $r('app.string.toast_unblock_first') });
       return;
     }
+    this.requestQuiet.release(beacon.deviceId); // the user asked for it
     const context = getContext(this) as common.UIAbilityContext;
     await this.trustStore.trust(context, beacon.deviceId, beacon.senderIp);
     await this.refreshTrustedDevices();
@@ -1872,10 +1913,15 @@ struct Index {
   async untrustDevice(deviceId: string): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
     await this.trustStore.untrust(context, deviceId);
+    // Still trusted at the other end, it redials, and each connection used to be a
+    // new request here: quiet for a while (see RequestQuiet).
+    this.requestQuiet.quiet(deviceId, QUIET_AFTER_REMOVED_MS, true);
     // Its live connection goes too, as on Windows: left open, it kept
     // receiving everything sent from here, and could still ask for any
     // stored file. So does a pairing request from it, should one be waiting.
-    this.syncManager?.disconnect(deviceId);
+    // It is told it was removed first, so it drops this device too and stops
+    // redialling.
+    this.syncManager?.unpair(deviceId);
     if (this.pendingPairingConn?.peerDeviceId === deviceId) this.rejectPairing();
     await this.refreshTrustedDevices();
     // No toast: the device leaves "trusted" - or, if it is still beaconing,
@@ -2365,6 +2411,7 @@ struct Index {
   // networking/PairingLink.ets) or, from an older build, the bare pairing
   // JSON. Also what a link that opened the app comes to (drainPairingLink).
   private async pairFromScanned(scanned: string): Promise<void> {
+    this.requestQuiet.clear(); // the user asked to pair: nothing is held back from this
     const text: string = unwrapPairingLink(scanned);
     let pairingInfo: PairingInfo | null = null;
     try {
@@ -2418,6 +2465,7 @@ struct Index {
   // from the signature-verified handshake, not from anything typed here).
   async pairByAddress(): Promise<void> {
     if (this.pairingInProgress) return;
+    this.requestQuiet.clear(); // the user asked to pair: nothing is held back from this
     // A pasted pairing link carries the JSON (see networking/PairingLink.ets).
     const raw = unwrapPairingLink(this.pairByAddressInput.trim()).trim();
     if (raw.length === 0) {
@@ -2482,6 +2530,26 @@ struct Index {
     if (count >= 0) {
       void this.deviceSettings.setLastSeenClipCount(getContext(this) as common.UIAbilityContext, count);
     }
+  }
+
+  // The button beside Paste: the system file picker, then what was picked syncs like
+  // a share (ShareIntake's copyIn rules, Index's syncShared, which says what was
+  // skipped) - without touching this device's clipboard. A cancelled picker says
+  // nothing.
+  private async pickAndSyncFiles(): Promise<void> {
+    const context = getContext(this) as common.UIAbilityContext;
+    let uris: string[] = [];
+    try {
+      const options: picker.DocumentSelectOptions = new picker.DocumentSelectOptions();
+      options.maxSelectNumber = 50; // as for a share (module.json5)
+      uris = await new picker.DocumentViewPicker(context).select(options);
+    } catch (e) {
+      this.log(`file picker: ${JSON.stringify(e)}`);
+      return;
+    }
+    if (uris.length === 0) return;
+    enqueueShares(await intakePicked(context, uris));
+    await this.drainPendingShares();
   }
 
   async onPasteButtonClick(result: PasteButtonOnClickResult) {
@@ -2642,10 +2710,10 @@ struct Index {
     }
     netLog(`share: files=${files} texts=${texts} tooLarge=${tooLarge} folders=${folders} unreadable=${unreadable} own=${own}`);
     const count = this.syncManager?.connectionCount ?? 0;
-    // The new cards are on screen (the Synced tab is shown, below), so a plain
-    // success needs no toast: only something skipped, nobody to send it to, or
-    // nothing shared does.
-    if (files + texts === 0 || count === 0 || tooLarge + folders + unreadable + own > 0) {
+    // The new cards are on screen (the Synced tab is shown, below), and the Devices
+    // tab already says nobody is connected, so a plain success - connected or not -
+    // needs no toast: only something skipped, or nothing shared, does.
+    if (files + texts === 0 || tooLarge + folders + unreadable + own > 0) {
       promptAction.showToast({
         message: shareOutcomeMessage(getContext(this), files, texts, tooLarge, folders, unreadable, own, count),
         duration: 3000,
@@ -4263,8 +4331,10 @@ struct Index {
   private readonly ME_END_GAP: number = 28;
   // The Synced tab additionally has the paste dock sitting above the pill,
   // so its scrollables need to reserve that too or the last card comes to
-  // rest underneath the paste button.
-  private readonly SYNCED_BOTTOM_CLEARANCE: number = 152;
+  // rest underneath the paste button. The dock is the pill clearance (84) + 10
+  // + the Paste / picker pill (about 76 tall with its padding) = 170 to its top,
+  // and the last card needs some air above that.
+  private readonly SYNCED_BOTTOM_CLEARANCE: number = 190;
 
   // The soft theme-colour glow along the bottom of every page (except the
   // preview): the accent at the screen edge fading out well above the
@@ -4631,8 +4701,33 @@ struct Index {
           .backgroundColor(this.accent())
           .shadow(ShadowStyle.OUTER_DEFAULT_SM)
       }
-      PasteButton({ icon: PasteIconStyle.LINES, text: PasteDescription.PASTE, buttonType: ButtonType.Capsule })
-        .onClick((event: ClickEvent, result: PasteButtonOnClickResult) => { tapHaptic(); void this.onPasteButtonClick(result); })
+      // Paste and the file picker in one pill: a solid capsule of their own, since the
+      // dock Row's material does not render here (see above) and a bare pair of buttons
+      // let the cards behind show through.
+      Row({ space: 6 }) {
+        PasteButton({ icon: PasteIconStyle.LINES, text: PasteDescription.PASTE, buttonType: ButtonType.Capsule })
+          .onClick((event: ClickEvent, result: PasteButtonOnClickResult) => { tapHaptic(); void this.onPasteButtonClick(result); })
+        // A file or a photo from the system file picker, beside Paste as on Android
+        // and iOS: synced like a share (see pickAndSyncFiles). An ordinary button -
+        // the picker needs no security component. The "new item" hint above still
+        // points at Paste.
+        Button({ type: ButtonType.Circle }) {
+          SymbolGlyph($r('sys.symbol.folder'))
+            .fontSize(18)
+            .fontColor([this.accent()])
+        }
+        // As tall as the Paste capsule beside it.
+        .width(34)
+        .height(34)
+        .backgroundColor(this.accentTint())
+        .accessibilityText($r('app.string.pick_files'))
+        .onClick(() => { tapHaptic(); void this.pickAndSyncFiles(); })
+      }
+      .padding(6)
+      .borderRadius(24)
+      .alignItems(VerticalAlign.Center)
+      .backgroundColor($r('sys.color.comp_background_primary'))
+      .shadow(ShadowStyle.OUTER_DEFAULT_SM)
     }
     .padding(14)
     .borderRadius(34)

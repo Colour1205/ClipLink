@@ -98,11 +98,55 @@ public sealed partial class ClipLinkEngine
         {
             HandleFileRequest(envelope.Payload, conn);
         }
+        else if (envelope.Type == "unpair")
+        {
+            HandleUnpair(conn);
+        }
         else
         {
             Console.WriteLine("Received message with unknown type from peer.");
             return;
         }
+    }
+
+    // The peer removed this device, or ignored its request: it no longer trusts
+    // it ("unpair"). Dropping it here too ends its redialling - trust that is only
+    // on one side never became a pairing, and only ever produced a request at the
+    // other end. Only a peer can say this about itself: the message came over
+    // its proven session, and all it changes is whether this device trusts it.
+    private void HandleUnpair(PeerConnection conn)
+    {
+        string peer = conn.PeerDeviceId;
+        if (!trustStore.IsTrusted(peer)) return;
+        Console.WriteLine($"[pair] {DeviceLabel.ShortId(peer)} removed this device - it is no longer trusted here either");
+        trustStore.Untrust(peer);
+        connectionsByDeviceId.TryRemove(new KeyValuePair<string, PeerConnection>(peer, conn));
+        conn.Close();
+        NotifyDevicesChanged();
+    }
+
+    // Tells the peer it is no longer trusted here, then closes the connection.
+    // Best effort: a peer that is gone, or an older build (which ignores a message
+    // it does not know), is left to RequestQuiet.
+    private static void SendUnpairAndClose(PeerConnection conn)
+    {
+        string json = JsonSerializer.Serialize(new Envelope("unpair", "{}"));
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await conn.Send(json);
+                await Task.Delay(300); // let it leave before the socket goes
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[pair] couldn't tell {DeviceLabel.ShortId(conn.PeerDeviceId)} it was removed: {ex.Message}");
+            }
+            finally
+            {
+                conn.Close();
+            }
+        });
     }
 
     private void HandleIncomingFileEntry(ClipboardEntry entry)
@@ -700,6 +744,15 @@ public sealed partial class ClipLinkEngine
             RegisterConnection(conn);
             return conn.NewlyTrustedViaPassphrase ? PairOutcome.PairedByPasscode : PairOutcome.Connected;
         }
+        if (requestQuiet.IsQuiet(conn.PeerDeviceId, out bool wasRemoved))
+        {
+            // Ignored, or removed, a little while ago: no new prompt for it (see
+            // RequestQuiet). One that was removed is told so again - it may not have
+            // heard the first time.
+            Console.WriteLine($"[pair] request from {DeviceLabel.ShortId(conn.PeerDeviceId)} held back - it was ignored or removed a while ago");
+            if (wasRemoved) SendUnpairAndClose(conn); else conn.Close();
+            return PairOutcome.Busy;
+        }
         if (!pairingState.TrySetPending(conn, address))
         {
             conn.Close(); // already have a candidate awaiting a decision
@@ -742,6 +795,7 @@ public sealed partial class ClipLinkEngine
         var taken = pairingState.TakePendingIf(conn);
         if (taken == null) return;
         Console.WriteLine($"[pair] the request from {DeviceLabel.ShortId(conn.PeerDeviceId)} went unanswered and was ignored");
+        requestQuiet.Quiet(conn.PeerDeviceId, RequestQuiet.AfterIgnored);
         conn.Close();
         RaisePairingResolved(conn.PeerDeviceId, PairingDecision.Abandoned);
     }

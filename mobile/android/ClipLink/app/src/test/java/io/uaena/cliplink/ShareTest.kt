@@ -381,4 +381,18 @@ class ShareTest {
         }
         assertTrue("expected IllegalArgumentException", threw)
     }
+
+    @Test
+    fun `a share made in the app is not toasted for nobody being connected`() {
+        val synced = ShareOutcome(files = listOf("a.txt"), connected = 0)
+        assertTrue(synced.needsAttention) // the share sheet, where the app is not in view, says it
+        assertFalse(synced.needsAttentionInApp) // in the app the new card and the Devices tab already do
+        assertFalse(ShareOutcome(files = listOf("a.txt"), connected = 2).needsAttentionInApp)
+        // Something went wrong, was left out or came to nothing: still said.
+        assertTrue(ShareOutcome(files = listOf("a.txt"), tooLarge = listOf("big.bin")).needsAttentionInApp)
+        assertTrue(ShareOutcome(files = listOf("a.txt"), unreadable = 1).needsAttentionInApp)
+        assertTrue(ShareOutcome(files = listOf("a.txt"), skipped = 3).needsAttentionInApp)
+        assertTrue(ShareOutcome(failed = true).needsAttentionInApp)
+        assertTrue(ShareOutcome().needsAttentionInApp)
+    }
 }

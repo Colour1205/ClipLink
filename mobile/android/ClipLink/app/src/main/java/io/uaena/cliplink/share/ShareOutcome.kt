@@ -24,6 +24,14 @@ data class ShareOutcome(
         get() = failed || connected == 0 || tooLarge.isNotEmpty() || unreadable > 0 || skipped > 0 ||
             (files.isEmpty() && !text)
 
+    /**
+     * [needsAttention] for a share made inside the app (the file picker beside Paste),
+     * where the new card is on screen and the Devices tab says nobody is connected:
+     * only something that went wrong, was left out or came to nothing is worth a toast.
+     */
+    val needsAttentionInApp: Boolean
+        get() = failed || tooLarge.isNotEmpty() || unreadable > 0 || skipped > 0 || (files.isEmpty() && !text)
+
     val message: String
         get() {
             if (failed) return "ClipLink couldn't share that - open it and try again."

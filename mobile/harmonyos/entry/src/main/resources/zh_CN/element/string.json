@@ -645,6 +645,10 @@
       "value": "该设备已被屏蔽，请先取消屏蔽。"
     },
     {
+      "name": "pick_files",
+      "value": "添加文件或图片"
+    },
+    {
       "name": "dialog_block_title",
       "value": "屏蔽 %1$s？"
     },

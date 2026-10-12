@@ -128,6 +128,8 @@ public final class SyncEngine {
     var pairingTargetKey: String?
     /// Everyone asking to pair, oldest first (see maxPendingRequests).
     var pendingRequests: [PendingPairing] = []
+    /// Devices whose pairing requests are held back for a while - see `RequestQuiet`.
+    var requestQuiet = RequestQuiet()
     /// The request the user is looking at (the oldest).
     var pending: PendingPairing? { pendingRequests.first }
     /// When requests out of the blue were last let through, for the budget.
@@ -491,6 +493,8 @@ public final class SyncEngine {
             guard pairingOpen != open else { return }
             pairingOpen = open
             if open {
+                // Somebody is expecting requests now: no device stays held back.
+                requestQuiet.clear()
                 // beaconTick itself sweeps while pairing is open: one copy of
                 // the pairing beacon per host, not two.
                 lastUDPSweep = .distantPast
@@ -550,6 +554,10 @@ public final class SyncEngine {
     private func ignoreLocked(_ id: String) {
         guard let index = pendingRequests.firstIndex(where: { $0.link.peerDeviceId == id }) else { return }
         let request = pendingRequests.remove(at: index)
+        // Quiet for a while: the device still trusting this one redials, and each
+        // connection would be a new request. (Nothing can be sent on a link held
+        // for a request, so it is only closed.)
+        requestQuiet.quiet(id, for: RequestQuiet.afterIgnored)
         request.link.close()
         log("ignored pairing request from \(DeviceLabel.short(id))")
         schedulePublish()
@@ -607,6 +615,8 @@ public final class SyncEngine {
     /// decide. Completion runs on the main queue.
     public func pair(with raw: String, completion: @escaping (PairOutcome) -> Void) {
         queue.async { [self] in
+            // The user asked to pair: nothing is held back from this.
+            requestQuiet.clear()
             pairLocked(raw) { outcome in DispatchQueue.main.async { completion(outcome) } }
         }
     }
@@ -622,6 +632,7 @@ public final class SyncEngine {
             // Never this device itself (PeerLink refuses our own handshake too),
             // and never a device the user blocked.
             guard !isOwnIdentity(deviceId), !blocks.isBlocked(deviceId) else { return }
+            requestQuiet.release(deviceId) // the user asked for it
             // A live request from it: accept THAT, so its connection is used.
             if pendingRequests.contains(where: { $0.link.peerDeviceId == deviceId }) {
                 acceptLocked(deviceId)
@@ -642,11 +653,25 @@ public final class SyncEngine {
     public func untrustDevice(_ deviceId: String) {
         queue.async { [self] in
             trust.untrust(deviceId)
-            if let link = links.removeValue(forKey: deviceId) { link.close() }
+            // Still trusted at the other end, it redials, and each connection used to
+            // be a new request here: quiet for a while (see RequestQuiet).
+            requestQuiet.quiet(deviceId, for: RequestQuiet.afterRemoved, removed: true)
+            if let link = links.removeValue(forKey: deviceId) { unpairAndClose(link) }
             backoff[deviceId] = nil
             awaitingInbound[deviceId] = nil
             log("untrusted \(DeviceLabel.short(deviceId))")
             schedulePublish()
+        }
+    }
+
+    /// Tells the peer it is no longer trusted here, then closes the link: it drops
+    /// this device too and stops redialling (`handleMessage`). Best effort - a peer
+    /// that is gone, or a build that does not know the message, is left to
+    /// `RequestQuiet`.
+    func unpairAndClose(_ link: PeerLink) {
+        link.send(Envelope(type: Wire.MessageType.unpair, payload: "{}").jsonString()) { [weak self] _ in
+            // Let it leave before the socket goes.
+            (self?.queue ?? DispatchQueue.global()).asyncAfter(deadline: .now() + 0.3) { link.close() }
         }
     }
 

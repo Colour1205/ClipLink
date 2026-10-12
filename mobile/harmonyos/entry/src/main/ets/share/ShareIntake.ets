@@ -331,6 +331,18 @@ export async function intakeShare(context: common.UIAbilityContext, want: Want):
   return out;
 }
 
+// Files the user picked with the file picker (the button beside Paste): each one
+// copied into the cache and checked by the same rules as a shared file
+// (copyIn), then queued like a share - so a picked file is synced, and what
+// cannot be (a folder, too large) is reported, exactly as for a share.
+export async function intakePicked(context: common.UIAbilityContext, uris: string[]): Promise<SharedIn[]> {
+  const out: SharedIn[] = [];
+  for (let i = 0; i < uris.length; i++) {
+    out.push(await copyIn(context, uris[i], undefined, 'general.file'));
+  }
+  return out;
+}
+
 export function enqueueShares(items: SharedIn[]): void {
   if (items.length === 0) return;
   const pending: SharedIn[] = AppStorage.get<SharedIn[]>(PENDING_SHARES_KEY) ?? [];
