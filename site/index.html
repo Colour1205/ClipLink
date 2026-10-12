@@ -3,30 +3,36 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    // First visit: the page opens in the browser's language (Chinese or English). The
+    // language links add ?lang= so a visitor's own choice sticks, and is not undone.
+    (function () {
+      try {
+        var m = /[?&]lang=(en|zh)\b/.exec(location.search), pref = m && m[1];
+        try { if (pref) localStorage.setItem('lang', pref); else pref = localStorage.getItem('lang'); } catch (e) { /* no storage: fine */ }
+        var want = pref || (/^zh/i.test(navigator.language || '') ? 'zh' : 'en');
+        var onZh = /\/zh(\/|$)/.test(location.pathname);
+        if (want === 'zh' && !onZh) location.replace(location.pathname.replace(/([^\/]*)$/, 'zh/$1') + location.search + location.hash);
+        else if (want === 'en' && onZh) location.replace(location.pathname.replace(/\/zh\/([^\/]*)$/, '/$1') + location.search + location.hash);
+      } catch (e) { /* stay where we are */ }
+    })();
+  </script>
   <title>ClipLink - clipboard sync between your own devices</title>
   <meta name="description" content="ClipLink syncs your clipboard - text, images and files - directly between your Windows, Android, HarmonyOS and iOS devices. No account, no cloud. Free and open source.">
   <meta name="color-scheme" content="light dark">
   <link rel="icon" type="image/png" href="assets/icon-64.png">
   <link rel="stylesheet" href="assets/style.css">
-  <link rel="alternate" hreflang="en" href="https://colour1205.github.io/ClipLink/">
-  <link rel="alternate" hreflang="zh-Hans" href="https://colour1205.github.io/ClipLink/zh/">
-  <link rel="alternate" hreflang="x-default" href="https://colour1205.github.io/ClipLink/">
+  <link rel="alternate" hreflang="en" href="https://cliplink.uaena.io/">
+  <link rel="alternate" hreflang="zh-Hans" href="https://cliplink.uaena.io/zh/">
+  <link rel="alternate" hreflang="x-default" href="https://cliplink.uaena.io/">
   <meta property="og:type" content="website">
   <meta property="og:title" content="ClipLink - clipboard sync between your own devices">
   <meta property="og:description" content="Copy on one device, paste on another. Direct, encrypted, no cloud. Windows, Android, HarmonyOS and iOS.">
-  <meta property="og:image" content="https://colour1205.github.io/ClipLink/assets/icon-256.png">
+  <meta property="og:image" content="https://cliplink.uaena.io/assets/icon-256.png">
   <script src="assets/site.js" defer></script>
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
-
-  <div id="lang-hint" class="lang-hint" data-for="zh" lang="zh-Hans">
-    <div class="wrap">
-      <span>这个页面有中文版。</span>
-      <a href="zh/">切换到中文</a>
-      <button type="button" aria-label="关闭 / Dismiss">&times;</button>
-    </div>
-  </div>
 
   <header class="site-header">
     <div class="wrap">
@@ -36,7 +42,7 @@
         <a class="keep" href="#download">Download</a>
         <a href="#faq">FAQ</a>
         <a href="https://github.com/Colour1205/ClipLink">GitHub</a>
-        <a class="lang" href="zh/" hreflang="zh-Hans" lang="zh-Hans">中文</a>
+        <a class="lang" href="zh/?lang=zh" hreflang="zh-Hans" lang="zh-Hans">中文</a>
       </nav>
     </div>
   </header>
@@ -69,7 +75,7 @@
       <div class="wrap">
         <h2>See it in action</h2>
         <p class="sub">The same items, synced across Windows, iOS, Android and HarmonyOS.</p>
-        <div class="showcase">
+        <div class="showcase" data-hint="Swipe to see the next one">
           <figure class="frame frame-win"><img src="assets/shot-windows.webp" width="950" height="676" alt="ClipLink on Windows" loading="lazy"><figcaption>Windows</figcaption></figure>
           <figure class="frame"><img src="assets/shot-ios.webp" width="560" height="1212" alt="ClipLink on iOS" loading="lazy"><figcaption>iOS</figcaption></figure>
           <figure class="frame"><img src="assets/shot-android.webp" width="560" height="1239" alt="ClipLink on Android" loading="lazy"><figcaption>Android</figcaption></figure>

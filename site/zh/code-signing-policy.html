@@ -3,13 +3,27 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    // First visit: the page opens in the browser's language (Chinese or English). The
+    // language links add ?lang= so a visitor's own choice sticks, and is not undone.
+    (function () {
+      try {
+        var m = /[?&]lang=(en|zh)\b/.exec(location.search), pref = m && m[1];
+        try { if (pref) localStorage.setItem('lang', pref); else pref = localStorage.getItem('lang'); } catch (e) { /* no storage: fine */ }
+        var want = pref || (/^zh/i.test(navigator.language || '') ? 'zh' : 'en');
+        var onZh = /\/zh(\/|$)/.test(location.pathname);
+        if (want === 'zh' && !onZh) location.replace(location.pathname.replace(/([^\/]*)$/, 'zh/$1') + location.search + location.hash);
+        else if (want === 'en' && onZh) location.replace(location.pathname.replace(/\/zh\/([^\/]*)$/, '/$1') + location.search + location.hash);
+      } catch (e) { /* stay where we are */ }
+    })();
+  </script>
   <title>代码签名政策 - ClipLink</title>
   <meta name="description" content="ClipLink for Windows 如何构建和进行代码签名、谁可以批准发布，以及程序如何处理你的数据。">
   <meta name="color-scheme" content="light dark">
   <link rel="icon" type="image/png" href="../assets/icon-64.png">
   <link rel="stylesheet" href="../assets/style.css">
-  <link rel="alternate" hreflang="en" href="https://colour1205.github.io/ClipLink/code-signing-policy.html">
-  <link rel="alternate" hreflang="zh-Hans" href="https://colour1205.github.io/ClipLink/zh/code-signing-policy.html">
+  <link rel="alternate" hreflang="en" href="https://cliplink.uaena.io/code-signing-policy.html">
+  <link rel="alternate" hreflang="zh-Hans" href="https://cliplink.uaena.io/zh/code-signing-policy.html">
 </head>
 <body>
   <a class="skip" href="#main">跳到正文</a>
@@ -19,7 +33,7 @@
       <nav class="nav" aria-label="主导航">
         <a class="keep" href="./#download">下载</a>
         <a href="https://github.com/Colour1205/ClipLink">GitHub</a>
-        <a class="lang" href="../code-signing-policy.html" hreflang="en" lang="en">English</a>
+        <a class="lang" href="../code-signing-policy.html?lang=en" hreflang="en" lang="en">English</a>
       </nav>
     </div>
   </header>
