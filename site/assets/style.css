@@ -407,7 +407,7 @@ section { position: relative; }
   -webkit-backdrop-filter: none; backdrop-filter: none;
 }
 .showcase.is-stack .frame img { pointer-events: none; -webkit-user-drag: none; }
-.showcase.is-stack .frame-win { align-self: start; }
+.showcase.is-stack .frame-win { align-self: center; } /* the wide window sits mid-way in the tall stack */
 .showcase.is-stack.dragging .frame { transition: none; }
 
 /* In front: follows the finger. */

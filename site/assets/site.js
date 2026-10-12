@@ -21,21 +21,29 @@
     }
   }
 
-  // ---- 2. On small phones, "See it in action" is a swipeable stack. ----
-  // The frames sit on top of each other: the one in front can be dragged
-  // left or right to go to the next (or back), the ones behind are blurred,
-  // and vertical swipes still scroll the page (touch-action: pan-y). Wider
-  // screens, and browsers without JavaScript, keep the plain grid.
+  // ---- 2. On small phones, "See it in action" is a swipeable, looping stack. ----
+  // The frames sit on top of each other: the one in front can be dragged left
+  // or right to go to the next (or back) and the stack goes round in a circle -
+  // after the last comes the first. The ones behind are blurred, and vertical
+  // swipes still scroll the page (touch-action: pan-y). The phones come first
+  // and the wide Windows window last, so a small one is never the first thing
+  // you see. Wider screens, and browsers without JavaScript, keep the grid.
   var box = document.querySelector('.showcase');
   if (box && window.matchMedia) {
     initStack(box);
   }
 
   function initStack(root) {
-    var frames = Array.prototype.slice.call(root.querySelectorAll('.frame'));
-    if (frames.length < 2) return;
+    var all = Array.prototype.slice.call(root.querySelectorAll('.frame'));
+    if (all.length < 2) return;
+    var phones = all.filter(function (frame) { return !frame.classList.contains('frame-win'); });
+    var wide = all.filter(function (frame) { return frame.classList.contains('frame-win'); });
+    var frames = phones.concat(wide);
+    var count = frames.length;
     var query = window.matchMedia('(max-width: 620px)');
     var active = 0;
+    var leaving = -1; // the frame that has just flown off to the left
+    var leaveTimer = 0;
     var dots = null;
     var hint = null;
     var drag = null; // { x, y, id, horizontal, dx }
@@ -53,7 +61,7 @@
         dot.type = 'button';
         dot.className = 'stack-dot';
         dot.setAttribute('aria-label', caption ? caption.textContent : String(i + 1));
-        dot.addEventListener('click', function () { go(i); });
+        dot.addEventListener('click', function () { jump(i); });
         dots.appendChild(dot);
       });
       root.parentNode.insertBefore(dots, root.nextSibling);
@@ -64,15 +72,18 @@
         hint.textContent = text;
         dots.parentNode.insertBefore(hint, dots.nextSibling);
       }
+      active = 0;
+      leaving = -1;
       render();
     }
 
     function destroy() {
+      clearTimeout(leaveTimer);
       root.classList.remove('is-stack', 'dragging');
       root.removeAttribute('role');
       root.removeAttribute('aria-roledescription');
       root.removeAttribute('tabindex');
-      frames.forEach(function (frame) {
+      all.forEach(function (frame) {
         frame.removeAttribute('data-pos');
         frame.removeAttribute('aria-hidden');
         frame.inert = false;
@@ -81,12 +92,16 @@
       });
       if (dots) { dots.remove(); dots = null; }
       if (hint) { hint.remove(); hint = null; }
-      active = 0;
     }
 
+    // Where each frame is: 0 in front, 1 and 2 peeking out behind it, 3 hidden
+    // further back, -1 flown off to the left. It is a circle, so the one just in
+    // front of the active frame is the last one back.
     function render() {
       frames.forEach(function (frame, i) {
-        var pos = Math.max(-1, Math.min(3, i - active));
+        var pos = ((i - active) % count + count) % count;
+        if (pos > 3) pos = 3;
+        if (i === leaving) pos = -1;
         frame.setAttribute('data-pos', String(pos));
         frame.setAttribute('aria-hidden', pos === 0 ? 'false' : 'true');
         frame.inert = pos !== 0;
@@ -103,8 +118,32 @@
       }
     }
 
-    function go(index) {
-      active = Math.max(0, Math.min(frames.length - 1, index));
+    function next() {
+      var old = active;
+      active = (active + 1) % count;
+      leaving = old; // it flies off to the left, then waits at the back
+      clearTimeout(leaveTimer);
+      leaveTimer = setTimeout(function () { leaving = -1; render(); }, 450);
+      render();
+    }
+
+    function previous() {
+      // The frame at the back comes round from the left.
+      var incoming = (active - 1 + count) % count;
+      var frame = frames[incoming];
+      leaving = -1;
+      frame.style.transition = 'none';
+      frame.setAttribute('data-pos', '-1');
+      void frame.offsetWidth; // let it sit there before it moves
+      frame.style.transition = '';
+      active = incoming;
+      render();
+    }
+
+    function jump(index) {
+      if (index === active) return;
+      leaving = -1;
+      active = index;
       render();
     }
 
@@ -116,7 +155,6 @@
 
     root.addEventListener('pointerdown', function (event) {
       if (!root.classList.contains('is-stack') || (event.pointerType === 'mouse' && event.button !== 0)) return;
-      if (event.target.closest && event.target.closest('a, button')) return;
       drag = { x: event.clientX, y: event.clientY, id: event.pointerId, horizontal: false, dx: 0 };
     });
 
@@ -131,10 +169,8 @@
         root.classList.add('dragging');
         try { root.setPointerCapture(event.pointerId); } catch (e) { /* not capturable: fine */ }
       }
-      // Past either end, the stack resists.
-      var atEnd = (dx > 0 && active === 0) || (dx < 0 && active === frames.length - 1);
-      drag.dx = atEnd ? dx * 0.3 : dx;
-      setDrag(drag.dx);
+      drag.dx = dx;
+      setDrag(dx);
     });
 
     function release(event) {
@@ -144,8 +180,8 @@
       root.classList.remove('dragging');
       if (!finished.horizontal) return;
       var threshold = Math.min(90, root.clientWidth * 0.2);
-      if (finished.dx < -threshold) go(active + 1);
-      else if (finished.dx > threshold) go(active - 1);
+      if (finished.dx < -threshold) next();
+      else if (finished.dx > threshold) previous();
       else render(); // snap back
     }
     root.addEventListener('pointerup', release);
@@ -153,8 +189,8 @@
 
     root.addEventListener('keydown', function (event) {
       if (!root.classList.contains('is-stack')) return;
-      if (event.key === 'ArrowRight') { go(active + 1); event.preventDefault(); }
-      else if (event.key === 'ArrowLeft') { go(active - 1); event.preventDefault(); }
+      if (event.key === 'ArrowRight') { next(); event.preventDefault(); }
+      else if (event.key === 'ArrowLeft') { previous(); event.preventDefault(); }
     });
 
     function sync() {
