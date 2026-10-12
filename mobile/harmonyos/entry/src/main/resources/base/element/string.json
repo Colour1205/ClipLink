@@ -645,6 +645,10 @@
       "value": "That device is blocked. Unblock it first."
     },
     {
+      "name": "pick_files",
+      "value": "Add a file or photo"
+    },
+    {
       "name": "dialog_block_title",
       "value": "Block %1$s?"
     },

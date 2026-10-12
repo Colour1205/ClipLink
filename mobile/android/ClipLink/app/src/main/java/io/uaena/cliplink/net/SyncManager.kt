@@ -14,12 +14,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ClosedSendChannelException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.io.File
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+
+/** How long an "unpair" gets to leave before its socket is closed. */
+private const val UNPAIR_FLUSH_MS = 300L
 
 /**
  * Owns the set of live peer connections and everything that flows over them.
@@ -88,6 +92,14 @@ class SyncManager(
 
     /** A registered connection ended - the live one for its peer or a stale one. */
     var onConnectionClosed: ((PeerLink) -> Unit)? = null
+
+    /**
+     * A trusted peer said it no longer trusts this device (it was removed there,
+     * or its request was ignored there). The argument is the peer's id; the engine
+     * drops its trust record here too, so the peer stops being redialled and
+     * stops asking. See [handleMessage].
+     */
+    var onUnpaired: ((String) -> Unit)? = null
 
     val connectionCount: Int get() = connections.size
 
@@ -208,6 +220,24 @@ class SyncManager(
      */
     fun close(deviceId: String, reason: String = "removed") {
         connections[deviceId]?.close(reason)
+    }
+
+    /**
+     * Tells [deviceId] it is no longer trusted here, then ends its link - for a
+     * device that has just been removed. The peer drops this device too and stops
+     * redialling (its [onUnpaired]). Best effort: a peer that is gone, or a build
+     * that does not know the message, is left to the engine's RequestQuiet.
+     */
+    fun unpair(deviceId: String) {
+        val conn = connections[deviceId] ?: return
+        scope.launch { unpairAndClose(conn, "removed") }
+    }
+
+    /** [unpair] for a link that is not registered, such as a pairing request that is being ignored. */
+    suspend fun unpairAndClose(conn: PeerLink, reason: String) {
+        runCatching { conn.send(Protocol.envelope(Protocol.TYPE_UNPAIR, "{}")) }
+        delay(UNPAIR_FLUSH_MS) // let it leave before the socket goes
+        conn.close(reason)
     }
 
     fun closeAll() {
@@ -358,6 +388,17 @@ class SyncManager(
                 }
                 // If we don't have it either, stay silent - the requester
                 // broadcast to everyone, someone else may have it.
+            }
+
+            Protocol.TYPE_UNPAIR -> {
+                // The peer removed this device, or ignored its request: it no longer
+                // trusts it. Dropping it here too ends its redialling - trust on one
+                // side only never became a pairing, and only ever produced a request
+                // at the other end. Only a peer can say this about itself: the message
+                // came over its proven session, and all it changes is whether this
+                // device trusts it.
+                onUnpaired?.invoke(conn.peerDeviceId)
+                conn.close("it removed this device")
             }
 
             else -> onLog?.invoke("received message with unknown type from peer: ${envelope.type}")

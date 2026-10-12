@@ -773,6 +773,12 @@ extension SyncEngine {
             link.close()
             return
         }
+        // Ignored, or removed, a little while ago: no new prompt for it (see RequestQuiet).
+        if requestQuiet.state(of: id) != .notQuiet {
+            log("a pairing request from \(DeviceLabel.short(id)) was held back - it was ignored or removed a while ago")
+            link.close()
+            return
+        }
         // A request out of the blue (our pairing screen closed, or the device
         // dialled us) counts against the budget: a flood is dropped quietly
         // rather than turned into a stream of prompts.

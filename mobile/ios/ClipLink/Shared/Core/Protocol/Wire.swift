@@ -16,6 +16,8 @@ public enum Wire {
         public static let historyBatch = "history_batch"
         public static let fileChunk = "file_chunk"
         public static let fileRequest = "file_request"
+        /// "I no longer trust you": sent when a device is removed.
+        public static let unpair = "unpair"
     }
 
     /// `ClipboardEntry.Type` values.

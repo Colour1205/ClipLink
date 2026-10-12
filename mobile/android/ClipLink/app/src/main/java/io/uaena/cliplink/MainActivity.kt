@@ -84,7 +84,7 @@ class MainActivity : ComponentActivity() {
     ) { uri ->
         // The same path as the share sheet (see ShareReceiverActivity): a
         // picked photo is synced as the file it is, streamed, size-capped.
-        uri?.let { engine.shareIn(null, listOf(it)) { outcome -> if (outcome.needsAttention) engine.showToast(outcome.message) } }
+        uri?.let { engine.shareIn(null, listOf(it)) { outcome -> if (outcome.needsAttentionInApp) engine.showToast(outcome.message) } }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

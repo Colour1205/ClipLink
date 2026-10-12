@@ -192,6 +192,41 @@ class SyncManagerTest {
     }
 
     @Test
+    fun `removing a device tells it first, then ends its link`() {
+        val peer = link()
+        sync.unpair("PEER")
+        eventually("the link to be closed") { peer.isClosed }
+        assertEquals("removed", peer.closeReason)
+        // After the history batch every new link gets, the last thing it was sent is the unpair.
+        assertEquals(Protocol.envelope(Protocol.TYPE_UNPAIR, "{}"), peer.sent.last())
+        assertFalse(sync.isConnected("PEER"))
+        // No link, or twice: nothing.
+        sync.unpair("PEER")
+        sync.unpair("NOBODY")
+    }
+
+    @Test
+    fun `a trusted peer that unpairs gets the engine told and its link closed`() {
+        val peer = link()
+        val unpaired = CopyOnWriteArrayList<String>()
+        sync.onUnpaired = { unpaired.add(it) }
+        runBlocking { peer.deliver(Protocol.envelope(Protocol.TYPE_UNPAIR, "{}")) }
+        eventually("the link to be closed") { peer.isClosed }
+        assertEquals(listOf("PEER"), unpaired.toList())
+        assertEquals("it removed this device", peer.closeReason)
+    }
+
+    @Test
+    fun `an unpair from a device that is not trusted changes nothing`() {
+        val peer = link(trust = false)
+        val unpaired = CopyOnWriteArrayList<String>()
+        sync.onUnpaired = { unpaired.add(it) }
+        runBlocking { peer.deliver(Protocol.envelope(Protocol.TYPE_UNPAIR, "{}")) }
+        eventually("the link to be closed") { peer.isClosed }
+        assertTrue(unpaired.isEmpty())
+    }
+
+    @Test
     fun `a new connection gets the history, but not if its device isn't trusted`() {
         history.addAll(listOf(entry("old", 1, device = "ME")))
         val known = link("KNOWN")

@@ -93,6 +93,9 @@ class ClipLinkEngine(context: Context) {
 
     val trustStore = TrustStore(appContext)
     val blockStore = BlockStore(appContext)
+
+    /** Devices whose pairing requests are held back for a while - see [RequestQuiet]. */
+    private val requestQuiet = RequestQuiet()
     val passphraseKeyStore = PassphraseKeyStore(appContext)
     val deviceSettings = DeviceSettings(appContext)
     val fileStore = FileStore(appContext)
@@ -246,6 +249,13 @@ class ClipLinkEngine(context: Context) {
             refreshDevices()
         }
         syncManager.onLog = { message -> log(message) }
+        syncManager.onUnpaired = { id ->
+            // The peer removed this device (or ignored its request): drop it here too.
+            trustStore.untrust(id)
+            connectionAddresses.remove(id)
+            refreshDevices()
+            log("${shortIdOf(id)} removed this device - it is no longer trusted here either")
+        }
         syncManager.onEntryApplied = { entry -> onEntryReceived(entry) }
         syncManager.onHistoryChanged = { refreshItems() }
         syncManager.onFileStored = { refreshItems() }
@@ -786,6 +796,20 @@ class ClipLinkEngine(context: Context) {
         // Shown right away, but stored only once proven - see rememberProvenName.
         peerNames.heardInHandshake(conn.peerDeviceId, conn.peerName)
         if (!conn.wasAlreadyTrusted) {
+            // Ignored, or removed, a little while ago: no new prompt for it (see
+            // RequestQuiet). One that was removed is told so again - it may not have
+            // heard the first time.
+            val quiet = requestQuiet.state(conn.peerDeviceId)
+            if (quiet != RequestQuiet.State.NotQuiet) {
+                log("a pairing request from ${shortIdOf(conn.peerDeviceId)} was held back - it was ignored or removed a while ago")
+                if (quiet == RequestQuiet.State.Removed) {
+                    scope.launch { syncManager.unpairAndClose(conn, "removed") }
+                } else {
+                    conn.close("request held back")
+                }
+                forgetUnprovenName(conn)
+                return
+            }
             // Checked and set together: two untrusted connections arriving at
             // once could both pass a bare check, and the second would
             // replace - and orphan, socket open - the first.
@@ -913,7 +937,7 @@ class ClipLinkEngine(context: Context) {
      * pending: it then does nothing, as the pairing screen closing does.
      * [expecting] is as for [acceptPairing].
      */
-    fun rejectPairing(expecting: String? = null) {
+    fun rejectPairing(expecting: String? = null, expired: Boolean = false) {
         val conn = synchronized(pairingLock) {
             val pending = pendingPairingConnection
             if (pending != null && expecting != null && !sameDeviceId(pending.peerDeviceId, expecting)) return
@@ -922,7 +946,14 @@ class ClipLinkEngine(context: Context) {
             pending
         }
         if (conn != null) {
-            conn.close("pairing ignored")
+            requestQuiet.quiet(conn.peerDeviceId, RequestQuiet.AFTER_IGNORED_MS)
+            if (expired) {
+                conn.close("pairing ignored")
+            } else {
+                // Told too: if it trusts this device, that was never going to become a
+                // pairing, and it can stop asking (its SyncManager.onUnpaired).
+                scope.launch { syncManager.unpairAndClose(conn, "pairing ignored") }
+            }
             forgetUnprovenName(conn) // never listened, so never proven
         }
         alert { resolved() }
@@ -943,7 +974,7 @@ class ClipLinkEngine(context: Context) {
         }
         if (!stale) return
         log("a pairing request went unanswered and was ignored")
-        rejectPairing()
+        rejectPairing(expired = true)
     }
 
     /** Runs [action] on the alerts, if any: a notification that can't be posted must never break pairing. */
@@ -1002,6 +1033,8 @@ class ClipLinkEngine(context: Context) {
      */
     fun setPairingOpen(open: Boolean) {
         _pairingOpen.value = open
+        // Somebody is expecting requests now: no device stays held back.
+        if (open) requestQuiet.clear()
     }
 
     fun pairingPayload(): String =
@@ -1028,6 +1061,8 @@ class ClipLinkEngine(context: Context) {
     suspend fun pairWith(raw: String): String {
         val trimmed = raw.trim()
         if (trimmed.isEmpty()) return "Enter a pairing code or address first."
+        // The user asked to pair: nothing is held back from this.
+        requestQuiet.clear()
 
         val info = PairingInfo.parse(trimmed)
         if (info != null) {
@@ -1174,6 +1209,7 @@ class ClipLinkEngine(context: Context) {
             showToast("That device is blocked. Unblock it first.")
             return
         }
+        requestQuiet.release(deviceId) // the user asked for it
         val beacon = beaconBook.get(deviceId)
         // Nameless until a connection to it proves its session.
         trustStore.trust(deviceId, beacon?.senderIp)
@@ -1183,9 +1219,13 @@ class ClipLinkEngine(context: Context) {
 
     fun untrustDevice(deviceId: String) {
         trustStore.untrust(deviceId)
+        // Still trusted at the other end, it redials, and each connection used to be
+        // a new request here: quiet for a while (see RequestQuiet).
+        requestQuiet.quiet(deviceId, RequestQuiet.AFTER_REMOVED_MS, removed = true)
         // And its link with it: a removed device must not keep receiving what
-        // is copied here, asking for files, or showing as connected.
-        syncManager.close(deviceId, "removed")
+        // is copied here, asking for files, or showing as connected. It is told it
+        // was removed first, so it drops this device too and stops redialling.
+        syncManager.unpair(deviceId)
         connectionAddresses.remove(deviceId)
         refreshDevices()
         // No toast: the device leaves "trusted" - or, if it is still beaconing,

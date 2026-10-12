@@ -73,6 +73,22 @@ extension SyncEngine {
             }
             // Otherwise stay silent - the request went to everyone.
 
+        case Wire.MessageType.unpair:
+            // The peer removed this device: it no longer trusts it. Dropping it here too
+            // ends its redialling - trust on one side only never became a pairing, and
+            // only ever produced a request at the other end. Only a peer can say this
+            // about itself: the message came over its proven session, and all it changes
+            // is whether this device trusts it.
+            let id = link.peerDeviceId
+            guard trust.isTrusted(id) else { return }
+            trust.untrust(id)
+            links.removeValue(forKey: id)?.close()
+            link.close()
+            backoff[id] = nil
+            awaitingInbound[id] = nil
+            log("\(DeviceLabel.short(id)) removed this device - it is no longer trusted here either")
+            schedulePublish()
+
         default:
             log("received message with unknown type from peer: \(envelope.type)")
         }

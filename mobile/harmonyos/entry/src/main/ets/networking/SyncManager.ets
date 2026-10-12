@@ -48,6 +48,7 @@ export class SyncManager {
   private fileStoredCallback: ((fileHash: string) => void) | null = null;
   private logCallback: ((message: string) => void) | null = null;
   private connectionsChangedCallback: ((count: number) => void) | null = null;
+  private unpairedCallback: ((deviceId: string) => void) | null = null;
 
   // In-progress incoming chunk streams, keyed `${peerDeviceId}:${fileHash}`
   // like streamingInFlight - the fd stays open across every "file_chunk"
@@ -101,6 +102,13 @@ export class SyncManager {
 
   onLog(callback: (message: string) => void): void {
     this.logCallback = callback;
+  }
+
+  // A trusted peer said it no longer trusts this device (it was removed there, or
+  // its request was ignored there). The argument is the peer's id: Index drops its
+  // trust record here too, so the peer stops being redialled and stops asking.
+  onUnpaired(callback: (deviceId: string) => void): void {
+    this.unpairedCallback = callback;
   }
 
   // The connections Map lives entirely inside this class - a plain
@@ -241,6 +249,32 @@ export class SyncManager {
     if (conn === undefined) return;
     this.connections.delete(deviceId);
     this.connectionsChangedCallback?.(this.connections.size);
+    conn.close();
+  }
+
+  // disconnect for a device that has just been removed, which tells it first that
+  // it is no longer trusted here: it drops this device too and stops redialling
+  // (its onUnpaired). Best effort - a peer that is gone, or a build that does not
+  // know the message, is left to Index's RequestQuiet.
+  unpair(deviceId: string): void {
+    const conn: PeerConnection | undefined = this.connections.get(deviceId);
+    if (conn === undefined) return;
+    this.connections.delete(deviceId);
+    this.connectionsChangedCallback?.(this.connections.size);
+    void this.unpairAndClose(conn);
+  }
+
+  // unpair for a link that is not registered, such as a pairing request that is
+  // being ignored.
+  async unpairAndClose(conn: PeerConnection): Promise<void> {
+    const envelope: Envelope = { Type: 'unpair', Payload: '{}' };
+    try {
+      await conn.send(JSON.stringify(envelope));
+      // Let it leave before the socket goes.
+      await new Promise<void>((resolve: () => void) => { setTimeout(resolve, 300); });
+    } catch (e) {
+      this.logCallback?.(`could not tell ${shortDeviceId(conn.peerDeviceId)} it was removed`);
+    }
     conn.close();
   }
 
@@ -775,6 +809,14 @@ export class SyncManager {
       await this.handleFileChunk(envelope.Payload, conn);
     } else if (envelope.Type === 'file_request') {
       this.handleFileRequest(envelope.Payload, conn);
+    } else if (envelope.Type === 'unpair') {
+      // The peer removed this device, or ignored its request: it no longer trusts
+      // it. Dropping it here too ends its redialling - trust on one side only never
+      // became a pairing, and only ever produced a request at the other end. Only
+      // a peer can say this about itself: the message came over its proven
+      // session, and all it changes is whether this device trusts it.
+      this.unpairedCallback?.(conn.peerDeviceId);
+      this.disconnect(conn.peerDeviceId);
     } else {
       this.logCallback?.(`received message with unknown type from peer: ${envelope.Type}`);
     }

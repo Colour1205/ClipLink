@@ -23,6 +23,9 @@ object Protocol {
     const val TYPE_FILE_CHUNK = "file_chunk"
     const val TYPE_FILE_REQUEST = "file_request"
 
+    /** "I no longer trust you": sent when a device is removed, or its pairing request ignored. */
+    const val TYPE_UNPAIR = "unpair"
+
     /** Display names travel capped at this many Unicode code points, on every platform. */
     const val MAX_DEVICE_NAME_LENGTH = 64
 
