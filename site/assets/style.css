@@ -92,13 +92,15 @@ body {
 body::before {
   content: "";
   position: fixed;
-  inset: -20vmax;
+  inset: 0;
   z-index: -2;
   background:
     radial-gradient(38vmax 38vmax at 18% 12%, var(--blob-a), transparent 70%),
     radial-gradient(34vmax 34vmax at 86% 18%, var(--blob-c), transparent 70%),
     radial-gradient(40vmax 40vmax at 78% 82%, var(--blob-b), transparent 70%),
     radial-gradient(30vmax 30vmax at 12% 86%, var(--blob-d), transparent 70%);
+  background-size: 135% 135%;
+  background-position: 0% 0%;
   animation: drift 40s ease-in-out infinite alternate;
 }
 
@@ -115,8 +117,8 @@ body::after {
 }
 
 @keyframes drift {
-  from { transform: translate3d(-2vmax, -1vmax, 0) scale(1); }
-  to   { transform: translate3d(2vmax, 2vmax, 0) scale(1.06); }
+  from { background-position: 0% 0%; }
+  to   { background-position: 100% 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -157,7 +159,7 @@ a:hover { text-decoration-thickness: 2px; }
 }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--text); text-decoration: none; font-weight: 700; font-size: 1.15rem; letter-spacing: -0.01em; }
 .brand img { width: 32px; height: 32px; border-radius: 9px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25); }
-.nav { margin-left: auto; display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
+.nav { margin-left: auto; display: flex; align-items: center; gap: 2px; flex-wrap: nowrap; white-space: nowrap; }
 .nav a { color: var(--text); text-decoration: none; padding: 8px 13px; border-radius: 12px; font-size: 0.95rem; transition: background 0.2s; }
 .nav a:hover { background: var(--accent-soft); }
 .nav .lang { background: var(--glass-strong); margin-left: 6px; font-weight: 600; }
@@ -436,4 +438,28 @@ section { position: relative; }
 
 @media (prefers-reduced-motion: reduce) {
   .showcase.is-stack .frame { transition: none; }
+}
+
+/* ================= nothing sticks out sideways ================= */
+
+/* The decorative shapes (the big circles in the margins, the floating ones behind
+   the hero, the screenshot phone that overlaps the window) run past the edge of
+   the screen on purpose. On a phone that made the page wider than the screen: the
+   browser widened its layout viewport to fit them, so the page was zoomed out,
+   scrolled sideways, and the fixed top bar ran off the right edge. `body`'s
+   overflow-x: hidden does not stop that on mobile; clipping where the shapes sit
+   does, and leaves vertical overflow (shadows, glows) alone. */
+@supports (overflow: clip) {
+  html, body { overflow-x: clip; }
+  section, .hero, .site-footer { overflow-x: clip; }
+}
+
+/* The top bar stays on one line down to the narrowest phones. */
+@media (max-width: 400px) {
+  .site-header { padding: 0 8px; }
+  .site-header .wrap { padding: 0 8px 0 12px; gap: 6px; min-height: 58px; }
+  .brand { font-size: 1.02rem; gap: 8px; }
+  .brand img { width: 28px; height: 28px; border-radius: 8px; }
+  .nav a { padding: 7px 10px; font-size: 0.9rem; }
+  .nav .lang { margin-left: 2px; }
 }
