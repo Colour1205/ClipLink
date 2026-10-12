@@ -147,6 +147,7 @@ public sealed partial class ClipLinkEngine
     {
         RequireStores();
         if (string.IsNullOrWhiteSpace(payload)) return false;
+        payload = PairingLink.Unwrap(payload); // a pairing link carries the JSON
         // accept either the {PublicKey, Address} pairing payload, or a
         // bare key (e.g. the old CLI --trust flow)
         PairingInfo? pairingInfo = null;
@@ -348,7 +349,7 @@ public sealed partial class ClipLinkEngine
     {
         host = "";
         targetPort = port;
-        string text = input?.Trim() ?? "";
+        string text = PairingLink.Unwrap(input).Trim(); // a pairing link carries the JSON
         if (text.StartsWith('{'))
         {
             try

@@ -34,8 +34,14 @@ struct ClipLinkApp: App {
                     }
                 }
                 .onOpenURL { url in
-                    // "Open in ClipLink" / Copy to ClipLink from Files or a share sheet.
-                    model.openFile(at: url)
+                    if PairingLink.isLink(url.absoluteString) {
+                        // Another device's pairing QR code, read by the system
+                        // camera or a scanner app (a universal link).
+                        model.openPairingLink(url)
+                    } else {
+                        // "Open in ClipLink" / Copy to ClipLink from Files or a share sheet.
+                        model.openFile(at: url)
+                    }
                 }
         }
         .onChange(of: scenePhase) { phase in

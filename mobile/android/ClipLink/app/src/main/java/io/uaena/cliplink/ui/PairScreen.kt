@@ -39,6 +39,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import io.uaena.cliplink.net.PairingLink
 
 @Composable
 fun PairScreen(
@@ -154,6 +155,9 @@ fun PairScreen(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+
+        Spacer(Modifier.height(24.dp))
+        GetClipLinkRow()
     }
 }
 
@@ -166,7 +170,11 @@ private fun QrPanel(payload: String) {
         if (payload.isEmpty()) {
             null
         } else {
-            Qr.encode(payload, 640, Color.Black.toArgb(), Color.White.toArgb())
+            // A link to the website's /pair page with the pairing info in it: a
+            // phone's own scanner opens its ClipLink app, or the website when
+            // it has none (see PairingLink). The text below still shows the
+            // bare info.
+            Qr.encode(PairingLink.wrap(payload), 640, Color.Black.toArgb(), Color.White.toArgb())
         }
     }
 

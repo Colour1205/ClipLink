@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The Release configuration's entitlements: ClipLink.entitlements plus
+	     Associated Domains, so the system camera or a scanner app that reads a
+	     pairing QR code (a link to https://cliplink.uaena.io/pair/, see
+	     PairingLink.swift) opens ClipLink instead of the website. The site's
+	     /.well-known/apple-app-site-association names this app (team ID + bundle
+	     ID) for /pair.
+
+	     Associated Domains needs a paid Apple Developer Program team - a free
+	     personal team cannot sign with it - which is why Debug builds use
+	     ClipLink.entitlements, without it. A Release build on a personal team
+	     will not sign: point Release's CODE_SIGN_ENTITLEMENTS back at
+	     ClipLink.entitlements to run one anyway. Keep the two files' other
+	     keys the same. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.io.uaena.ClipLink</string>
+	</array>
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:cliplink.uaena.io</string>
+	</array>
+</dict>
+</plist>

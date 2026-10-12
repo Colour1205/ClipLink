@@ -202,6 +202,8 @@ bidi or zero-width characters, `\/:*?"<>|` as `_`, no trailing dots or
 spaces (leading ones stay), and at most 120 UTF-16 units and 240 UTF-8 bytes,
 cut by code point with its extension kept.
 
+**The pairing QR code is a link** to the website, `https://cliplink.uaena.io/pair/#<pairing info>` (`Shared/Core/Protocol/PairingLink.swift`; the format is in `docs/protocol.md`), so the system camera or any scanner app that reads it opens ClipLink if it is installed and the website, with the downloads, if not. `PairingInfo.parse` takes the link or the bare JSON. `ClipLinkApp`'s `.onOpenURL` hands a pairing link to `AppModel.openPairingLink`, which shows the pairing sheet and starts pairing, as if the code had been scanned in the app. Opening it from the system needs **Universal Links**: the site's `/.well-known/apple-app-site-association` names the app (team ID and bundle ID), and the app needs the Associated Domains entitlement `applinks:cliplink.uaena.io`. That capability needs a paid Apple Developer Program team, so it is only in `ClipLink.Release.entitlements`, which the Release configuration uses; Debug keeps `ClipLink.entitlements` and so signs with a free personal team (links then open the website). To run a Release build on a personal team, point Release's `CODE_SIGN_ENTITLEMENTS` back at `ClipLink.entitlements`. Keep the two files' other keys the same.
+
 ## Fixed here that other ports still have (reported separately)
 
 - Android/HarmonyOS reject ~10% of Windows entries (timestamp trimming, above).

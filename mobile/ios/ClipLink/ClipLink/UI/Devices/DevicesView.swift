@@ -121,6 +121,14 @@ struct DevicesView: View {
             }
 
             DevicesNetworkSection(snapshot: model.snapshot, transparency: settings.cardTransparency)
+
+            Section {
+                GetClipLinkRow()
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .cardBackground(transparency: settings.cardTransparency)
+                    .devicesCardRow()
+            }
         }
         .mePage(glow: settings.bottomGlow, accent: settings.accentTheme.color)
         .refreshable {

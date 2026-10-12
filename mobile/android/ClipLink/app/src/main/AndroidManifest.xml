@@ -52,16 +52,37 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.ClipLink">
 
+        <!-- singleTask: a pairing link that arrives while ClipLink is already
+             running goes to that window (onNewIntent) instead of stacking a
+             second one on top. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
+            android:launchMode="singleTask"
             android:resizeableActivity="true"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.ClipLink">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- The pairing QR code is a link to https://cliplink.uaena.io/pair/ (see
+                 net/PairingLink.kt). With ClipLink installed, a phone's camera or
+                 scanner app opens it here; without, the website opens. autoVerify:
+                 the site's /.well-known/assetlinks.json names this app and the
+                 certificate that signs it, and Android then opens the link here
+                 without asking. The certificate listed there must be the one the
+                 installed build is signed with: add the release key's SHA-256 to
+                 site/.well-known/assetlinks.json before publishing a release. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="https"
+                    android:host="cliplink.uaena.io"
+                    android:pathPrefix="/pair" />
             </intent-filter>
         </activity>
 

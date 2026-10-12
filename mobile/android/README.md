@@ -138,6 +138,13 @@ few hundred MB, so what a peer can make the app hold is capped (`net/Limits.kt`)
   chunks is dropped after 5 minutes, and stray `.tmp` files are deleted at
   start. Blobs are written to a temporary file and renamed, never in place.
 
+## The pairing QR code is a link
+
+The QR code on the Pair screen is a link to the website, `https://cliplink.uaena.io/pair/#<pairing info>` (`net/PairingLink.kt`; the format is in `docs/protocol.md`), so a phone's camera or any scanner app that reads it opens ClipLink if it is installed and the website, with the downloads, if not. `PairingInfo.parse` takes the link or the bare JSON, so the in-app scanner and the pair-by-address box accept both.
+
+- `MainActivity` has an App Link intent filter for `https://cliplink.uaena.io/pair` (`autoVerify`) and is `singleTask`, so a link that arrives while ClipLink is running comes to `onNewIntent` rather than stacking a second window. `ClipLinkApp` shows the Pair screen and starts pairing, as if the code had been scanned in the app; both devices still have to trust each other.
+- Android only opens the link in the app without asking when it has verified the site's `/.well-known/assetlinks.json`, which names the package and the **SHA-256 of the certificate that signs the build**. The file lists the debug keystore's today. **Add the release key's fingerprint to `site/.well-known/assetlinks.json` before publishing a release**, or a release build is not verified and the link opens the website. Check a device with `adb shell pm get-app-links io.uaena.cliplink`.
+
 ## Toasts (snackbars)
 
 A toast is for what the screen doesn't already show: a failure of something the user asked for (a share, a copy), or a wait ("Getting it ready to share…"). A success the UI shows by itself gets none, so the paste button doesn't say "Synced text." - the new card at the top of Synced is the answer - and a paste with nothing on the clipboard, nothing new on it, or one that fails (still starting, couldn't sync) says nothing at all - the failure goes to the log; a device blocked, unblocked or removed, a pairing accepted ("Paired."), the passcode set or cleared, the device name saved, the history cleared, a copy (an item, a device ID - only a failed copy is toasted; Android 13+ also shows its own copy preview), or an item that arrives and is put on the clipboard says nothing either. Saving from the system's own dialog or picker has no toast of its own (there is none on Android). A share from another app (`ShareReceiverActivity`) always says what it did, since ClipLink isn't on screen; one from the file picker (in the app) only does when `ShareOutcome.needsAttention`. Add a toast only if the user couldn't otherwise tell what happened. (The HarmonyOS app follows the same rule.)

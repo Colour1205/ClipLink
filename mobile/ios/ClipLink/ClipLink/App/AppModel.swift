@@ -637,6 +637,18 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Another device's pairing QR code, read by the system camera or a scanner
+    /// app, opened ClipLink with its link (https://cliplink.uaena.io/pair/#...,
+    /// see PairingLink): show the pairing sheet and start pairing, as if the code
+    /// had been scanned in the app. (Both devices still have to trust each other -
+    /// the code only says where to dial.)
+    func openPairingLink(_ url: URL) {
+        let link = url.absoluteString
+        guard PairingLink.isLink(link) else { return }
+        pairingPresented = true
+        pair(with: link)
+    }
+
     // MARK: - Pairing requests
 
     /// Trust. A live request is accepted - its connection goes to work. One

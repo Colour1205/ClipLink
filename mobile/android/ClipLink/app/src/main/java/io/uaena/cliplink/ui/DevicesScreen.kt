@@ -95,6 +95,7 @@ fun DevicesScreen(
                     body = "Devices on the same network show up here automatically. Tap Pair to " +
                         "add one by QR code, address, or a shared passcode.",
                 )
+                Box(Modifier.padding(horizontal = 16.dp)) { GetClipLinkRow() }
             }
         } else {
             LazyColumn(
@@ -118,6 +119,7 @@ fun DevicesScreen(
                         onUnblock = { onUnblock(device) },
                     )
                 }
+                item { GetClipLinkRow() }
             }
         }
 

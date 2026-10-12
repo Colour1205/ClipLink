@@ -401,6 +401,10 @@
       "value": "Trusted devices, and nearby devices on the same network, will show up here."
     },
     {
+      "name": "website_title",
+      "value": "Get ClipLink on your other devices"
+    },
+    {
       "name": "me_section_device",
       "value": "Device"
     },

@@ -214,7 +214,11 @@ data class HandshakeMessage(
     }
 }
 
-/** What a QR code / manual pairing string carries. [name] is optional - older codes have none. */
+/**
+ * What a QR code / manual pairing string carries. [name] is optional - older
+ * codes have none. The QR code wraps it as a link (see [PairingLink]); [parse]
+ * takes the link or the bare JSON.
+ */
 data class PairingInfo(val publicKey: String, val address: String?, val name: String? = null) {
     fun toJson(): String = JSONObject().apply {
         put("PublicKey", publicKey)
@@ -237,7 +241,8 @@ data class PairingInfo(val publicKey: String, val address: String?, val name: St
          * handled - as a literal address, not a key.
          */
         fun parse(raw: String): PairingInfo? {
-            val trimmed = raw.trim()
+            // A pairing link (what the QR code carries) holds the JSON.
+            val trimmed = PairingLink.unwrap(raw).trim()
             if (trimmed.isEmpty()) return null
             return untrusted {
                 val obj = JSONObject(trimmed)

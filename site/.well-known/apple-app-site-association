@@ -1,0 +1,13 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["57Y96G68FJ.io.uaena.ClipLink"],
+        "components": [
+          { "/": "/pair", "comment": "A ClipLink pairing code" },
+          { "/": "/pair/*" }
+        ]
+      }
+    ]
+  }
+}
