@@ -11,3 +11,7 @@ powershell -ExecutionPolicy Bypass -File windows\publish.ps1   # -> windows\dist
 ```
 
 See `windows/README.md` for running it, where its data and logs live, and test options.
+
+## License
+
+ClipLink is open source under the [Apache License 2.0](LICENSE).
