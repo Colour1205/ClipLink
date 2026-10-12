@@ -48,7 +48,8 @@ class SyncManagerTest {
         @Volatile
         override var isClosed = false
         override val peerName: String? = null
-        override val isSessionProven = false
+        @Volatile
+        override var isSessionProven = false
 
         @Volatile
         override var closeReason: String? = null
@@ -203,6 +204,18 @@ class SyncManagerTest {
         // No link, or twice: nothing.
         sync.unpair("PEER")
         sync.unpair("NOBODY")
+    }
+
+    @Test
+    fun `a link counts as proven only once its peer has answered`() {
+        val peer = link()
+        assertTrue(sync.isConnected("PEER"))
+        assertEquals(1, sync.connectionCount)
+        assertEquals(0, sync.provenCount)
+        assertTrue(sync.provenDeviceIds().isEmpty())
+        peer.isSessionProven = true
+        assertEquals(1, sync.provenCount)
+        assertEquals(setOf("PEER"), sync.provenDeviceIds())
     }
 
     @Test

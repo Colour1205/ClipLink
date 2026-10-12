@@ -406,7 +406,13 @@ export class PeerConnection {
   public readonly peerName: string | null;
   // Set by the first line that decrypts - see onSessionProven.
   private sessionProven: boolean = false;
-  private sessionProvenCallback: (() => void) | null = null;
+  private sessionProvenCallbacks: Array<() => void> = [];
+
+  // The peer has answered: a line from it decrypted, which it only sends once it
+  // accepted this device. Before that the peer may still be asking its user.
+  get isSessionProven(): boolean {
+    return this.sessionProven;
+  }
   // The nonce of every envelope this side sends until the session is
   // proven, then null. Both directions share one key with no AAD, so an
   // envelope of ours echoed back would decrypt too - a replayed handshake's
@@ -562,7 +568,7 @@ export class PeerConnection {
   // echoed back doesn't count - see sentNonces). Whatever the handshake
   // claims that gets written to disk (its name) waits for this.
   onSessionProven(callback: () => void): void {
-    this.sessionProvenCallback = callback;
+    this.sessionProvenCallbacks.push(callback);
     if (this.sessionProven) callback();
   }
 
@@ -639,10 +645,12 @@ export class PeerConnection {
   private markSessionProven(): void {
     this.sessionProven = true;
     this.sentNonces = null; // the peer holds the key - nothing left to tell apart
-    try {
-      this.sessionProvenCallback?.();
-    } catch (e) {
-      // a listener's failure must never end the read loop
+    for (const callback of this.sessionProvenCallbacks) {
+      try {
+        callback();
+      } catch (e) {
+        // a listener's failure must never end the read loop
+      }
     }
   }
 

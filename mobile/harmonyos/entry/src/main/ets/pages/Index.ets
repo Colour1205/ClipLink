@@ -53,6 +53,7 @@ import { HandshakeReport, PeerConnection, PeerVerdict, TcpSocketAdapter, TcpSock
 import { PAIRING_ACTION_EVENT, PAIRING_ACTION_OPEN, PAIRING_ACTION_PARAM, PAIRING_ACTION_TRUST, PAIRING_ACTION_IGNORE, PAIRING_DEVICE_PARAM } from '../networking/PairingActions';
 import { PAIRING_LINK_EVENT, takePendingPairingLink, unwrapPairingLink, wrapPairingLink } from '../networking/PairingLink';
 import { QUIET_AFTER_IGNORED_MS, QUIET_AFTER_REMOVED_MS, QuietState, RequestQuiet } from '../networking/RequestQuiet';
+import { DialFallback } from '../networking/DialFallback';
 import { SyncManager } from '../networking/SyncManager';
 import { connection } from '@kit.NetworkKit';
 import { signEntry, ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
@@ -152,6 +153,9 @@ interface DeviceRow {
   discovered: boolean;
   tcpPort: number | null;
   connected: boolean;
+  // Trusted here and linked, but the other device has not accepted yet - it may
+  // still be asking its user. Not connected: nothing is exchanged until it does.
+  waiting: boolean;
   // Blocked here: no request from it is shown and it is never dialled. It
   // stays listed, on its own dark gray card, so it can be unblocked.
   blocked: boolean;
@@ -619,6 +623,10 @@ struct Index {
   @State syncedItems: SyncedItem[] = [];
   @State immersiveSupported: boolean = false;
   @State connectedCount: number = 0;
+  // Counts every change to the links (one coming up, answering, going away), so the
+  // device rows redraw for a device that is linked but has not accepted yet - the
+  // connected count alone does not change for that.
+  @State linkChanges: number = 0;
   @State topInsetVp: number = 0;
   @State bottomInsetVp: number = 0;
   // Window height, for placing the bottom glow's colour stops (see
@@ -802,6 +810,8 @@ struct Index {
   };
   // Devices whose pairing requests are held back for a while - see RequestQuiet.
   private requestQuiet: RequestQuiet = new RequestQuiet();
+  // Trusted devices that should have dialled this one and have not - see DialFallback.
+  private dialFallback: DialFallback = new DialFallback();
   private connectingTo: Set<string> = new Set();
   private offLanReconnectTimerId: number = -1;
   // Real Navigation/NavDestination stacks, one per tab that needs its own
@@ -952,7 +962,9 @@ struct Index {
     syncManager.onUnpaired((deviceId: string) => { void this.handleUnpaired(deviceId); });
     syncManager.onConnectionsChanged((count: number) => {
       netLog(`connections=${count}`);
-      this.connectedCount = count;
+      // Only links whose peer has answered count (see SyncManager.provenCount).
+      this.connectedCount = syncManager.provenCount;
+      this.linkChanges++;
     });
     this.syncManager = syncManager;
     // Shares arriving from now on; one that came before this page existed
@@ -1351,9 +1363,11 @@ struct Index {
   private async maybeAutoConnect(beacon: PeerBeacon): Promise<void> {
     if (beacon.deviceId === this.ownDeviceId) return;
     if (this.isBlockedNow(beacon.deviceId)) return;
-    if (this.syncManager?.isConnected(beacon.deviceId)) return;
+    if (this.syncManager?.isConnected(beacon.deviceId)) {
+      this.dialFallback.connected(beacon.deviceId);
+      return;
+    }
     if (this.connectingTo.has(beacon.deviceId)) return;
-    if (beacon.deviceId >= this.ownDeviceId) return;
 
     // Reserved synchronously, before the first await below - the
     // has()-check-then-add() pair has to stay atomic from this point on, or
@@ -1369,6 +1383,10 @@ struct Index {
       const context = getContext(this) as common.UIAbilityContext;
       const isTrusted = await this.trustStore.isTrusted(context, beacon.deviceId);
       if (!isTrusted) return;
+      // The other device should dial (its key sorts after ours); if it has not after a
+      // while it does not trust this one, and the dial from here is what asks it (see
+      // DialFallback).
+      if (beacon.deviceId >= this.ownDeviceId && !this.dialFallback.due(beacon.deviceId)) return;
       await this.connectToBeacon(beacon);
     } finally {
       this.connectingTo.delete(beacon.deviceId);
@@ -1463,6 +1481,11 @@ struct Index {
       // RequestQuiet). One that was removed is told so again - it may not have
       // heard the first time.
       this.log(`a pairing request from ${shortDeviceId(peerConn.peerDeviceId)} was held back - it was ignored or removed a while ago`);
+      if (quiet === 'removed') {
+        // Told once: after that a request from it - the user trusting this device from
+        // there - is a real one.
+        this.requestQuiet.release(peerConn.peerDeviceId);
+      }
       this.closeAndTell(peerConn, quiet === 'removed');
       return;
     }
@@ -1571,7 +1594,8 @@ struct Index {
     const conn = this.pendingPairingConn;
     if (conn !== null && expecting !== undefined && !sameIdentityKey(conn.peerDeviceId, expecting)) return;
     if (conn !== null) {
-      this.requestQuiet.quiet(conn.peerDeviceId, QUIET_AFTER_IGNORED_MS);
+      // Not for one that only expired: nobody refused it, and a later request is a fresh one.
+      if (!expired) this.requestQuiet.quiet(conn.peerDeviceId, QUIET_AFTER_IGNORED_MS);
       // Told too, unless nobody answered: if it trusts this device, that was never
       // going to become a pairing, and it can stop asking (its onUnpaired).
       this.closeAndTell(conn, !expired);
@@ -1915,13 +1939,18 @@ struct Index {
     await this.trustStore.untrust(context, deviceId);
     // Still trusted at the other end, it redials, and each connection used to be a
     // new request here: quiet for a while (see RequestQuiet).
-    this.requestQuiet.quiet(deviceId, QUIET_AFTER_REMOVED_MS, true);
     // Its live connection goes too, as on Windows: left open, it kept
     // receiving everything sent from here, and could still ask for any
     // stored file. So does a pairing request from it, should one be waiting.
     // It is told it was removed first, so it drops this device too and stops
     // redialling.
-    this.syncManager?.unpair(deviceId);
+    if (this.syncManager?.isConnected(deviceId) ?? false) {
+      this.syncManager?.unpair(deviceId);
+    } else {
+      // Not connected, so it cannot be told now: its next connection is answered with
+      // "unpair" instead of a prompt, once (see RequestQuiet).
+      this.requestQuiet.quiet(deviceId, QUIET_AFTER_REMOVED_MS, true);
+    }
     if (this.pendingPairingConn?.peerDeviceId === deviceId) this.rejectPairing();
     await this.refreshTrustedDevices();
     // No toast: the device leaves "trusted" - or, if it is still beaconing,
@@ -3231,9 +3260,10 @@ struct Index {
   // empty one rather than failing.
   private liveRow(deviceId: string): DeviceRow {
     void this.connectedCount;
+    void this.linkChanges;
     const found: DeviceRow | undefined = this.deviceRows().find((r: DeviceRow) => r.deviceId === deviceId);
     if (found !== undefined) return found;
-    return { deviceId, name: null, addresses: [], address: null, trusted: false, discovered: false, tcpPort: null, connected: false, blocked: false, connectedAddress: null };
+    return { deviceId, name: null, addresses: [], address: null, trusted: false, discovered: false, tcpPort: null, connected: false, waiting: false, blocked: false, connectedAddress: null };
   }
 
   private deviceRows(): DeviceRow[] {
@@ -3255,7 +3285,8 @@ struct Index {
         trusted: true,
         discovered: false,
         tcpPort: null,
-        connected: this.syncManager?.isConnected(t.publicKey) ?? false,
+        connected: this.syncManager?.isProven(t.publicKey) ?? false,
+        waiting: (this.syncManager?.isConnected(t.publicKey) ?? false) && !(this.syncManager?.isProven(t.publicKey) ?? false),
         blocked: false,
         connectedAddress: null,
       };
@@ -3273,7 +3304,8 @@ struct Index {
           trusted: false,
           discovered: true,
           tcpPort: b.tcpPort,
-          connected: this.syncManager?.isConnected(b.deviceId) ?? false,
+          connected: this.syncManager?.isProven(b.deviceId) ?? false,
+          waiting: false,
           blocked: false,
           connectedAddress: null,
         };
@@ -3281,7 +3313,8 @@ struct Index {
       }
       row.discovered = true;
       row.tcpPort = b.tcpPort;
-      row.connected = this.syncManager?.isConnected(b.deviceId) ?? false;
+      row.connected = this.syncManager?.isProven(b.deviceId) ?? false;
+      row.waiting = row.trusted && (this.syncManager?.isConnected(b.deviceId) ?? false) && !row.connected;
       // A beacon is unsigned, so its name is only a fallback: it names an
       // untrusted device, or a trusted one with no stored name yet - never
       // overriding what the trust store got from a proven handshake.
@@ -3317,6 +3350,7 @@ struct Index {
           discovered: false,
           tcpPort: null,
           connected: false,
+          waiting: false,
           blocked: true,
           connectedAddress: null,
         };
@@ -3338,6 +3372,7 @@ struct Index {
     const row: DeviceRow = this.liveRow(deviceId);
     const status: string = row.blocked ? this.str($r('app.string.devices_status_blocked'))
       : row.connected ? this.str($r('app.string.devices_status_connected'))
+        : row.waiting ? this.str($r('app.string.devices_status_waiting'))
         : row.trusted ? this.str($r('app.string.devices_status_trusted'))
           : this.str($r('app.string.devices_status_discovered'));
     return row.connectedAddress !== null ? `${status} · ${row.connectedAddress}` : status;

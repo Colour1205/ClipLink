@@ -197,7 +197,7 @@ public sealed class DeviceRow : Observable
 
     public string Status => Listing.Blocked ? "Blocked"
         : Listing.Trusted
-            ? (Listing.Connected ? "Connected" : "Not connected")
+            ? (Listing.Connected ? "Connected" : Listing.Waiting ? "Waiting for it to accept" : "Not connected")
             : (Listing.PairingOpen ? "Pairing open" : "Not paired");
 
     // Second line: the status, then the ONE address the live connection runs

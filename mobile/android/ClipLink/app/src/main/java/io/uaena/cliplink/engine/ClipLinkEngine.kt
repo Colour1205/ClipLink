@@ -96,6 +96,9 @@ class ClipLinkEngine(context: Context) {
 
     /** Devices whose pairing requests are held back for a while - see [RequestQuiet]. */
     private val requestQuiet = RequestQuiet()
+
+    /** Trusted devices that should have dialled this one and have not - see [DialFallback]. */
+    private val dialFallback = DialFallback()
     val passphraseKeyStore = PassphraseKeyStore(appContext)
     val deviceSettings = DeviceSettings(appContext)
     val fileStore = FileStore(appContext)
@@ -244,8 +247,9 @@ class ClipLinkEngine(context: Context) {
         if (started) return
         started = true
 
-        syncManager.onConnectionsChanged = { count ->
-            _connectedCount.value = count
+        syncManager.onConnectionsChanged = { _ ->
+            // Only links whose peer has answered count (see SyncManager.provenCount).
+            _connectedCount.value = syncManager.provenCount
             refreshDevices()
         }
         syncManager.onLog = { message -> log(message) }
@@ -259,7 +263,12 @@ class ClipLinkEngine(context: Context) {
         syncManager.onEntryApplied = { entry -> onEntryReceived(entry) }
         syncManager.onHistoryChanged = { refreshItems() }
         syncManager.onFileStored = { refreshItems() }
-        syncManager.onSessionProven = { conn -> rememberProvenName(conn) }
+        syncManager.onSessionProven = { conn ->
+            rememberProvenName(conn)
+            // The peer accepted: waiting becomes connected.
+            _connectedCount.value = syncManager.provenCount
+            refreshDevices()
+        }
         syncManager.onConnectionClosed = { conn -> forgetUnprovenName(conn) }
         historyStore.onProblem = { message -> log(message) }
         passphraseKeyStore.onLog = { message -> log(message) }
@@ -533,12 +542,17 @@ class ClipLinkEngine(context: Context) {
 
     /** Connect to an already-trusted device the moment its beacon is heard. */
     private suspend fun maybeAutoConnect(beacon: Discovery.Beacon) {
-        if (syncManager.isConnected(beacon.deviceId)) return
+        if (syncManager.isConnected(beacon.deviceId)) {
+            dialFallback.connected(beacon.deviceId)
+            return
+        }
         if (blockStore.isBlocked(beacon.deviceId)) return
         if (!connectingTo.add(beacon.deviceId)) return
         try {
-            if (losesTieBreaker(beacon.deviceId)) return
             if (!trustStore.isTrusted(beacon.deviceId)) return
+            // The other device should dial; if it has not after a while it does not trust
+            // this one, and the dial from here is what asks it (see DialFallback).
+            if (losesTieBreaker(beacon.deviceId) && !dialFallback.due(beacon.deviceId)) return
             connectToAddress(beacon.senderIp, beacon.tcpPort)
         } finally {
             connectingTo.remove(beacon.deviceId)
@@ -803,6 +817,9 @@ class ClipLinkEngine(context: Context) {
             if (quiet != RequestQuiet.State.NotQuiet) {
                 log("a pairing request from ${shortIdOf(conn.peerDeviceId)} was held back - it was ignored or removed a while ago")
                 if (quiet == RequestQuiet.State.Removed) {
+                    // Told once: after that a request from it - the user trusting this
+                    // device from there - is a real one.
+                    requestQuiet.release(conn.peerDeviceId)
                     scope.launch { syncManager.unpairAndClose(conn, "removed") }
                 } else {
                     conn.close("request held back")
@@ -946,7 +963,8 @@ class ClipLinkEngine(context: Context) {
             pending
         }
         if (conn != null) {
-            requestQuiet.quiet(conn.peerDeviceId, RequestQuiet.AFTER_IGNORED_MS)
+            // Not for one that only expired: nobody refused it, and a later request is a fresh one.
+            if (!expired) requestQuiet.quiet(conn.peerDeviceId, RequestQuiet.AFTER_IGNORED_MS)
             if (expired) {
                 conn.close("pairing ignored")
             } else {
@@ -1221,11 +1239,16 @@ class ClipLinkEngine(context: Context) {
         trustStore.untrust(deviceId)
         // Still trusted at the other end, it redials, and each connection used to be
         // a new request here: quiet for a while (see RequestQuiet).
-        requestQuiet.quiet(deviceId, RequestQuiet.AFTER_REMOVED_MS, removed = true)
         // And its link with it: a removed device must not keep receiving what
         // is copied here, asking for files, or showing as connected. It is told it
-        // was removed first, so it drops this device too and stops redialling.
-        syncManager.unpair(deviceId)
+        // was removed first, so it drops this device too and stops redialling. One that
+        // is not connected cannot be told now: it is told when it next connects (see
+        // RequestQuiet, which holds back its request until then).
+        if (syncManager.isConnected(deviceId)) {
+            syncManager.unpair(deviceId)
+        } else {
+            requestQuiet.quiet(deviceId, RequestQuiet.AFTER_REMOVED_MS, removed = true)
+        }
         connectionAddresses.remove(deviceId)
         refreshDevices()
         // No toast: the device leaves "trusted" - or, if it is still beaconing,
@@ -1512,7 +1535,9 @@ class ClipLinkEngine(context: Context) {
     /** Rebuilds [devices] - serialised like [refreshItems]. */
     fun refreshDevices() {
         synchronized(devicesLock) {
-            val connected = syncManager.connectedDeviceIds()
+            val linked = syncManager.connectedDeviceIds()
+            // Linked is not connected: a device we trust and dialled may not have accepted yet.
+            val connected = syncManager.provenDeviceIds()
             val trusted = trustStore.all()
             val blockedDevices = blockStore.all()
             val ids = LinkedHashSet<String>()
@@ -1549,8 +1574,9 @@ class ClipLinkEngine(context: Context) {
                     // heard, long ago, is not open now.
                     pairing = beacon?.pairing == true && beaconBook.isRecent(id),
                     lastSeenAtMs = beaconBook.lastSeenAt(id),
-                    online = connected.contains(id) || beaconBook.isRecent(id),
+                    online = linked.contains(id) || beaconBook.isRecent(id),
                     blocked = blockedEntry != null,
+                    waiting = trustedEntry != null && linked.contains(id) && !connected.contains(id),
                     // The address the live link is using - the one the card
                     // shows. Only while there is a link: nothing is "in use"
                     // for a device that is merely nearby.

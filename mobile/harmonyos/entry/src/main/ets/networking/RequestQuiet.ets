@@ -21,9 +21,12 @@
 
 import { sameIdentityKey } from './PeerConnection';
 
-// After an ignored request, or one nobody answered.
-export const QUIET_AFTER_IGNORED_MS: number = 30 * 60 * 1000;
-// After the user removed the device: it is not coming back on its own.
+// After the user tapped Ignore on its request. Short: Ignore is "not this one", and a real
+// request from it after that - the user trusting this device from there - must get
+// through. (A request that only expired unanswered is not quiet at all.)
+export const QUIET_AFTER_IGNORED_MS: number = 2 * 60 * 1000;
+// After the user removed a device that could not be told (it was not connected): its
+// next connection is answered with "unpair" instead of a prompt, once.
 export const QUIET_AFTER_REMOVED_MS: number = 6 * 60 * 60 * 1000;
 
 export type QuietState = 'none' | 'ignored' | 'removed';

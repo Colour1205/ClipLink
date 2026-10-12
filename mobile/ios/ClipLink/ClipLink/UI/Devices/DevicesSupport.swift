@@ -12,6 +12,8 @@ import UIKit
 /// screen and VoiceOver can't drift apart.
 enum DeviceStatus: Equatable {
     case connected
+    /// Paired, and linked, but the other device has not accepted yet.
+    case waiting
     /// Paired and heard from recently, but no connection is up.
     case pairedNearby
     /// Paired, and not heard from recently.
@@ -28,6 +30,8 @@ enum DeviceStatus: Equatable {
             self = .blocked
         } else if row.connected {
             self = .connected
+        } else if row.waiting {
+            self = .waiting
         } else if row.trusted {
             self = row.nearby ? .pairedNearby : .pairedOffline
         } else if !row.nearby {
@@ -40,6 +44,7 @@ enum DeviceStatus: Equatable {
     var text: String {
         switch self {
         case .connected: return "Connected"
+        case .waiting: return "Paired · Waiting for it to accept"
         case .pairedNearby: return "Paired · Nearby"
         case .pairedOffline: return "Paired · Offline"
         case .nearby: return "Nearby"
@@ -52,6 +57,7 @@ enum DeviceStatus: Equatable {
     /// For VoiceOver: no "middle dot" or "em dash" read aloud.
     var spokenText: String {
         switch self {
+        case .waiting: return "Paired, waiting for it to accept"
         case .pairedNearby: return "Paired, nearby"
         case .pairedOffline: return "Paired, offline"
         case .pairingOpen: return "Nearby, pairing mode open"
@@ -63,7 +69,7 @@ enum DeviceStatus: Equatable {
     func tint(accent: Color) -> Color {
         switch self {
         case .connected: return Theme.connected
-        case .pairedNearby, .nearby, .pairingOpen: return accent
+        case .waiting, .pairedNearby, .nearby, .pairingOpen: return accent
         case .pairedOffline, .away: return Color(UIColor.secondaryLabel)
         case .blocked: return DevicesBlockedStyle.primary
         }

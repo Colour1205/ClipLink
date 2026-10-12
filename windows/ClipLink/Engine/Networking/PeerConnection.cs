@@ -80,7 +80,10 @@ public class PeerConnection
     // Handlers must be quick (the read loop waits for them) and mustn't
     // throw.
     public event Action? SessionProven;
-    private bool sessionProven; // only Listen's read loop touches it
+    private volatile bool sessionProven; // only Listen's read loop sets it
+    // The peer has answered: a line from it decrypted, which it only sends once it
+    // accepted this device. Before that the peer may still be asking its user.
+    public bool IsSessionProven => sessionProven;
 
     // The nonces of the lines this side sent before the session was proven.
     // One key serves both directions, so a replayer could otherwise echo

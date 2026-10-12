@@ -103,6 +103,16 @@ class SyncManager(
 
     val connectionCount: Int get() = connections.size
 
+    /**
+     * Connections whose peer has answered - its first line decrypted, which it only
+     * sends once it accepted this device. A trusting device that dials one that has
+     * not accepted yet is linked, but the peer may still be asking its user: that is
+     * not "connected" for anyone looking at the Devices tab.
+     */
+    val provenCount: Int get() = connections.values.count { it.isSessionProven }
+
+    fun provenDeviceIds(): Set<String> = connections.filterValues { it.isSessionProven }.keys.toSet()
+
     fun connectedDeviceIds(): Set<String> = connections.keys.toSet()
 
     fun isConnected(deviceId: String): Boolean = connections.containsKey(deviceId)

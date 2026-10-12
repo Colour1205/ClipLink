@@ -104,6 +104,11 @@ data class DeviceRow(
     /** Blocked here: no request from it is shown and it is never dialled. It stays listed so it can be unblocked. */
     val blocked: Boolean = false,
     /**
+     * Trusted here and linked, but the other device has not accepted yet - it may
+     * still be asking its user. Not [connected]: nothing is exchanged until it does.
+     */
+    val waiting: Boolean = false,
+    /**
      * The address the live connection is using, when there is one - the one
      * address the card shows. The full list is [addresses], on the detail screen.
      */

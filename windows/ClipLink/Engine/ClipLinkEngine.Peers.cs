@@ -620,7 +620,11 @@ public sealed partial class ClipLinkEngine
             }
         };
         // Its handshake's name is stored only now, and off the read loop.
-        conn.SessionProven += () => _ = Task.Run(() => RememberProvenName(conn));
+        conn.SessionProven += () =>
+        {
+            _ = Task.Run(() => RememberProvenName(conn));
+            NotifyDevicesChanged(); // waiting becomes connected
+        };
         conn.Disconnected += () =>
         {
             // Identity-checked removal, NOT TryRemove(key). When both ends
@@ -750,7 +754,17 @@ public sealed partial class ClipLinkEngine
             // RequestQuiet). One that was removed is told so again - it may not have
             // heard the first time.
             Console.WriteLine($"[pair] request from {DeviceLabel.ShortId(conn.PeerDeviceId)} held back - it was ignored or removed a while ago");
-            if (wasRemoved) SendUnpairAndClose(conn); else conn.Close();
+            if (wasRemoved)
+            {
+                // Told once: after that a request from it - the user trusting this PC from
+                // there - is a real one.
+                requestQuiet.Release(conn.PeerDeviceId);
+                SendUnpairAndClose(conn);
+            }
+            else
+            {
+                conn.Close();
+            }
             return PairOutcome.Busy;
         }
         if (!pairingState.TrySetPending(conn, address))
@@ -795,8 +809,7 @@ public sealed partial class ClipLinkEngine
         var taken = pairingState.TakePendingIf(conn);
         if (taken == null) return;
         Console.WriteLine($"[pair] the request from {DeviceLabel.ShortId(conn.PeerDeviceId)} went unanswered and was ignored");
-        requestQuiet.Quiet(conn.PeerDeviceId, RequestQuiet.AfterIgnored);
-        conn.Close();
+        conn.Close(); // not quiet: nobody refused it, and a later request is a fresh one
         RaisePairingResolved(conn.PeerDeviceId, PairingDecision.Abandoned);
     }
 
@@ -1024,11 +1037,14 @@ public sealed partial class ClipLinkEngine
                 // one exists (e.g. just paired, session not yet proven).
                 device.Name ?? conn?.PeerDeviceName ?? seen?.Name,
                 Trusted: true,
-                Connected: conn != null,
+                // Linked is not connected: a device that is trusted here and was dialled
+                // may not have accepted yet (Waiting) - nothing is exchanged until it has.
+                Connected: conn != null && conn.IsSessionProven,
                 PairingOpen: recent && seen!.PairingOpen,
                 DistinctAddresses(seen?.LanAddress, seen?.AdvertisedAddress, device.Address),
                 Blocked: false,
-                ConnectedAddress: conn?.RemoteAddress ?? (conn != null ? seen?.LanAddress : null)));
+                ConnectedAddress: conn?.RemoteAddress ?? (conn != null ? seen?.LanAddress : null),
+                Waiting: conn != null && !conn.IsSessionProven));
         }
         // Blocked devices are listed even when silent: that is where they get
         // unblocked. A blocked device is never also a trusted one.

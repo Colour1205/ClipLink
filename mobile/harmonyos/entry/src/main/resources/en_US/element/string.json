@@ -377,6 +377,10 @@
       "value": "Connected"
     },
     {
+      "name": "devices_status_waiting",
+      "value": "Trusted - waiting for it to accept"
+    },
+    {
       "name": "devices_status_trusted",
       "value": "Trusted · not connected"
     },
