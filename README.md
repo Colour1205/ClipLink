@@ -2,8 +2,6 @@
 
 # ClipLink
 
-### Copy on one device. Paste on another.
-
 ## 🌐 [cliplink.uaena.io](https://cliplink.uaena.io)
 
 Downloads, how to set up, and help &nbsp;·&nbsp; [中文](https://cliplink.uaena.io/zh/)
