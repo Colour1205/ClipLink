@@ -53,8 +53,6 @@ ClipLink does not collect anything. Read the [privacy policy](https://cliplink.u
 
 ## To do
 
-What we want to build next:
-
 1. **A switch in Settings to turn pairing on or off.**
 2. **A switch in Settings to turn discoverability on or off.** When it is off, the device is hidden: it does not announce itself and does not answer other devices' announcements. Another device can still reach it, but only if it already knows its IP address. Today the app retries saved Tailscale addresses every 30 seconds. It should retry every saved address instead, not just the Tailscale ones.
 3. **Sync between devices that are not on the same network**, without needing a VPN such as Tailscale.
