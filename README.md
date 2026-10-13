@@ -31,7 +31,7 @@ ClipLink sends what you copy (text, pictures and files) to your other devices. I
 | Device | How |
 | --- | --- |
 | **Windows** | Download `ClipLink-Setup-2.0.0.exe` from [Releases](https://github.com/Colour1205/ClipLink/releases/latest) |
-| **Android** | Download `ClipLink-2.0.0.apk` from [Releases](https://github.com/Colour1205/ClipLink/releases/latest) (Android 12 or newer). Google Play is coming soon |
+| **Android** | Download `ClipLink-2.0.0.apk` from [Releases](https://github.com/Colour1205/ClipLink/releases/latest) (Android 12 or newer). Also on Google Play as an alpha test: [join here](https://play.google.com/apps/testing/io.uaena.cliplink) |
 | **HarmonyOS** | Coming soon |
 | **iPhone** | Coming soon |
 
