@@ -51,6 +51,16 @@ Your devices need to reach each other: on the same Wi-Fi, or through a VPN such 
 
 ClipLink does not collect anything. Read the [privacy policy](https://cliplink.uaena.io/privacy.html).
 
+## To do
+
+What we want to build next:
+
+1. **A switch in Settings to turn pairing on or off.**
+2. **A switch in Settings to turn discoverability on or off.** When it is off, the device is hidden: it does not announce itself and does not answer other devices' announcements. Another device can still reach it, but only if it already knows its IP address. Today the app retries saved Tailscale addresses every 30 seconds. It should retry every saved address instead, not just the Tailscale ones.
+3. **Sync between devices that are not on the same network**, without needing a VPN such as Tailscale.
+4. **Better handling of large pictures and files**: send them in smaller pieces, and slow down when the other device cannot keep up.
+5. **A rule for when two devices copy at almost the same moment.** Today both copies are kept, in time order, and neither one wins.
+
 ## For developers
 
 - How it works: [architecture](docs/architecture.md), [protocol](docs/protocol.md) and [security](docs/security.md)
