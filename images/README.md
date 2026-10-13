@@ -7,7 +7,6 @@ The [main README](../README.md) uses `windows/`, `ios/`, `android/` and `harmony
 | --- | --- |
 | `windows/` | The Windows app |
 | `ios/` | The iPhone app |
-| `android/` | The Android app: Devices, Me, Settings and Synced screens |
-| `android/play-store/` | What is on the Google Play page: the 512 px icon, the 1024x500 banner and four 1080x1920 phone screenshots |
+| `android/` | The Android app: the Devices, Me, Settings and Synced screens, plus the pictures on the Google Play page (`icon-512.png`, `feature-graphic-1024x500.png` and the four `phone-*.png` screenshots at 1080x1920) |
 | `harmonyos/phone/` | The HarmonyOS phone app, 1080x1920 |
 | `harmonyos/tablet/` | The HarmonyOS tablet app, 1920x1280 |

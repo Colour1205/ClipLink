@@ -1,44 +1,74 @@
 # Architecture
 
-## Model
+How ClipLink is put together, in plain words. This page is about version 2.0.
 
-Pure P2P, no central server. Every device is a **node**. Nodes:
+**Contents**
 
-1. **Discover** each other on the local network (UDP broadcast / mDNS).
-2. **Gossip** clipboard entries to every peer they can reach directly.
-3. **Reconcile history** with each peer on connect, so a device that was offline catches up from whichever peer it talks to next (epidemic/gossip propagation — no single node needs to have been online the whole time).
+- [The idea](#the-idea)
+- [The parts inside each app](#the-parts-inside-each-app)
+- [Each platform](#each-platform)
+- [The Windows app](#the-windows-app)
+- [Where the code is](#where-the-code-is)
 
-There is no "server" role. An always-running tray app (Windows) and a foreground app (iOS/Android/HarmonyOS) are both just nodes with different lifecycle constraints — see below.
+Other pages: [protocol](protocol.md) (how devices talk) and [security](security.md) (who is trusted and why).
 
-## Node lifecycle by platform
+## The idea
 
-| Platform | Runs as | Sync trigger |
-|---|---|---|
-| Windows | One app, `ClipLink.exe`: the engine (`windows/ClipLink/Engine`, a library) in-process, a tray icon and a window | Continuous — watches clipboard, listens for peers at all times |
-| iOS | Foreground app + Background App Refresh + Share extension | On launch / foreground: announce presence (unicast beacons + /24 sweep when iOS blocks broadcast), pull history from any reachable peer, push local clipboard once; iOS-scheduled background rounds catch up history; "Share → ClipLink" sends from any app |
-| Android | Foreground app (+ optional short-lived background window if OS allows) | Same as iOS |
-| HarmonyOS | Foreground app | Same as iOS |
+There is no ClipLink server. Every device runs the same program, and every device is equal. Each one does three things:
 
-Mobile platforms cannot keep a socket open indefinitely, so they are **eventually-consistent by design**: they catch up when opened rather than staying live. The gossip/history-reconciliation protocol is what makes this safe — a phone that was closed for two days still gets fully caught up the next time it opens near any peer (or via relay, see `docs/protocol.md`).
+1. **Find** other devices on the local network.
+2. **Connect** to the ones it has been paired with.
+3. **Share** what you copy, and swap recent history.
+
+Each device keeps its own short history. When two devices connect, they swap histories, so a device that was switched off catches up from whichever device it meets next. No single device has to be on all the time.
+
+## The parts inside each app
+
+Every app has the same parts:
+
+| Part | What it does |
+| --- | --- |
+| Discovery | Announces this device on the local network and listens for others. It also reconnects to saved addresses, such as a Tailscale address |
+| Connection | Talks to one other device over a link that is signed and encrypted |
+| Clipboard watcher | Notices when you copy something on this device, and puts items received from other devices on the clipboard |
+| History | The last 25 items, and the files they point to, kept on the device |
+| Sharing | Decides what to send: a new copy goes out straight away, and the history goes out when a device connects |
+| Identity and trust | The device's key, the list of devices it trusts, the devices it has blocked, and the optional passcode |
+
+## Each platform
+
+| Platform | How it runs | When it syncs |
+| --- | --- | --- |
+| Windows | One app, `ClipLink.exe`, with a tray icon and a window. Syncing runs inside the app | All the time, as long as the app is running. It watches the clipboard and listens for other devices |
+| Android | An app. If you turn on "Keep syncing in the background", a notification keeps it running | While the app is open, or all the time with that setting on. Android only lets an app read the clipboard while it is open, so there is a setting to send your clipboard when you open ClipLink |
+| iOS | An app, with background refresh and a Share extension | When the app is open. iOS closes connections when the app is not in front. On opening, the app announces itself, asks the devices it can reach for their history, and sends the current clipboard. "Share to ClipLink" sends from any app. iOS also runs short background catch-ups when it chooses to |
+| HarmonyOS | An app | While the app is open. HarmonyOS pauses the app soon after you leave it, so a new item that arrives in that short time shows a notification |
+
+A phone cannot stay connected for ever. So phones are built to catch up when they are opened, and swapping histories is what makes that safe: a phone that was closed for two days is fully up to date the next time it opens near any of your devices.
 
 ## The Windows app
 
-One process, `ClipLink.exe` (WinUI 3 / Windows App SDK, self-contained; `windows/publish.ps1` makes the app folder and the installer; build and run details in `windows/README.md`):
+One program, `ClipLink.exe`. Inside it:
 
-- **Engine** — `windows/ClipLink/Engine`, plain C# compiled into the app: `ClipLinkEngine` is the whole node (discovery, peer connections, clipboard watcher, history, trust, pairing). The app calls typed methods on it and subscribes to its events (`HistoryChanged`, `DevicesChanged`, `PairingRequested`/`PairingResolved`, `StatusChanged`). Events are raised in order on one background thread; the app marshals them to the UI thread with `DispatcherQueue.TryEnqueue`. If the TCP port is taken the engine reports `Faulted` (shown in the window, with Try again) instead of exiting.
-- **Threads** — the WinUI UI thread; the clipboard watcher on its own STA thread with its own WinForms message loop (while it runs, every clipboard write, the UI's Copy included, goes through its queue, so ClipLink's own writes aren't echoed to peers as new copies); networking on the thread pool.
-- **UI** — WinUI 3 with Mica and the native Fluent controls (`NavigationView`, collapsible to icons only; `ItemsView` with a masonry layout for the grid; `BreadcrumbBar`; `ContentDialog`; Windows Community Toolkit settings cards): Synced (history as a list or grid, Copy/Open/Delete, full view), Devices (paired and nearby devices; the pairing view with this PC's QR code and pair by address — pairing mode is on only while that view is on screen), Settings (device name and ID, passcode, start at sign-in, File Explorer share menu, clear history, Quit). Touchpad scrolling is WinUI's own (scrolls by the distance moved); mouse-wheel notches get a short custom animation.
-- **Tray** — H.NotifyIcon with the ClipLink icon: left click shows the window; right click gives Open and Quit. Closing the window hides it; Quit (tray or Settings) is what exits.
-- **Single instance** — a mutex `Local\ClipLink_<label>`; a second launch sends `activate`, `share` (Explorer's "Share to ClipLink", see `windows/README.md`), `unregister` or `quit` over a `CurrentUserOnly` named pipe to the running copy and exits. There is no other pipe: the engine has no external control channel.
-- **Storage** — the engine's data stays in `%APPDATA%\ClipboardDaemon` (files suffixed with the label, `default` normally); the app's settings and log live in `%LOCALAPPDATA%\ClipLink`. Starting at sign-in is an `HKCU\...\Run` value with `--background`.
+- **The sync engine** (`windows/ClipLink/Engine`) does the whole job: discovery, connections, the clipboard watcher, history, trust and pairing. The window and the tray icon only ask it for things and listen for what changes.
+- **The window** has three pages: *Synced* (the history, as a list or a grid, with Copy, Open and Delete), *Devices* (paired and nearby devices, and pairing with this PC's QR code or an address) and *Settings* (device name, passcode, start when you sign in, the File Explorer share menu, clear history and Quit).
+- **The tray icon** opens the window on a left click, and has Open and Quit on a right click. Closing the window hides it. Quit (from the tray or Settings) is what closes the app.
+- **One copy at a time.** If you start ClipLink a second time, the new copy hands its job to the one already running (open the window, share a file, quit) and exits.
+- **If the port is taken**, the engine says so in the window, with a Try again button, instead of closing.
+- **Data.** History, the trust list and similar files are in `%APPDATA%\ClipboardDaemon`. Settings and the log are in `%LOCALAPPDATA%\ClipLink`.
 
-## Core components (per node)
+How to build and run it is in [`windows/README.md`](../windows/README.md).
 
-- **Discovery** — finds peers (LAN broadcast now; NAT traversal / relay fallback later for peers off-LAN).
-- **Peer link** — authenticated, encrypted transport between two discovered nodes.
-- **Clipboard watcher** — OS-specific hook that detects local clipboard changes.
-- **History store** — local append-only log of clipboard entries (content, source device, timestamp, content hash) used both to answer "what did I miss" queries and to keep a scrollable history UI.
-- **Sync/gossip engine** — decides what to send a newly connected peer (diff since last known state) and what to broadcast when the local clipboard changes.
-- **Identity/pairing** — each device has a keypair; devices must be paired once (e.g. QR code / pairing code) before they trust each other's broadcasts.
+## Where the code is
 
-See `docs/protocol.md` for the wire format and `docs/security.md` for the trust model.
+| Folder | What is in it |
+| --- | --- |
+| [`windows/`](../windows/) | The Windows app and its installer |
+| [`mobile/android/`](../mobile/android/) | The Android app |
+| [`mobile/harmonyos/`](../mobile/harmonyos/) | The HarmonyOS app |
+| [`mobile/ios/`](../mobile/ios/) | The iOS app |
+| [`docs/`](../docs/) | This page, the protocol and the security page |
+| [`site/`](../site/) | The website, [cliplink.uaena.io](https://cliplink.uaena.io) |
+| [`images/`](../images/) | Screenshots and store pictures, one folder per platform |
+
+The four apps are written separately, in each platform's own language, and follow the [protocol](protocol.md) so that they work together. Each app's folder has its own README with build steps.
