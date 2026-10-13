@@ -174,7 +174,9 @@ a:hover { text-decoration-thickness: 2px; }
   padding: 5px 14px; border-radius: 999px; margin-bottom: 20px;
 }
 h1 { font-size: clamp(2.3rem, 5.4vw, 3.8rem); line-height: 1.07; margin: 0 0 20px; letter-spacing: -0.03em; }
-h1 em { display: inline-block; font-style: normal; background: var(--accent-grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+/* The gradient only paints inside the element's box and the text is transparent, so a tight
+   line-height clips descenders (the y in "every"). Pad the box down, and pull the margin back. */
+h1 em { display: inline-block; font-style: normal; background: var(--accent-grad); -webkit-background-clip: text; background-clip: text; color: transparent; padding-bottom: 0.16em; margin-bottom: -0.16em; }
 .lead { font-size: 1.2rem; color: var(--muted); margin: 0 0 30px; max-width: 33em; }
 .lead-link {
   color: var(--accent); font-weight: 700; text-decoration: underline;
@@ -206,7 +208,13 @@ h1 em { display: inline-block; font-style: normal; background: var(--accent-grad
   content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.35), transparent 45%);
 }
-.art-panel.shots { padding: 14px; }
+.art-panel.shots {
+  /* A plain, even frame round the screenshot: opaque (so the blurred shapes behind don't tint
+     it unevenly), no corner highlight, and radii that nest (screenshot 30px + 8px padding). */
+  padding: 8px; border-radius: 38px; background: var(--glass-solid);
+  -webkit-backdrop-filter: none; backdrop-filter: none;
+}
+.art-panel.shots::before { display: none; }
 .shot-win { display: block; width: 100%; height: auto; border-radius: 30px; box-shadow: 0 10px 30px rgba(60, 30, 20, 0.18); }
 .shot-phone {
   position: absolute; right: -26px; bottom: -44px; width: 34%; height: auto;
@@ -310,6 +318,7 @@ code { background: var(--accent-soft); padding: 1px 7px; border-radius: 7px; fon
   }
   .card { border-radius: 52px; }
   .art-panel { border-radius: 84px; }
+  .art-panel.shots { border-radius: 42px; }
   .site-header .wrap { border-radius: 48px; }
   details, .callout { border-radius: 40px; }
   .ico { border-radius: 24px; }
@@ -387,7 +396,7 @@ section { position: relative; }
   .frame { corner-shape: squircle; border-radius: 52px; }
   .frame img { corner-shape: squircle; border-radius: 40px; }
   .shot-win, .shot-phone { corner-shape: squircle; }
-  .shot-win { border-radius: 46px; }
+  .shot-win { border-radius: 34px; }
   .shot-phone { border-radius: 52px; }
 }
 @media (max-width: 960px) { .shot-phone { right: -12px; width: 32%; } }
