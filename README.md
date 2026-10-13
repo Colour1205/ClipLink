@@ -18,14 +18,14 @@ ClipLink sends what you copy (text, pictures and files) to your other devices. I
 - **Free and open source.**
 
 <p align="center">
-  <img src="images/screenshots/windows-synced.webp" width="560" alt="ClipLink on Windows">
+  <img src="images/windows/synced.webp" width="560" alt="ClipLink on Windows">
 </p>
 <p align="center">
-  <img src="images/screenshots/ios-synced.webp" height="400" alt="ClipLink on iPhone">
+  <img src="images/ios/synced.webp" height="400" alt="ClipLink on iPhone">
   &nbsp;
-  <img src="images/screenshots/android-synced.jpg" height="400" alt="ClipLink on Android">
+  <img src="images/android/synced.jpg" height="400" alt="ClipLink on Android">
   &nbsp;
-  <img src="images/screenshots/harmonyos-synced-1080x1920.png" height="400" alt="ClipLink on HarmonyOS">
+  <img src="images/harmonyos/phone/synced-1080x1920.png" height="400" alt="ClipLink on HarmonyOS">
 </p>
 
 ## Get it

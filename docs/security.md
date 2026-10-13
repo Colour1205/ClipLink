@@ -1,67 +1,74 @@
-# Security & trust model (draft)
+# Security and trust model
+
+This page says how ClipLink decides who to trust, how devices talk to each other, what is kept on a device, and what is known not to be perfect. It describes version 2.0. The wire formats are in [`protocol.md`](protocol.md).
+
+In short: there is no ClipLink server and no account. Devices talk straight to each other, only after you have paired them, and everything they send is encrypted and signed.
+
+## Identity
+
+Each device makes a long-term P-256 key pair the first time it runs. The public key, as Base64, is the device's id. The private key stays on the device:
+
+| Platform | Where the private key lives |
+| --- | --- |
+| Windows | In a file encrypted with DPAPI (tied to the Windows user) |
+| Android | Android Keystore |
+| HarmonyOS | HUKS, the system key store. The key cannot be read out |
+| iOS | The Keychain, on this device only |
 
 ## Pairing
 
-Devices must be explicitly paired before they trust each other's clipboard data. Suggested flow:
+A device only accepts a peer it has been told to trust. There are three ways to pair, and none of them involves a server:
 
-1. Each device generates a long-term keypair on first run (identity).
-2. Pairing exchanges public keys out-of-band (QR code shown on one device, scanned by the other; or a short numeric code typed on both) — this prevents an unpaired device on the same LAN from silently joining the mesh.
-3. Paired device public keys are stored locally; only peers with a known/trusted key are accepted on the peer link.
+1. **QR code or pairing link.** The code carries the other device's public key and address. It is a link to the website (`https://cliplink.uaena.io/pair/#...`), so a phone's own camera opens ClipLink if it is installed. The key travels after the `#`, so it is never sent to a server.
+2. **Address.** Type in the other device's address. The other device shows a pairing request, and nothing is trusted until it is accepted.
+3. **Shared passcode.** Devices that have the same passcode trust each other with no scan. Each device sends a proof: an HMAC-SHA256 of its own id under a key made from the passcode (PBKDF2-SHA256, 210,000 rounds, a fixed salt, so every device makes the same key). The passcode itself is never sent. See "Known limits" for the catch.
 
-A device's name is whatever it claims, and two devices can claim the same one, so every pairing prompt also shows the requester's fingerprint: the first 4 bytes of the SHA-256 of its id, as `XXXX·XXXX` (the id `abc` gives `BA78·16BF`; see `docs/protocol.md`, Device names). Each device shows its own fingerprint on its Settings (Windows) or Me (phones) screen, so the user can compare the two. It isn't a prefix of the id, because every id starts with the same 36 characters. The fingerprint is only 32 bits, though: enough to tell your own devices apart and to spot a copied name, but a determined attacker can generate a key with a matching fingerprint (a few billion key generations, within reach of one PC). The real protection is still that a pairing request only gets through while the Pairing screen is open, and has to be accepted on both devices.
+A device's name is whatever it says it is, and two devices can use the same one. So every pairing prompt also shows the sender's **fingerprint**: the first 4 bytes of the SHA-256 of its id, as `XXXX·XXXX` (the id `abc` gives `BA78·16BF`). Each device shows its own fingerprint on its Settings (Windows) or Me (phones) screen, so you can compare them. It is only 32 bits, which is enough to tell your devices apart and to spot a copied name, but not to stop a determined attacker who is willing to generate a lot of keys. The real protection is the next section: a request has to be accepted by a person.
 
 ## Pairing requests, ignoring and blocking
 
-A pairing request can come from any device on the network at any time while the app is running. A device's pairing screen being open is no longer what lets a request through: a device is discoverable on the LAN whatever its screen says, so that gate protected nothing. What protects the user is that **nothing is trusted until a person says so**, on both devices.
+A pairing request can come from any device on the network at any time while the app is running. What protects you is that **nothing is trusted until a person says so**, except a device that proves it has your passcode.
 
-- A stranger's handshake is held as the one pending request, with nothing read from it and nothing sent to it. A second stranger is turned away while one is waiting. A request nobody answers is ignored after 3 minutes (its notification goes at the same moment), so one device can't hold the slot and keep every later request, including the user's own new device, out.
-- **Trust** adds the key to the trust store. **Ignore** (not "deny") closes that one connection and remembers nothing, so the device can ask again. **Block**, a deliberate action in the Devices tab's menu for a device, remembers the *key*: the device is untrusted and disconnected if it was paired, its handshake is refused before trust, a passcode proof or pairing mode are looked at, it is never dialled, never listed as a stranger, and an open request from it is dropped. Unblocking does not trust it again. A blocked device's card is dark gray.
-- Blocking is by key, not by address or name, so a device that makes itself a new identity is a new device and is not stopped. Keys are compared by what they decode to, not as text, because decoders accept stray spaces and missing padding and one key therefore has many spellings.
-- The shared passcode doesn't override a block: a blocked key's proof is never checked.
-- When the app isn't in front, a request is a notification with **Trust** and **Ignore** (never Block). Trust needs the device unlocked where the OS can ask for that (Android `setAuthenticationRequired`, iOS `authenticationRequired`), so a stranger's request can't be answered from a lock screen. Each notification carries the id it was posted for, so one that outlived its request can't trust whoever asks next.
-- How long a request can be received with the app out of front depends on the platform. iOS suspends the app and closes its sockets, so a request is only seen while the app is running (a notification covers the stretch when the app is running but isn't the active screen, such as the app switcher); a request can't be held across the app going to the background, and an iOS background refresh round or the Share extension doesn't take requests at all. A push from a server would be needed to wake a suspended iPhone, and this app has none.
-- A device that keeps asking is a nuisance, not a way in: it can raise prompts (one at a time) but can't connect, read or write anything without a Trust.
+- A stranger's connection is held as the one pending request. Nothing is read from it and nothing is sent to it. A second stranger is turned away while one is waiting. A request nobody answers is dropped after 3 minutes, so one device cannot hold the slot forever.
+- **Trust** adds the key to the trust list. **Ignore** closes that one connection and remembers nothing, so the device can ask again, except that for 2 minutes after you ignore a request from a device, new requests from it are closed without a prompt. **Block** (a deliberate action in the Devices tab) remembers the *key*: the device is untrusted and disconnected, its connection is refused before anything else is checked, it is never dialled and never listed, and a passcode proof from it is never looked at. Unblocking does not trust it again.
+- Blocking is by key, not by address or name. A device that makes a new identity is a new device and is not stopped. Keys are compared by what they decode to, not as text, because one key can be written many ways.
+- When the app is not in front, a request is a notification with **Trust** and **Ignore** (never Block). Where the system can ask for it, Trust needs the device to be unlocked (Android `setAuthenticationRequired`, iOS `authenticationRequired`), so a stranger's request cannot be answered from a lock screen.
+- How long a request can be received with the app out of front depends on the platform. iOS suspends the app and closes its connections, so a request is only seen while the app is running. A push from a server would be needed to wake a suspended iPhone, and ClipLink has no server.
+- A device that keeps asking can only raise prompts, one at a time. It cannot connect, read or write anything without a Trust.
 
-## Transport security
+**Removing a device.** Removing a device here drops its key from the trust list and sends it an `unpair` message over the encrypted link, so it stops trusting and redialling this device. If it was not connected, it is told the next time it connects. Removing a device on one of your devices does not remove it from your others. If a device is lost or stolen, remove it on each of the devices you still have.
 
-- Presence beacons (`HELLO`) are unauthenticated by nature (broadcast) and must never contain clipboard content — only device id + metadata.
-- The actual peer TCP link is encrypted and mutually authenticated using the paired keys (e.g. Noise protocol or TLS with pinned certs derived from the device keypair).
+## Talking to a peer
 
-## Data at rest
+- **Presence beacons** (UDP broadcast) carry the device's id, name and port, its Tailscale address if one is set, a passcode proof if a passcode is set, and whether its pairing screen is open. They never contain clipboard content. They are not authenticated, so a name in a beacon is only shown, never saved.
+- **The connection** is TCP. Each side sends a handshake first: a fresh P-256 key made for this connection, signed with the device's long-term key. Each side checks the other's signature and that the other is trusted (or is a pairing request). The two fresh keys give a shared secret, and its SHA-256 is the session key. So a stolen long-term key cannot decrypt old sessions, and someone in the middle cannot swap in their own key without the real private key.
+- **Everything after the handshake** is AES-256-GCM, with a random 12-byte nonce and a 16-byte tag on each message. A message that fails to decrypt ends the connection. Each side remembers the nonces it sent until the connection has proved itself, and ends the connection if one comes back to it: this stops a device from being tricked into talking to itself or into repeating a replayed handshake.
+- **Entries are signed.** Each clipboard entry is signed by the device that made it (ECDSA P-256 over its content, type, device id and time). A device only accepts an entry whose signature is valid and whose signer is trusted.
+- **Files** are checked against the SHA-256 in their signed entry before they are stored, and a received name is cut to a safe last part, so a peer cannot write a file anywhere else or store other bytes under a hash it chose.
+- **Limits against abuse.** The handshake has a time limit (15 seconds on Windows, 10 on the phone apps). The Android, HarmonyOS and iOS apps limit how long a line can be, and drop what is too big. Files are limited to 1 GB.
+- **Names.** A device name from a handshake is only saved once the connection has proved itself, so a replayed handshake cannot rename a device. See [`protocol.md`](protocol.md#device-names).
+- **A device connecting to itself** is refused on every platform, straight after the handshake is read, before any trust, passcode or pairing check. Otherwise it could trust itself or show its own pairing request. See [`protocol.md`](protocol.md#a-handshake-from-this-device-itself).
 
-- Local history store should be encrypted at rest (or at least access-restricted) since it accumulates sensitive clipboard content (passwords, tokens, etc. users may copy).
-- Consider a "don't sync sensitive content" heuristic later (e.g. skip content that looks like a password-manager copy) — out of scope for v1.
+## What is kept on a device
 
-## Threat model notes (draft, revisit before shipping)
+- The history is the last 25 items, plus the files they point to, in the app's own private storage (on Windows, the user's `AppData` folder). It is **not encrypted separately**: it is as protected as the user's own files and the operating system's app separation. It can hold anything you copied, such as a password, so the apps let you clear it.
+- If you delete an item, the device remembers that, so a peer's history cannot bring it back.
+- The trust list, the blocked list, the device name and the optional Tailscale address are stored in the same private storage. On Windows the trust list is a plain JSON file.
+- The passcode itself is never stored. Only the key made from it is: encrypted with DPAPI on Windows, with the Android Keystore on Android, in the Keychain on iOS, and in the app's private preferences on HarmonyOS.
+- Nothing is sent to the developer or anyone else. There are no accounts, no analytics and no crash reports. See the [privacy policy](https://cliplink.uaena.io/privacy.html).
 
-- LAN-local attacker should not be able to join the mesh without completing pairing.
-- A compromised/unpaired device should not be able to read or inject clipboard entries.
-- Lost/stolen device: needs a way to revoke its trust from the others (unpair) — TBD.
+## Known limits
 
-## Windows daemon security review (2026-09-18)
+These are known and not fixed:
 
-Self-review of the implemented Windows daemon, thinking as an attacker. Ordered by severity; none of these are fixed yet.
+- **A short passcode can be guessed offline.** The passcode proof is in the beacon, which anyone on the network can read. Someone who captures one can try passcodes against it on their own computer, offline. The 210,000 rounds slow that down but do not stop it. There is no minimum length, because the passcode can be any length. Use a long passcode, or pair with a QR code.
+- **Windows does not limit the length of a line it reads** from a connection. The Android, HarmonyOS and iOS apps do. The 15-second handshake limit stops a stranger holding a connection open, but not from sending a lot of data inside those 15 seconds, and a trusted peer is not limited.
+- **A device name can be changed by someone on the network path** (ARP spoofing, say) while a real handshake passes, because the handshake's signature does not cover the name. The real device then proves the connection, and the changed name is saved. Closing this needs the name to be signed, which is a change to the protocol on every platform at once.
+- **The history is not encrypted on disk**, and Windows keeps the trust list in a plain file (see above).
+- **No re-keying.** A connection uses one session key for its whole life. A leaked session key exposes that connection's traffic, but no other.
+- **Old entries can come back.** Nothing checks how old an entry is. An entry that has fallen out of the last 25 can be sent again by a device that still has it. Entries you deleted stay deleted.
+- **Beacon tricks.** A fake beacon cannot impersonate a device, because the handshake is signed, but it can cause wasted connection attempts. On Android and HarmonyOS, a beacon with a re-written copy of a device's own id can add a row to the list of nearby devices (its handshake is still refused). On HarmonyOS, a handshake from a device itself that uses a different encoding of the same key is not recognised as its own.
 
-### Critical
-1. **Local IPC has no authentication.** *(Gone since the Windows daemon and tray became one app: the engine runs in-process with typed calls and no control pipe; the app's only pipe forwards a second launch's "activate"/"share" to the running copy and is opened `CurrentUserOnly`.)* `IpcServer` opens a named pipe (`ClipboardDaemonIPC_<label>`) with a fully predictable name and no ACL/secret. Any process running as the same Windows user can connect and issue `trust_device`, `set_passphrase`, `untrust_device`, `list_trusted`/`list_connections` — full control of the daemon, completely bypassing every network-level protection (ECDH, signing, trust checks). This is the top priority fix.
-- **Peer-supplied file hashes and names were used as paths.** *(Fixed with the one-app merge.)* A `file_request`'s, `file_chunk`'s or file entry's `FileHash` went straight into `FileStore` paths, so a trusted (or compromised) peer could have any file the user can read streamed to it, create `*.partial` files anywhere, or get any file deleted when the entry naming it was deleted or trimmed from history; and a received `FileName` was joined onto `ReceivedFiles` as it came, so a rooted or `..\` name wrote the file anywhere (the Startup folder, say). `FileStore` now only takes 64-hex-digit SHA-256 hashes (`FileStore.IsValidHash`), and received names are cut to a safe last segment (`FileNames.Safe`).
-2. **Handshake has no timeout — one connection can freeze the whole daemon.** The accept loop `await`s `PeerConnection.CreateAsync` before looping back to accept the next connection. A peer that opens a TCP connection and never sends handshake data blocks the daemon from accepting *any* other connection (including legitimate devices) until the OS-level socket timeout eventually fires (can be minutes).
+## Found a problem?
 
-### High
-3. **No size limit on any line read from the network** (handshake, envelope, chunk) — `ReadLineAsync()` will buffer an attacker-supplied line of unbounded length, a memory-exhaustion vector.
-4. **Abandoned file transfers are never cleaned up.** `HandleFileChunk` opens a `FileStream` per hash with no timeout or cap on concurrent transfers; sending `file_chunk` messages for bogus hashes and never sending `IsLast` leaks file handles and disk space indefinitely.
-5. **Passphrase auto-trust proof is broadcast in cleartext**, enabling offline brute-force of a weak user-chosen passphrase by anyone who passively captures one beacon (no live throttling applies to an offline attack).
-   - So a short passcode can be guessed offline from one captured beacon proof, and a longer passcode is safer. No minimum length is enforced, by design (the passcode can be set, changed or cleared at any time, at any length).
-
-### Medium
-6. **Trust revocation doesn't propagate.** `Untrust` only edits the local trust store — revoking a stolen device on one of your devices leaves it fully trusted on every other device until each is separately revoked.
-7. **Old signed entries can be replayed once evicted from the 25-item history cap** — dedup only checks "is this still in my current history," with no timestamp-freshness requirement.
-8. **`TrustStore`'s file isn't DPAPI-protected**, unlike the identity and passphrase keys — plain JSON revealing paired devices + their Tailscale addresses to anyone with local file access.
-
-### Low
-- No re-keying on long-lived connections (one compromised session key exposes that connection's whole lifetime of traffic).
-- Beacon spoofing (fake deviceId + port) can't achieve impersonation (the identity-signed handshake blocks it) but can cause wasted/nuisance connection attempts against a victim's real address.
-- The handshake's `DeviceName` isn't covered by its signature (only `EphemeralPublicKey` is), so a captured handshake of a trusted device can be replayed with any `DeviceName`. *(A replay can no longer rename a device.)* No platform stores a handshake's name until a line received on that connection has decrypted with its session key and isn't one of the receiver's own lines echoed back. A replayer can't derive the key, so echoing is its only way to get a line that decrypts (one key serves both directions), and a reflected line ends the connection. A replayed connection may show its name while it lasts (until it sends a line that doesn't decrypt or is reflected, or the heartbeat times it out), but never writes it. Pairing and passcode auto-trust store a device without a name, and its connection fills it in once proven (see `docs/protocol.md`, Device names). Still open: an attacker on the network path (ARP spoofing on the LAN, say) can change `DeviceName` in a genuine handshake as it passes; the real device then proves the session and the changed name is stored. Only signing `DeviceName` with the ephemeral key closes that, a protocol change on every platform.
-- **A device could connect to itself.** *(Fixed.)* Dialling one of its own addresses, or a reflector on the path relaying its dial back into its own listener, produced a handshake carrying its own identity. The two ends derived one session key, so each took the other's lines as proof of the session. With a passcode set, its own passcode proof vouched for its own id, and while the pairing screen was open the connection became a pairing request from itself. A reflector that re-encoded the id (a space inside the Base64) also got past the text comparison that some paths had. A handshake carrying the receiver's own identity is now refused straight after it's read, before any trust, passcode or pairing check, on every platform. The comparison is of the decoded key, not only of the text, except that HarmonyOS compares the decoded bytes, so it misses a different DER encoding of the same key (see `docs/protocol.md`, A handshake from this device itself). Beacons and pairing payloads are compared by key on Windows and iOS, but as text on Android and HarmonyOS, where a spoofed beacon with a re-spelt copy of the device's own id can add a discovered row. Its handshakes are still refused as the device's own, within the HarmonyOS limit above. On Windows, when a trusted peer's stored address answers as this device, that address is cleared, but an address a beacon came from never clears anything, so a reflector can't use this to wipe a peer's real address.
-- **File bytes are only ever stored under their own hash.** Received bytes are checked against the entry's signed `FileHash` before they're stored. The only file a receiver creates without receiving it is a 0-byte one, and only for exactly `FileSize` 0 with the SHA-256 of empty input, so no peer can get other bytes stored under a hash of its choosing. On the sending side, a file on this PC that changes between being hashed and being stored to send isn't sent at all (see `docs/protocol.md`, Files).
-- `TrayLauncher`/`DaemonLauncher`'s path-guessing is fine for the current same-user dev layout but needs hardening before ever being installed to a shared location. *(Gone with the one-app merge.)*
+If you find a way around any of this, please open an issue at https://github.com/Colour1205/ClipLink/issues, and leave out anything private.
