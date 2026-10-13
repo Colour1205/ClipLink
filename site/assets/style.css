@@ -244,16 +244,18 @@ h2 { font-size: clamp(1.7rem, 3.6vw, 2.4rem); margin: 0 0 12px; letter-spacing: 
 }
 .ico svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
-.steps .card { padding-top: 62px; }
+/* Steps: the number sits beside the title and text, so the cards stay short. */
+.steps .card { display: grid; grid-template-columns: 32px 1fr; column-gap: 14px; align-items: start; padding: 18px 22px; }
 .steps .card::before {
   counter-increment: step; content: counter(step);
-  position: absolute; top: 20px; left: 24px;
+  grid-row: 1 / span 2;
   width: 32px; height: 32px; border-radius: 50%;
   background: var(--accent-grad); color: var(--accent-ink);
   display: grid; place-items: center; font-weight: 750; font-size: 0.95rem;
   box-shadow: 0 4px 12px rgba(194, 74, 39, 0.3);
 }
-.steps .card { position: relative; }
+.steps .card h3 { grid-column: 2; margin-bottom: 4px; }
+.steps .card p { grid-column: 2; }
 
 .dl { display: flex; flex-direction: column; gap: 10px; }
 .dl h3 { font-size: 1.25rem; margin: 2px 0 0; }
