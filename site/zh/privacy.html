@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    // First visit: the page opens in the browser's language (Chinese or English). The
+    // language links add ?lang= so a visitor's own choice sticks, and is not undone.
+    (function () {
+      try {
+        var m = /[?&]lang=(en|zh)\b/.exec(location.search), pref = m && m[1];
+        try { if (pref) localStorage.setItem('lang', pref); else pref = localStorage.getItem('lang'); } catch (e) { /* no storage: fine */ }
+        var want = pref || (/^zh/i.test(navigator.language || '') ? 'zh' : 'en');
+        var onZh = /\/zh(\/|$)/.test(location.pathname);
+        if (want === 'zh' && !onZh) location.replace(location.pathname.replace(/([^\/]*)$/, 'zh/$1') + location.search + location.hash);
+        else if (want === 'en' && onZh) location.replace(location.pathname.replace(/\/zh\/([^\/]*)$/, '/$1') + location.search + location.hash);
+      } catch (e) { /* stay where we are */ }
+    })();
+  </script>
+  <title>隐私政策 - ClipLink</title>
+  <meta name="description" content="ClipLink 会用到哪些信息、这些信息会去哪里，以及你的选择。没有账号，没有服务器，没有跟踪。">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" type="image/png" href="../assets/icon-64.png">
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="alternate" hreflang="en" href="https://cliplink.uaena.io/privacy.html">
+  <link rel="alternate" hreflang="zh-Hans" href="https://cliplink.uaena.io/zh/privacy.html">
+</head>
+<body>
+  <a class="skip" href="#main">跳到正文</a>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="./"><img src="../assets/icon-64.png" alt="" width="32" height="32"> ClipLink</a>
+      <nav class="nav" aria-label="主导航">
+        <a class="keep" href="./#download">下载</a>
+        <a href="https://github.com/Colour1205/ClipLink">GitHub</a>
+        <a class="lang" href="../privacy.html?lang=en" hreflang="en" lang="en">English</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main" class="wrap prose">
+    <h1>隐私政策</h1>
+    <p><em>最后更新：2026 年 10 月 12 日</em></p>
+    <p>ClipLink 会把你在一台设备上复制的内容同步到你的其他设备。本页说明 ClipLink 为此会用到哪些信息、这些信息会去哪里，以及你可以怎么处理。本政策适用于 Windows、Android、鸿蒙和 iOS 版 ClipLink 应用以及本网站。ClipLink 由 Uaena（GitHub：<a href="https://github.com/Colour1205">Colour1205</a>）开发，并且是开源的。</p>
+
+    <div class="callout"><strong>简而言之：</strong>ClipLink 没有账号，也没有自己的服务器。你复制的内容通过你自己的网络，加密后直接从你的一台设备传到你已配对的另一台设备。开发者不会收到这些内容。应用不含广告、不含统计分析、不含崩溃上报，也不做任何跟踪。</div>
+
+    <h2>ClipLink 会处理什么</h2>
+    <ul>
+      <li><strong>你复制的内容，或分享给 ClipLink 的内容：</strong>文字、图片和文件。每台设备会在 ClipLink 自己的存储空间里保留一份简短的历史记录（最近的 25 项，并有大小上限），以便发送到你的其他设备并显示给你。</li>
+      <li><strong>设备身份：</strong>ClipLink 首次运行时在设备上生成的一对密钥。私钥始终留在这台设备上，并在平台提供的情况下保存在系统的受保护密钥存储中。公钥就是这台设备的 ID。</li>
+      <li><strong>你配对的设备：</strong>你信任或屏蔽的设备的公钥、名称和最近已知的网络地址。</li>
+      <li><strong>你设置的选项：</strong>设备显示的名称、可选的口令（受保护存放，发送出去的只有由它派生出的证明），以及可选的 Tailscale 地址。</li>
+    </ul>
+
+    <h2>这些信息会去哪里</h2>
+    <ul>
+      <li>设备会在本地网络中用一条很小的消息宣告自己：设备 ID、名称、端口、配对界面是否打开，以及可选的“知道相同口令”的证明和 Tailscale 地址。其中不含你复制的任何内容，同一网络中的其他设备可以看到它。</li>
+      <li>你复制的内容只会通过两台已配对设备之间的直接加密连接传输，双方都会用对方的密钥进行验证。它走你的本地网络，或者在你使用时走 Tailscale 或你自己搭建的其他 VPN。它不会经过任何服务器。</li>
+      <li>应用不会向开发者或任何其他公司发送任何内容。应用不使用广告、统计分析或崩溃上报服务，也没有任何外部服务从中收集数据。</li>
+      <li>没有任何内容被出售或与他人共享。</li>
+    </ul>
+
+    <h2>权限</h2>
+    <ul>
+      <li><strong>相机</strong>（Android、iOS、鸿蒙）：用于扫描另一台设备的配对二维码。画面只在设备上读取，不会保存或发送。</li>
+      <li><strong>本地网络 / 附近的设备：</strong>用于发现并连接你的其他设备。</li>
+      <li><strong>通知：</strong>在应用不在屏幕上时，提醒你有配对请求或收到了新内容。</li>
+      <li><strong>后台运行</strong>（Android，可选）：ClipLink 为保持同步而持续运行时会显示一条通知。</li>
+      <li><strong>剪贴板：</strong>当你点按“粘贴”、把内容分享给 ClipLink，或者（若你保持开启“打开 ClipLink 时发送我的剪贴板”）打开应用时，ClipLink 才会读取剪贴板。在 Windows 上，ClipLink 运行时会监视剪贴板，使你复制的内容能到达你的其他设备。</li>
+      <li><strong>文件和照片：</strong>仅限你通过系统自带的选择器挑选或分享的那些。</li>
+    </ul>
+
+    <h2>你的选择</h2>
+    <ul>
+      <li>在应用中删除单个项目，或清空全部历史记录。</li>
+      <li>在“设备”界面中移除或屏蔽某台设备。被移除的设备会收到通知，从而不再发起请求。</li>
+      <li>可随时更改或清除口令。</li>
+      <li>在系统设置中关闭通知、相机或本地网络访问。退出应用即可停止同步。</li>
+      <li>卸载 ClipLink 会删除它在该设备上存储的全部内容。你的其他设备会保留各自的副本，直到你在那些设备上删除。</li>
+    </ul>
+
+    <h2>安全</h2>
+    <p>设备之间的连接是加密的，并且双方都用自己的密钥证明身份，因此未配对的设备无法读取或写入你的剪贴板。在你于两台设备上都确认之前，不会信任任何设备。具体机制见<a href="https://github.com/Colour1205/ClipLink/blob/main/docs/security.md">安全说明</a>，全部代码都是公开的。</p>
+
+    <h2>儿童</h2>
+    <p>ClipLink 不面向儿童。它不收集任何人的个人信息：它处理的内容都留在你自己的设备上。</p>
+
+    <h2>本网站</h2>
+    <ul>
+      <li>网站没有 Cookie，也没有统计分析。你的浏览器会在你自己的设备上记住你选择的语言。</li>
+      <li>页面加载时，你的浏览器会向 GitHub 的公开 API 查询最新版本，因此 GitHub 能看到这次请求。网站托管在 GitHub Pages 上，下载来自 GitHub Releases 或 Google Play；这些服务适用它们各自的隐私政策。</li>
+    </ul>
+
+    <h2>本政策的变更</h2>
+    <p>如有变更，新版本会连同日期发布在本页。每一次改动的历史都记录在<a href="https://github.com/Colour1205/ClipLink">公开仓库</a>中。</p>
+
+    <h2>联系方式</h2>
+    <p>对隐私有疑问或顾虑，请<a href="https://github.com/Colour1205/ClipLink/issues">提交 issue</a>。</p>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <span>ClipLink · Apache 2.0</span>
+      <a href="./">首页</a>
+      <a href="https://github.com/Colour1205/ClipLink/releases">发布页面</a>
+      <a href="https://github.com/Colour1205/ClipLink/blob/main/LICENSE">许可证</a>
+      <a href="code-signing-policy.html">代码签名政策</a>
+    </div>
+  </footer>
+</body>
+</html>

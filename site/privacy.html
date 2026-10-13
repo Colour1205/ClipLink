@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    // First visit: the page opens in the browser's language (Chinese or English). The
+    // language links add ?lang= so a visitor's own choice sticks, and is not undone.
+    (function () {
+      try {
+        var m = /[?&]lang=(en|zh)\b/.exec(location.search), pref = m && m[1];
+        try { if (pref) localStorage.setItem('lang', pref); else pref = localStorage.getItem('lang'); } catch (e) { /* no storage: fine */ }
+        var want = pref || (/^zh/i.test(navigator.language || '') ? 'zh' : 'en');
+        var onZh = /\/zh(\/|$)/.test(location.pathname);
+        if (want === 'zh' && !onZh) location.replace(location.pathname.replace(/([^\/]*)$/, 'zh/$1') + location.search + location.hash);
+        else if (want === 'en' && onZh) location.replace(location.pathname.replace(/\/zh\/([^\/]*)$/, '/$1') + location.search + location.hash);
+      } catch (e) { /* stay where we are */ }
+    })();
+  </script>
+  <title>Privacy policy - ClipLink</title>
+  <meta name="description" content="What information ClipLink uses, where it goes, and your choices. No accounts, no servers, no tracking.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" type="image/png" href="assets/icon-64.png">
+  <link rel="stylesheet" href="assets/style.css">
+  <link rel="alternate" hreflang="en" href="https://cliplink.uaena.io/privacy.html">
+  <link rel="alternate" hreflang="zh-Hans" href="https://cliplink.uaena.io/zh/privacy.html">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="./"><img src="assets/icon-64.png" alt="" width="32" height="32"> ClipLink</a>
+      <nav class="nav" aria-label="Main">
+        <a class="keep" href="./#download">Download</a>
+        <a href="https://github.com/Colour1205/ClipLink">GitHub</a>
+        <a class="lang" href="zh/privacy.html?lang=zh" hreflang="zh-Hans" lang="zh-Hans">中文</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main" class="wrap prose">
+    <h1>Privacy policy</h1>
+    <p><em>Last updated: 12 October 2026</em></p>
+    <p>ClipLink copies what you copy on one of your devices to your other devices. This page says what information ClipLink uses to do that, where it goes, and what you can do about it. It covers the ClipLink apps for Windows, Android, HarmonyOS and iOS, and this website. ClipLink is developed by Uaena (GitHub: <a href="https://github.com/Colour1205">Colour1205</a>) and is open source.</p>
+
+    <div class="callout"><strong>In short:</strong> ClipLink has no accounts and no servers of its own. What you copy goes directly from one of your devices to another one you have paired, over your own network, encrypted. The developers never receive it. The apps contain no advertising, no analytics, no crash reporting and no tracking.</div>
+
+    <h2>What ClipLink handles</h2>
+    <ul>
+      <li><strong>What you copy, or share into ClipLink:</strong> text, images and files. Each device keeps a short history of them (the 25 most recent items, within a size limit) in ClipLink's own storage, so they can be sent to your other devices and shown to you.</li>
+      <li><strong>A device identity:</strong> a key pair made on the device the first time ClipLink runs. The private key stays on that device, in the system's protected key storage where the platform has one. The public key is the device's ID.</li>
+      <li><strong>Your paired devices:</strong> the public keys, names and last known network addresses of the devices you trusted or blocked.</li>
+      <li><strong>Settings you choose:</strong> the name shown for your device, an optional passcode (stored protected; only a proof derived from it is ever sent), and an optional Tailscale address.</li>
+    </ul>
+
+    <h2>Where it goes</h2>
+    <ul>
+      <li>Devices announce themselves on your local network with a small message: the device ID, its name, a port, whether its pairing screen is open, and optionally a proof that it knows the same passcode and its Tailscale address. It never contains anything you copied, and other devices on the same network can see it.</li>
+      <li>What you copy travels only over a direct, encrypted connection between two devices you have paired, each checked with the other's key. It goes over your local network or, if you use one, over Tailscale or another VPN you set up. It does not pass through any server.</li>
+      <li>The apps send nothing to the developers or to any other company. They use no advertising, analytics or crash reporting services, and no outside service collects data from them.</li>
+      <li>Nothing is sold or shared with anyone else.</li>
+    </ul>
+
+    <h2>Permissions</h2>
+    <ul>
+      <li><strong>Camera</strong> (Android, iOS, HarmonyOS): to scan another device's pairing QR code. The picture is read on the device and is not saved or sent.</li>
+      <li><strong>Local network / nearby devices:</strong> to find your other devices and connect to them.</li>
+      <li><strong>Notifications:</strong> to tell you about a pairing request or an item that arrived while the app is not on screen.</li>
+      <li><strong>Running in the background</strong> (Android, optional): a notification shows while ClipLink stays running to keep syncing.</li>
+      <li><strong>The clipboard:</strong> ClipLink reads it when you tap Paste, or share something into ClipLink, or, if you leave "send my clipboard when I open ClipLink" on, when you open the app. On Windows, ClipLink watches the clipboard while it is running, so that what you copy reaches your other devices.</li>
+      <li><strong>Files and photos:</strong> only the ones you pick or share, through the system's own pickers.</li>
+    </ul>
+
+    <h2>Your choices</h2>
+    <ul>
+      <li>Delete a single item, or clear the whole history, in the app.</li>
+      <li>Remove a device, or block it, in the Devices screen. A removed device is told, so it stops asking.</li>
+      <li>Change or clear the passcode at any time.</li>
+      <li>Turn off notifications, camera or local network access in your system settings. Quit the app to stop syncing.</li>
+      <li>Uninstalling ClipLink removes everything it stored on that device. Your other devices keep their own copies until you delete them there.</li>
+    </ul>
+
+    <h2>Security</h2>
+    <p>Connections between devices are encrypted and each side proves its identity with its key, so a device you have not paired cannot read or add to your clipboard. Nothing is trusted until you accept it on both devices. How this works is described in the <a href="https://github.com/Colour1205/ClipLink/blob/main/docs/security.md">security notes</a>, and all of the code is public.</p>
+
+    <h2>Children</h2>
+    <p>ClipLink is not aimed at children. It collects no personal information about anyone: what it handles stays on your own devices.</p>
+
+    <h2>This website</h2>
+    <ul>
+      <li>It has no cookies and no analytics. Your browser remembers your language choice for the site, on your own device.</li>
+      <li>When a page loads, your browser asks GitHub's public API for the latest release, so GitHub sees that request. The site is hosted on GitHub Pages, and downloads come from GitHub Releases or Google Play; their own privacy policies apply to those.</li>
+    </ul>
+
+    <h2>Changes to this policy</h2>
+    <p>If this changes, the new version is posted on this page with its date. The history of every change is in the <a href="https://github.com/Colour1205/ClipLink">public repository</a>.</p>
+
+    <h2>Contact</h2>
+    <p>Questions or concerns about privacy: please <a href="https://github.com/Colour1205/ClipLink/issues">open an issue</a>.</p>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <span>ClipLink &middot; Apache 2.0</span>
+      <a href="./">Home</a>
+      <a href="https://github.com/Colour1205/ClipLink/releases">Releases</a>
+      <a href="https://github.com/Colour1205/ClipLink/blob/main/LICENSE">Licence</a>
+      <a href="code-signing-policy.html">Code signing policy</a>
+    </div>
+  </footer>
+</body>
+</html>
