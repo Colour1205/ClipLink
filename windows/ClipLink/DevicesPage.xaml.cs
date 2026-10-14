@@ -207,8 +207,7 @@ public sealed partial class DevicesPage : Page
     private void CopyPairingInfo_Click(object sender, RoutedEventArgs e)
     {
         if (pairingPayload == null) return;
-        if (host.CopyText(pairingPayload)) App.MainAppWindow.Toast("Pairing info copied");
-        else App.MainAppWindow.ToastError("Couldn't copy", "Another app is using the clipboard. Try again.");
+        if (!host.CopyText(pairingPayload)) App.MainAppWindow.ToastError("Couldn't copy", "Another app is using the clipboard. Try again.");
     }
 
     // ---- pair by address ----------------------------------------------------
@@ -292,8 +291,7 @@ public sealed partial class DevicesPage : Page
 
     private void CopyId(DeviceRow row)
     {
-        if (host.CopyText(row.PublicKey)) App.MainAppWindow.Toast("Device ID copied");
-        else App.MainAppWindow.ToastError("Couldn't copy", "Another app is using the clipboard. Try again.");
+        if (!host.CopyText(row.PublicKey)) App.MainAppWindow.ToastError("Couldn't copy", "Another app is using the clipboard. Try again.");
     }
 
     // The menu on a card's three dots, and on its right-click: block it (or,
@@ -364,13 +362,12 @@ public sealed partial class DevicesPage : Page
             if (!confirmed) return;
         }
         host.Engine.BlockDevice(row.PublicKey);
-        App.MainAppWindow.Toast($"Blocked {name}");
     }
 
+    // (An unblocked device is not paired again: it has to pair like any other.)
     private void Unblock(DeviceRow row)
     {
         host.Engine.UnblockDevice(row.PublicKey);
-        App.MainAppWindow.Toast($"Unblocked {row.Title}", "It is not paired: it has to pair again like any other device.");
     }
 
     // ---- one device in full -------------------------------------------------------
@@ -509,8 +506,8 @@ public sealed partial class DevicesPage : Page
 
     private void Trust_Click(object sender, RoutedEventArgs e, DeviceRow row)
     {
-        if (host.Engine.TrustDevice(row.PublicKey))
-            App.MainAppWindow.Toast($"{row.Title} is trusted", $"It connects once {row.Title} trusts this PC too.");
+        // (It connects once it trusts this PC too; its row shows where it stands.)
+        host.Engine.TrustDevice(row.PublicKey);
     }
 
     private async void Remove_Click(object sender, RoutedEventArgs e)
@@ -526,6 +523,5 @@ public sealed partial class DevicesPage : Page
             "Remove");
         if (!confirmed) return;
         host.Engine.UntrustDevice(row.PublicKey);
-        App.MainAppWindow.Toast($"Removed {name}");
     }
 }

@@ -4,6 +4,7 @@ using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Graphics;
 using WinRT.Interop;
@@ -74,8 +75,7 @@ public sealed partial class MainWindow : Window
         host.PairingResolved += OnPairingResolved;
         RootNavigation.IsPaneOpen = !App.Settings.NavPaneCollapsed;
         UpdateToastMargin();
-        RootNavigation.SelectedItem = RootNavigation.MenuItems[0];
-    }
+        RootNavigation.SelectedItem = RootNavigation.MenuItems[0];    }
 
     // Open (icons and labels) or collapsed to icons only: remembered.
     private void RootNavigation_PaneChanged(NavigationView sender, object args)
@@ -149,14 +149,18 @@ public sealed partial class MainWindow : Window
 
     // ---- toasts and dialogs -----------------------------------------------------
 
-    // A short message at the bottom of the window.
-    public void Toast(string title, string? message = null, InfoBarSeverity severity = InfoBarSeverity.Success)
+    // A short error message at the bottom of the window: it fades out after
+    // three seconds. Only errors get one. Something that worked says nothing -
+    // the window already shows it (the device is gone from the list, the
+    // setting is switched) - and a green "done" message that stays up, or
+    // pops up after every click, is just noise.
+    public void ToastError(string title, string? message = null)
     {
         var bar = new InfoBar
         {
             Title = title,
             Message = message ?? "",
-            Severity = severity,
+            Severity = InfoBarSeverity.Error,
             IsOpen = true,
             IsClosable = false,
             MaxWidth = 560,
@@ -166,13 +170,24 @@ public sealed partial class MainWindow : Window
         while (ToastHost.Children.Count > 3) ToastHost.Children.RemoveAt(0);
 
         var timer = DispatcherQueue.CreateTimer();
-        timer.Interval = TimeSpan.FromSeconds(message == null ? 3 : 6);
+        // Kept on the bar itself: a timer nothing refers to can be collected
+        // before it fires, and the toast then never goes away.
+        bar.Tag = timer;
+        timer.Interval = TimeSpan.FromSeconds(3);
         timer.IsRepeating = false;
-        timer.Tick += (_, _) => ToastHost.Children.Remove(bar);
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            var fade = new Storyboard();
+            var opacity = new DoubleAnimation { To = 0, Duration = TimeSpan.FromMilliseconds(300) };
+            Storyboard.SetTarget(opacity, bar);
+            Storyboard.SetTargetProperty(opacity, "Opacity");
+            fade.Children.Add(opacity);
+            fade.Completed += (_, _) => ToastHost.Children.Remove(bar);
+            fade.Begin();
+        };
         timer.Start();
     }
-
-    public void ToastError(string title, string? message = null) => Toast(title, message, InfoBarSeverity.Error);
 
     public async Task<ContentDialogResult> ShowDialogAsync(ContentDialog dialog)
     {
@@ -310,10 +325,9 @@ public sealed partial class MainWindow : Window
 
         if (result == ContentDialogResult.Primary)
         {
-            // (It may have trusted this PC already, or not yet.)
-            if (host.Engine.AcceptPairing())
-                Toast($"Trusted {name}", $"Syncing starts once {name} trusts this PC too.");
-            else
+            // (It may have trusted this PC already, or not yet.) When it
+            // works the new device simply shows up on the Devices page.
+            if (!host.Engine.AcceptPairing())
                 ToastError("That pairing request has gone", "The other device may have cancelled it. Try again from both devices.");
         }
         else

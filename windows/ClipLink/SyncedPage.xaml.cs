@@ -296,9 +296,7 @@ public sealed partial class SyncedPage : Page
         // Through the engine, never straight from here: its clipboard
         // watcher then knows the copy came from ClipLink and doesn't send
         // it back out as something new.
-        if (host.Engine.CopyToClipboard(card.Key))
-            App.MainAppWindow.Toast("Copied to the clipboard");
-        else
+        if (!host.Engine.CopyToClipboard(card.Key))
             App.MainAppWindow.ToastError("Couldn't copy that", card.IsFile ? "The file hasn't arrived on this PC." : "It's no longer in the synced history.");
     }
 

@@ -14,9 +14,8 @@ internal static class EngineBanner
         retry.Click += (_, _) =>
         {
             host.Retry();
-            // (The banner itself still says why.)
+            // (The banner itself still says why; once it works the banner goes.)
             if (host.IsFaulted) App.MainAppWindow.ToastError("Still can't sync");
-            else App.MainAppWindow.Toast("ClipLink is syncing again");
         };
         bar.ActionButton = retry;
         bar.IsClosable = false;

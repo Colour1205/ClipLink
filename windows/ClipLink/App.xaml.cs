@@ -244,8 +244,9 @@ public partial class App : Application
     {
         if (window is { IsInFront: true })
         {
+            // Only a failure speaks up in the window; a share that worked
+            // shows up in Synced.
             if (summary.IsError) window.ToastError(summary.Title, summary.Message);
-            else window.Toast(summary.Title, summary.Message);
         }
         else
         {
