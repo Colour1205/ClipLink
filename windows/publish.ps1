@@ -33,7 +33,7 @@ if ($running) {
 }
 
 $version = ([xml](Get-Content $project)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
-if (-not $version) { $version = '2.0.0' }
+if (-not $version) { $version = '2.0.1' }
 
 if (Test-Path $dist) {
     Remove-Item $dist -Recurse -Force

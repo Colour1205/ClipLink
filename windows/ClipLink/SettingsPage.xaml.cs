@@ -104,23 +104,21 @@ public sealed partial class SettingsPage : Page
             DeviceNameBox.Text = host.Engine.DeviceName;
             return;
         }
-        string now = host.Engine.SetDeviceName(DeviceNameBox.Text);
-        DeviceNameBox.Text = now;
-        App.MainAppWindow.Toast("Device name saved", $"Your other devices will see \"{now}\".");
+        // The box shows the name that was saved (it may have been tidied).
+        DeviceNameBox.Text = host.Engine.SetDeviceName(DeviceNameBox.Text);
     }
 
     private void CopyId_Click(object sender, RoutedEventArgs e) =>
-        CopyText(host.Engine.DeviceId, "Device ID copied");
+        CopyText(host.Engine.DeviceId);
 
     private void CopyTailscale_Click(object sender, RoutedEventArgs e)
     {
-        if (host.Engine.TailscaleAddress is { } address) CopyText(address, "Tailscale address copied");
+        if (host.Engine.TailscaleAddress is { } address) CopyText(address);
     }
 
-    private void CopyText(string text, string done)
+    private void CopyText(string text)
     {
-        if (host.CopyText(text)) App.MainAppWindow.Toast(done);
-        else App.MainAppWindow.ToastError("Couldn't copy", "Another app is using the clipboard. Try again.");
+        if (!host.CopyText(text)) App.MainAppWindow.ToastError("Couldn't copy", "Another app is using the clipboard. Try again.");
     }
 
     private async Task RefreshTailscaleAsync()
@@ -194,8 +192,6 @@ public sealed partial class SettingsPage : Page
             PasscodeBox.Password = "";
             host.RefreshPasscode();
             UpdatePasscode();
-            App.MainAppWindow.Toast(hadOne ? "Passcode changed" : "Passcode set",
-                "Set the same one on your other devices and they pair automatically.");
         }
         catch (Exception ex)
         {
@@ -219,7 +215,6 @@ public sealed partial class SettingsPage : Page
         {
             host.Engine.ClearPasscode();
             ShowPasscodeError(null);
-            App.MainAppWindow.Toast("Passcode cleared");
         }
         catch (Exception ex)
         {
@@ -274,11 +269,6 @@ public sealed partial class SettingsPage : Page
         try
         {
             App.Instance.SetExplorerShareMenu(on);
-            if (on)
-            {
-                App.MainAppWindow.Toast("Added to File Explorer", "Right-click files and choose Share to ClipLink"
-                    + (IsWindows11 ? " - it's under Show more options." : "."));
-            }
         }
         catch (Exception ex)
         {
@@ -297,7 +287,6 @@ public sealed partial class SettingsPage : Page
             "Clear");
         if (!confirmed) return;
         host.Engine.ClearHistory();
-        App.MainAppWindow.Toast("Synced history cleared");
     }
 
     // ---- about -------------------------------------------------------------
