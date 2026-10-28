@@ -1240,7 +1240,9 @@ struct Index {
     this.setMeScreen('pairing');
   }
 
-  private setMeScreen(screen: 'main' | 'pairing' | 'passcode' | 'network' | 'devicename' | 'diagnostics' | 'log'): void {
+  // animated only matters when going back to 'main': false when Me is not on
+  // screen (see returnTabToMain).
+  private setMeScreen(screen: 'main' | 'pairing' | 'passcode' | 'network' | 'devicename' | 'diagnostics' | 'log', animated: boolean = true): void {
     const previous = this.meScreen;
     this.meScreen = screen;
     this.pairingOpen = screen === 'pairing';
@@ -1248,7 +1250,7 @@ struct Index {
     if (screen === 'pairing') this.requestQuiet.clear();
     if (screen !== 'passcode') this.passcodeChanging = false;
     if (screen === 'main' && previous !== 'main') {
-      this.meNavStack.pop(true);
+      this.meNavStack.pop(animated);
       if (this.pairingReturnTab >= 0) {
         this.currentTabIndex = this.pairingReturnTab;
         this.pairingReturnTab = -1;
@@ -1287,8 +1289,12 @@ struct Index {
       }
     } else if (this.meScreen !== 'main') {
       // Left by the tab bar, so no jump back to the tab pairing was opened from.
+      // That tab was left on purpose for pairing and kept as it was (see
+      // onChange); it goes back to its main screen now, like any tab left.
+      const origin: number = this.pairingReturnTab;
       this.pairingReturnTab = -1;
-      this.setMeScreen('main');
+      this.setMeScreen('main', onScreen);
+      if (origin >= 0 && origin !== 2) this.returnTabToMain(origin);
     }
   }
 
@@ -6578,7 +6584,11 @@ struct Index {
         const left: number = this.lastShownTab;
         this.lastShownTab = index;
         this.currentTabIndex = index;
-        if (left !== index) this.returnTabToMain(left);
+        // The hand-off to Pairing (openPairingFromDevices) keeps the tab it
+        // came from as it was, so backing out of Pairing returns to where it
+        // started.
+        const toPairing: boolean = index === 2 && left === this.pairingReturnTab;
+        if (left !== index && !toPairing) this.returnTabToMain(left);
       })
       // Tapping the tab that is already showing, while it is on a sub-screen,
       // goes back to its main screen. (Tapping another tab only switches; the
