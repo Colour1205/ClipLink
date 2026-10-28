@@ -1271,14 +1271,20 @@ struct Index {
 
   // Each tab keeps its own navigation stack, so a tab left on a sub-screen (an
   // item preview, a device's detail, a Me screen) came back showing that
-  // sub-screen instead of the tab the user tapped. Called with the tab that was
-  // just left, once it is off screen: it goes back to its main screen, the same
-  // pops the back buttons make (without the animation, nobody is watching).
-  private returnTabToMain(tab: number): void {
+  // sub-screen instead of the tab the user tapped. Two callers: the tab that
+  // was just left, once it is off screen (nobody is watching, so no animation),
+  // and the tab that is being tapped while it is already showing (on screen, so
+  // the same animated pop the back button makes). Either way it goes back to
+  // its main screen.
+  private returnTabToMain(tab: number, onScreen: boolean = false): void {
     if (tab === 0) {
-      if (this.syncedNavStack.size() > 1) this.syncedNavStack.pop(false);
+      if (this.syncedNavStack.size() > 1) {
+        if (onScreen) this.closeItemDetail(); else this.syncedNavStack.pop(false);
+      }
     } else if (tab === 1) {
-      if (this.devicesNavStack.size() > 1) this.devicesNavStack.pop(false);
+      if (this.devicesNavStack.size() > 1) {
+        if (onScreen) this.closeDeviceDetail(); else this.devicesNavStack.pop(false);
+      }
     } else if (this.meScreen !== 'main') {
       // Left by the tab bar, so no jump back to the tab pairing was opened from.
       this.pairingReturnTab = -1;
@@ -6573,6 +6579,12 @@ struct Index {
         this.lastShownTab = index;
         this.currentTabIndex = index;
         if (left !== index) this.returnTabToMain(left);
+      })
+      // Tapping the tab that is already showing, while it is on a sub-screen,
+      // goes back to its main screen. (Tapping another tab only switches; the
+      // tab left is returned by onChange above.)
+      .onTabBarClick((index: number) => {
+        if (index === this.lastShownTab) this.returnTabToMain(index, true);
       })
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
 
