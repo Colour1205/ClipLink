@@ -163,7 +163,9 @@ public sealed class EngineHost : Observable
         SyncByKey(History, items, card => card.Key, item => item.Key, item => new HistoryCard(item), (card, item) => card.Update(item));
         foreach (var card in History)
         {
-            if (card.IsImage && !card.ThumbnailRequested) _ = LoadThumbnailAsync(card);
+            // (A picture file's bytes may still be on their way: asked for
+            // once they're here - this runs again when they are.)
+            if (card.IsPicture && card.Item.IsAvailable && !card.ThumbnailRequested) _ = LoadThumbnailAsync(card);
         }
         Raise(nameof(HistoryIsEmpty));
         if (arrived.Count > 0) ItemsArrived?.Invoke(arrived);
@@ -238,8 +240,10 @@ public sealed class EngineHost : Observable
             stream.Seek(0);
             // Only the header, to pick the decode size.
             var decoder = await BitmapDecoder.CreateAsync(stream);
-            int width = (int)decoder.PixelWidth;
-            int height = (int)decoder.PixelHeight;
+            // As shown, not as stored: a phone's photo is saved sideways with
+            // a tag saying how to turn it, which the BitmapImage honours.
+            int width = (int)decoder.OrientedPixelWidth;
+            int height = (int)decoder.OrientedPixelHeight;
             var bitmap = new BitmapImage();
             if ((long)width * maxHeight > (long)height * maxWidth)
                 bitmap.DecodePixelWidth = Math.Min(width, maxWidth);

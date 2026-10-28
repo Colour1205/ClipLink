@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using ClipboardDaemon.Engine;
+using ClipboardDaemon.Storage;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 
@@ -32,11 +33,17 @@ public sealed class HistoryCard : Observable
     public bool IsFile => Item.Type == "file";
     public bool IsLink => IsText && LooksLikeLink(Item.TextPreview);
 
-    public string KindText => IsLink ? "Link" : IsText ? "Text" : IsImage ? "Image" : IsFile ? "File" : "Item";
+    // Shown as a picture: an image entry, or a file whose name says it's one
+    // (a photo from a phone arrives as a file). By the name alone - never by
+    // whether the bytes are here yet: a card's template is picked once, so a
+    // file whose bytes arrive later must not need another.
+    public bool IsPicture => IsImage || (IsFile && ImageFiles.IsImageName(Item.FileName));
+
+    public string KindText => IsLink ? "Link" : IsText ? "Text" : IsPicture ? "Image" : IsFile ? "File" : "Item";
 
     public Symbol KindSymbol => IsLink ? Symbol.Link
         : IsText ? Symbol.Font
-        : IsImage ? Symbol.Pictures
+        : IsPicture ? Symbol.Pictures
         : IsFile ? Symbol.Document
         : Symbol.Help;
 
@@ -117,6 +124,7 @@ public sealed class HistoryCard : Observable
     {
         get
         {
+            if (IsFile && !Item.IsAvailable) return "Not received yet";
             if (ThumbnailFailed) return "This image couldn't be shown";
             string size = Item.SizeBytes is long bytes ? Format.Size(bytes) : "";
             return PixelWidth > 0 ? $"{PixelWidth} × {PixelHeight} · {size}" : size;
