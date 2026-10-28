@@ -34,6 +34,13 @@ internal sealed class AppSettings
 
     public bool ExplorerShareMenuOn(AppOptions options) => ExplorerShareMenu ?? options.IsDefaultLabel;
 
+    // "Check for updates automatically" (UpdateService): on until switched off.
+    public bool CheckForUpdates { get; set; } = true;
+
+    // When GitHub last answered an update check (UTC), by itself or by
+    // hand: a restart doesn't ask again within a day. Null: never.
+    public DateTime? LastUpdateCheckUtc { get; set; }
+
     private string path = "";
 
     public static AppSettings Load(AppOptions options)
