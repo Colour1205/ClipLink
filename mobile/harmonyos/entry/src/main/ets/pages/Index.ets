@@ -1264,6 +1264,28 @@ struct Index {
     }
   }
 
+  // The tab shown before the last switch. Not currentTabIndex: when the switch
+  // is made in code (openPairingFromDevices, the pairing return) that already
+  // holds the new tab by the time Tabs reports the change.
+  private lastShownTab: number = 0;
+
+  // Each tab keeps its own navigation stack, so a tab left on a sub-screen (an
+  // item preview, a device's detail, a Me screen) came back showing that
+  // sub-screen instead of the tab the user tapped. Called with the tab that was
+  // just left, once it is off screen: it goes back to its main screen, the same
+  // pops the back buttons make (without the animation, nobody is watching).
+  private returnTabToMain(tab: number): void {
+    if (tab === 0) {
+      if (this.syncedNavStack.size() > 1) this.syncedNavStack.pop(false);
+    } else if (tab === 1) {
+      if (this.devicesNavStack.size() > 1) this.devicesNavStack.pop(false);
+    } else if (this.meScreen !== 'main') {
+      // Left by the tab bar, so no jump back to the tab pairing was opened from.
+      this.pairingReturnTab = -1;
+      this.setMeScreen('main');
+    }
+  }
+
   // Text built in code (toasts, dialog bodies, status lines) - see
   // i18n/Strings.ets. Resolved when called, in the language then in effect.
   private str(res: Resource, ...args: Array<string | number>): string {
@@ -6546,7 +6568,12 @@ struct Index {
       })
       .width('100%')
       .height('100%')
-      .onChange((index: number) => { this.currentTabIndex = index; })
+      .onChange((index: number) => {
+        const left: number = this.lastShownTab;
+        this.lastShownTab = index;
+        this.currentTabIndex = index;
+        if (left !== index) this.returnTabToMain(left);
+      })
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
 
       // Mounted as a sibling of Tabs, not inside a tab's content: it has to
