@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="ClipLink/ClipLink.csproj" />
+  <Project Path="ClipLink.Tests/ClipLink.Tests.csproj" />
 </Solution>
