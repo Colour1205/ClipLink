@@ -65,7 +65,7 @@ All four apps (Windows, Android, HarmonyOS and iOS) follow this page, which is w
 
 **When broadcast is blocked.** iOS often does not allow broadcast. The iPhone app also sends beacons straight to the addresses around its own on the local network, and the other apps hear them like any other beacon.
 
-**Off the local network.** Beacons do not cross networks. A device that knows another device's address (typed in, in a pairing code, or sent in a beacon) can connect to it directly. The Windows app retries a trusted device's saved address every 30 seconds.
+**Off the local network.** Beacons do not cross networks. A device that knows another device's address (typed in, in a pairing code, or sent in the beacon of a device it trusts) can connect to it directly. The Windows app retries a trusted device's saved address every 30 seconds.
 
 ## Connecting
 
@@ -73,7 +73,7 @@ All four apps (Windows, Android, HarmonyOS and iOS) follow this page, which is w
 
 **Who connects to whom.** Only one of two devices opens the connection: the one whose device id sorts after the other's. That way the two never open two connections at once.
 
-**Who a device dials.** A device dials a device it trusts, or an address the user gave it (typed in, or in a pairing code). It never dials a stranger just because it heard its beacon. A stranger can still dial in at any time, and is held for its user (see Refusals below).
+**Who a device dials.** A device dials a device it trusts, at the address it heard the device's beacon from or saved from an earlier connection, and an address the user gave it (typed in, or in a pairing code). It never dials a stranger just because it heard its beacon. The one exception is the passcode: a beacon whose proof matches this device's passcode makes its sender trusted on the spot (see [security](security.md)), and it is then dialled like any trusted device.
 
 **Trust can be one-sided.** A device you have just trusted may not trust you yet. If its id sorts higher, it would wait for you to connect while you wait for it, and your pairing request would never arrive. So a trusted device that has not connected 8 seconds after it was first heard is connected to anyway, whatever the order, and again every 30 seconds while it stays unconnected. A device that already trusts you will have connected long before, so this does nothing there.
 
@@ -102,7 +102,7 @@ An acceptor writes its own handshake first and then reads the connecting device'
 **Refusals.**
 
 - A device that has blocked your key reads your handshake, closes the connection and tells you nothing. To you it looks like a connection that came up and dropped at once, the same as a device that has stopped trusting you.
-- A stranger that is not blocked is held for its user, at any time while the app is running (see [security](security.md)). You see nothing until it is trusted, or the request is ignored or runs out.
+- A stranger that is not blocked can connect at any time, and is held for its user (see [security](security.md)). You see nothing until it is trusted, or the request is ignored or runs out.
 
 **If a handshake does not arrive.** A connection that never sends its handshake is closed after 10 seconds (15 on Windows), so one stranger cannot keep a connection open.
 
