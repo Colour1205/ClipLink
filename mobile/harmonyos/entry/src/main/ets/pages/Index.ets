@@ -240,10 +240,10 @@ interface PairingInfo {
 //   'silent'         - it accepted the connection but never sent a
 //                      handshake (ClipLink there is stuck, or it's not
 //                      ClipLink on that port).
-//   'refused'        - it hung up around the handshake: it doesn't trust
-//                      this device, the passcodes differ (or it has none),
-//                      and its pairing screen isn't open - or it's busy
-//                      with another pairing request.
+//   'refused'        - it hung up around the handshake: it has blocked
+//                      this device or is holding its requests back for a
+//                      while (RequestQuiet), or it's busy with another
+//                      pairing request.
 //   'connected'      - already paired; now connected.
 //   'passcode'       - newly paired just now through matching passcodes.
 //   'prompt'         - a new pairing awaiting Accept on this device.
@@ -734,16 +734,10 @@ struct Index {
   // (pairing/QR, passcode, diagnostics, activity log) rather than one
   // combined page, per request.
   @State meScreen: 'main' | 'pairing' | 'passcode' | 'network' | 'devicename' | 'diagnostics' | 'log' = 'main';
-  // True only while the Pairing screen is open - see setMeScreen. This is
-  // the live "I'm expecting to pair right now" signal broadcast in the LAN
-  // beacon and checked by PeerConnection.create's relaxed trust gate; a
-  // pairing handshake with an untrusted peer only proceeds at all when
-  // this is true on BOTH ends independently.
-  @State pairingOpen: boolean = false;
   // A connection that completed the full authenticated handshake but whose
-  // peer wasn't already trusted - set only via the pairingOpen gate above,
-  // and only resolved by the user tapping Accept/Reject on the prompt this
-  // drives (see acceptPairing/rejectPairing). Not @State: PeerConnection
+  // peer wasn't already trusted - only resolved by the user tapping
+  // Accept/Reject on the prompt this drives (see
+  // acceptPairing/rejectPairing). Not @State: PeerConnection
   // itself doesn't need reactive tracking, only the two id/address strings
   // that drive the prompt's UI do.
   @State pendingPairingPeerId: string = '';
@@ -1023,7 +1017,6 @@ struct Index {
       // it's never written to the trust store (see TrustedDevice.name).
       void this.maybeAutoTrustViaPassphrase(beacon);
       void this.maybeAutoConnect(beacon);
-      void this.maybeConnectForPairing(beacon);
     });
 
     const identity = new DeviceIdentity();
@@ -1169,7 +1162,6 @@ struct Index {
       TCP_PORT,
       () => this.cachedProof,
       () => this.tailscaleIp.length > 0 ? this.tailscaleIp : null,
-      () => this.pairingOpen,
       () => this.ownDeviceName(),
     );
     this.discoveryUpAtMs = Date.now();
@@ -1221,12 +1213,12 @@ struct Index {
   }
 
   // Every navigation into/out of the Me tab's sub-screens goes through
-  // this - not just a plain field assignment - because leaving/entering
-  // 'pairing' has to flip pairingOpen in lockstep (see its own doc comment).
+  // this - not just a plain field assignment - because opening 'pairing'
+  // also ends any quiet time (see RequestQuiet).
   // Also drives the real push/pop on meNavStack, since immersive material
   // requires the back button to live in an actual NavDestination title bar
   // (see mePageMap) rather than plain content - this single call site is
-  // what keeps meScreen/pairingOpen and the nav stack in sync regardless of
+  // what keeps meScreen and the nav stack in sync regardless of
   // whether a sub-screen is entered via settingsRow's onTap or left via its
   // own title bar back button / a system back gesture (onBackPressed).
   // Set when pairing was opened from the Devices tab's + button rather
@@ -1243,8 +1235,7 @@ struct Index {
   private setMeScreen(screen: 'main' | 'pairing' | 'passcode' | 'network' | 'devicename' | 'diagnostics' | 'log'): void {
     const previous = this.meScreen;
     this.meScreen = screen;
-    this.pairingOpen = screen === 'pairing';
-    // Somebody is expecting requests now: no device stays held back.
+    // The user is here to pair: no device stays held back.
     if (screen === 'pairing') this.requestQuiet.clear();
     if (screen !== 'passcode') this.passcodeChanging = false;
     if (screen === 'main' && previous !== 'main') {
@@ -1258,8 +1249,8 @@ struct Index {
     } else if (screen !== 'main' && screen !== previous) {
       // Sub-screen to sub-screen: only happens via the Devices tab's "+"
       // while Me was left on another sub-screen (e.g. Tailscale IP). Without
-      // this, meScreen/pairingOpen said 'pairing' while the stack still
-      // showed the old screen - pairing mode open with no Pairing screen.
+      // this, meScreen said 'pairing' while the stack still showed the old
+      // screen.
       this.meNavStack.replacePath({ name: screen }, false);
     }
   }
@@ -1409,42 +1400,11 @@ struct Index {
     }
   }
 
-  // Sibling to maybeAutoConnect, for UNTRUSTED peers - only attempts a
-  // handshake at all when BOTH this device's own Pairing screen is open
-  // (this.pairingOpen) AND the beacon says the sender's is too
-  // (beacon.pairing) - two independent, live, local "I'm expecting to
-  // pair right now" signals, not just one side's assumption. Same
-  // tie-breaker as maybeAutoConnect so both sides don't dial each other
-  // simultaneously; the handshake that results is what actually surfaces
-  // the accept/reject prompt (see handleNewConnection).
-  private async maybeConnectForPairing(beacon: PeerBeacon): Promise<void> {
-    if (!this.pairingOpen || !beacon.pairing) return;
-    if (beacon.deviceId === this.ownDeviceId) return;
-    if (this.isBlockedNow(beacon.deviceId)) return;
-    if (this.syncManager?.isConnected(beacon.deviceId)) return;
-    if (this.connectingTo.has(beacon.deviceId)) return;
-    if (this.pendingPairingConn !== null) return; // already have a candidate awaiting a decision
-    if (beacon.deviceId >= this.ownDeviceId) return;
-
-    // See maybeAutoConnect's identical fix - reserved before the first
-    // await so a second beacon for the same peer can't slip through the
-    // has() check above while this call is still awaiting isTrusted().
-    this.connectingTo.add(beacon.deviceId);
-    try {
-      const context = getContext(this) as common.UIAbilityContext;
-      if (await this.trustStore.isTrusted(context, beacon.deviceId)) return; // maybeAutoConnect already handles this case
-      await this.connectToBeacon(beacon);
-    } finally {
-      this.connectingTo.delete(beacon.deviceId);
-    }
-  }
-
   // Single funnel for every freshly-created PeerConnection, whichever of
   // the three places created it (incoming TCP, LAN beacon dial, or manual
   // Pair by Address) - an already-trusted peer is registered immediately
-  // like today; a pairing candidate (only possible because pairingOpen was
-  // true - see PeerConnection.create) gets an explicit local accept/reject
-  // prompt instead, never auto-registered.
+  // like today; a stranger's request (see PeerConnection.create) gets an
+  // explicit local accept/reject prompt instead, never auto-registered.
   private handleNewConnection(peerConn: PeerConnection, address: string | null): void {
     netLog(`handleNewConnection: peer=${deviceFingerprint(peerConn.peerDeviceId)} address=${address ?? 'null'} wasAlreadyTrusted=${peerConn.wasAlreadyTrusted} newlyTrustedViaPassphrase=${peerConn.newlyTrustedViaPassphrase}`);
     if (this.isBlockedNow(peerConn.peerDeviceId)) {
@@ -2370,12 +2330,9 @@ struct Index {
   // Scanning is now purely "how do I find the other device's address" -
   // NOT "trust it". It never writes to the trust store directly; it dials
   // the scanned address (same as Pair by Address below) and lets the
-  // normal handleNewConnection accept/reject prompt decide. That prompt
-  // only appears at all if THIS device's Pairing screen is open (which it
-  // has to be, to reach this button) - and the connection only completes
-  // in the first place if the OTHER device's Pairing screen is open too
-  // (see PeerConnection.create's relaxed gate), so scanning someone's code
-  // alone can no longer trust them unilaterally the way it used to.
+  // normal handleNewConnection accept/reject prompt decide, so scanning
+  // someone's code alone can no longer trust them unilaterally the way it
+  // used to.
   // Every address worth trying for a peer, best-first. A QR code (and the
   // trust store) carries whatever the peer ADVERTISES for itself, which is
   // its Tailscale IP when it has one configured - and that address is
@@ -2412,10 +2369,8 @@ struct Index {
     return { address: this.joinAddresses(candidates), outcome: outcome };
   }
 
-  // The pairing screen's feedback for a dial. It used to be one message
-  // for every failure - "make sure the other device's Pairing screen is
-  // open" - which was misleading whenever the real problem was the network
-  // (or the other device not listening), and ignored the passcode path.
+  // The pairing screen's feedback for a dial: one message per way it can
+  // end (see DialOutcome), so it says which step actually failed.
   private pairingOutcomeMessage(result: DialResult): string {
     switch (result.outcome) {
       case 'connected':
@@ -2765,7 +2720,7 @@ struct Index {
       });
     }
     // Show where it went, unless that would pull the user out of pairing.
-    if (files + texts > 0 && !this.pairingOpen) {
+    if (files + texts > 0 && this.meScreen !== 'pairing') {
       this.currentTabIndex = 0;
     }
   }
@@ -5755,7 +5710,7 @@ struct Index {
   // string title (a real title bar, so immersive material actually works,
   // per the doc-confirmed restriction above), and system back routed
   // through setMeScreen so it stays in sync with
-  // pairingOpen exactly like the visible back button does. Inlined per
+  // meScreen exactly like the visible back button does. Inlined per
   // screen rather than factored into one shared helper taking the content
   // as a callback parameter - ArkTS's declarative UI syntax only
   // recognizes direct calls to actual @Builder methods inside a @Builder
@@ -5776,8 +5731,8 @@ struct Index {
     } else if (name === 'pairing') {
       // Sub-screens use the HDS bar's own back button. Its tap and the
       // system back gesture both land in onBackPressed, which routes
-      // through setMeScreen so meScreen/pairingOpen stay in step with the
-      // stack (a default pop would leave pairing mode open).
+      // through setMeScreen so meScreen stays in step with the stack (a
+      // default pop would leave it on 'pairing').
       HdsNavDestination() {
         this.pairingScreenContent()
       }
@@ -6124,8 +6079,8 @@ struct Index {
     Scroll(this.pairingScroller) {
       Column({ space: 16 }) {
         Column({ space: 8 }) {
-          Text($r('app.string.pairing_open_title')).fontSize(13).fontWeight(FontWeight.Medium)
-          Text($r('app.string.pairing_open_detail'))
+          Text($r('app.string.pairing_intro_title')).fontSize(13).fontWeight(FontWeight.Medium)
+          Text($r('app.string.pairing_intro_detail'))
             .fontSize(12)
             .fontColor($r('sys.color.font_secondary'))
         }

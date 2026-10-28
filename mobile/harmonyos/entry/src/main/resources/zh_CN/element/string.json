@@ -298,7 +298,7 @@
     },
     {
       "name": "scan_no_address",
-      "value": "%1$s 的二维码中没有地址——如果它在同一网络中，只需保持此页面打开，它发出的广播会自动触发配对。"
+      "value": "%1$s 的二维码中没有地址——如果它在同一网络中，请在“设备”页找到它并点按“信任”。"
     },
     {
       "name": "scan_connecting",
@@ -513,12 +513,12 @@
       "value": "配对"
     },
     {
-      "name": "pairing_open_title",
-      "value": "此页面打开时才可配对。"
+      "name": "pairing_intro_title",
+      "value": "扫描对方的二维码，或在列表中信任它。"
     },
     {
-      "name": "pairing_open_detail",
-      "value": "两台设备同时打开此页面时，它们会互相发现并发起配对。网络中的设备也可以随时向你发起配对请求，只有你点按“信任”后才会信任对方。离开此页面即停止搜索；不会有任何设备在后台悄悄完成配对。"
+      "name": "pairing_intro_detail",
+      "value": "扫描对方设备的二维码，或在下方输入它的地址。同一网络中的设备也会出现在“设备”页，在那里点按“信任”即可。无论哪种方式，两台设备都需要互相信任。"
     },
     {
       "name": "pairing_scan_hint",
@@ -727,10 +727,6 @@
     {
       "name": "device_detail_id",
       "value": "设备 ID"
-    },
-    {
-      "name": "device_detail_pairing_open",
-      "value": "对方的配对页面已打开"
     },
     {
       "name": "synced_preview_none_title",
