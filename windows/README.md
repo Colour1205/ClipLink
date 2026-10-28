@@ -9,8 +9,12 @@ with the always-on P2P node running inside it.
   - `ClipLink/Engine/` — the sync engine (`ClipLinkEngine`): discovery, peer
     connections, clipboard watcher, history store, trust and pairing, running
     in-process. See `ClipLink/Engine/README.md`.
+- `ClipLink.Tests/` — xunit tests for the engine parts that need no UI (the
+  beacon codec, who dials whom). The engine's source files are linked in, so
+  running them builds no app.
 - `installer/ClipLink.iss` — the installer script (Inno Setup).
-- `ClipLink.slnx` — the solution, for Visual Studio / `dotnet build`.
+- `ClipLink.slnx` — the solution, for Visual Studio / `dotnet build`; it
+  includes the tests.
 - `publish.ps1` — builds the app folder and the installer into `dist/`
   (git-ignored).
 - `ClipLink.ico` — the app icon.
@@ -33,6 +37,7 @@ Studio needed.
 ```powershell
 dotnet build windows\ClipLink.slnx                                  # development build
 dotnet run --project windows\ClipLink\ClipLink.csproj               # build and run it
+dotnet test windows\ClipLink.Tests                                  # the unit tests
 powershell -ExecutionPolicy Bypass -File windows\publish.ps1        # -> windows\dist\
 ```
 
