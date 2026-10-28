@@ -202,7 +202,7 @@
                 <StackPanel>
                     <InfoBar IsOpen="True" IsClosable="False" Severity="Informational" Margin="0,12,0,0"
                              Title="Nothing syncs until both devices trust each other."
-                             Message="Scan the code below, enter the other device's address, or go back and select Trust on the other device in the Devices list." />
+                             Message="Scan the code below, enter the other device's address, or go back and select Trust next to it in the Devices list." />
 
                     <TextBlock Text="Scan with your phone" Style="{StaticResource SectionHeader}" />
                     <Border x:Name="QrCard" Style="{StaticResource CardBorder}">

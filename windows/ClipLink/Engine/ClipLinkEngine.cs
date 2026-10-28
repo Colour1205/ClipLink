@@ -445,7 +445,8 @@ public sealed partial class ClipLinkEngine : IDisposable
 
             // A blocked device is listed (so it can be unblocked) and that is
             // all: no passcode auto-trust, no dial, no pairing.
-            if (blockStore.IsBlocked(other_device_id))
+            bool blocked = blockStore.IsBlocked(other_device_id);
+            if (blocked)
             {
                 NotifyDevicesChanged();
                 return;
@@ -466,20 +467,13 @@ public sealed partial class ClipLinkEngine : IDisposable
             bool isTrusted = trustStore.IsTrusted(other_device_id);
             NotifyDevicesChanged(); // an event only if the list really changed
 
-            // connect only when the other device's public key is "smaller" than this device's public key (to avoid duplicate connections)
-            // connect only if the other device is in the trust store
-            // CompareOrdinal, not CompareTo: CompareTo is culture-sensitive
-            // (it sorts 'a' before 'B'), while HarmonyOS and Android compare
-            // keys by character code ('B' before 'a'). For keys that first
-            // differ in letter case the two sides disagreed about who dials,
-            // so after an off-LAN (Tailscale) pairing neither side would
-            // reconnect - or both would.
+            // connect only if the other device is in the trust store, and when its key
+            // sorts first or it is due the dial fallback: see DialDecision
             if (connectionsByDeviceId.ContainsKey(other_device_id)) dialFallback.Connected(other_device_id);
-            // (Or, for a trusted device that should have dialled this one and has not after
-            // a while - one that does not trust this PC - dial it anyway: see DialFallback.)
-            if (!connectionsByDeviceId.ContainsKey(other_device_id) && isTrusted
-                && (string.CompareOrdinal(other_device_id, ownId) < 0 || dialFallback.Due(other_device_id))
-                && connectingTo.TryAdd(other_device_id, 0))
+            if (DialDecision.ShouldDial(blocked, connectionsByDeviceId.ContainsKey(other_device_id), isTrusted,
+                    other_device_id, ownId,
+                    () => dialFallback.Due(other_device_id),
+                    () => connectingTo.TryAdd(other_device_id, 0)))
             {
                 Console.WriteLine($"Discovered peer {other_device_id} at {other_port}");
                 try
