@@ -1,25 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" fill="none">
-  <!-- Accent glow / subtle background disc -->
-  <circle cx="60" cy="64" r="44" fill="#5468D4" fill-opacity="0.08"/>
-  <!-- Clipboard board - wider/shorter than before, and critically: the
-       clip below OVERLAPS this rect's top edge instead of floating above
-       it as a thin gap-separated nub. A tall rect + thin centered nub
-       above it with a gap is exactly a battery icon's silhouette; a
-       wider tab that visibly sits ON the board's edge (not above it) is
-       what actually reads as "clipboard" rather than "battery" at a
-       glance. -->
-  <rect x="32" y="36" width="56" height="60" rx="10" stroke="#9AA0A6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-  <!-- Clip tab - wider than the board, filled (not just outlined) so it
-       reads as a distinct overlapping piece, centered and overlapping
-       the board's top edge by a few px rather than sitting flush above it. -->
-  <rect x="46" y="26" width="28" height="18" rx="6" fill="#F5F6FA" stroke="#9AA0A6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-  <!-- Empty placeholder dashed slots -->
-  <line x1="44" y1="56" x2="76" y2="56" stroke="#9AA0A6" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="4 4" stroke-opacity="0.45"/>
-  <line x1="44" y1="68" x2="76" y2="68" stroke="#9AA0A6" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="4 4" stroke-opacity="0.35"/>
-  <line x1="44" y1="80" x2="64" y2="80" stroke="#9AA0A6" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="4 4" stroke-opacity="0.25"/>
-  <!-- Waiting peer signal radar arcs (accent brand blue) -->
-  <path d="M92 44C96 48 98 53 98 60C98 67 96 72 92 76" stroke="#5468D4" stroke-width="2.5" stroke-linecap="round"/>
-  <path d="M100 38C106 44 109 51 109 60C109 69 106 76 100 82" stroke="#5468D4" stroke-width="2.5" stroke-linecap="round" stroke-opacity="0.4"/>
-  <path d="M28 44C24 48 22 53 22 60C22 67 24 72 28 76" stroke="#5468D4" stroke-width="2.5" stroke-linecap="round"/>
-  <path d="M20 38C14 44 11 51 11 60C11 69 14 76 20 82" stroke="#5468D4" stroke-width="2.5" stroke-linecap="round" stroke-opacity="0.4"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none">
+  <!-- The empty "Nothing synced yet" mark: a plain outline clipboard with a
+       page in front, one muted tone, like the Windows app's. The board's
+       outline is left open where the clip and the page sit on it, so no
+       line shows through them and nothing needs a theme-dependent fill. -->
+  <g stroke="#000000" stroke-opacity="0.45" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M32 14H37A5 5 0 0 1 42 19V26"/>
+    <path d="M32 56H15A5 5 0 0 1 10 51V19A5 5 0 0 1 15 14H20"/>
+    <rect x="20" y="8" width="12" height="10" rx="3"/>
+    <rect x="28" y="26" width="26" height="30" rx="4"/>
+  </g>
 </svg>

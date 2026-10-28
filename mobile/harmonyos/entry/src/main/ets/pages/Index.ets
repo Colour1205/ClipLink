@@ -4853,10 +4853,12 @@ struct Index {
   @Builder
   emptyState(headline: ResourceStr, detail: ResourceStr, art: Resource) {
     Column({ space: 8 }) {
+      // A small plain mark, like the Windows app's, not an illustration: the
+      // words are what the screen is about.
       Image(art)
-        .width(120)
-        .height(120)
-        .margin({ bottom: 8 })
+        .width(64)
+        .height(64)
+        .margin({ bottom: 16 })
       Text(headline)
         .fontSize(17)
         .fontWeight(FontWeight.Medium)

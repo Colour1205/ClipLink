@@ -1,22 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" fill="none">
-  <!-- Accent glow / subtle background disc -->
-  <circle cx="60" cy="64" r="44" fill="#5468D4" fill-opacity="0.12"/>
-  <!-- Clipboard board - see the light variant's comment for why the clip
-       tab below has to overlap this rect's top edge (a wide overlapping
-       tab, not a thin gap-separated nub) to read as a clipboard instead
-       of a battery. -->
-  <rect x="32" y="36" width="56" height="60" rx="10" stroke="#8A8A8A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-  <!-- Clip tab - filled with a dark surface tone (not the light variant's
-       near-white) so it reads as a solid overlapping piece against a
-       dark background instead of an odd pale patch. -->
-  <rect x="46" y="26" width="28" height="18" rx="6" fill="#242424" stroke="#8A8A8A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-  <!-- Empty placeholder dashed slots -->
-  <line x1="44" y1="56" x2="76" y2="56" stroke="#8A8A8A" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="4 4" stroke-opacity="0.45"/>
-  <line x1="44" y1="68" x2="76" y2="68" stroke="#8A8A8A" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="4 4" stroke-opacity="0.35"/>
-  <line x1="44" y1="80" x2="64" y2="80" stroke="#8A8A8A" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="4 4" stroke-opacity="0.25"/>
-  <!-- Waiting peer signal radar arcs (accent brand blue) -->
-  <path d="M92 44C96 48 98 53 98 60C98 67 96 72 92 76" stroke="#5468D4" stroke-width="2.5" stroke-linecap="round"/>
-  <path d="M100 38C106 44 109 51 109 60C109 69 106 76 100 82" stroke="#5468D4" stroke-width="2.5" stroke-linecap="round" stroke-opacity="0.4"/>
-  <path d="M28 44C24 48 22 53 22 60C22 67 24 72 28 76" stroke="#5468D4" stroke-width="2.5" stroke-linecap="round"/>
-  <path d="M20 38C14 44 11 51 11 60C11 69 14 76 20 82" stroke="#5468D4" stroke-width="2.5" stroke-linecap="round" stroke-opacity="0.4"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none">
+  <!-- See the light variant; white at the Windows dark theme's tertiary
+       strength instead of black. -->
+  <g stroke="#FFFFFF" stroke-opacity="0.5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M32 14H37A5 5 0 0 1 42 19V26"/>
+    <path d="M32 56H15A5 5 0 0 1 10 51V19A5 5 0 0 1 15 14H20"/>
+    <rect x="20" y="8" width="12" height="10" rx="3"/>
+    <rect x="28" y="26" width="26" height="30" rx="4"/>
+  </g>
 </svg>
