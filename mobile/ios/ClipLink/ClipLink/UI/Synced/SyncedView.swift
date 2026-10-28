@@ -177,14 +177,20 @@ enum SyncedMasonry {
         case .opaque:
             return chrome + metrics.body.lineHeight + 4 + metrics.caption.lineHeight
         case .image:
-            let picture = min(260, (columnWidth - 16) * 0.8)
-            return 16 + picture + 8 + metrics.footer + 2
+            return pictureHeight(columnWidth: columnWidth, metrics: metrics)
         case .file:
+            // A picture without a name; failing to decode it is a rarity.
+            if SyncedItemActions.hasPicture(item) { return pictureHeight(columnWidth: columnWidth, metrics: metrics) }
             var height = chrome + max(36, 2 * metrics.body.lineHeight + metrics.caption.lineHeight)
-            if SyncedItemActions.hasPicture(item) { height += min(220, inner * 0.8) + 10 }
             if !item.fileAvailable { height += 8 }
             return height
         }
+    }
+
+    /// An image card: the picture 8 pt from the edges, then the footer.
+    private static func pictureHeight(columnWidth: CGFloat, metrics: Metrics) -> CGFloat {
+        let picture = min(260, (columnWidth - 16) * 0.8)
+        return 16 + picture + 10 + metrics.footer + 4
     }
 
     /// Wrapped line count, from an average glyph width (CJK counts double).
