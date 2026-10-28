@@ -405,4 +405,39 @@ public class ReleaseJsonRobustnessTests
         string json = JsonSerializer.Serialize(new[] { new { tag_name = "v2.0.2\uFFFD", draft = false, prerelease = false } });
         Assert.Null(TestReleases.Find(json, "2.0.1"));
     }
+
+    // A lone surrogate escape is valid JSON but not valid text: the parser takes
+    // it and JsonElement.GetString() throws on it. The release it is in is
+    // skipped - it must not end the whole check or hide a good release.
+    [Theory]
+    [InlineData("tag_name", "\\uD800")]
+    [InlineData("tag_name", "\\uDC00")]
+    [InlineData("html_url", "\\uD800")]
+    [InlineData("html_url", "\\uDC00")]
+    [InlineData("name", "\\uD800")]
+    [InlineData("name", "\\uDC00")]
+    [InlineData("state", "\\uD800")]
+    [InlineData("state", "\\uDC00")]
+    [InlineData("browser_download_url", "\\uD800")]
+    [InlineData("browser_download_url", "\\uDC00")]
+    [InlineData("digest", "\\uD800")]
+    [InlineData("digest", "\\uDC00")]
+    public void AReleaseWithALoneSurrogateIsSkippedAndAGoodOneStillFound(string field, string escape)
+    {
+        // (Newer than the good one, so it would win if it were read.)
+        const string mark = "LONESURROGATEMARK";
+        var broken = TestReleases.WithInstaller("v2.0.3");
+        var brokenAsset = (Dictionary<string, object?>)((object[])broken["assets"]!)[0];
+        if (field is "tag_name" or "html_url") broken[field] = broken[field] + mark;
+        else brokenAsset[field] = brokenAsset[field] + mark;
+        var good = TestReleases.WithInstaller("v2.0.2");
+
+        foreach (var releases in new[] { new object[] { broken, good }, new object[] { good, broken } })
+        {
+            string json = TestReleases.List(releases).Replace(mark, escape);
+            Assert.Contains(escape, json);
+            Assert.Equal("2.0.2", TestReleases.Find(json, "2.0.1")!.Version.Text);
+        }
+        Assert.Null(TestReleases.Find(TestReleases.List(broken).Replace(mark, escape), "2.0.1"));
+    }
 }

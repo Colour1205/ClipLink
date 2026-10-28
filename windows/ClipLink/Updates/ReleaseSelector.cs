@@ -39,7 +39,19 @@ internal static class ReleaseSelector
             foreach (var release in document.RootElement.EnumerateArray())
             {
                 if (++seen > MaxReleases) break;
-                if (ReadRelease(release, policy) is { } offer && (newest == null || offer.Version > newest.Version))
+                ReleaseOffer? offer;
+                try
+                {
+                    offer = ReadRelease(release, policy);
+                }
+                catch (InvalidOperationException)
+                {
+                    // A string that isn't text ("\uD800" on its own parses, but
+                    // GetString throws on it): this release is skipped, like any
+                    // that doesn't look right, and the others are still read.
+                    continue;
+                }
+                if (offer != null && (newest == null || offer.Version > newest.Version))
                     newest = offer;
             }
             return newest != null && newest.Version > current ? newest : null;

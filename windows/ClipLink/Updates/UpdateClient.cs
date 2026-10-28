@@ -27,16 +27,19 @@ internal sealed class UpdateClient : IDisposable
     private static readonly TimeSpan AnswerTimeout = TimeSpan.FromSeconds(20);
     // A download is given up when no data comes for this long (however long it takes otherwise).
     private static readonly TimeSpan StallTimeout = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan DefaultProgressInterval = TimeSpan.FromMilliseconds(100);
 
     private readonly UpdateEndpoint endpoint;
     private readonly HttpClient http;
+    private readonly TimeSpan progressInterval;
 
     // `handler` is for tests, to stand in for the network. It must not follow
     // redirects itself (the real one doesn't): that's done here, address by address.
-    public UpdateClient(UpdateEndpoint endpoint, string appVersion, HttpMessageHandler? handler = null)
+    // `progressInterval` is for tests too: how often a download reports.
+    public UpdateClient(UpdateEndpoint endpoint, string appVersion, HttpMessageHandler? handler = null, TimeSpan? progressInterval = null)
     {
         this.endpoint = endpoint;
+        this.progressInterval = progressInterval ?? DefaultProgressInterval;
         http = new HttpClient(handler ?? new SocketsHttpHandler
         {
             AllowAutoRedirect = false,
@@ -215,7 +218,7 @@ internal sealed class UpdateClient : IDisposable
                     {
                         throw DiskError(ex);
                     }
-                    if (clock.Elapsed - lastReport >= ProgressInterval)
+                    if (clock.Elapsed - lastReport >= progressInterval)
                     {
                         lastReport = clock.Elapsed;
                         progress?.Report(new UpdateProgress(UpdateStage.Downloading, received, asset.Size));

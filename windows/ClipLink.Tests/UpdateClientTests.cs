@@ -304,16 +304,20 @@ public class UpdateClientDownloadTests
         using var folder = new TempFolder();
         var big = TestReleases.Installer(3_000_000);
         var network = new FakeNetwork(request => FakeNetwork.Bytes(big));
-        using var client = Client(network);
+        // (Reported with every chunk: a body in memory is read in far less than the usual 100 ms.)
+        using var client = new UpdateClient(UpdateEndpoint.Default, "2.0.1", network, progressInterval: TimeSpan.Zero);
         var reports = new List<UpdateProgress>();
 
         using var installer = await client.DownloadAsync(Offer(big), folder.Path, new SyncProgress<UpdateProgress>(reports.Add), CancellationToken.None);
 
-        Assert.All(reports.Where(r => r.Stage == UpdateStage.Downloading), r =>
+        var downloading = reports.Where(r => r.Stage == UpdateStage.Downloading).ToList();
+        Assert.True(downloading.Count > 1, $"{downloading.Count} reports while downloading");
+        Assert.All(downloading, r =>
         {
             Assert.Equal(big.Length, r.Total);
             Assert.InRange(r.Done, 1, big.Length);
         });
+        Assert.Equal(big.Length, downloading[^1].Done);
         Assert.Equal(reports.Select(r => r.Done).Order(), reports.Select(r => r.Done)); // only ever forwards
     }
 
