@@ -47,9 +47,6 @@ class MainActivity : ComponentActivity() {
     /** What the Pair screen's Connect is doing - in a ViewModel so a rotation neither cancels nor loses it. */
     private val pairModel: PairViewModel by viewModels()
 
-    /** Whether the UI has the Pair screen on show; [onStart] turns pairing mode back on if so. */
-    private var pairScreenOpen = false
-
     private val uiPrefs by lazy { getSharedPreferences("cliplink_ui", MODE_PRIVATE) }
 
     /**
@@ -209,10 +206,10 @@ class MainActivity : ComponentActivity() {
                         onCopyDeviceId = {
                             copyPlainText(it.deviceId)
                         },
-                        onPairingOpenChange = { open ->
-                            pairScreenOpen = open
-                            engine.setPairingOpen(open)
-                            if (!open) pairModel.clear()
+                        onPairingScreenChange = { open ->
+                            // Opening it ends any quiet time; leaving it forgets what the last
+                            // attempt answered.
+                            if (open) engine.clearRequestQuiet() else pairModel.clear()
                         },
                         onPair = { raw -> pairModel.pair(raw, engine::pairWith) },
                         onAcceptPairing = { engine.acceptPairing() },
@@ -234,25 +231,6 @@ class MainActivity : ComponentActivity() {
     /** The pairing link an intent carries, if it is one of ClipLink's. */
     private fun pairLinkIn(intent: Intent?): String? =
         intent?.takeIf { it.action == Intent.ACTION_VIEW }?.dataString?.takeIf { PairingLink.isLink(it) }
-
-    override fun onStart() {
-        super.onStart()
-        // Back from the background with the Pair screen still up: it is live
-        // again (see onStop).
-        if (pairScreenOpen) engine.setPairingOpen(true)
-    }
-
-    override fun onStop() {
-        super.onStop()
-        // Pairing mode is what this device advertises (pairing=1 in its beacon)
-        // and what lets it dial a stranger that advertises the same, and the
-        // Pair screen's own on/off follows in-app navigation only. Left on
-        // here, a phone with keep-alive on kept beaconing pairing=1 and dialling
-        // strangers after the user went Home from that screen. Not for a
-        // recreation, though: it is the same screen, a moment later. (A request
-        // that is waiting for an answer is left alone either way.)
-        if (!isChangingConfigurations) engine.setPairingOpen(false)
-    }
 
     override fun onResume() {
         super.onResume()

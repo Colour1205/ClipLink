@@ -286,37 +286,50 @@ final class ProtocolInteropTests: XCTestCase {
     // MARK: beacon
 
     func testBeaconFullFormAndDashes() {
+        // An older build still sends `1` in the fifth field: read, and ignored.
         let b = Beacon.parse("49000:SOMEKEY:SOMEPROOF:100.64.0.1:1", senderIP: "192.168.1.5")
-        XCTAssertEqual(b, Beacon(tcpPort: 49000, deviceId: "SOMEKEY", proof: "SOMEPROOF", address: "100.64.0.1", pairing: true, senderIP: "192.168.1.5"))
+        XCTAssertEqual(b, Beacon(tcpPort: 49000, deviceId: "SOMEKEY", proof: "SOMEPROOF", address: "100.64.0.1", senderIP: "192.168.1.5"))
         let d = Beacon.parse("49000:SOMEKEY:-:-:-", senderIP: "10.0.0.2")!
-        XCTAssertNil(d.proof); XCTAssertNil(d.address); XCTAssertFalse(d.pairing)
+        XCTAssertNil(d.proof); XCTAssertNil(d.address)
         let legacy = Beacon.parse("49000:SOMEKEY:-", senderIP: "10.0.0.2")!
-        XCTAssertNil(legacy.address); XCTAssertFalse(legacy.pairing)
+        XCTAssertNil(legacy.address)
         XCTAssertNil(Beacon.parse("", senderIP: "x"))
         XCTAssertNil(Beacon.parse("garbage", senderIP: "x"))
         XCTAssertNil(Beacon.parse("notaport:KEY:-", senderIP: "x"))
         XCTAssertNil(Beacon.parse("49000::-", senderIP: "x"))
         XCTAssertNil(d.name, "five-field beacons (older builds) have no name")
         // Senders always write all six fields, `-` for an unknown name.
-        XCTAssertEqual(Beacon.build(tcpPort: 49000, deviceId: "K", proof: nil, address: "", pairing: false), "49000:K:-:-:-:-")
-        XCTAssertEqual(Beacon.build(tcpPort: 49000, deviceId: "K", proof: "P", address: "100.1.2.3", pairing: true), "49000:K:P:100.1.2.3:1:-")
+        XCTAssertEqual(Beacon.build(tcpPort: 49000, deviceId: "K", proof: nil, address: ""), "49000:K:-:-:-:-")
+        XCTAssertEqual(Beacon.build(tcpPort: 49000, deviceId: "K", proof: "P", address: "100.1.2.3"), "49000:K:P:100.1.2.3:-:-")
+    }
+
+    /// The fifth field used to say "my pairing screen is open". It stays so the
+    /// name keeps its place, but it is always written `-` and never read.
+    func testBeaconFifthFieldIsAlwaysADashAndNeverRead() {
+        let name = Data("Old PC".utf8).base64EncodedString()
+        let expected = Beacon(tcpPort: 49000, deviceId: "K", proof: "P", address: "100.1.2.3", name: "Old PC", senderIP: "x")
+        for fifth in ["1", "-", "0", "", "yes"] {
+            XCTAssertEqual(Beacon.parse("49000:K:P:100.1.2.3:\(fifth):\(name)", senderIP: "x"), expected, "fifth field \(fifth.debugDescription)")
+        }
+        let built = Beacon.build(tcpPort: 49000, deviceId: "K", proof: "P", address: "100.1.2.3", name: "New PC")
+        XCTAssertEqual(built.split(separator: ":", omittingEmptySubsequences: false).map(String.init)[4], "-")
     }
 
     func testBeaconNameIsBase64InTheSixthField() {
-        let built = Beacon.build(tcpPort: 49000, deviceId: "K", proof: nil, address: nil, pairing: false, name: "  Colour's PC  ")
+        let built = Beacon.build(tcpPort: 49000, deviceId: "K", proof: nil, address: nil, name: "  Colour's PC  ")
         XCTAssertEqual(built, "49000:K:-:-:-:" + Data("Colour's PC".utf8).base64EncodedString(), "trimmed, then padded base64 of the UTF-8")
         XCTAssertEqual(Beacon.parse(built, senderIP: "10.0.0.2")?.name, "Colour's PC")
 
         // Non-ASCII round-trips, and base64 never adds a colon.
         let fancy = "Zo\u{EB}'s iPad \u{1F30D}"
-        let b = Beacon.build(tcpPort: 49000, deviceId: "K", proof: "P", address: "100.1.2.3", pairing: true, name: fancy)
+        let b = Beacon.build(tcpPort: 49000, deviceId: "K", proof: "P", address: "100.1.2.3", name: fancy)
         XCTAssertEqual(b.split(separator: ":", omittingEmptySubsequences: false).count, 6)
-        XCTAssertEqual(Beacon.parse(b, senderIP: "x"), Beacon(tcpPort: 49000, deviceId: "K", proof: "P", address: "100.1.2.3", pairing: true, name: fancy, senderIP: "x"))
+        XCTAssertEqual(Beacon.parse(b, senderIP: "x"), Beacon(tcpPort: 49000, deviceId: "K", proof: "P", address: "100.1.2.3", name: fancy, senderIP: "x"))
 
         // Capped at 64 before encoding.
-        let long = Beacon.build(tcpPort: 49000, deviceId: "K", proof: nil, address: nil, pairing: false, name: String(repeating: "n", count: 100))
+        let long = Beacon.build(tcpPort: 49000, deviceId: "K", proof: nil, address: nil, name: String(repeating: "n", count: 100))
         XCTAssertEqual(Beacon.parse(long, senderIP: "x")?.name, String(repeating: "n", count: 64))
-        XCTAssertEqual(Beacon.build(tcpPort: 49000, deviceId: "K", proof: nil, address: nil, pairing: false, name: "   "), "49000:K:-:-:-:-")
+        XCTAssertEqual(Beacon.build(tcpPort: 49000, deviceId: "K", proof: nil, address: nil, name: "   "), "49000:K:-:-:-:-")
 
         // Absent, `-`, empty, bad base64, bad UTF-8 or blank: unknown - and
         // the beacon itself still counts.
@@ -325,7 +338,6 @@ final class ProtocolInteropTests: XCTestCase {
         for tail in ["", ":-", ":", ":%%%", ":QUJD", ":QUJD\n", ":\(badUTF8)", ":\(blank)"] {
             let parsed = Beacon.parse("49000:K:-:-:1" + tail, senderIP: "x")
             XCTAssertNotNil(parsed, tail)
-            XCTAssertEqual(parsed?.pairing, true, tail)
             if tail.hasPrefix(":QUJD") {
                 XCTAssertEqual(parsed?.name, "ABC")
             } else {
@@ -651,7 +663,7 @@ final class ProtocolInteropTests: XCTestCase {
     func testDeviceFingerprintIsTheSameEverywhere() {
         XCTAssertEqual(DeviceLabel.fingerprint("abc"), "BA78·16BF")
         XCTAssertEqual(DeviceLabel.short("abc"), "Device BA78·16BF")
-        let row = DeviceRow(deviceId: "abc", name: nil, trusted: false, connected: false, addresses: [], pairing: false, lastSeen: nil, nearby: false)
+        let row = DeviceRow(deviceId: "abc", name: nil, trusted: false, connected: false, addresses: [], lastSeen: nil, nearby: false)
         XCTAssertEqual(row.shortId, "Device BA78·16BF")
         let a = SoftwareIdentity().publicKeyBase64
         let b = SoftwareIdentity().publicKeyBase64
@@ -661,7 +673,7 @@ final class ProtocolInteropTests: XCTestCase {
 
     func testDeviceRowsSortByGroupThenNameThenIdOnly() {
         func row(_ id: String, _ name: String?, trusted: Bool, connected: Bool = false, lastSeen: Date? = nil) -> DeviceRow {
-            DeviceRow(deviceId: id, name: name, trusted: trusted, connected: connected, addresses: [], pairing: false, lastSeen: lastSeen, nearby: connected)
+            DeviceRow(deviceId: id, name: name, trusted: trusted, connected: connected, addresses: [], lastSeen: lastSeen, nearby: connected)
         }
         let rows = [
             row("id5", nil, trusted: false, lastSeen: Date()),

@@ -691,10 +691,9 @@ public sealed partial class ClipLinkEngine
     // immediately like always; one newly trusted via a matching passphrase
     // proof (NewlyTrustedViaPassphrase - see PeerConnection.CreateAsync) is
     // persisted to the trust store first, then registered the same way; a
-    // genuine pairing candidate (only possible because PairingState.ModeOpen
-    // was true) is parked as the pending candidate instead (PairingRequested),
-    // for AcceptPairing/RejectPairing to resolve. Never auto-trusted just
-    // because a connection formed on its own.
+    // genuine pairing candidate is parked as the pending candidate instead
+    // (PairingRequested), for AcceptPairing/RejectPairing to resolve. Never
+    // auto-trusted just because a connection formed on its own.
     //
     // Nothing here stores the handshake's name, though every connection path
     // (ConnectToPeer, AcceptConnection, PairByAddress) ends up here: a
@@ -962,9 +961,8 @@ public sealed partial class ClipLinkEngine
 
     // Counterpart to ConnectToPeer for a genuinely new pairing target - the
     // peer's identity isn't known in advance (that's what the handshake is
-    // for), so there's no id to validate against. Used by PairByAddressAsync
-    // and by the beacon handler's untrusted-pairing-candidate path. A
-    // candidate counts as reached too (Pending) - the accept/reject decision
+    // for), so there's no id to validate against. Used by PairByAddressAsync.
+    // A candidate counts as reached too (Pending) - the accept/reject decision
     // happens separately, via HandleNewConnection.
     private async Task<PairOutcome> PairByAddress(string address, int port)
     {
@@ -1030,7 +1028,6 @@ public sealed partial class ClipLinkEngine
         {
             seenPeers.TryGetValue(device.PublicKey, out var seen);
             connectionsByDeviceId.TryGetValue(device.PublicKey, out var conn);
-            bool recent = seen != null && now - seen.LastSeenUtc <= DiscoveredListingWindow;
             rows.Add(new DeviceListing(
                 device.PublicKey,
                 // The live connection's handshake name only until a stored
@@ -1040,7 +1037,6 @@ public sealed partial class ClipLinkEngine
                 // Linked is not connected: a device that is trusted here and was dialled
                 // may not have accepted yet (Waiting) - nothing is exchanged until it has.
                 Connected: conn != null && conn.IsSessionProven,
-                PairingOpen: recent && seen!.PairingOpen,
                 DistinctAddresses(seen?.LanAddress, seen?.AdvertisedAddress, device.Address),
                 Blocked: false,
                 ConnectedAddress: conn?.RemoteAddress ?? (conn != null ? seen?.LanAddress : null),
@@ -1053,7 +1049,7 @@ public sealed partial class ClipLinkEngine
         {
             if (trusted.ContainsKey(device.PublicKey)) continue;
             seenPeers.TryGetValue(device.PublicKey, out var seen);
-            rows.Add(new DeviceListing(device.PublicKey, device.Name ?? seen?.Name, Trusted: false, Connected: false, PairingOpen: false,
+            rows.Add(new DeviceListing(device.PublicKey, device.Name ?? seen?.Name, Trusted: false, Connected: false,
                 DistinctAddresses(seen?.LanAddress, seen?.AdvertisedAddress),
                 Blocked: true, ConnectedAddress: null));
         }
@@ -1061,7 +1057,7 @@ public sealed partial class ClipLinkEngine
         {
             if (trusted.ContainsKey(id) || now - seen.LastSeenUtc > DiscoveredListingWindow) continue;
             if (blockedList.Any(device => device.PublicKey == id)) continue; // its blocked row is above
-            rows.Add(new DeviceListing(id, seen.Name, Trusted: false, Connected: false, seen.PairingOpen,
+            rows.Add(new DeviceListing(id, seen.Name, Trusted: false, Connected: false,
                 DistinctAddresses(seen.LanAddress, seen.AdvertisedAddress)));
         }
         return rows

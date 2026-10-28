@@ -1,22 +1,15 @@
 namespace ClipboardDaemon.Networking;
 
-// Coordinates the app-driven "pairing mode" gate and the single pending
-// pairing candidate connection, shared between the threads that create
-// connections (TCP accept loop, discovery beacon handler, pair-by-address)
-// and whichever thread the app uses to toggle pairing mode and
+// Coordinates the single pending pairing candidate connection, shared
+// between the threads that create connections (TCP accept loop, discovery
+// beacon handler, pair-by-address) and whichever thread the app uses to
 // accept/reject a candidate. Mirrors HarmonyOS's Index.ets
-// pairingOpen/pendingPairingConn.
+// pendingPairingConn.
 public class PairingState
 {
     private readonly object gate = new();
     private PeerConnection? pendingConn;
     private string? pendingAddress;
-
-    // Written by ClipLinkEngine.SetPairingMode, read by every
-    // connection-creation path (TCP accept, beacon dial, pair-by-address)
-    // and by the beacon sender itself - volatile since those are different
-    // threads and this needs to be visible immediately, not eventually.
-    public volatile bool ModeOpen = false;
 
     // Returns true if conn was accepted as the pending candidate (caller
     // must NOT register it as a live connection - wait for accept/reject);

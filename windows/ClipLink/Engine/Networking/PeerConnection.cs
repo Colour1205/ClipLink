@@ -124,11 +124,10 @@ public class PeerConnection
     // the user can be asked, as a dialog or a notification, whether to trust
     // it: the caller who gets back WasAlreadyTrusted=false is responsible for
     // that Trust/Ignore prompt before writing trust, and nothing is trusted
-    // by the connection merely existing. (This used to need the pairing
-    // screen open; a request now reaches this PC whenever it is running.) A
-    // handshake whose passcode proof verifies against passphraseKeyStore
-    // (NewlyTrustedViaPassphrase) is trusted without a question, the same as
-    // the LAN beacon's passive auto-trust.
+    // by the connection merely existing. A handshake whose passcode proof
+    // verifies against passphraseKeyStore (NewlyTrustedViaPassphrase) is
+    // trusted without a question, the same as the LAN beacon's passive
+    // auto-trust.
     //
     // isBlocked is asked about the peer's claimed key as soon as it is read,
     // before trust, the passcode proof or anything else: a blocked device

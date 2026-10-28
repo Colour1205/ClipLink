@@ -69,9 +69,6 @@ public sealed class EngineHost : Observable
     public bool HasBlockedDevices => BlockedDevices.Count > 0;
     public bool HasNoDevices => PairedDevices.Count == 0 && NearbyDevices.Count == 0 && BlockedDevices.Count == 0;
 
-    // The Devices page's pairing view is showing (so pairing mode is on).
-    public bool PairingUiActive { get; private set; }
-
     public event Action<PendingPairing>? PairingRequested;
     public event Action<string, PairingDecision>? PairingResolved;
 
@@ -128,14 +125,6 @@ public sealed class EngineHost : Observable
             Console.WriteLine($"[app] couldn't write the clipboard: {ex.Message}");
             return false;
         }
-    }
-
-    public void SetPairingUiActive(bool active)
-    {
-        if (active == PairingUiActive) return;
-        PairingUiActive = active;
-        Engine.SetPairingMode(active);
-        Console.WriteLine($"[app] pairing mode {(active ? "on" : "off")}");
     }
 
     private void Post(Action action) => dispatcher.TryEnqueue(() => action());

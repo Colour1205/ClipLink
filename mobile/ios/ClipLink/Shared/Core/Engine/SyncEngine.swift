@@ -55,8 +55,8 @@ public struct EngineConfig {
     /// buffered.
     public var sendOnly = false
     /// Let an untrusted device that dials us finish the handshake as a
-    /// pairing request - held, with the user asked - even while our pairing
-    /// screen is closed. Off for the Share extension: it has no UI to ask in.
+    /// pairing request - held, with the user asked. Off for the Share
+    /// extension: it has no UI to ask in.
     public var acceptPairingRequests = true
     /// At most `requestBudget` requests out of the blue per
     /// `requestBudgetWindow`: a flood is dropped without a prompt.
@@ -124,7 +124,7 @@ public final class SyncEngine {
     var foregroundAt = Date()
 
     // Pairing & trust
-    var pairingOpen = false
+    /// The device a scanned code named, while no address is known to dial.
     var pairingTargetKey: String?
     /// Everyone asking to pair, oldest first (see maxPendingRequests).
     var pendingRequests: [PendingPairing] = []
@@ -487,27 +487,16 @@ public final class SyncEngine {
 
     // MARK: - Pairing & trust API
 
-    /// True exactly while the pairing screen is visible. Opening it advertises
-    /// pairing in our beacon and lets untrusted peers finish a handshake;
-    /// closing it rejects any request still waiting.
-    public func setPairingOpen(_ open: Bool) {
-        queue.async { [self] in
-            guard pairingOpen != open else { return }
-            pairingOpen = open
-            if open {
-                // Somebody is expecting requests now: no device stays held back.
-                requestQuiet.clear()
-                // beaconTick itself sweeps while pairing is open: one copy of
-                // the pairing beacon per host, not two.
-                lastUDPSweep = .distantPast
-                beaconTick()
-                tcpSweep(force: true, reason: "pairing")
-            } else {
-                pairingTargetKey = nil
-                rejectPendingLocked()
-            }
-            schedulePublish()
-        }
+    /// The pairing screen opened: somebody is expecting requests, so no device
+    /// stays held back (see `RequestQuiet`).
+    public func liftRequestQuiet() {
+        queue.async { [self] in requestQuiet.clear() }
+    }
+
+    /// The pairing screen closed, or the app left the foreground: stop looking
+    /// for the device a scanned code named.
+    public func cancelPairingSearch() {
+        queue.async { [self] in pairingTargetKey = nil }
     }
 
     /// Trusts the request the prompt is showing (the oldest) and puts its
@@ -540,8 +529,10 @@ public final class SyncEngine {
         schedulePublish()
     }
 
-    /// "Ignore": closes the oldest request. Not a block, and no cooldown - the
-    /// device may ask again whenever it likes (Block is the way to stop it).
+    /// "Ignore": closes the oldest request. Not a block, but the device is held
+    /// back for a while (RequestQuiet.afterIgnored; opening the pairing sheet,
+    /// pairing or trusting it lifts that) before it may ask again (Block is the
+    /// way to stop it).
     public func rejectPairing() {
         queue.async { [self] in
             guard let first = pendingRequests.first else { return }
@@ -565,8 +556,8 @@ public final class SyncEngine {
         schedulePublish()
     }
 
-    /// Closes every waiting request: the pairing screen closing, the app going
-    /// to the background - not the user's decision.
+    /// Closes every waiting request: the app going to the background - not the
+    /// user's decision.
     func rejectPendingLocked() {
         let waiting = pendingRequests
         pendingRequests.removeAll()
@@ -924,7 +915,6 @@ public final class SyncEngine {
         s.connectedCount = links.values.filter(\.hasReceivedSessionLine).count
         s.network = status
         s.log = logLines
-        s.pairingOpen = pairingOpen
         s.pairingRequests = pendingRequests.map {
             PairingRequest(deviceId: $0.link.peerDeviceId, address: $0.address, name: $0.link.peerName, date: $0.date, initiatedByUs: $0.link.direction == .outbound)
         }
@@ -999,7 +989,6 @@ public final class SyncEngine {
                 trusted: trusted != nil,
                 connected: proven,
                 addresses: addresses,
-                pairing: sighting?.pairing == true && now.timeIntervalSince(sighting?.pairingSeen ?? .distantPast) < 10,
                 lastSeen: lastSeen,
                 nearby: links[id] != nil || (sighting.map { now.timeIntervalSince($0.lastSeen) < 30 } ?? false),
                 blocked: blocks.isBlocked(id),
@@ -1023,8 +1012,6 @@ struct Sighting {
     var addresses: [String: Date] = [:]
     var beaconPort: Int?
     var advertisedAddress: String?
-    var pairing = false
-    var pairingSeen = Date.distantPast
     /// The latest name it gave itself (beacon or handshake); a message
     /// without one never clears it, but a connection that closes without
     /// decrypting a line takes its handshake's name with it (linkClosed).

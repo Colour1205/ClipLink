@@ -13,10 +13,13 @@ with the always-on P2P node running inside it.
     which release to offer, the download, the size and SHA-256 check. The
     app's side of it is `UpdateService.cs` and the Updates card in Settings
     (see [Updates](#updates)).
-- `ClipLink.Tests/` — xUnit tests for `ClipLink/Updates/` (the files are
-  linked in, since `ClipLink.csproj` is a WinUI exe): `dotnet test windows\ClipLink.Tests`.
+- `ClipLink.Tests/` — xUnit tests for the parts that need no UI: the updater
+  (`ClipLink/Updates/`) and the engine's beacon codec and who-dials-whom rule.
+  The source files are linked in (`ClipLink.csproj` is a WinUI exe), so
+  running them builds no app: `dotnet test windows\ClipLink.Tests`.
 - `installer/ClipLink.iss` — the installer script (Inno Setup).
-- `ClipLink.slnx` — the solution, for Visual Studio / `dotnet build`.
+- `ClipLink.slnx` — the solution, for Visual Studio / `dotnet build`; it
+  includes the tests.
 - `publish.ps1` — builds the app folder and the installer into `dist/`
   (git-ignored).
 - `ClipLink.ico` — the app icon.
@@ -39,6 +42,7 @@ Studio needed.
 ```powershell
 dotnet build windows\ClipLink.slnx                                  # development build
 dotnet run --project windows\ClipLink\ClipLink.csproj               # build and run it
+dotnet test windows\ClipLink.Tests                                  # the unit tests
 powershell -ExecutionPolicy Bypass -File windows\publish.ps1        # -> windows\dist\
 ```
 

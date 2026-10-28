@@ -13,9 +13,8 @@ namespace ClipLink;
 
 // Paired and nearby devices (the engine's stable order), plus the pairing
 // view ("Add device"): this PC's QR code, its pairing info and pair by
-// address. Pairing mode is on exactly while that view is on screen - as on
-// the phones' Pair screens - and goes off when you go back, leave the page,
-// hide the window or minimise it.
+// address. Opening it ends any quiet time for devices whose requests were
+// ignored or removed (ClipLinkEngine.LiftRequestQuiet).
 public sealed partial class DevicesPage : Page
 {
     private readonly EngineHost host = App.Host;
@@ -32,8 +31,6 @@ public sealed partial class DevicesPage : Page
         PairTitle.ItemsSource = new[] { "Devices", "Add a device" };
         Loaded += (_, _) =>
         {
-            App.MainAppWindow.OnScreenChanged += UpdatePairingMode;
-            UpdatePairingMode();
             // A device's detail view follows its row: renamed, connected,
             // blocked, gone.
             host.PairedDevices.CollectionChanged += Devices_Changed;
@@ -42,8 +39,7 @@ public sealed partial class DevicesPage : Page
         };
         Unloaded += (_, _) =>
         {
-            // Navigated to another page: back to the list, pairing off.
-            App.MainAppWindow.OnScreenChanged -= UpdatePairingMode;
+            // Navigated to another page: back to the list.
             host.PairedDevices.CollectionChanged -= Devices_Changed;
             host.NearbyDevices.CollectionChanged -= Devices_Changed;
             host.BlockedDevices.CollectionChanged -= Devices_Changed;
@@ -82,6 +78,7 @@ public sealed partial class DevicesPage : Page
             PairView.Visibility = PairTitle.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
             if (open)
             {
+                host.Engine.LiftRequestQuiet();
                 PairView.ChangeView(null, 0, null, disableAnimation: true);
                 _ = LoadPairingInfoAsync();
                 // After the view has been laid out: a control that has only
@@ -94,13 +91,6 @@ public sealed partial class DevicesPage : Page
                 PairResult.IsOpen = false;
             }
         }
-        UpdatePairingMode();
-    }
-
-    private void UpdatePairingMode()
-    {
-        bool onScreen = IsLoaded && App.MainAppWindow.IsOnScreen;
-        host.SetPairingUiActive(pairViewOpen && onScreen);
     }
 
     // ---- this PC's code ---------------------------------------------------
@@ -473,7 +463,6 @@ public sealed partial class DevicesPage : Page
             $"Status: {row.Status}\n" +
             $"Name: {row.Listing.Name ?? "not known yet"}\n" +
             $"Fingerprint: {DeviceLabel.Fingerprint(row.PublicKey)}\n" +
-            (row.Listing.PairingOpen && !row.Blocked ? "Pairing: its pairing screen is open\n" : "") +
             $"Device ID: {row.PublicKey}";
     }
 

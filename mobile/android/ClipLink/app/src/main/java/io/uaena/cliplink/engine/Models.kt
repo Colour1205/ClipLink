@@ -84,8 +84,6 @@ data class DeviceRow(
     val connected: Boolean,
     /** Every address this device is currently reachable at, LAN first. */
     val addresses: List<String>,
-    /** The peer says its own pairing screen is open right now. */
-    val pairing: Boolean,
     /**
      * When this device's beacon was last heard. Not part of the row's
      * identity ([equals] leaves it out): it changes with every beacon, every
@@ -116,7 +114,7 @@ data class DeviceRow(
 ) {
     override fun equals(other: Any?): Boolean =
         other is DeviceRow && deviceId == other.deviceId && name == other.name && trusted == other.trusted &&
-            connected == other.connected && addresses == other.addresses && pairing == other.pairing &&
+            connected == other.connected && addresses == other.addresses &&
             online == other.online && blocked == other.blocked && connectedAddress == other.connectedAddress
 
     override fun hashCode(): Int {
@@ -125,7 +123,6 @@ data class DeviceRow(
         result = 31 * result + trusted.hashCode()
         result = 31 * result + connected.hashCode()
         result = 31 * result + addresses.hashCode()
-        result = 31 * result + pairing.hashCode()
         result = 31 * result + online.hashCode()
         result = 31 * result + blocked.hashCode()
         result = 31 * result + (connectedAddress?.hashCode() ?: 0)
