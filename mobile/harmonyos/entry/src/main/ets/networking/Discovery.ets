@@ -1,11 +1,11 @@
 // Step 5 of the build order in ../../../../README.md: networking.
 // Mirrors windows/ClipLink/Engine/Networking/Discovery.cs exactly — same port, same
-// beacon format ("{tcpPort}:{deviceID}:{proof}:{address}:{pairing}:{name}",
-// "-" for absent fields), same 2-second send interval. Device IDs are base64
+// beacon format ("{tcpPort}:{deviceID}:{proof}:{address}:-:{name}", "-" for
+// absent fields), same 2-second send interval. Device IDs are base64
 // (from DeviceIdentity.ets / DeviceIdentity.cs), which never contains ":", so
 // splitting on ":" is safe - and so is the name, sent as Base64 of its UTF-8
-// for exactly that reason. Older builds stop reading after the pairing field,
-// and a beacon from one simply has no name.
+// for exactly that reason. The fifth field is always "-" (see encodeBeacon).
+// Older builds stop reading after it, and a beacon from one simply has no name.
 //
 // Whether LAN broadcast actually works without any extra permission beyond
 // INTERNET was flagged as a genuine unknown in the step-2 spike, deferred
@@ -73,16 +73,35 @@ export interface PeerBeacon {
   deviceId: string;
   proof: string | null;
   address: string | null;
-  // True only while the sender's own Pairing screen is open - the signal
-  // that makes it safe/expected to attempt a pairing handshake with an
-  // otherwise-untrusted device found this way, instead of trying one with
-  // every stranger's beacon on the LAN. See Index.ets's pairingOpen and
-  // PeerConnection.create's pairingModeOpen gate.
-  pairing: boolean;
   // The sender's display name, or null when it sent none (an older build)
   // or it didn't decode. See decodeBeaconName.
   name: string | null;
   senderIp: string;
+}
+
+// The beacon as sent. "-" stands in for a missing proof, address or name, so
+// the name is always the sixth field. The fifth is always "-" too: it used to
+// say the sender's Pairing screen was open, and stays only so builds from
+// before and after that read each other. Nothing reads it any more.
+export function encodeBeacon(tcpPort: number, deviceId: string, proof: string | null, address: string | null, name: string | null): string {
+  return `${tcpPort}:${deviceId}:${proof ?? '-'}:${address ?? '-'}:-:${encodeBeaconName(name)}`;
+}
+
+// Null for a datagram too short to be a beacon. The fifth field is skipped
+// whatever it holds (an older build sends "1" there), and a beacon from a
+// build that sends no name just has none.
+export function parseBeacon(text: string, senderIp: string): PeerBeacon | null {
+  const parts = text.split(':');
+  if (parts.length < 3) return null; // malformed/old-format beacon, ignore
+  const beacon: PeerBeacon = {
+    tcpPort: Number(parts[0]),
+    deviceId: parts[1],
+    proof: parts[2] === '-' ? null : parts[2],
+    address: parts.length > 3 && parts[3] !== '-' ? parts[3] : null,
+    name: parts.length > 5 ? decodeBeaconName(parts[5]) : null,
+    senderIp: senderIp,
+  };
+  return beacon;
 }
 
 export class Discovery {
@@ -110,14 +129,13 @@ export class Discovery {
     this.errorCallback = callback;
   }
 
-  // getProof, getOwnAddress, getPairingOpen and getOwnName are all called
-  // fresh on every beacon, not just once at start - each can change live (a
-  // passphrase set later, a manually-entered Tailscale IP, the Pairing
-  // screen opening/closing, or the device renamed on the Me screen) and must
-  // take effect without a restart, same reasoning as Discovery.cs's own
-  // getProof callback.
-  start(deviceId: string, tcpPort: number, getProof: () => string | null, getOwnAddress: () => string | null, getPairingOpen: () => boolean, getOwnName: () => string | null): Promise<void> {
-    const run: Promise<void> = this.turn.then(() => this.begin(deviceId, tcpPort, getProof, getOwnAddress, getPairingOpen, getOwnName));
+  // getProof, getOwnAddress and getOwnName are all called fresh on every
+  // beacon, not just once at start - each can change live (a passphrase set
+  // later, a manually-entered Tailscale IP, or the device renamed on the Me
+  // screen) and must take effect without a restart, same reasoning as
+  // Discovery.cs's own getProof callback.
+  start(deviceId: string, tcpPort: number, getProof: () => string | null, getOwnAddress: () => string | null, getOwnName: () => string | null): Promise<void> {
+    const run: Promise<void> = this.turn.then(() => this.begin(deviceId, tcpPort, getProof, getOwnAddress, getOwnName));
     // The caller gets the failure; the next turn starts either way.
     this.turn = run.catch((): void => { /* reported to the caller */ });
     return run;
@@ -140,7 +158,7 @@ export class Discovery {
     this.sendNow?.();
   }
 
-  private async begin(deviceId: string, tcpPort: number, getProof: () => string | null, getOwnAddress: () => string | null, getPairingOpen: () => boolean, getOwnName: () => string | null): Promise<void> {
+  private async begin(deviceId: string, tcpPort: number, getProof: () => string | null, getOwnAddress: () => string | null, getOwnName: () => string | null): Promise<void> {
     if (this.udp !== null) {
       // Already up (a second start asked for just after the first): say so
       // again at once, rather than binding the port a second time.
@@ -152,18 +170,8 @@ export class Discovery {
 
     udp.on('message', (info: socket.SocketMessageInfo) => {
       const text = this.decoder.decodeToString(new Uint8Array(info.message));
-      const parts = text.split(':');
-      if (parts.length < 3) return; // malformed/old-format beacon, ignore
-
-      const beacon: PeerBeacon = {
-        tcpPort: Number(parts[0]),
-        deviceId: parts[1],
-        proof: parts[2] === '-' ? null : parts[2],
-        address: parts.length > 3 && parts[3] !== '-' ? parts[3] : null,
-        pairing: parts.length > 4 && parts[4] === '1',
-        name: parts.length > 5 ? decodeBeaconName(parts[5]) : null,
-        senderIp: info.remoteInfo.address,
-      };
+      const beacon: PeerBeacon | null = parseBeacon(text, info.remoteInfo.address);
+      if (beacon === null) return;
       this.peerCallback?.(beacon);
     });
 
@@ -185,12 +193,7 @@ export class Discovery {
     const send = (): void => {
       // A beacon after a stop (a late follow-up below) is not sent.
       if (this.udp !== udp) return;
-      const proof = getProof() ?? '-';
-      const addr = getOwnAddress() ?? '-';
-      // Always sent, even as "-", so the name is always the 6th field.
-      const pairing = getPairingOpen() ? '1' : '-';
-      const name = encodeBeaconName(getOwnName());
-      const message = `${tcpPort}:${deviceId}:${proof}:${addr}:${pairing}:${name}`;
+      const message = encodeBeacon(tcpPort, deviceId, getProof(), getOwnAddress(), getOwnName());
       udp.send({ data: message, address: { address: BROADCAST_ADDRESS, port: PORT } })
         .catch((e: BusinessError) => {
           this.errorCallback?.('send', e);

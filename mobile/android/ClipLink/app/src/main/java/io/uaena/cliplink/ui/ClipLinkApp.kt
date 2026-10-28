@@ -84,7 +84,7 @@ data class AppActions(
     val onBlock: (DeviceRow) -> Unit,
     val onUnblock: (DeviceRow) -> Unit,
     val onCopyDeviceId: (DeviceRow) -> Unit,
-    val onPairingOpenChange: (Boolean) -> Unit,
+    val onPairingScreenChange: (Boolean) -> Unit,
     val onPair: (String) -> Unit,
     val onAcceptPairing: () -> Unit,
     val onRejectPairing: () -> Unit,
@@ -107,8 +107,7 @@ fun ClipLinkApp(
     // All of this is rememberSaveable: the Activity is destroyed and rebuilt
     // for a rotation, a dark-mode or a language switch, and everything held in
     // plain remember went back to the Synced tab, closed the open item and the
-    // pairing screen - and, through the pairing effect below, rejected a
-    // pairing request somebody was in the middle of.
+    // pairing screen.
     var tab by rememberSaveable { mutableStateOf(Tab.Synced) }
     var pairing by rememberSaveable { mutableStateOf(false) }
     // The open item is held by its key and looked up in the live list below,
@@ -148,23 +147,18 @@ fun ClipLinkApp(
         if (deviceDetailId != null && deviceDetail == null) deviceDetailId = null
     }
 
-    // Pairing mode is a live signal, not a setting: this device advertises it
-    // and dials strangers that advertise it only while this screen is actually
-    // open, so it has to be flipped on the way in and off on every way out
-    // (leaving the app is MainActivity's: no composition runs while it is
-    // stopped).
+    // Tells the caller when the pairing screen opens and when it closes, whichever
+    // way that happens (the back arrow, the system back, a pairing link).
     //
     // Only real transitions are reported. The first composition of a fresh
-    // Activity (after a rotation, say) used to report "closed" whenever the
-    // screen wasn't open - a change nobody made. An open screen is still
-    // reported at once: that is a recreation restoring it. (Whether the screen
-    // is open only decides what this device advertises and dials; a pairing
-    // request reaches it either way.)
+    // Activity (after a rotation, say) is the same screen restored, not one
+    // opening or closing - reporting it "closed" whenever the screen wasn't open
+    // was a change nobody made.
     var reportedPairing by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(pairing) {
         val before = reportedPairing
         reportedPairing = pairing
-        if (pairing || before != null) actions.onPairingOpenChange(pairing)
+        if (before != null) actions.onPairingScreenChange(pairing)
     }
 
     // Opened by a scanner reading another device's pairing code: show the pairing
@@ -199,10 +193,9 @@ fun ClipLinkApp(
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
-            // Hidden on the sub-screens: both are full-screen tasks with their
-            // own back affordance, and leaving a tab bar visible invites
-            // tapping it mid-pairing, which silently cancels the pairing
-            // window the other device is waiting on.
+            // Hidden on the sub-screens: they are full-screen tasks with their
+            // own back affordance, and a tab tapped while one is open would
+            // change nothing on screen.
             if (detail == null && deviceDetail == null && !pairing && !scanning) {
                 ShortNavigationBar {
                     Tab.entries.forEach { entry ->

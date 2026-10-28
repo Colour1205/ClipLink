@@ -186,7 +186,7 @@ struct DeviceDetailView: View {
         if row.blocked {
             Text("Blocked devices can't send pairing requests, and ClipLink never connects to them. Unblock it to let it ask to pair again.")
         } else if !row.trusted {
-            Text("Trust lets this device accept it. The other device must also trust this \(ThisDeviceNoun.current) (same passcode, or its pairing screen open).")
+            Text("Trust lets this device accept it and sends it a request. It must also trust this \(ThisDeviceNoun.current): accept the request there, or use the same passcode.")
         }
     }
 

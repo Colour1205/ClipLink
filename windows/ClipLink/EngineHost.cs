@@ -69,9 +69,6 @@ public sealed class EngineHost : Observable
     public bool HasBlockedDevices => BlockedDevices.Count > 0;
     public bool HasNoDevices => PairedDevices.Count == 0 && NearbyDevices.Count == 0 && BlockedDevices.Count == 0;
 
-    // The Devices page's pairing view is showing (so pairing mode is on).
-    public bool PairingUiActive { get; private set; }
-
     public event Action<PendingPairing>? PairingRequested;
     public event Action<string, PairingDecision>? PairingResolved;
 
@@ -130,14 +127,6 @@ public sealed class EngineHost : Observable
         }
     }
 
-    public void SetPairingUiActive(bool active)
-    {
-        if (active == PairingUiActive) return;
-        PairingUiActive = active;
-        Engine.SetPairingMode(active);
-        Console.WriteLine($"[app] pairing mode {(active ? "on" : "off")}");
-    }
-
     private void Post(Action action) => dispatcher.TryEnqueue(() => action());
 
     private void RefreshStatus()
@@ -160,10 +149,12 @@ public sealed class EngineHost : Observable
         var known = new HashSet<string>(History.Select(card => card.Key));
         var arrived = historyLoaded ? items.Where(item => !item.FromThisDevice && !known.Contains(item.Key)).ToList() : new List<HistoryItem>();
         historyLoaded = true;
-        SyncByKey(History, items, card => card.Key, item => item.Key, item => new HistoryCard(item), (card, item) => card.Update(item));
+        CollectionSync.ByKey(History, items, card => card.Key, item => item.Key, item => new HistoryCard(item), (card, item) => card.Update(item));
         foreach (var card in History)
         {
-            if (card.IsImage && !card.ThumbnailRequested) _ = LoadThumbnailAsync(card);
+            // (A picture file's bytes may still be on their way: asked for
+            // once they're here - this runs again when they are.)
+            if (card.IsPicture && card.Item.IsAvailable && !card.ThumbnailRequested) _ = LoadThumbnailAsync(card);
         }
         Raise(nameof(HistoryIsEmpty));
         if (arrived.Count > 0) ItemsArrived?.Invoke(arrived);
@@ -171,36 +162,12 @@ public sealed class EngineHost : Observable
 
     private void ApplyDevices(IReadOnlyList<DeviceListing> devices)
     {
-        SyncByKey(PairedDevices, devices.Where(d => d.Trusted && !d.Blocked).ToList(), row => row.PublicKey, d => d.PublicKey, d => new DeviceRow(d), (row, d) => row.Update(d));
-        SyncByKey(NearbyDevices, devices.Where(d => !d.Trusted && !d.Blocked).ToList(), row => row.PublicKey, d => d.PublicKey, d => new DeviceRow(d), (row, d) => row.Update(d));
-        SyncByKey(BlockedDevices, devices.Where(d => d.Blocked).ToList(), row => row.PublicKey, d => d.PublicKey, d => new DeviceRow(d), (row, d) => row.Update(d));
+        CollectionSync.ByKey(PairedDevices, devices.Where(d => d.Trusted && !d.Blocked).ToList(), row => row.PublicKey, d => d.PublicKey, d => new DeviceRow(d), (row, d) => row.Update(d));
+        CollectionSync.ByKey(NearbyDevices, devices.Where(d => !d.Trusted && !d.Blocked).ToList(), row => row.PublicKey, d => d.PublicKey, d => new DeviceRow(d), (row, d) => row.Update(d));
+        CollectionSync.ByKey(BlockedDevices, devices.Where(d => d.Blocked).ToList(), row => row.PublicKey, d => d.PublicKey, d => new DeviceRow(d), (row, d) => row.Update(d));
         Raise(nameof(ConnectedCount), nameof(ConnectionSummary), nameof(HasPairedDevices), nameof(HasNearbyDevices), nameof(HasBlockedDevices), nameof(HasNoDevices));
         // The cards show device names too, which may have just changed.
         ReloadHistory();
-    }
-
-    // Makes target match source, in source's order, reusing the items it
-    // already has by key - so a card keeps its thumbnail, a row its focus,
-    // and the list its scroll position.
-    private static void SyncByKey<TItem, TSource>(ObservableCollection<TItem> target, IReadOnlyList<TSource> source,
-        Func<TItem, string> keyOfItem, Func<TSource, string> keyOfSource, Func<TSource, TItem> create, Action<TItem, TSource> update)
-    {
-        var existing = new Dictionary<string, TItem>();
-        foreach (var item in target) existing.TryAdd(keyOfItem(item), item);
-        for (int i = 0; i < source.Count; i++)
-        {
-            if (existing.TryGetValue(keyOfSource(source[i]), out var item))
-            {
-                update(item, source[i]);
-                int at = target.IndexOf(item);
-                if (at != i) target.Move(at, i);
-            }
-            else
-            {
-                target.Insert(i, create(source[i]));
-            }
-        }
-        while (target.Count > source.Count) target.RemoveAt(target.Count - 1);
     }
 
     // Thumbnails are decoded at most this big - enough for the list's 320 x
@@ -238,8 +205,10 @@ public sealed class EngineHost : Observable
             stream.Seek(0);
             // Only the header, to pick the decode size.
             var decoder = await BitmapDecoder.CreateAsync(stream);
-            int width = (int)decoder.PixelWidth;
-            int height = (int)decoder.PixelHeight;
+            // As shown, not as stored: a phone's photo is saved sideways with
+            // a tag saying how to turn it, which the BitmapImage honours.
+            int width = (int)decoder.OrientedPixelWidth;
+            int height = (int)decoder.OrientedPixelHeight;
             var bitmap = new BitmapImage();
             if ((long)width * maxHeight > (long)height * maxWidth)
                 bitmap.DecodePixelWidth = Math.Min(width, maxWidth);

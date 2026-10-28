@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Unit tests for the parts of ClipLink that are plain C# and need no
+       Windows UI: the updater (ClipLink\Updates) and the engine's beacon codec
+       and dial decision (ClipLink\Engine\Networking). Run with
+       `dotnet test windows\ClipLink.Tests`. ClipLink.csproj is a WinUI exe,
+       which a test project can't sensibly reference, so the source files are
+       linked in (not copied) instead - which is also why these files must stay
+       free of WinUI. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>ClipLink.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\ClipLink\Updates\*.cs" Link="Updates\%(Filename)%(Extension)" />
+    <Compile Include="..\ClipLink\Engine\Networking\Discovery.cs" Link="Engine\Discovery.cs" />
+    <Compile Include="..\ClipLink\Engine\Identity\DeviceNameStore.cs" Link="Engine\DeviceNameStore.cs" />
+    <Compile Include="..\ClipLink\Engine\Networking\DialDecision.cs" Link="Engine\DialDecision.cs" />
+    <Compile Include="..\ClipLink\Engine\Networking\DialFallback.cs" Link="Engine\DialFallback.cs" />
+  </ItemGroup>
+
+</Project>

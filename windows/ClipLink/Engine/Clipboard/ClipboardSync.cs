@@ -254,7 +254,7 @@ public class ClipboardSync
             // goes on as a picture, so it pastes into documents as well as
             // into folders.
             var info = new FileInfo(destPath);
-            if (ImageFileExtensions.Contains(info.Extension) && info.Length <= MaxInlineImageBytes)
+            if (ImageFiles.BitmapExtensions.Contains(info.Extension) && info.Length <= ImageFiles.MaxDecodeBytes)
             {
                 SetImageAndFile(File.ReadAllBytes(destPath), destPath);
                 return;
@@ -274,11 +274,6 @@ public class ClipboardSync
 {
     return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data));
 }
-
-    // Image files GDI+ can decode, and the largest one worth also putting on
-    // the clipboard as a bitmap (a decoded bitmap is far bigger than the file).
-    private static readonly HashSet<string> ImageFileExtensions = new(StringComparer.OrdinalIgnoreCase) { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff" };
-    private const long MaxInlineImageBytes = 50L * 1024 * 1024;
 
     // One clipboard item carrying the picture AND the file it's saved as:
     // apps that paste images (Word, Paint, chat apps) take the bitmap - or

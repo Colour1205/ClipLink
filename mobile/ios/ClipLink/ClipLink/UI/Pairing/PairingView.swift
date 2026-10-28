@@ -1,9 +1,9 @@
 import SwiftUI
 import UIKit
 
-/// The pairing sheet. Being on screen IS pairing mode (AppModel turns it on
-/// and off with `pairingPresented`): this device's QR code, a scanner for the
-/// other device's code, and pair-by-address for devices without a camera.
+/// The pairing sheet (shown while `AppModel.pairingPresented`): this device's
+/// QR code, a scanner for the other device's code, and pair-by-address for
+/// devices without a camera.
 struct PairingView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
@@ -35,7 +35,7 @@ struct PairingView: View {
                                 .id(PairingAnchor.status)
                                 .transition(.opacity)
                         }
-                        Text("Devices on the same Wi-Fi pair automatically while both pairing screens are open — codes are only needed when they can't find each other. Devices with the same passcode (Me › Passcode) pair with no prompts at all.")
+                        Text("Devices on the same Wi-Fi also show up under Devices › Nearby: tap Trust there to send a request, and pull down on the list to refresh if one is missing. Codes are only needed when they can't find each other. Devices with the same passcode (Me › Passcode) pair with no prompts at all.")
                             .font(.footnote)
                             .foregroundColor(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -87,23 +87,12 @@ struct PairingView: View {
                     .foregroundColor(accent)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Keep this screen open on both devices.")
+                    Text("Nothing is trusted until you accept it on both sides.")
                         .font(.subheadline.weight(.semibold))
-                    Text("Nothing is trusted until you accept it on both sides. A request from another device can also reach this \(ThisDeviceNoun.current) any time ClipLink is open, and you'll be asked before anything is trusted.")
+                    Text("A request from another device can reach this \(ThisDeviceNoun.current) any time ClipLink is open, and you'll be asked before anything is trusted.")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    if model.snapshot.pairingOpen {
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(Theme.connected)
-                                .frame(width: 8, height: 8)
-                            Text("Pairing mode on")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundColor(Theme.connected)
-                        }
-                        .padding(.top, 2)
-                    }
                 }
             }
             .accessibilityElement(children: .combine)
@@ -144,7 +133,7 @@ struct PairingView: View {
                 // not installed (see PairingLink). The text below, and Copy,
                 // still give the bare info.
                 PairingQRCodeView(payload: payload.isEmpty ? "" : PairingLink.wrap(payload))
-                Text("Scan this on the other device with its pairing screen open.")
+                Text("Scan this on the other device.")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)

@@ -51,9 +51,6 @@ struct RootView: View {
                 .environmentObject(settings)
                 .accentColor(settings.accentTheme.color)
         }
-        // The pairing prompt lives inside PairingView: a request can only reach
-        // this device while that sheet is open, and an alert here couldn't be
-        // shown over the sheet anyway.
     }
 }
 

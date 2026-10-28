@@ -29,7 +29,6 @@ final class EngineIntegrationTests: XCTestCase {
         var pairingRequest: PairingRequest? { lock.lock(); defer { lock.unlock() }; return snapshot.pairingRequest }
         var devices: [DeviceRow] { lock.lock(); defer { lock.unlock() }; return snapshot.devices }
         var pairingRequests: [PairingRequest] { lock.lock(); defer { lock.unlock() }; return snapshot.pairingRequests }
-        var pairingOpen: Bool { lock.lock(); defer { lock.unlock() }; return snapshot.pairingOpen }
         func device(_ id: String) -> DeviceRow? { devices.first { $0.deviceId == id } }
         var hasPassphrase: Bool { lock.lock(); defer { lock.unlock() }; return snapshot.hasPassphrase }
         var running: Bool { lock.lock(); defer { lock.unlock() }; return snapshot.network.running }
@@ -265,11 +264,10 @@ final class EngineIntegrationTests: XCTestCase {
         b.engine.setDeviceName("Bravo")
         a.engine.enterForeground()
         b.engine.enterForeground()
-        a.engine.setPairingOpen(true)
-        b.engine.setPairingOpen(true)
 
-        // Whoever has the larger id dials on the pairing beacon; the other gets
-        // the same prompt from the inbound handshake.
+        // A reaches B by address; B gets the same prompt from the inbound
+        // handshake.
+        XCTAssertEqual(reach(a, b), .prompt("127.0.0.1"))
         wait("both prompted") { a.recorder.pairingRequest != nil && b.recorder.pairingRequest != nil }
         XCTAssertEqual(a.recorder.pairingRequest?.deviceId, b.engine.ownId)
         XCTAssertEqual(b.recorder.pairingRequest?.deviceId, a.engine.ownId)
@@ -348,7 +346,7 @@ final class EngineIntegrationTests: XCTestCase {
         setPasscode(a, "pw")
         let trustFile = a.dir.appendingPathComponent("trusted_devices.json")
         func hear(_ id: String, _ name: String?, proof: String? = nil) {
-            let beacon = Beacon(tcpPort: 9, deviceId: id, proof: proof, address: nil, pairing: false, name: name, senderIP: "127.0.0.1")
+            let beacon = Beacon(tcpPort: 9, deviceId: id, proof: proof, address: nil, name: name, senderIP: "127.0.0.1")
             a.engine.queue.sync { a.engine.onBeacon(beacon) }
         }
         // The Devices row, then the label prompts, toasts and history use.
@@ -517,7 +515,7 @@ final class EngineIntegrationTests: XCTestCase {
     /// Completes a handshake with `node` as `peer`, calling itself `name`. This
     /// side of the link stays held - it sends nothing - until it goes live.
     private func handshake(with node: Node, as peer: SoftwareIdentity, named name: String, passcode: Data) throws -> PeerLink {
-        let context = HandshakeContext(identity: peer, trusted: [node.engine.ownId], passphraseKey: passcode, pairingOpen: false, deviceName: name)
+        let context = HandshakeContext(identity: peer, trusted: [node.engine.ownId], passphraseKey: passcode, deviceName: name)
         let done = expectation(description: "handshake as \(name)")
         var link: PeerLink?
         PeerLink.dial(host: "127.0.0.1", port: node.engine.config.listenPort, context: context, connectTimeout: 3,
@@ -530,9 +528,9 @@ final class EngineIntegrationTests: XCTestCase {
     }
 
     /// With requests switched off (what the Share extension runs with) an
-    /// untrusted device is refused outright unless the pairing screen is open
-    /// or a passcode matches - the behaviour every platform had before
-    /// pairing requests could arrive out of the blue.
+    /// untrusted device is refused outright unless a passcode matches - the
+    /// behaviour every platform had before pairing requests could arrive out
+    /// of the blue.
     func testUntrustedPeerIsRefusedWhenRequestsAreOff() throws {
         let (a, b) = makePair(configureB: { $0.acceptPairingRequests = false })
         a.engine.enterForeground()
@@ -544,10 +542,9 @@ final class EngineIntegrationTests: XCTestCase {
 
     // MARK: - Pairing requests out of the blue, ignoring, blocking
 
-    /// `a` opens its own pairing screen and reaches `b` by address, however
-    /// `b` is set up. The outcome is what `a`'s user is told.
+    /// `a` reaches `b` by address, however `b` is set up. The outcome is what
+    /// `a`'s user is told.
     private func reach(_ a: Node, _ b: Node) -> PairOutcome {
-        a.engine.setPairingOpen(true)
         let done = expectation(description: "pair outcome")
         var result: PairOutcome?
         a.engine.pair(with: "127.0.0.1:\(b.engine.config.listenPort)") { outcome in
@@ -558,10 +555,10 @@ final class EngineIntegrationTests: XCTestCase {
         return result ?? .empty
     }
 
-    /// A stranger with its own pairing screen open asks `node` to pair - the
-    /// link stays held on the stranger's side too.
+    /// A stranger asks `node` to pair - the link stays held on the stranger's
+    /// side too.
     private func ask(_ node: Node, as stranger: SoftwareIdentity = SoftwareIdentity(), named name: String = "Stranger") throws -> PeerLink {
-        let context = HandshakeContext(identity: stranger, trusted: [], passphraseKey: nil, pairingOpen: true, deviceName: name)
+        let context = HandshakeContext(identity: stranger, trusted: [], passphraseKey: nil, deviceName: name)
         let done = expectation(description: "ask as \(name)")
         var link: PeerLink?
         PeerLink.dial(host: "127.0.0.1", port: node.engine.config.listenPort, context: context, connectTimeout: 3,
@@ -573,11 +570,10 @@ final class EngineIntegrationTests: XCTestCase {
         return try XCTUnwrap(link, "the handshake as \(name) should complete")
     }
 
-    func testStrangerCanAskToPairWhileOurPairingScreenIsClosed() throws {
+    func testStrangerCanAskToPairAtAnyTime() throws {
         let (a, b) = makePair()
         a.engine.enterForeground()
         b.engine.enterForeground()
-        XCTAssertFalse(b.recorder.pairingOpen, "b's pairing screen is closed")
 
         XCTAssertEqual(reach(a, b), .prompt("127.0.0.1"))
         wait("b is asked") { b.recorder.pairingRequests.count == 1 }
@@ -633,7 +629,9 @@ final class EngineIntegrationTests: XCTestCase {
         links.forEach { $0.close() }
     }
 
-    func testIgnoringIsNotBlockingAndItMayAskAgainAtOnce() throws {
+    /// Ignoring a request is not a block: the device is only held back for the
+    /// quiet time (the next test lifts it).
+    func testIgnoringIsNotBlockingButHoldsTheDeviceBack() throws {
         let (a, b) = makePair()
         a.engine.enterForeground()
         b.engine.enterForeground()
@@ -644,10 +642,53 @@ final class EngineIntegrationTests: XCTestCase {
         wait("request gone") { b.recorder.pairingRequests.isEmpty }
         XCTAssertNotEqual(b.recorder.device(a.engine.ownId)?.blocked, true, "ignoring is not blocking")
 
-        // No cooldown: it may ask again straight away - an ignore is not a no.
         wait("a let go of its side") { a.recorder.pairingRequests.isEmpty }
+        _ = reach(a, b)
+        XCTAssertTrue(b.recorder.pairingRequests.isEmpty, "held back: it was ignored a moment ago")
+    }
+
+    /// Ignoring a request keeps that device quiet for a while; the pairing
+    /// screen opening ends it for everyone (`liftRequestQuiet`).
+    func testLiftingRequestQuietLetsAnIgnoredDeviceAskAgain() throws {
+        let (a, b) = makePair()
+        a.engine.enterForeground()
+        b.engine.enterForeground()
         XCTAssertEqual(reach(a, b), .prompt("127.0.0.1"))
-        wait("asked again at once") { b.recorder.pairingRequests.count == 1 }
+        wait("b is asked") { b.recorder.pairingRequests.count == 1 }
+        b.engine.ignorePairing(deviceId: a.engine.ownId)
+        wait("request gone") { b.recorder.pairingRequests.isEmpty }
+        wait("a let go of its side") { a.recorder.pairingRequests.isEmpty }
+
+        _ = reach(a, b)
+        XCTAssertTrue(b.recorder.pairingRequests.isEmpty, "held back: it was ignored a moment ago")
+
+        b.engine.liftRequestQuiet()
+        wait("a let go of its side again") { a.recorder.pairingRequests.isEmpty }
+        XCTAssertEqual(reach(a, b), .prompt("127.0.0.1"))
+        wait("asked again") { b.recorder.pairingRequests.count == 1 }
+    }
+
+    /// Hearing a stranger's beacon is no reason to dial it: nothing is asked or
+    /// connected until someone pairs on purpose (a code, an address, Trust) -
+    /// not even for a beacon that still says "pairing open", as older builds
+    /// send.
+    func testAStrangersBeaconIsNeverDialled() throws {
+        let (a, b) = makePair()
+        a.engine.enterForeground()
+        b.engine.enterForeground()
+        wait("each hears the other") {
+            a.recorder.device(b.engine.ownId)?.nearby == true && b.recorder.device(a.engine.ownId)?.nearby == true
+        }
+        for (me, other) in [(a, b), (b, a)] {
+            let older = "\(other.engine.config.listenPort):\(other.engine.ownId):-:-:1"
+            me.engine.queue.sync { me.engine.handleDatagram(Data(older.utf8), from: "127.0.0.1") }
+        }
+        // Beacons come every 2 s: leave a few rounds for a dial that never happens.
+        RunLoop.main.run(until: Date().addingTimeInterval(7))
+        XCTAssertTrue(a.recorder.pairingRequests.isEmpty)
+        XCTAssertTrue(b.recorder.pairingRequests.isEmpty)
+        XCTAssertEqual(a.recorder.connectedCount, 0)
+        XCTAssertEqual(b.recorder.connectedCount, 0)
     }
 
     func testAFloodOfRequestsIsDroppedWithoutPrompts() throws {
@@ -738,13 +779,12 @@ final class EngineIntegrationTests: XCTestCase {
     /// A handshake in this device's own identity is never a peer - our line
     /// sent back, or our own listener dialled - and two of our own
     /// connections wired together would each take the other's lines as
-    /// proof. Refused both ways, even with the pairing screen open and our
-    /// own passcode proof on the line; nothing ever trusts our own id.
+    /// proof. Refused both ways, even with our own passcode proof on the
+    /// line; nothing ever trusts our own id.
     func testOwnIdentityIsRefusedBothWaysAndNeverTrusted() throws {
         let (a, _) = makePair()
         setPasscode(a, "pw")
         a.engine.enterForeground()
-        a.engine.setPairingOpen(true)
         wait("A listening") { a.engine.queue.sync { a.engine.status.listening } }
         let own = a.engine.ownId
         let passcode = PassphraseAuth.deriveKey(passphrase: "pw")
@@ -790,7 +830,7 @@ final class EngineIntegrationTests: XCTestCase {
         // Nor any other way: our own beacon replayed with our proof, or the
         // Devices tab's Trust.
         let beacon = Beacon(tcpPort: Int(a.engine.config.listenPort), deviceId: own, proof: PassphraseAuth.proof(key: passcode, deviceId: own),
-                            address: nil, pairing: true, name: "Me Again", senderIP: "127.0.0.1")
+                            address: nil, name: "Me Again", senderIP: "127.0.0.1")
         a.engine.queue.sync { a.engine.onBeacon(beacon) }
         a.engine.trustDevice(own)
         untouched("beacon and trust")
@@ -804,7 +844,6 @@ final class EngineIntegrationTests: XCTestCase {
         let (a, _) = makePair()
         setPasscode(a, "pw")
         a.engine.enterForeground()
-        a.engine.setPairingOpen(true)
         wait("A listening") { a.engine.queue.sync { a.engine.status.listening } }
         let own = a.engine.ownId
         let passcode = PassphraseAuth.deriveKey(passphrase: "pw")
@@ -844,7 +883,7 @@ final class EngineIntegrationTests: XCTestCase {
 
             // Nor as a beacon with that proof, a pairing code, or Trust.
             let beacon = Beacon(tcpPort: Int(a.engine.config.listenPort), deviceId: copy, proof: PassphraseAuth.proof(key: passcode, deviceId: copy),
-                                address: nil, pairing: true, name: "Me Again", senderIP: "127.0.0.1")
+                                address: nil, name: "Me Again", senderIP: "127.0.0.1")
             a.engine.queue.sync { a.engine.onBeacon(beacon) }
             a.engine.trustDevice(copy)
             let outcome = expectation(description: "pair outcome")
@@ -871,17 +910,17 @@ final class EngineIntegrationTests: XCTestCase {
     }
 
     /// The handshake itself turns our own key away however it is spelt, as
-    /// the dialer and as the acceptor: "that's this device", before trust,
-    /// a passcode or an open pairing screen count. Compared as text, a
-    /// spelling this decoder rejects would end as a bad signature instead
-    /// (a pairing dial says "refused", not "your own code"), and one it
-    /// takes would connect us to ourselves. Anyone else's key gets through.
+    /// the dialer and as the acceptor: "that's this device", before trust or
+    /// a passcode count. Compared as text, a spelling this decoder rejects
+    /// would end as a bad signature instead (a pairing dial says "refused",
+    /// not "your own code"), and one it takes would connect us to ourselves.
+    /// Anyone else's key gets through.
     func testHandshakeRefusesOurOwnKeyHoweverItIsSpelt() throws {
         let me = SoftwareIdentity()
         let own = me.publicKeyBase64
         let spellings = [own.replacingOccurrences(of: "A", with: "A "), String(own.dropLast(2)), own + "\r\n", Self.withSpareBitSet(own)]
         func context(_ identity: IdentitySigner) -> HandshakeContext {
-            HandshakeContext(identity: identity, trusted: [], passphraseKey: nil, pairingOpen: true, deviceName: nil)
+            HandshakeContext(identity: identity, trusted: [], passphraseKey: nil, deviceName: nil, acceptRequests: true)
         }
         let port = Self.portBase
         Self.portBase += 10

@@ -35,6 +35,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -100,6 +101,8 @@ fun MeScreen(
     val shownName = state.deviceNameOverride.ifBlank { state.defaultDeviceName }
     var confirmingClear by rememberSaveable { mutableStateOf(false) }
     var confirmingClearPassphrase by rememberSaveable { mutableStateOf(false) }
+    val context = LocalContext.current
+    val version = remember { appVersionDetail(context) }
 
     LazyColumn(
         contentPadding = PaddingValues(
@@ -371,6 +374,12 @@ fun MeScreen(
                 subtitle = "Deletes every item from this phone. Your other devices keep theirs.",
                 onClick = { confirmingClear = true },
             )
+        }
+
+        // Above the activity log too - it would be sixty lines down.
+        if (version != null) {
+            item { SectionHeader("About") }
+            item { SettingRow(title = stringResource(R.string.app_version, version)) }
         }
 
         item { SectionHeader("Activity") }

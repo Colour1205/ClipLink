@@ -19,8 +19,6 @@ enum DeviceStatus: Equatable {
     /// Paired, and not heard from recently.
     case pairedOffline
     case nearby
-    /// Nearby, with its own pairing screen open.
-    case pairingOpen
     /// Not paired, and not heard from recently.
     case away
     case blocked
@@ -37,7 +35,7 @@ enum DeviceStatus: Equatable {
         } else if !row.nearby {
             self = .away
         } else {
-            self = row.pairing ? .pairingOpen : .nearby
+            self = .nearby
         }
     }
 
@@ -48,7 +46,6 @@ enum DeviceStatus: Equatable {
         case .pairedNearby: return "Paired · Nearby"
         case .pairedOffline: return "Paired · Offline"
         case .nearby: return "Nearby"
-        case .pairingOpen: return "Nearby — pairing mode open"
         case .away: return "Not nearby"
         case .blocked: return "Blocked"
         }
@@ -60,7 +57,6 @@ enum DeviceStatus: Equatable {
         case .waiting: return "Paired, waiting for it to accept"
         case .pairedNearby: return "Paired, nearby"
         case .pairedOffline: return "Paired, offline"
-        case .pairingOpen: return "Nearby, pairing mode open"
         default: return text
         }
     }
@@ -69,7 +65,7 @@ enum DeviceStatus: Equatable {
     func tint(accent: Color) -> Color {
         switch self {
         case .connected: return Theme.connected
-        case .waiting, .pairedNearby, .nearby, .pairingOpen: return accent
+        case .waiting, .pairedNearby, .nearby: return accent
         case .pairedOffline, .away: return Color(UIColor.secondaryLabel)
         case .blocked: return DevicesBlockedStyle.primary
         }

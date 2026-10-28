@@ -304,26 +304,25 @@ class PeerConnection private constructor(
 
         /**
          * Runs the handshake and returns a live connection, or null for any
-         * failure at all - a malformed peer, a bad signature, or an untrusted
-         * one that is neither pairing-eligible nor passphrase-verified. Never
-         * throws, matching CreateAsync's contract on the Windows side - and
-         * "never" includes Errors: the first line comes from a stranger.
+         * failure at all - a malformed peer, a bad signature, or a blocked
+         * key. Never throws, matching CreateAsync's contract on the Windows
+         * side - and "never" includes Errors: the first line comes from a
+         * stranger.
          *
          * An untrusted peer's handshake completes - once its signature
          * verifies - so the caller can ask the user, as a dialog or a
          * notification, whether to trust it. Nothing is trusted by that: the
          * caller gets a connection that is not yet registered, and only the
-         * user's Trust makes it one. (This used to need the pairing screen
-         * open; a request now reaches the device whenever it is running.) A
-         * verifying passphrase proof is a second way in, which needs no
-         * question at all. Only a blocked key is turned away outright.
+         * user's Trust makes it one. A verifying passphrase proof is a second
+         * way in, which needs no question at all. Only a blocked key is
+         * turned away outright.
          *
          * [ownName] is this device's display name as it should go out in the
          * handshake, or null to leave the field off.
          *
          * [isBlocked] is asked about the peer's claimed key as soon as it is
-         * read, before trust, a passcode proof or pairing mode is looked at: a
-         * blocked device gets nothing, however it got here. (It has already
+         * read, before trust or a passcode proof is looked at: a blocked
+         * device gets nothing, however it got here. (It has already
          * been sent our handshake line - an acceptor writes first - which is
          * only a public key and a signature.)
          *
@@ -414,8 +413,8 @@ class PeerConnection private constructor(
             // Windows does.
             if (DeviceIdentity.isSameKey(theirs.identityPublicKey, myIdentityPublicKey)) return null
 
-            // Before trust, the passcode proof and pairing mode: a blocked
-            // device is never let in by any of them.
+            // Before trust and the passcode proof: a blocked device is never
+            // let in by either.
             if (isBlocked.isBlocked(theirs.identityPublicKey)) return null
 
             val alreadyTrusted = trustStore.isTrusted(theirs.identityPublicKey)

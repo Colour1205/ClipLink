@@ -263,7 +263,15 @@ private fun SyncedCard(
     compact: Boolean,
 ) {
     val item = keyed.item
-    val style = typeStyleOf(item)
+    // The picture of an image file (a photo sent from a phone), once its bytes
+    // are here: such a card is an image card, footer included. Until then, and
+    // for any other file, it is a file card.
+    val thumbnail = if (item.type == ClipboardEntry.TYPE_FILE) {
+        rememberFileThumbnail(item, if (compact) 480 else 900)
+    } else {
+        null
+    }
+    val style = typeStyleOf(item, showsPicture = thumbnail != null)
     var menuOpen by remember { mutableStateOf(false) }
     var confirmingDelete by remember { mutableStateOf(false) }
 
@@ -283,7 +291,10 @@ private fun SyncedCard(
             ) {
                 when {
                     item.type == ClipboardEntry.TYPE_IMAGE -> ImagePreview(keyed.key, item, compact)
-                    item.type == ClipboardEntry.TYPE_FILE -> FileContent(item, style, compact)
+                    // The picture alone: its name is no part of the card, as an
+                    // inline image has none (talkback still reads it).
+                    thumbnail != null -> PreviewImage(thumbnail, item.filePayload?.fileName ?: "Synced image")
+                    item.type == ClipboardEntry.TYPE_FILE -> FileRow(item, style)
                     else -> Text(
                         // Only what the card can show: Text measures all it is
                         // given, and a multi-megabyte copy is one entry.
@@ -415,30 +426,7 @@ private fun PreviewImage(bitmap: ImageBitmap, contentDescription: String) {
 
 private const val MAX_PICTURE_HEIGHT_RATIO = 3f
 
-/**
- * An image file shows its picture, as an inline image does, with its name
- * under it. Any other file - and an image one until its bytes are here and
- * decoded - is its file card.
- */
-@Composable
-private fun FileContent(item: SyncedItem, style: TypeStyle, compact: Boolean) {
-    val thumbnail = rememberFileThumbnail(item, if (compact) 480 else 900)
-    if (thumbnail == null) {
-        FileRow(item, style)
-        return
-    }
-    val name = item.filePayload?.fileName ?: "Image"
-    PreviewImage(thumbnail, name)
-    Spacer(Modifier.height(10.dp))
-    Text(
-        name,
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-    )
-}
-
+/** A file with no picture to show - any file but an image one whose bytes are here and decoded - as its card. */
 @Composable
 private fun FileRow(item: SyncedItem, style: TypeStyle) {
     val payload = item.filePayload

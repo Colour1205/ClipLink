@@ -89,10 +89,6 @@
       "value": "Delete"
     },
     {
-      "name": "action_save_to_gallery",
-      "value": "Save to gallery"
-    },
-    {
       "name": "action_save_file",
       "value": "Save file"
     },
@@ -131,10 +127,6 @@
     {
       "name": "theme_violet",
       "value": "Violet"
-    },
-    {
-      "name": "dialog_save_image_prompt",
-      "value": "Save this image to your gallery?"
     },
     {
       "name": "dialog_pairing_request_title",
@@ -253,14 +245,6 @@
       "value": "Could not open share sheet."
     },
     {
-      "name": "toast_save_not_authorized",
-      "value": "Save was not authorized."
-    },
-    {
-      "name": "toast_save_image_failed",
-      "value": "Could not save image."
-    },
-    {
       "name": "toast_save_file_failed",
       "value": "Could not save file."
     },
@@ -298,7 +282,7 @@
     },
     {
       "name": "scan_no_address",
-      "value": "%1$s has no address in its code - if it's on the same network, just keep this screen open and its beacon will trigger pairing automatically."
+      "value": "%1$s has no address in its code - if it's on the same network, find it on the Devices tab and tap Trust."
     },
     {
       "name": "scan_connecting",
@@ -330,7 +314,7 @@
     },
     {
       "name": "outcome_refused",
-      "value": "%1$s answered but didn't accept this device. Set the same passcode on both, or finish any pairing request waiting on that device, then try again."
+      "value": "%1$s answered but didn't accept this device. It may have blocked it, be holding its requests back for a while, or be busy with another request. Try again in a couple of minutes, or open ClipLink there and tap Trust on this device."
     },
     {
       "name": "outcome_silent",
@@ -509,16 +493,20 @@
       "value": "Clear synced history"
     },
     {
+      "name": "me_version",
+      "value": "Version %1$s"
+    },
+    {
       "name": "pairing_title",
       "value": "Pairing"
     },
     {
-      "name": "pairing_open_title",
-      "value": "This screen open = pairable."
+      "name": "pairing_intro_title",
+      "value": "Scan the other device's code, or trust it from the list."
     },
     {
-      "name": "pairing_open_detail",
-      "value": "With this screen open on both devices they find each other and ask to pair. A device on your network can also ask at any time, and nothing is trusted until you tap Trust. Leaving this screen stops the searching; nothing pairs silently in the background."
+      "name": "pairing_intro_detail",
+      "value": "Scan the other device's QR code, or type its address below. A device on your network also shows up on the Devices tab: tap Trust there. Either way, each device has to trust the other."
     },
     {
       "name": "pairing_scan_hint",
@@ -727,10 +715,6 @@
     {
       "name": "device_detail_id",
       "value": "Device ID"
-    },
-    {
-      "name": "device_detail_pairing_open",
-      "value": "Its pairing screen is open"
     },
     {
       "name": "synced_preview_none_title",

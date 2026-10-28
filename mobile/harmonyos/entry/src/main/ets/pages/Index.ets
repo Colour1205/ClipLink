@@ -14,7 +14,7 @@
 // PeerConnection, and SyncManager, all built and verified in earlier steps.
 
 import hilog from '@ohos.hilog';
-import { common, Want, WantAgent, wantConstant, wantAgent } from '@kit.AbilityKit';
+import { bundleManager, common, Want, WantAgent, wantConstant, wantAgent } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { isPasteboardReadGranted, requestPasteboardRead } from '../clipboard/PasteboardPermission';
@@ -31,7 +31,6 @@ import { image as imageKit } from '@kit.ImageKit';
 import pasteboard from '@ohos.pasteboard';
 import fs from '@ohos.file.fs';
 import fileUri from '@ohos.file.fileuri';
-import photoAccessHelper from '@ohos.file.photoAccessHelper';
 import picker from '@ohos.file.picker';
 import uiMaterial from '@ohos.arkui.uiMaterial';
 import unifiedDataChannel from '@ohos.data.unifiedDataChannel';
@@ -240,10 +239,10 @@ interface PairingInfo {
 //   'silent'         - it accepted the connection but never sent a
 //                      handshake (ClipLink there is stuck, or it's not
 //                      ClipLink on that port).
-//   'refused'        - it hung up around the handshake: it doesn't trust
-//                      this device, the passcodes differ (or it has none),
-//                      and its pairing screen isn't open - or it's busy
-//                      with another pairing request.
+//   'refused'        - it hung up around the handshake: it has blocked
+//                      this device or is holding its requests back for a
+//                      while (RequestQuiet), or it's busy with another
+//                      pairing request.
 //   'connected'      - already paired; now connected.
 //   'passcode'       - newly paired just now through matching passcodes.
 //   'prompt'         - a new pairing awaiting Accept on this device.
@@ -520,34 +519,6 @@ struct SelectTextDialog {
   }
 }
 
-// SaveButton (security component) has to be the actually-tapped element to
-// get its temporary photoAccessHelper grant - it can't be triggered from a
-// plain MenuItem's onClick. Wrapping it in its own small dialog (opened from
-// the long-press menu's "Save to gallery" item) keeps it out of the menu
-// itself while still reusing a pattern (CustomDialogController) already
-// proven to work in this file.
-@CustomDialog
-struct SaveImageDialog {
-  controller?: CustomDialogController;
-  onSave: (result: SaveButtonOnClickResult) => void = () => {};
-
-  build() {
-    Column({ space: 16 }) {
-      Text($r('app.string.dialog_save_image_prompt')).fontSize(14)
-      SaveButton({ text: SaveDescription.SAVE_TO_GALLERY, buttonType: ButtonType.Capsule })
-        .fontSize(14)
-        .onClick((event: ClickEvent, result: SaveButtonOnClickResult) => {
-          tapHaptic();
-          this.onSave(result);
-          this.controller?.close();
-        })
-      Button($r('app.string.common_cancel')).fontSize(13).onClick(() => { tapHaptic(); this.controller?.close(); })
-    }
-    .width('100%')
-    .padding(20)
-  }
-}
-
 // A PDF shown in the app with PDF Kit's PdfView: scrollable and zoomable, so
 // the preview of a PDF is the PDF itself, with opening it in another app one
 // tap away in the title bar. It loads the stored file by its path (the name
@@ -677,6 +648,10 @@ struct Index {
   // What's typed on the Device name screen, saved by saveDeviceName.
   @State deviceNameInput: string = '';
   @State savingDeviceName: boolean = false;
+  // This app's versionName / versionCode (app.json5), read once from the
+  // installed package for the Me page's version line. Only the data is kept,
+  // not the finished "Version ..." text, so the label follows a language change.
+  private appVersionName: string = '';
   // Mirror of DeviceSettings.getAutoApply, pushed into SyncManager too.
   @State autoApply: boolean = true;
   // "Notify about new items" (see notifyReceivedItem), and how many arrived
@@ -734,16 +709,10 @@ struct Index {
   // (pairing/QR, passcode, diagnostics, activity log) rather than one
   // combined page, per request.
   @State meScreen: 'main' | 'pairing' | 'passcode' | 'network' | 'devicename' | 'diagnostics' | 'log' = 'main';
-  // True only while the Pairing screen is open - see setMeScreen. This is
-  // the live "I'm expecting to pair right now" signal broadcast in the LAN
-  // beacon and checked by PeerConnection.create's relaxed trust gate; a
-  // pairing handshake with an untrusted peer only proceeds at all when
-  // this is true on BOTH ends independently.
-  @State pairingOpen: boolean = false;
   // A connection that completed the full authenticated handshake but whose
-  // peer wasn't already trusted - set only via the pairingOpen gate above,
-  // and only resolved by the user tapping Accept/Reject on the prompt this
-  // drives (see acceptPairing/rejectPairing). Not @State: PeerConnection
+  // peer wasn't already trusted - only resolved by the user tapping
+  // Accept/Reject on the prompt this drives (see
+  // acceptPairing/rejectPairing). Not @State: PeerConnection
   // itself doesn't need reactive tracking, only the two id/address strings
   // that drive the prompt's UI do.
   @State pendingPairingPeerId: string = '';
@@ -891,6 +860,7 @@ struct Index {
     }
     // Here rather than later so the very first beacon already carries it.
     this.refreshSystemDeviceName();
+    this.readAppVersion();
 
     // Initial (home) route on each stack, pushed with animation off (the
     // `false` second argument) - matches Huawei's own documented pattern
@@ -1023,7 +993,6 @@ struct Index {
       // it's never written to the trust store (see TrustedDevice.name).
       void this.maybeAutoTrustViaPassphrase(beacon);
       void this.maybeAutoConnect(beacon);
-      void this.maybeConnectForPairing(beacon);
     });
 
     const identity = new DeviceIdentity();
@@ -1169,7 +1138,6 @@ struct Index {
       TCP_PORT,
       () => this.cachedProof,
       () => this.tailscaleIp.length > 0 ? this.tailscaleIp : null,
-      () => this.pairingOpen,
       () => this.ownDeviceName(),
     );
     this.discoveryUpAtMs = Date.now();
@@ -1190,6 +1158,18 @@ struct Index {
     if (name === this.systemDeviceName) return;
     this.systemDeviceName = name;
     if (this.ownDeviceId.length > 0) this.refreshPairingPayload();
+  }
+
+  // From the installed package itself, so a version bump in app.json5 can't
+  // leave the Me page's line stale. If the lookup fails the line stays hidden.
+  private readAppVersion(): void {
+    try {
+      const info: bundleManager.BundleInfo =
+        bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+      this.appVersionName = info.versionName;
+    } catch (e) {
+      // keep the empty defaults
+    }
   }
 
   aboutToDisappear(): void {
@@ -1221,12 +1201,12 @@ struct Index {
   }
 
   // Every navigation into/out of the Me tab's sub-screens goes through
-  // this - not just a plain field assignment - because leaving/entering
-  // 'pairing' has to flip pairingOpen in lockstep (see its own doc comment).
+  // this - not just a plain field assignment - because opening 'pairing'
+  // also ends any quiet time (see RequestQuiet).
   // Also drives the real push/pop on meNavStack, since immersive material
   // requires the back button to live in an actual NavDestination title bar
   // (see mePageMap) rather than plain content - this single call site is
-  // what keeps meScreen/pairingOpen and the nav stack in sync regardless of
+  // what keeps meScreen and the nav stack in sync regardless of
   // whether a sub-screen is entered via settingsRow's onTap or left via its
   // own title bar back button / a system back gesture (onBackPressed).
   // Set when pairing was opened from the Devices tab's + button rather
@@ -1240,15 +1220,16 @@ struct Index {
     this.setMeScreen('pairing');
   }
 
-  private setMeScreen(screen: 'main' | 'pairing' | 'passcode' | 'network' | 'devicename' | 'diagnostics' | 'log'): void {
+  // animated only matters when going back to 'main': false when Me is not on
+  // screen (see returnTabToMain).
+  private setMeScreen(screen: 'main' | 'pairing' | 'passcode' | 'network' | 'devicename' | 'diagnostics' | 'log', animated: boolean = true): void {
     const previous = this.meScreen;
     this.meScreen = screen;
-    this.pairingOpen = screen === 'pairing';
-    // Somebody is expecting requests now: no device stays held back.
+    // The user is here to pair: no device stays held back.
     if (screen === 'pairing') this.requestQuiet.clear();
     if (screen !== 'passcode') this.passcodeChanging = false;
     if (screen === 'main' && previous !== 'main') {
-      this.meNavStack.pop(true);
+      this.meNavStack.pop(animated);
       if (this.pairingReturnTab >= 0) {
         this.currentTabIndex = this.pairingReturnTab;
         this.pairingReturnTab = -1;
@@ -1258,9 +1239,41 @@ struct Index {
     } else if (screen !== 'main' && screen !== previous) {
       // Sub-screen to sub-screen: only happens via the Devices tab's "+"
       // while Me was left on another sub-screen (e.g. Tailscale IP). Without
-      // this, meScreen/pairingOpen said 'pairing' while the stack still
-      // showed the old screen - pairing mode open with no Pairing screen.
+      // this, meScreen said 'pairing' while the stack still showed the old
+      // screen.
       this.meNavStack.replacePath({ name: screen }, false);
+    }
+  }
+
+  // The tab shown before the last switch. Not currentTabIndex: when the switch
+  // is made in code (openPairingFromDevices, the pairing return) that already
+  // holds the new tab by the time Tabs reports the change.
+  private lastShownTab: number = 0;
+
+  // Each tab keeps its own navigation stack, so a tab left on a sub-screen (an
+  // item preview, a device's detail, a Me screen) came back showing that
+  // sub-screen instead of the tab the user tapped. Two callers: the tab that
+  // was just left, once it is off screen (nobody is watching, so no animation),
+  // and the tab that is being tapped while it is already showing (on screen, so
+  // the same animated pop the back button makes). Either way it goes back to
+  // its main screen.
+  private returnTabToMain(tab: number, onScreen: boolean = false): void {
+    if (tab === 0) {
+      if (this.syncedNavStack.size() > 1) {
+        if (onScreen) this.closeItemDetail(); else this.syncedNavStack.pop(false);
+      }
+    } else if (tab === 1) {
+      if (this.devicesNavStack.size() > 1) {
+        if (onScreen) this.closeDeviceDetail(); else this.devicesNavStack.pop(false);
+      }
+    } else if (this.meScreen !== 'main') {
+      // Left by the tab bar, so no jump back to the tab pairing was opened from.
+      // That tab was left on purpose for pairing and kept as it was (see
+      // onChange); it goes back to its main screen now, like any tab left.
+      const origin: number = this.pairingReturnTab;
+      this.pairingReturnTab = -1;
+      this.setMeScreen('main', onScreen);
+      if (origin >= 0 && origin !== 2) this.returnTabToMain(origin);
     }
   }
 
@@ -1409,42 +1422,11 @@ struct Index {
     }
   }
 
-  // Sibling to maybeAutoConnect, for UNTRUSTED peers - only attempts a
-  // handshake at all when BOTH this device's own Pairing screen is open
-  // (this.pairingOpen) AND the beacon says the sender's is too
-  // (beacon.pairing) - two independent, live, local "I'm expecting to
-  // pair right now" signals, not just one side's assumption. Same
-  // tie-breaker as maybeAutoConnect so both sides don't dial each other
-  // simultaneously; the handshake that results is what actually surfaces
-  // the accept/reject prompt (see handleNewConnection).
-  private async maybeConnectForPairing(beacon: PeerBeacon): Promise<void> {
-    if (!this.pairingOpen || !beacon.pairing) return;
-    if (beacon.deviceId === this.ownDeviceId) return;
-    if (this.isBlockedNow(beacon.deviceId)) return;
-    if (this.syncManager?.isConnected(beacon.deviceId)) return;
-    if (this.connectingTo.has(beacon.deviceId)) return;
-    if (this.pendingPairingConn !== null) return; // already have a candidate awaiting a decision
-    if (beacon.deviceId >= this.ownDeviceId) return;
-
-    // See maybeAutoConnect's identical fix - reserved before the first
-    // await so a second beacon for the same peer can't slip through the
-    // has() check above while this call is still awaiting isTrusted().
-    this.connectingTo.add(beacon.deviceId);
-    try {
-      const context = getContext(this) as common.UIAbilityContext;
-      if (await this.trustStore.isTrusted(context, beacon.deviceId)) return; // maybeAutoConnect already handles this case
-      await this.connectToBeacon(beacon);
-    } finally {
-      this.connectingTo.delete(beacon.deviceId);
-    }
-  }
-
   // Single funnel for every freshly-created PeerConnection, whichever of
   // the three places created it (incoming TCP, LAN beacon dial, or manual
   // Pair by Address) - an already-trusted peer is registered immediately
-  // like today; a pairing candidate (only possible because pairingOpen was
-  // true - see PeerConnection.create) gets an explicit local accept/reject
-  // prompt instead, never auto-registered.
+  // like today; a stranger's request (see PeerConnection.create) gets an
+  // explicit local accept/reject prompt instead, never auto-registered.
   private handleNewConnection(peerConn: PeerConnection, address: string | null): void {
     netLog(`handleNewConnection: peer=${deviceFingerprint(peerConn.peerDeviceId)} address=${address ?? 'null'} wasAlreadyTrusted=${peerConn.wasAlreadyTrusted} newlyTrustedViaPassphrase=${peerConn.newlyTrustedViaPassphrase}`);
     if (this.isBlockedNow(peerConn.peerDeviceId)) {
@@ -2370,12 +2352,9 @@ struct Index {
   // Scanning is now purely "how do I find the other device's address" -
   // NOT "trust it". It never writes to the trust store directly; it dials
   // the scanned address (same as Pair by Address below) and lets the
-  // normal handleNewConnection accept/reject prompt decide. That prompt
-  // only appears at all if THIS device's Pairing screen is open (which it
-  // has to be, to reach this button) - and the connection only completes
-  // in the first place if the OTHER device's Pairing screen is open too
-  // (see PeerConnection.create's relaxed gate), so scanning someone's code
-  // alone can no longer trust them unilaterally the way it used to.
+  // normal handleNewConnection accept/reject prompt decide, so scanning
+  // someone's code alone can no longer trust them unilaterally the way it
+  // used to.
   // Every address worth trying for a peer, best-first. A QR code (and the
   // trust store) carries whatever the peer ADVERTISES for itself, which is
   // its Tailscale IP when it has one configured - and that address is
@@ -2412,10 +2391,8 @@ struct Index {
     return { address: this.joinAddresses(candidates), outcome: outcome };
   }
 
-  // The pairing screen's feedback for a dial. It used to be one message
-  // for every failure - "make sure the other device's Pairing screen is
-  // open" - which was misleading whenever the real problem was the network
-  // (or the other device not listening), and ignored the passcode path.
+  // The pairing screen's feedback for a dial: one message per way it can
+  // end (see DialOutcome), so it says which step actually failed.
   private pairingOutcomeMessage(result: DialResult): string {
     switch (result.outcome) {
       case 'connected':
@@ -2765,7 +2742,7 @@ struct Index {
       });
     }
     // Show where it went, unless that would pull the user out of pairing.
-    if (files + texts > 0 && !this.pairingOpen) {
+    if (files + texts > 0 && this.meScreen !== 'pairing') {
       this.currentTabIndex = 0;
     }
   }
@@ -2787,8 +2764,8 @@ struct Index {
 
   // "Copy" only makes sense for text - for image/file it used to dump the
   // raw base64/JSON descriptor onto the clipboard as literal text, which
-  // was never useful. Those two types get Share + Save instead (see
-  // shareItem/showSaveImageDialog/saveFileToDocuments below).
+  // was never useful. Those two types get Share (and Save, for files)
+  // instead (see shareItem/saveFileToDocuments below).
   copyItemContent(item: SyncedItem): void {
     const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, item.content);
     pasteboard.getSystemPasteboard().setData(data)
@@ -2804,10 +2781,10 @@ struct Index {
     dialogController.open();
   }
 
-  // Real system share sheet (@kit.ShareKit's systemShare) - unlike
-  // SaveButton, this is a normal API call, not gated behind a security
-  // component. Images get materialized to a temp file first since
-  // systemShare needs a URI, not raw base64.
+  // Real system share sheet (@kit.ShareKit's systemShare), a normal API call
+  // not gated behind a security component. Text goes as the record's content;
+  // images get materialized to a temp file first since systemShare needs a
+  // URI, not raw base64.
   // Hands a stored file to the system so the user can actually open it.
   // Two tiers, because neither alone covers everything:
   //   1. Preview Kit's openPreview - the real "view this file" surface on
@@ -2968,6 +2945,11 @@ struct Index {
   async shareItem(item: SyncedItem): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
     try {
+      if (item.type === 'text') {
+        // Text goes as text (the record's content), not as a file.
+        await this.showShareSheet(context, { utd: 'general.plain-text', content: item.content });
+        return;
+      }
       let uri: string;
       let utd: string;
       if (item.type === 'image') {
@@ -3003,53 +2985,22 @@ struct Index {
         uri = named;
         utd = utdForFileName(safeFileName(payload.FileName, 'file'));
       }
-      const sharedData = new systemShare.SharedData({ utd, uri });
-      const controller = new systemShare.ShareController(sharedData);
-      await controller.show(context, { previewMode: systemShare.SharePreviewMode.DETAIL });
+      await this.showShareSheet(context, { utd, uri });
     } catch (e) {
       promptAction.showToast({ message: $r('app.string.toast_share_sheet_failed') });
     }
   }
 
-  showSaveImageDialog(item: SyncedItem): void {
-    const dialogController: CustomDialogController = new CustomDialogController({
-      builder: SaveImageDialog({ onSave: (result: SaveButtonOnClickResult) => { void this.saveImageOnClick(item, result); } }),
-      alignment: DialogAlignment.Bottom,
-    });
-    dialogController.open();
-  }
-
-  // Wired to a SaveButton (security component - see save_button.d.ts),
-  // which is what actually grants the temporary photoAccessHelper access
-  // this needs; it can't be invoked imperatively from a plain Button, the
-  // SaveButton itself has to be the tapped component (see SaveImageDialog).
-  async saveImageOnClick(item: SyncedItem, result: SaveButtonOnClickResult): Promise<void> {
-    if (result !== SaveButtonOnClickResult.SUCCESS) {
-      promptAction.showToast({ message: $r('app.string.toast_save_not_authorized') });
-      return;
-    }
-    try {
-      const context = getContext(this) as common.UIAbilityContext;
-      const helper = photoAccessHelper.getPhotoAccessHelper(context);
-      const uri = await helper.createAsset(photoAccessHelper.PhotoType.IMAGE, 'png');
-      const file = fs.openSync(uri, fs.OpenMode.WRITE_ONLY);
-      try {
-        const bytes = base64Helper.decodeSync(item.content);
-        const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-        fs.writeSync(file.fd, ab);
-      } finally {
-        fs.closeSync(file);
-      }
-      // No toast: the save went through the system's own dialog.
-    } catch (e) {
-      promptAction.showToast({ message: $r('app.string.toast_save_image_failed') });
-    }
+  private async showShareSheet(context: common.UIAbilityContext, record: systemShare.SharedRecord): Promise<void> {
+    const sharedData = new systemShare.SharedData(record);
+    const controller = new systemShare.ShareController(sharedData);
+    await controller.show(context, { previewMode: systemShare.SharePreviewMode.DETAIL });
   }
 
   // Files aren't media-library content, so this goes through
-  // DocumentViewPicker.save() - a normal system file-save picker, not
-  // gated behind a security component the way SaveButton/photoAccessHelper
-  // is - confirmed against @ohos.file.picker.d.ts rather than assumed.
+  // DocumentViewPicker.save() - a normal system file-save picker, not gated
+  // behind a security component - confirmed against @ohos.file.picker.d.ts
+  // rather than assumed.
   async saveFileToDocuments(item: SyncedItem): Promise<void> {
     const fileStore = this.fileStore;
     if (fileStore === null) {
@@ -3760,7 +3711,8 @@ struct Index {
   }
 
   private chipKindFor(item: SyncedItem): string {
-    if (item.type === 'image') return 'image';
+    // A file that is really a picture is an image to look at, like a native one.
+    if (item.type === 'image' || this.imagePreviewUri(item) !== null) return 'image';
     if (item.type === 'file') return 'file';
     if (this.looksLikeOpaqueData(item.preview)) return 'key';
     const t: string = item.preview.trim();
@@ -3783,10 +3735,10 @@ struct Index {
   // Real official long-press menu (bindContextMenu, confirmed to support
   // systemMaterial via ContextMenuOptions) instead of a hand-rolled
   // gesture+conditional-row hack - gets the native menu animation/backdrop
-  // for free. "Copy" only for text; image/file get Share (real system
-  // share sheet) and Save (gallery for images via a SaveButton-backed
-  // dialog since SaveButton must be the tapped element itself; a document
-  // picker for files, which needs no security component).
+  // for free. "Copy" only for text; every type gets Share (the real system
+  // share sheet, which already has Save to gallery / Save to Files, so none of
+  // that is an item of ours); a file also gets Open and Save (a document
+  // picker, which needs no security component).
   @Builder
   itemActionMenu(item: SyncedItem) {
     Menu() {
@@ -3798,17 +3750,14 @@ struct Index {
         // tinted from code. The light/dark resource pair is what makes it
         // adapt.
         MenuItem({ content: $r('app.string.action_copy'), startIcon: $r('app.media.ic_menu_copy') }).onClick(() => { tapHaptic(); this.copyItemContent(item); })
-      } else {
-        MenuItem({ content: $r('app.string.action_share'), startIcon: $r('app.media.ic_menu_share') }).onClick(() => { tapHaptic(); void this.shareItem(item); })
-        if (item.type === 'image') {
-          MenuItem({ content: $r('app.string.action_save_to_gallery'), startIcon: $r('app.media.ic_menu_save_gallery') }).onClick(() => { tapHaptic(); this.showSaveImageDialog(item); })
-        } else {
-          // Same shape as the preview title bar's Open button
-          // (sys.symbol.arrow_right_up_and_square), drawn in this menu's
-          // stroke style.
-          MenuItem({ content: $r('app.string.action_open'), startIcon: $r('app.media.ic_menu_open') }).onClick(() => { tapHaptic(); void this.openFileWithSystem(item); })
-          MenuItem({ content: $r('app.string.action_save_file'), startIcon: $r('app.media.ic_menu_save_file') }).onClick(() => { tapHaptic(); void this.saveFileToDocuments(item); })
-        }
+      }
+      MenuItem({ content: $r('app.string.action_share'), startIcon: $r('app.media.ic_menu_share') }).onClick(() => { tapHaptic(); void this.shareItem(item); })
+      if (item.type !== 'text' && item.type !== 'image') {
+        // Same shape as the preview title bar's Open button
+        // (sys.symbol.arrow_right_up_and_square), drawn in this menu's
+        // stroke style.
+        MenuItem({ content: $r('app.string.action_open'), startIcon: $r('app.media.ic_menu_open') }).onClick(() => { tapHaptic(); void this.openFileWithSystem(item); })
+        MenuItem({ content: $r('app.string.action_save_file'), startIcon: $r('app.media.ic_menu_save_file') }).onClick(() => { tapHaptic(); void this.saveFileToDocuments(item); })
       }
       // Every type, last. Removes the item from this device only.
       MenuItem({ content: $r('app.string.action_delete'), startIcon: $r('app.media.ic_menu_delete') }).onClick(() => { tapHaptic(); this.confirmDeleteItem(item); })
@@ -3839,22 +3788,54 @@ struct Index {
         .objectFit(ImageFit.Cover)
         .autoResize(true)
     } else {
-      Stack() {
-        // White is baked into the chip SVGs rather than applied with
-        // .fillColor(), which does not reach stroke-drawn art (see the
-        // settingsRow note). The chip fill is always a saturated theme
-        // colour, so one fixed white asset is correct.
-        Image(this.typeIcon(this.chipKindFor(item)))
-          .width(size * 0.52)
-          .height(size * 0.52)
-      }
-      .width(size)
-      .height(size)
-      // The chosen theme colour for every type (the glyph carries the
-      // type), so the cards follow the theme picker like everything else.
-      .backgroundColor(this.accent())
-      .borderRadius(size / 3.2)
+      this.typeGlyphTile(item, size)
     }
+  }
+
+  // The solid colored tile with a type's glyph, never a thumbnail - a
+  // picture gets the image glyph (see chipKindFor). Alone, it is what the
+  // grid cards' footer uses (see syncedCardFooter).
+  @Builder
+  typeGlyphTile(item: SyncedItem, size: number) {
+    Stack() {
+      // White is baked into the chip SVGs rather than applied with
+      // .fillColor(), which does not reach stroke-drawn art (see the
+      // settingsRow note). The chip fill is always a saturated theme
+      // colour, so one fixed white asset is correct.
+      Image(this.typeIcon(this.chipKindFor(item)))
+        .width(size * 0.52)
+        .height(size * 0.52)
+    }
+    .width(size)
+    .height(size)
+    // The chosen theme colour for every type (the glyph carries the
+    // type), so the cards follow the theme picker like everything else.
+    .backgroundColor(this.accent())
+    .borderRadius(size / 3.2)
+  }
+
+  // The footer every grid card ends in, whatever it holds - text, link, key,
+  // picture or file: the type's glyph and the time in one row. Only the glyph
+  // differs between kinds. The tile fixes the row's height, so a card is the
+  // same size from its first layout whatever kind it is (see syncedGridCard).
+  @Builder
+  syncedCardFooter(item: SyncedItem) {
+    Row({ space: 6 }) {
+      // The chip tile, shrunk - not a bare Image. The chip SVGs have white
+      // baked in (they normally sit on a saturated tile), and fillColor
+      // cannot retint stroke-drawn art, so drawing one directly onto a
+      // white card left it invisible. Keeping the tile keeps the type
+      // colour legible and matches the list card's language.
+      this.typeGlyphTile(item, 18)
+      Text(item.time)
+        .fontSize(10)
+        .fontColor($r('sys.color.font_secondary'))
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .layoutWeight(1)
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Center)
   }
 
   @Builder
@@ -3863,42 +3844,46 @@ struct Index {
       this.typeChip(item, 44)
 
       Column({ space: 3 }) {
-        if (this.looksLikeOpaqueData(item.preview)) {
-          // Machine noise: label what it is, then show a short fragment
-          // rather than two lines of characters nobody can read. The full
-          // value is still one tap away in the detail view.
-          Text(item.type === 'file' ? $r('app.string.item_file') : $r('app.string.item_encoded_data'))
-            .fontSize(14)
-            .fontColor($r('sys.color.font_primary'))
-            .fontWeight(FontWeight.Medium)
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(item.preview.slice(0, 24))
-            .fontSize(11)
-            .fontColor($r('sys.color.font_tertiary'))
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .wordBreak(WordBreak.BREAK_ALL)
-        } else {
-          Text(this.cardBodyText(item))
-            .fontSize(14)
-            // font_primary, not the type accent - a themed token that
-            // inverts with the background instead of a fixed accent that
-            // could land the same color as whatever is behind it.
-            .fontColor($r('sys.color.font_primary'))
-            .fontWeight(FontWeight.Medium)
-            // Grid cells are narrow but tall, so 2 lines truncated almost
-            // every note to an ellipsis. Show the body instead, capped so
-            // one long note can't grow a cell past itemConstraintSize.
-            .maxLines(this.syncedViewMode === 'list' ? 2 : 8)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            // BREAK_WORD (the default) for prose - BREAK_ALL here was
-            // splitting ordinary words mid-character ("bro/wn fox",
-            // "develo/per.huawei"). The unbreakable-blob case that
-            // originally motivated BREAK_ALL no longer reaches this
-            // branch: looksLikeOpaqueData catches it above and renders a
-            // short labeled fragment instead.
-            .wordBreak(WordBreak.BREAK_WORD)
+        // A picture is its own content (the thumbnail beside it), so no
+        // name or caption - a file with nothing to preview keeps its name.
+        if (this.chipKindFor(item) !== 'image') {
+          if (this.looksLikeOpaqueData(item.preview)) {
+            // Machine noise: label what it is, then show a short fragment
+            // rather than two lines of characters nobody can read. The full
+            // value is still one tap away in the detail view.
+            Text(item.type === 'file' ? $r('app.string.item_file') : $r('app.string.item_encoded_data'))
+              .fontSize(14)
+              .fontColor($r('sys.color.font_primary'))
+              .fontWeight(FontWeight.Medium)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(item.preview.slice(0, 24))
+              .fontSize(11)
+              .fontColor($r('sys.color.font_tertiary'))
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .wordBreak(WordBreak.BREAK_ALL)
+          } else {
+            Text(this.cardBodyText(item))
+              .fontSize(14)
+              // font_primary, not the type accent - a themed token that
+              // inverts with the background instead of a fixed accent that
+              // could land the same color as whatever is behind it.
+              .fontColor($r('sys.color.font_primary'))
+              .fontWeight(FontWeight.Medium)
+              // Grid cells are narrow but tall, so 2 lines truncated almost
+              // every note to an ellipsis. Show the body instead, capped so
+              // one long note can't grow a cell past itemConstraintSize.
+              .maxLines(this.syncedViewMode === 'list' ? 2 : 8)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              // BREAK_WORD (the default) for prose - BREAK_ALL here was
+              // splitting ordinary words mid-character ("bro/wn fox",
+              // "develo/per.huawei"). The unbreakable-blob case that
+              // originally motivated BREAK_ALL no longer reaches this
+              // branch: looksLikeOpaqueData catches it above and renders a
+              // short labeled fragment instead.
+              .wordBreak(WordBreak.BREAK_WORD)
+          }
         }
         // This builder is ALSO the grid fallback for every non-image item
         // (see syncedGridCard), where a half-width cell can't fit
@@ -4031,22 +4016,7 @@ struct Index {
           .width('100%')
       }
 
-      Row({ space: 6 }) {
-        // The chip tile, shrunk - not a bare Image. The chip SVGs have white
-        // baked in (they normally sit on a saturated tile), and fillColor
-        // cannot retint stroke-drawn art, so drawing one directly onto a
-        // white card left it invisible. Keeping the tile keeps the type
-        // colour legible and matches the list card's language.
-        this.typeChip(item, 18)
-        Text(item.time)
-          .fontSize(10)
-          .fontColor($r('sys.color.font_secondary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
+      this.syncedCardFooter(item)
     }
     .width('100%')
     .padding(12)
@@ -4083,7 +4053,7 @@ struct Index {
     if (item.type !== 'image' && this.imagePreviewUri(item) === null) {
       this.syncedGridTextCard(item)
     } else {
-      Column({ space: 6 }) {
+      Column({ space: 8 }) {
         Image(item.type === 'image' ? `data:image/png;base64,${item.content}` : this.imagePreviewUri(item) as string)
           .width('100%')
           // The picture's own proportions, whole: the card is as tall as the
@@ -4094,26 +4064,18 @@ struct Index {
           .objectFit(ImageFit.Contain)
           .autoResize(true) // see typeChip
           .borderRadius(12)
-        Text(this.looksLikeOpaqueData(item.preview) ? $r('app.string.item_image') : this.previewLabel(item))
-          .fontSize(13)
-          .fontColor($r('sys.color.font_primary'))
-          .fontWeight(FontWeight.Medium)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          // See syncedItemCard's identical comment - wordBreak is what
-          // actually lets textOverflow truncate an unbroken blob instead
-          // of it painting past the card at full width.
-          .wordBreak(WordBreak.BREAK_ALL)
-          .padding({ left: 4, right: 4 })
-        // Time only here - the full "time · source" byline does not fit a
-        // half-width grid cell and truncated to a meaningless "· ...".
-        // The source is still on the list card and in the detail view.
-        Text(item.time)
-          .fontSize(10)
-          .fontColor($r('sys.color.font_secondary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .padding({ left: 4, right: 4, bottom: 4 })
+        // The picture is the content, so no name or caption under it - a file
+        // with nothing to preview keeps its name (see syncedGridTextCard).
+        // The standard footer, time only: the full "time · source" byline
+        // does not fit a half-width grid cell and truncated to a meaningless
+        // "· ...". The source is still on the list card and in the detail
+        // view. The 4 of padding on top of the card's 8 puts the glyph where
+        // the text card's 12 does.
+        Row() {
+          this.syncedCardFooter(item)
+        }
+        .width('100%')
+        .padding({ left: 4, right: 4, bottom: 4 })
       }
       .width('100%')
       .padding(8)
@@ -4538,7 +4500,7 @@ struct Index {
     }]);
   }
 
-  // Item preview: Copy for text, Share for images/files, and Open (left of
+  // Item preview: Copy for text, Share for every type, and Open (left of
   // Share) for files - the same split itemActionMenu's long-press menu
   // uses - then Delete, last, for every type. Open is files-only because
   // openFileWithSystem hands the system a stored file; an 'image' item is
@@ -4556,15 +4518,6 @@ struct Index {
         action: () => { tapHaptic(); this.confirmDeleteItem(item); },
       },
     };
-    if (item.type === 'text') {
-      return this.hdsTitleBar('', false, [{
-        content: {
-          label: $r('app.string.action_copy'),
-          icon: $r('sys.symbol.rectangle_on_rectangle'),
-          action: () => { tapHaptic(); this.copyItemContent(item); },
-        },
-      }, deleteButton]);
-    }
     const share: HdsNavigationMenuItemOptions = {
       content: {
         label: $r('app.string.action_share'),
@@ -4572,6 +4525,15 @@ struct Index {
         action: () => { tapHaptic(); void this.shareItem(item); },
       },
     };
+    if (item.type === 'text') {
+      return this.hdsTitleBar('', false, [{
+        content: {
+          label: $r('app.string.action_copy'),
+          icon: $r('sys.symbol.rectangle_on_rectangle'),
+          action: () => { tapHaptic(); this.copyItemContent(item); },
+        },
+      }, share, deleteButton]);
+    }
     if (item.type === 'file') {
       return this.hdsTitleBar('', false, [{
         content: {
@@ -4853,9 +4815,12 @@ struct Index {
   @Builder
   emptyState(headline: ResourceStr, detail: ResourceStr, art: Resource) {
     Column({ space: 8 }) {
+      // A small plain mark, like the Windows app's, not an illustration: the
+      // words are what the screen is about. The Windows glyph is about twice
+      // the headline's size and sits close above it; this is the same.
       Image(art)
-        .width(120)
-        .height(120)
+        .width(40)
+        .height(40)
         .margin({ bottom: 8 })
       Text(headline)
         .fontSize(17)
@@ -4959,8 +4924,13 @@ struct Index {
         // itemConstraintSize applies a hard constraintSize to every
         // FlowItem directly (not a nested grandchild), so no single
         // item's post-reflow box can ever exceed this regardless of what
-        // its content does.
-        .itemConstraintSize({ maxHeight: 320 })
+        // its content does. The bound has to clear the tallest card that is
+        // allowed: a picture 3 times as tall as it is wide (see
+        // syncedGridCard) in the widest column (about 280 vp, 2 columns at
+        // the 600 vp split width) is about 3 x 264 + 46 of padding, gap and
+        // footer. A phone screenshot (about 2.2 : 1) in the 2-column phone
+        // grid already passed the old 320 and had its footer cut off.
+        .itemConstraintSize({ maxHeight: 840 })
         .padding({ left: 16, right: 16 })
         // Same contentStartOffset/contentEndOffset treatment as the List
         // branch. An earlier revision claimed these were "List-only" after
@@ -5755,7 +5725,7 @@ struct Index {
   // string title (a real title bar, so immersive material actually works,
   // per the doc-confirmed restriction above), and system back routed
   // through setMeScreen so it stays in sync with
-  // pairingOpen exactly like the visible back button does. Inlined per
+  // meScreen exactly like the visible back button does. Inlined per
   // screen rather than factored into one shared helper taking the content
   // as a callback parameter - ArkTS's declarative UI syntax only
   // recognizes direct calls to actual @Builder methods inside a @Builder
@@ -5776,8 +5746,8 @@ struct Index {
     } else if (name === 'pairing') {
       // Sub-screens use the HDS bar's own back button. Its tap and the
       // system back gesture both land in onBackPressed, which routes
-      // through setMeScreen so meScreen/pairingOpen stay in step with the
-      // stack (a default pop would leave pairing mode open).
+      // through setMeScreen so meScreen stays in step with the stack (a
+      // default pop would leave it on 'pairing').
       HdsNavDestination() {
         this.pairingScreenContent()
       }
@@ -6075,6 +6045,15 @@ struct Index {
       .width('100%')
       .borderRadius(16)
       .backgroundColor(this.cardFill())
+      // The version line, as the footer of the last section (like iOS).
+      if (this.appVersionName.length > 0) {
+        Text($r('app.string.me_version', this.appVersionName))
+          .fontSize(12)
+          .fontColor($r('sys.color.font_secondary'))
+          .width('100%')
+          .textAlign(TextAlign.Center)
+          .margin({ top: 12 })
+      }
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
@@ -6124,8 +6103,8 @@ struct Index {
     Scroll(this.pairingScroller) {
       Column({ space: 16 }) {
         Column({ space: 8 }) {
-          Text($r('app.string.pairing_open_title')).fontSize(13).fontWeight(FontWeight.Medium)
-          Text($r('app.string.pairing_open_detail'))
+          Text($r('app.string.pairing_intro_title')).fontSize(13).fontWeight(FontWeight.Medium)
+          Text($r('app.string.pairing_intro_detail'))
             .fontSize(12)
             .fontColor($r('sys.color.font_secondary'))
         }
@@ -6546,7 +6525,22 @@ struct Index {
       })
       .width('100%')
       .height('100%')
-      .onChange((index: number) => { this.currentTabIndex = index; })
+      .onChange((index: number) => {
+        const left: number = this.lastShownTab;
+        this.lastShownTab = index;
+        this.currentTabIndex = index;
+        // The hand-off to Pairing (openPairingFromDevices) keeps the tab it
+        // came from as it was, so backing out of Pairing returns to where it
+        // started.
+        const toPairing: boolean = index === 2 && left === this.pairingReturnTab;
+        if (left !== index && !toPairing) this.returnTabToMain(left);
+      })
+      // Tapping the tab that is already showing, while it is on a sub-screen,
+      // goes back to its main screen. (Tapping another tab only switches; the
+      // tab left is returned by onChange above.)
+      .onTabBarClick((index: number) => {
+        if (index === this.lastShownTab) this.returnTabToMain(index, true);
+      })
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
 
       // Mounted as a sibling of Tabs, not inside a tab's content: it has to

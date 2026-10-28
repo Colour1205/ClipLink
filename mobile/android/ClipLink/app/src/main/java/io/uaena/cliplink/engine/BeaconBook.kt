@@ -33,7 +33,7 @@ internal class BeaconBook(
         /** Already known, and nothing the Devices tab shows has changed - only the time it was last heard. */
         Refreshed,
 
-        /** A new device, or one whose address, name or pairing state differs: the list has to be rebuilt. */
+        /** A new device, or one whose address or name differs: the list has to be rebuilt. */
         Changed,
     }
 
@@ -102,7 +102,7 @@ internal class BeaconBook(
     // The port and the sender's address are what a dial needs, and may
     // change too - but only what the screen shows asks for a new list.
     private fun Discovery.Beacon.visiblyDiffersFrom(other: Discovery.Beacon): Boolean =
-        senderIp != other.senderIp || address != other.address || pairing != other.pairing || name != other.name
+        senderIp != other.senderIp || address != other.address || name != other.name
 
     companion object {
         /** An unprotected device drops off the list this long after its last beacon (they come every 2 s). */

@@ -27,6 +27,7 @@ extension SyncEngine {
     /// dialing it ourselves (its UDP path may be broken or its map stale).
     static let yieldGrace: TimeInterval = 5
     static let autoSweepInterval: TimeInterval = 60
+    /// While looking for the device a scanned code named.
     static let pairingSweepInterval: TimeInterval = 20
     static let maxInboundPerHost = 4
     static let maxInboundTotal = 16
@@ -34,7 +35,7 @@ extension SyncEngine {
     /// unauthenticated UDP: without a cap, spoofed ids grow this forever.
     static let maxStrangerSightings = 64
     /// How long to hold an outbound untrusted link before prompting: a peer
-    /// whose own pairing screen is closed hangs up within one round trip.
+    /// that won't take us hangs up within one round trip.
     static let pairingVerdictDelay: TimeInterval = 1.5
 
     // MARK: - Start / kick
@@ -198,7 +199,6 @@ extension SyncEngine {
             identity: identity,
             trusted: Set(trust.all.map(\.publicKey)),
             passphraseKey: passphraseKey,
-            pairingOpen: pairingOpen,
             deviceName: ownDeviceName,
             blocked: Set(blocks.all.map(\.publicKey)),
             acceptRequests: acceptsRequests
@@ -226,8 +226,8 @@ extension SyncEngine {
     }
 
     /// Exactly the Android/Windows sequence: auto-trust on a verifying
-    /// passcode proof, then dial if trusted and we're the designated dialer,
-    /// then the pairing dial if both pairing screens are open.
+    /// passcode proof, then dial if trusted and we're the designated dialer.
+    /// A stranger's beacon is only ever shown, never dialled.
     func onBeacon(_ beacon: Beacon) {
         let id = beacon.deviceId
         // Our own broadcast, looped back - or replayed: it carries our own
@@ -240,8 +240,6 @@ extension SyncEngine {
         if Self.isPeerAddress(beacon.senderIP) { sighting.addresses[beacon.senderIP] = Date() }
         sighting.beaconPort = beacon.tcpPort
         sighting.advertisedAddress = beacon.address
-        sighting.pairing = beacon.pairing
-        if beacon.pairing { sighting.pairingSeen = Date() }
         // A beacon without a name (an older build) keeps the one we know.
         // Beacons are unauthenticated UDP: the name is held here, in memory,
         // for display only - never written to the trust store.
@@ -273,14 +271,12 @@ extension SyncEngine {
             // this one, and the dial from here is what asks it (see DialFallback).
             guard shouldDial || dialFallback.due(id) else { return }
             dial(deviceId: id, candidates: [beacon.senderIP], port: UInt16(clamping: beacon.tcpPort), ignoreTieBreaker: !shouldDial) { _ in }
-        } else if shouldDial, pairingOpen, beacon.pairing, pendingRequests.count < Self.maxPendingRequests {
-            dial(deviceId: id, candidates: [beacon.senderIP], port: UInt16(clamping: beacon.tcpPort), ignoreTieBreaker: false, purpose: .pairing) { _ in }
         }
     }
 
     func currentBeacon() -> Data {
         let address = tailscaleIP.isEmpty ? nil : tailscaleIP
-        return Data(Beacon.build(tcpPort: Int(config.listenPort), deviceId: ownId, proof: cachedProof, address: address, pairing: pairingOpen, name: ownDeviceName).utf8)
+        return Data(Beacon.build(tcpPort: Int(config.listenPort), deviceId: ownId, proof: cachedProof, address: address, name: ownDeviceName).utf8)
     }
 
     func beaconTick() {
@@ -290,8 +286,7 @@ extension SyncEngine {
 
         if config.enableBroadcast, status.broadcast != .unavailable || Date() >= broadcastRetryAt {
             // One copy per tick: the subnet-directed broadcast when we know the
-            // subnet, the limited broadcast otherwise. (Windows starts a
-            // separate pairing dial for every copy it hears.)
+            // subnet, the limited broadcast otherwise.
             let targets = NetworkInterfaces.lan().map { [NetworkInterfaces.directedBroadcast(for: $0)] } ?? ["255.255.255.255"]
             var ok = false
             var lastErr: Int32 = 0
@@ -312,12 +307,10 @@ extension SyncEngine {
         var lanOK = false
         var lanErr: Int32 = 0
         let lan = NetworkInterfaces.lan()
-        var sent = Set<String>()
         for target in beaconTargets() {
             // Broadcast already reached everyone on our own subnet.
             if status.broadcast == .available, let lan, let v = NetworkInterfaces.parse(target),
                v & lan.maskValue == lan.ipValue & lan.maskValue { continue }
-            sent.insert(target)
             let err = udp.send(beacon, to: target, port: config.peerDiscoveryPort)
             if NetworkInterfaces.isPrivateLAN(target) {
                 if err == 0 { lanOK = true } else { lanErr = err }
@@ -329,7 +322,6 @@ extension SyncEngine {
             setLocalNetwork(.denied)
         }
 
-        if pairingOpen { udpSweep(force: false, skip: sent) }
         overrideStalledInbound()
         pruneSightings()
     }
@@ -360,11 +352,11 @@ extension SyncEngine {
         }
         let now = Date()
         for (id, sighting) in sightings {
-            // Only devices that need to hear us: trusted ones, anyone while
-            // pairing, and (with a passcode) strangers that haven't recently
-            // refused us - otherwise a device removed here but still trusting
-            // us would dial, be refused and redial every 2 s.
-            let wanted = trust.isTrusted(id) || pairingOpen || id == pairingTargetKey ||
+            // Only devices that need to hear us: trusted ones, the device a
+            // scanned code named, and (with a passcode) strangers that haven't
+            // recently refused us - otherwise a device removed here but still
+            // trusting us would dial, be refused and redial every 2 s.
+            let wanted = trust.isTrusted(id) || id == pairingTargetKey ||
                 (passphraseKey != nil && now.timeIntervalSince(refusedAt[id] ?? .distantPast) > 600)
             // Never to a device the user blocked: it has no business dialling us.
             guard wanted, !blocks.isBlocked(id) else { continue }
@@ -378,14 +370,13 @@ extension SyncEngine {
 
     /// Unicast our beacon to every host on the Wi-Fi /24. This is how peers
     /// that should dial us learn where we are when broadcast is unavailable.
-    func udpSweep(force: Bool, skip: Set<String> = []) {
+    func udpSweep(force: Bool) {
         guard running, config.enableSweeps, let udp, status.broadcast != .available,
               let lan = NetworkInterfaces.lan() else { return }
-        let interval: TimeInterval = pairingOpen ? 4 : Self.reconnectInterval
-        guard force || Date().timeIntervalSince(lastUDPSweep) >= interval else { return }
+        guard force || Date().timeIntervalSince(lastUDPSweep) >= Self.reconnectInterval else { return }
         lastUDPSweep = Date()
         let beacon = currentBeacon()
-        let hosts = NetworkInterfaces.sweepHosts(for: lan).filter { !skip.contains($0) }
+        let hosts = NetworkInterfaces.sweepHosts(for: lan)
         var errors = 0
         // Paced, 32 datagrams per 10 ms: a /24 in under 0.1 s without dumping
         // 254 frames on the access point at once.
@@ -526,35 +517,32 @@ extension SyncEngine {
     enum DialPurpose { case sync, pairing }
 
     /// Tries `candidates` in order until one completes a handshake. `deviceId`
-    /// is who we expect (nil for pairing a not-yet-identified device).
+    /// is who we expect.
     func dial(
-        deviceId: String?,
+        deviceId: String,
         candidates: [String],
         port: UInt16? = nil,
         ignoreTieBreaker: Bool,
-        purpose: DialPurpose = .sync,
         completion: @escaping (Bool) -> Void
     ) {
-        if let deviceId {
-            guard !connectingTo.contains(deviceId) else {
-                completion(false)
-                return
-            }
-            connectingTo.insert(deviceId)
+        guard !connectingTo.contains(deviceId) else {
+            completion(false)
+            return
         }
+        connectingTo.insert(deviceId)
         var remaining = candidates
         func next() {
             guard running, !remaining.isEmpty else {
-                if let deviceId { connectingTo.remove(deviceId) }
+                connectingTo.remove(deviceId)
                 completion(false)
                 return
             }
             let host = remaining.removeFirst()
-            dialOnce(host: host, port: port ?? config.peerPort, expected: deviceId, purpose: purpose, ignoreTieBreaker: ignoreTieBreaker) { [weak self] result in
+            dialOnce(host: host, port: port ?? config.peerPort, expected: deviceId, purpose: .sync, ignoreTieBreaker: ignoreTieBreaker) { [weak self] result in
                 guard let self else { return }
                 switch result {
                 case .success(let link):
-                    if let deviceId { self.connectingTo.remove(deviceId) }
+                    self.connectingTo.remove(deviceId)
                     self.handleNewConnection(link, address: host)
                     completion(true)
                 case .failure:
@@ -586,7 +574,7 @@ extension SyncEngine {
             if !ignoreTieBreaker, id != expected, !DeviceOrder.shouldDial(peerId: id, ownId: own) { return false }
             if context.trusted.contains(id) { return true }
             if let key = context.passphraseKey, PassphraseAuth.verifyProof(key: key, deviceId: id, proofBase64: theirs.passphraseProof) { return true }
-            return context.pairingOpen
+            return false
         }
         PeerLink.dial(host: host, port: port, context: context, connectTimeout: timeout, maxLineBytes: config.maxLineBytes, deliveryQueue: queue, gate: gate) { [weak self] result in
             guard let self else { return }
@@ -606,7 +594,7 @@ extension SyncEngine {
                     self.setLocalNetwork(.denied)
                 case .notWanted(let theirs):
                     self.noteSighting(theirs.identityPublicKey, address: host, name: theirs.deviceName)
-                case .refused(let id, let name), .blocked(let id, let name):
+                case .blocked(let id, let name):
                     self.noteSighting(id, address: host, name: name)
                 default:
                     break
@@ -633,10 +621,10 @@ extension SyncEngine {
             links[$0.publicKey] == nil && DeviceOrder.shouldDial(peerId: $0.publicKey, ownId: ownId) && !isBackedOff($0.publicKey)
         }
         let onForeground = ["foreground", "background", "network change", "local network allowed"].contains(reason)
-        let needed = force || wantsTCPSweep || pairingOpen || pairingTargetKey != nil ||
+        let needed = force || wantsTCPSweep || pairingTargetKey != nil ||
             (onForeground && (unreachedDialTargets || (passphraseKey != nil && trust.all.isEmpty)))
         guard needed, status.broadcast != .available || pairingTargetKey != nil || force else { return }
-        let interval = pairingOpen ? Self.pairingSweepInterval : Self.autoSweepInterval
+        let interval = pairingTargetKey != nil ? Self.pairingSweepInterval : Self.autoSweepInterval
         guard force || Date().timeIntervalSince(lastTCPSweep) >= interval else { return }
 
         tcpSweepInFlight = true
@@ -670,7 +658,7 @@ extension SyncEngine {
             } else if let key = context.passphraseKey, PassphraseAuth.verifyProof(key: key, deviceId: id, proofBase64: theirs.passphraseProof) {
                 wanted = true
             } else {
-                wanted = context.pairingOpen
+                wanted = false
             }
             return wanted && claims.claim(id)
         }
@@ -697,7 +685,7 @@ extension SyncEngine {
                     case .failure(.notWanted(let theirs)):
                         found += 1
                         self.noteSighting(theirs.identityPublicKey, address: host, name: theirs.deviceName)
-                    case .failure(.refused(let id, let name)), .failure(.blocked(let id, let name)):
+                    case .failure(.blocked(let id, let name)):
                         found += 1
                         self.noteSighting(id, address: host, name: name)
                     case .failure(.localNetworkDenied):
@@ -740,21 +728,15 @@ extension SyncEngine {
             // An untrusted device: a pairing request. Held - nothing read,
             // nothing sent - until the user decides.
             if link.direction == .outbound {
-                // We dialled from our own open pairing screen, without knowing
-                // whether ITS screen is open (sweeps and pairing dials can't
-                // tell). A peer that isn't pairing refuses by hanging up
-                // within a round trip - wait for that before bothering the
-                // user with a prompt.
-                guard pairingOpen else {
-                    link.close()
-                    return
-                }
+                // We dialled it on purpose (a scanned code, a typed address),
+                // without knowing whether it will take us. A peer that won't
+                // refuses by hanging up within a round trip - wait for that
+                // before bothering the user with a prompt.
                 queue.asyncAfter(deadline: .now() + Self.pairingVerdictDelay) { [weak self] in
                     self?.promoteToPending(link, address: address)
                 }
             } else {
-                // Inbound: the device dialled us - from its own pairing
-                // screen, whether or not ours is open.
+                // Inbound: the device dialled us.
                 promoteToPending(link, address: address)
             }
             return
@@ -787,11 +769,10 @@ extension SyncEngine {
             link.close()
             return
         }
-        // A request out of the blue (our pairing screen closed, or the device
-        // dialled us) counts against the budget: a flood is dropped quietly
-        // rather than turned into a stream of prompts.
-        let unprompted = link.direction == .inbound && !pairingOpen
-        if unprompted {
+        // A request out of the blue (the device dialled us) counts against the
+        // budget: a flood is dropped quietly rather than turned into a stream
+        // of prompts.
+        if link.direction == .inbound {
             guard config.acceptPairingRequests, !config.sendOnly, acceptsRequests else {
                 log("ignored a pairing request from \(DeviceLabel.short(id)): too many requests")
                 link.close()
@@ -959,9 +940,8 @@ extension SyncEngine {
             if let a = info.address, !candidates.contains(a) { candidates.append(a) }
             if candidates.isEmpty {
                 guard config.enableSweeps, NetworkInterfaces.lan() != nil else { return completion(.noAddress(key: key, name: info.name)) }
-                // No address to dial: find it. If we're its dialer the sweep
-                // connects straight away; otherwise our pairing beacons make it
-                // dial us once its own Pairing screen is open.
+                // No address to dial: find it. The sweep connects to it once
+                // found, whichever of us has the larger id.
                 pairingTargetKey = key
                 udpSweep(force: true)
                 tcpSweep(force: true, reason: "pairing target")
@@ -1009,7 +989,7 @@ extension SyncEngine {
                     case .localNetworkDenied: outcome = .localNetworkDenied
                     case .silent: outcome = .silent(host)
                     case .blocked(let id, let name): outcome = .blocked(name: name ?? self.peerName(for: id))
-                    case .closedEarly, .refused, .malformed, .badSignature: outcome = .refused(host)
+                    case .closedEarly, .malformed, .badSignature: outcome = .refused(host)
                     case .selfConnection: outcome = .ownCode
                     default: outcome = .unreachable(host)
                     }

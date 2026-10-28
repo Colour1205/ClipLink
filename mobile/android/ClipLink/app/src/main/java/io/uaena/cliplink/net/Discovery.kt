@@ -23,9 +23,11 @@ import java.util.Base64
 /**
  * LAN peer discovery. Mirrors Discovery.cs and Discovery.ets exactly: same
  * port, same 2-second cadence, same beacon format
- * `{tcpPort}:{deviceId}:{proof}:{address}:{pairing}:{name}` with "-" for an
- * absent field. Device IDs and names are base64, which never contains ":", so
- * splitting on it is safe.
+ * `{tcpPort}:{deviceId}:{proof}:{address}:-:{name}` with "-" for an absent
+ * field. The field before the name is only a placeholder that keeps the name
+ * at index 5: it is always written as "-", and whatever an older build put
+ * there is ignored. Device IDs and names are base64, which never contains
+ * ":", so splitting on it is safe.
  */
 class Discovery {
 
@@ -34,8 +36,6 @@ class Discovery {
         val deviceId: String,
         val proof: String?,
         val address: String?,
-        /** True only while the sender's own pairing screen is open. */
-        val pairing: Boolean,
         /** The sender's display name - null from older builds, or when it didn't decode. */
         val name: String?,
         val senderIp: String,
@@ -50,17 +50,16 @@ class Discovery {
     val isRunning: Boolean get() = socket?.isClosed == false
 
     /**
-     * [proof], [ownAddress], [pairingOpen] and [ownName] are read fresh on
-     * every beacon, not captured once. Each can change while running - a
-     * passcode set later, a Tailscale IP typed in, the pairing screen
-     * opening, the device renamed - and must take effect without a restart.
+     * [proof], [ownAddress] and [ownName] are read fresh on every beacon, not
+     * captured once. Each can change while running - a passcode set later, a
+     * Tailscale IP typed in, the device renamed - and must take effect
+     * without a restart.
      */
     suspend fun start(
         deviceId: String,
         tcpPort: Int,
         proof: () -> String?,
         ownAddress: () -> String?,
-        pairingOpen: () -> Boolean,
         ownName: () -> String?,
     ) = withContext(Dispatchers.IO) {
         stop()
@@ -80,7 +79,7 @@ class Discovery {
         scope = discoveryScope
 
         discoveryScope.launch { receiveLoop(udp) }
-        discoveryScope.launch { sendLoop(udp, deviceId, tcpPort, proof, ownAddress, pairingOpen, ownName) }
+        discoveryScope.launch { sendLoop(udp, deviceId, tcpPort, proof, ownAddress, ownName) }
     }
 
     private suspend fun receiveLoop(udp: DatagramSocket) {
@@ -111,14 +110,13 @@ class Discovery {
         tcpPort: Int,
         proof: () -> String?,
         ownAddress: () -> String?,
-        pairingOpen: () -> Boolean,
         ownName: () -> String?,
     ) {
         val broadcast = InetAddress.getByName(BROADCAST_ADDRESS)
         var alreadyReported = false
         while (currentCoroutineContext().isActive) {
             try {
-                val message = build(tcpPort, deviceId, proof(), ownAddress(), pairingOpen(), ownName())
+                val message = build(tcpPort, deviceId, proof(), ownAddress(), ownName())
                 val bytes = message.toByteArray(Charsets.UTF_8)
                 udp.send(DatagramPacket(bytes, bytes.size, broadcast, Protocol.UDP_PORT))
                 alreadyReported = false
@@ -165,30 +163,28 @@ class Discovery {
         const val MAX_ADDRESS_LENGTH = 64
 
         /**
-         * Always writes all six fields, the pairing one included even when
-         * it's "-": the name is only findable because it is always at index 5.
+         * Always writes all six fields, the placeholder before the name
+         * included: the name is only findable because it is always at index 5.
          *
          * Every field is made safe for the format first: a ':' in any of them
          * would shift every field after it, and every receiver would then
-         * read the pairing flag and the name from the wrong place. So none
-         * may contain one (or whitespace or a control character), and each
-         * has a cap. The address goes out only if it is an IPv4 address
-         * ([Ipv4]) - anything else is "-" - and the name is base64, which has
-         * no colon to begin with.
+         * read the name from the wrong place. So none may contain one (or
+         * whitespace or a control character), and each has a cap. The address
+         * goes out only if it is an IPv4 address ([Ipv4]) - anything else is
+         * "-" - and the name is base64, which has no colon to begin with.
          */
         fun build(
             tcpPort: Int,
             deviceId: String,
             proof: String?,
             address: String?,
-            pairing: Boolean,
             name: String?,
         ): String = buildString {
             append(tcpPort).append(':')
             append(field(deviceId, MAX_ID_LENGTH) ?: "-").append(':')
             append(field(proof, MAX_PROOF_LENGTH) ?: "-").append(':')
             append(Ipv4.normalize(address) ?: "-").append(':')
-            append(if (pairing) "1" else "-").append(':')
+            append("-").append(':') // the placeholder, always
             append(encodeName(name))
         }
 
@@ -206,7 +202,6 @@ class Discovery {
                 deviceId = parts[1],
                 proof = parts[2].takeIf { it != "-" && it.isNotEmpty() && it.length <= MAX_PROOF_LENGTH },
                 address = parts.getOrNull(3)?.takeIf { it != "-" && isPlausibleAddress(it) },
-                pairing = parts.getOrNull(4) == "1",
                 name = decodeName(parts.getOrNull(5)),
                 senderIp = senderIp,
             )
