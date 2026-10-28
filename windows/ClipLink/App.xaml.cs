@@ -19,6 +19,7 @@ public partial class App : Application
     private Tray? tray;
     private MainWindow? window;
     private ShareBatcher? shares;
+    private UpdateService? updates;
 
     internal App(AppOptions options)
     {
@@ -32,6 +33,7 @@ public partial class App : Application
     internal static AppSettings Settings => Instance.settings;
     internal static EngineHost Host => Instance.host ?? throw new InvalidOperationException("The engine isn't set up yet.");
     internal static MainWindow MainAppWindow => Instance.window ?? throw new InvalidOperationException("The window isn't set up yet.");
+    internal static UpdateService Updates => Instance.updates ?? throw new InvalidOperationException("The updater isn't set up yet.");
 
     public static bool IsQuitting { get; private set; }
     public static int ExitCode { get; private set; }
@@ -89,6 +91,7 @@ public partial class App : Application
         SetUpShellIntegration();
         SystemEvents.SessionEnding += (_, e) => dispatcher.TryEnqueue(Quit); // signing out or shutting down
 
+        updates = new UpdateService(dispatcher, options, settings);
         window = new MainWindow(host);
         // A share that found no ClipLink running started this one: it stays
         // in the tray, as at sign-in, and says what it shared from there.
@@ -104,6 +107,9 @@ public partial class App : Application
 
         // With whatever other launches forward meanwhile.
         if (options.SharePaths is { Count: > 0 } paths) OnShare(paths);
+
+        // Its first look at GitHub waits a few seconds: not part of starting up.
+        updates.Start();
     }
 
     // On by default the first time the real ClipLink runs; after that it's
@@ -263,6 +269,7 @@ public partial class App : Application
         Console.WriteLine("[app] quitting");
         quitting.Cancel();
         shares?.Dispose();
+        updates?.Dispose();
         // First, so peers see this device go right away.
         host?.Stop();
         // Or its icon lingers in the tray until the mouse passes over it.

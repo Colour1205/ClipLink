@@ -42,10 +42,14 @@
                 </NavigationViewItem>
             </NavigationView.MenuItems>
             <NavigationView.FooterMenuItems>
-                <NavigationViewItem Content="Settings" Tag="settings">
+                <NavigationViewItem x:Name="SettingsItem" Content="Settings" Tag="settings">
                     <NavigationViewItem.Icon>
                         <SymbolIcon Symbol="Setting" />
                     </NavigationViewItem.Icon>
+                    <!-- A dot while an update is waiting (UpdateService) -->
+                    <NavigationViewItem.InfoBadge>
+                        <InfoBadge x:Name="UpdateBadge" Visibility="Collapsed" AutomationProperties.Name="Update available" />
+                    </NavigationViewItem.InfoBadge>
                 </NavigationViewItem>
             </NavigationView.FooterMenuItems>
 

@@ -1,8 +1,11 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
 using ClipboardDaemon.Engine;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Windows.System;
@@ -11,11 +14,17 @@ namespace ClipLink;
 
 // This PC (name, device ID and fingerprint, Tailscale address), the
 // passcode, starting at sign-in, "Share to ClipLink" in File Explorer,
-// clearing the synced history, About - and Quit, the only way to end ClipLink.
+// clearing the synced history, About (with the updater) - and Quit, the only
+// way to end ClipLink.
 public sealed partial class SettingsPage : Page
 {
     private readonly EngineHost host = App.Host;
     private bool loadingToggle;
+    // An update button was used: when the one with the focus goes away
+    // (Check -> Cancel, Download -> Retry...), the focus moves to the next
+    // one that's there instead of being lost.
+    private bool restoreUpdateFocus;
+    private UpdatePhase announcedPhase;
 
     public SettingsPage()
     {
@@ -32,8 +41,14 @@ public sealed partial class SettingsPage : Page
         {
             Refresh();
             App.Instance.ExplorerShareMenuChanged += UpdateShareMenuToggle;
+            App.Updates.State.PropertyChanged += OnUpdateStateChanged;
         };
-        Unloaded += (_, _) => App.Instance.ExplorerShareMenuChanged -= UpdateShareMenuToggle;
+        Unloaded += (_, _) =>
+        {
+            App.Instance.ExplorerShareMenuChanged -= UpdateShareMenuToggle;
+            App.Updates.State.PropertyChanged -= OnUpdateStateChanged;
+            restoreUpdateFocus = false;
+        };
     }
 
     private static bool IsWindows11 => Environment.OSVersion.Version.Build >= 22000;
@@ -68,7 +83,10 @@ public sealed partial class SettingsPage : Page
         UpdateShareMenuToggle();
         loadingToggle = true;
         NotifyReceivedToggle.IsOn = App.Settings.NotifyReceivedItems;
+        AutoUpdateToggle.IsOn = App.Updates.AutomaticChecks;
         loadingToggle = false;
+        announcedPhase = App.Updates.State.Phase;
+        ShowUpdateState();
     }
 
     private static string ComputerName()
@@ -303,6 +321,129 @@ public sealed partial class SettingsPage : Page
         {
             App.MainAppWindow.ToastError("Couldn't open the log folder", ex.Message);
         }
+    }
+
+    // ---- updates -----------------------------------------------------------
+
+    private void OnUpdateStateChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(UpdateState.BytesDone)) ShowUpdateProgress();
+        else ShowUpdateState();
+    }
+
+    // The card for the updater's state: what it says, and the buttons that
+    // make sense now - never more than a couple.
+    private void ShowUpdateState()
+    {
+        var state = App.Updates.State;
+        var phase = state.Phase;
+        var offer = state.Offer;
+        string version = offer?.Version.Text ?? "";
+        bool canInstall = offer?.CanInstallInApp == true;
+
+        string description = phase switch
+        {
+            UpdatePhase.Checking => "Checking for updates...",
+            UpdatePhase.UpToDate => $"You're up to date. {LastChecked(state)}",
+            UpdatePhase.Available => $"Version {version} is available. "
+                + (canInstall
+                    ? "Your settings, paired devices and history are kept."
+                    : "ClipLink can't check that download itself, so get it from the download page.")
+                + (state.Message != null ? " " + state.Message : ""),
+            UpdatePhase.Downloading => $"Downloading version {version}...",
+            UpdatePhase.Verifying => "Checking the download...",
+            UpdatePhase.Installing => "Installing - ClipLink will restart.",
+            UpdatePhase.Error => state.Message ?? "Something went wrong.",
+            _ => LastChecked(state),
+        };
+        UpdateCard.Description = description;
+
+        WhatsNewButton.Visibility = Show(phase == UpdatePhase.Available);
+        CheckUpdateButton.Visibility = Show(phase is UpdatePhase.Idle or UpdatePhase.UpToDate or UpdatePhase.Checking);
+        CheckUpdateButton.IsEnabled = phase != UpdatePhase.Checking;
+        InstallUpdateButton.Visibility = Show(phase == UpdatePhase.Available && canInstall);
+        CancelUpdateButton.Visibility = Show(phase == UpdatePhase.Downloading);
+        RetryUpdateButton.Visibility = Show(phase == UpdatePhase.Error);
+        DownloadPageButton.Visibility = Show((phase == UpdatePhase.Available && !canInstall) || phase == UpdatePhase.Error);
+        AutomationProperties.SetName(WhatsNewButton, $"What's new in version {version}");
+        ShowUpdateProgress();
+
+        if (restoreUpdateFocus) FocusAnUpdateButton();
+        if (phase != announcedPhase)
+        {
+            announcedPhase = phase;
+            // Screen readers hear the result of a check, not every step of it.
+            if (phase is UpdatePhase.UpToDate or UpdatePhase.Available or UpdatePhase.Error or UpdatePhase.Installing)
+                FrameworkElementAutomationPeer.FromElement(UpdateCard)?.RaiseNotificationEvent(
+                    AutomationNotificationKind.ActionCompleted, AutomationNotificationProcessing.ImportantMostRecent, description, "ClipLinkUpdate");
+        }
+    }
+
+    private void ShowUpdateProgress()
+    {
+        var state = App.Updates.State;
+        bool downloading = state.Phase == UpdatePhase.Downloading;
+        UpdateProgressPanel.Visibility = Show(downloading || state.Phase is UpdatePhase.Verifying or UpdatePhase.Installing);
+        UpdateProgressBar.IsIndeterminate = !downloading;
+        UpdateProgressText.Visibility = Show(downloading);
+        if (!downloading) return;
+        UpdateProgressBar.Maximum = Math.Max(state.BytesTotal, 1);
+        UpdateProgressBar.Value = state.BytesDone;
+        UpdateProgressText.Text = $"{Format.Size(state.BytesDone)} of {Format.Size(state.BytesTotal)}";
+    }
+
+    private static string LastChecked(UpdateState state) =>
+        state.LastCheckedUtc is { } checkedAt ? $"Last checked: {Format.When(checkedAt, DateTime.UtcNow)}." : "Not checked yet.";
+
+    private static Visibility Show(bool visible) => visible ? Visibility.Visible : Visibility.Collapsed;
+
+    // The first update button that's there, in the order of what the user
+    // most likely wants next.
+    private void FocusAnUpdateButton()
+    {
+        foreach (var button in new Control[] { InstallUpdateButton, RetryUpdateButton, CancelUpdateButton, CheckUpdateButton, DownloadPageButton })
+        {
+            if (button.Visibility != Visibility.Visible || !button.IsEnabled) continue;
+            button.Focus(FocusState.Programmatic);
+            restoreUpdateFocus = false;
+            return;
+        }
+    }
+
+    private async void CheckUpdate_Click(object sender, RoutedEventArgs e)
+    {
+        restoreUpdateFocus = true;
+        await App.Updates.CheckAsync();
+    }
+
+    private async void InstallUpdate_Click(object sender, RoutedEventArgs e)
+    {
+        restoreUpdateFocus = true;
+        await App.Updates.InstallAsync();
+    }
+
+    private void CancelUpdate_Click(object sender, RoutedEventArgs e)
+    {
+        restoreUpdateFocus = true;
+        App.Updates.Cancel();
+    }
+
+    // Again whatever failed: the check, or the download and install.
+    private async void RetryUpdate_Click(object sender, RoutedEventArgs e)
+    {
+        restoreUpdateFocus = true;
+        if (App.Updates.State.FailedToInstall) await App.Updates.InstallAsync();
+        else await App.Updates.CheckAsync();
+    }
+
+    private void WhatsNew_Click(object sender, RoutedEventArgs e) => App.Updates.OpenReleasePage();
+
+    private void OpenDownloadPage_Click(object sender, RoutedEventArgs e) => App.Updates.OpenReleasePage();
+
+    private void AutoUpdateToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (loadingToggle) return;
+        App.Updates.AutomaticChecks = AutoUpdateToggle.IsOn;
     }
 
     private void Quit_Click(object sender, RoutedEventArgs e) => App.Instance.Quit();
