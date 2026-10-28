@@ -509,6 +509,10 @@
       "value": "Clear synced history"
     },
     {
+      "name": "me_version",
+      "value": "Version %1$s"
+    },
+    {
       "name": "pairing_title",
       "value": "Pairing"
     },
