@@ -14,10 +14,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -390,22 +390,30 @@ private fun ImagePreview(key: String, item: SyncedItem, compact: Boolean) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        is ImageState.Ready -> PreviewImage(image.bitmap, "Synced image", compact)
+        is ImageState.Ready -> PreviewImage(image.bitmap, "Synced image")
     }
 }
 
+/**
+ * A card's picture: as wide as the card and as tall as the picture is, whole,
+ * never cropped. One taller than [MAX_PICTURE_HEIGHT_RATIO] times its width
+ * (a very long screenshot) gets a box of that height and is fitted into it.
+ */
 @Composable
-private fun PreviewImage(bitmap: ImageBitmap, contentDescription: String, compact: Boolean) {
+private fun PreviewImage(bitmap: ImageBitmap, contentDescription: String) {
+    val ratio = (bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1)).coerceAtLeast(1f / MAX_PICTURE_HEIGHT_RATIO)
     Image(
         bitmap = bitmap,
         contentDescription = contentDescription,
-        contentScale = ContentScale.FillWidth,
+        contentScale = ContentScale.Fit,
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(max = if (compact) 260.dp else 340.dp)
+            .aspectRatio(ratio)
             .clip(RoundedCornerShape(16.dp)),
     )
 }
+
+private const val MAX_PICTURE_HEIGHT_RATIO = 3f
 
 /**
  * An image file shows its picture, as an inline image does, with its name
@@ -420,7 +428,7 @@ private fun FileContent(item: SyncedItem, style: TypeStyle, compact: Boolean) {
         return
     }
     val name = item.filePayload?.fileName ?: "Image"
-    PreviewImage(thumbnail, name, compact)
+    PreviewImage(thumbnail, name)
     Spacer(Modifier.height(10.dp))
     Text(
         name,

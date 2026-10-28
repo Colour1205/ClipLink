@@ -31,6 +31,7 @@ import io.uaena.cliplink.ui.ClipLinkApp
 import io.uaena.cliplink.ui.MeActions
 import io.uaena.cliplink.ui.PairViewModel
 import io.uaena.cliplink.ui.SyncedActions
+import io.uaena.cliplink.ui.SyncedLayout
 import io.uaena.cliplink.ui.rememberLocalAddresses
 import io.uaena.cliplink.ui.theme.ClipLinkTheme
 import kotlinx.coroutines.Dispatchers
@@ -160,6 +161,8 @@ class MainActivity : ComponentActivity() {
                     pairStatus = pairStatus,
                     pairLink = pendingPairLink,
                     onPairLinkTaken = { pendingPairLink = null },
+                    initialSyncedLayout = if (engine.deviceSettings.syncedLayout == "list") SyncedLayout.List else SyncedLayout.Grid,
+                    onSyncedLayoutChange = { engine.deviceSettings.syncedLayout = if (it == SyncedLayout.List) "list" else "grid" },
                     actions = AppActions(
                         synced = SyncedActions(
                             onCopy = ::copyItem,

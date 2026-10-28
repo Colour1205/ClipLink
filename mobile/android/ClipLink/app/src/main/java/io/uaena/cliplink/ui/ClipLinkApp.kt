@@ -100,6 +100,9 @@ fun ClipLinkApp(
     /** A pairing link the app was opened with (a scanner read a pairing QR code), until taken up. */
     pairLink: String? = null,
     onPairLinkTaken: () -> Unit = {},
+    /** The Synced tab's layout the last time it was changed (kept by the caller across launches). */
+    initialSyncedLayout: SyncedLayout = SyncedLayout.Grid,
+    onSyncedLayoutChange: (SyncedLayout) -> Unit = {},
 ) {
     // All of this is rememberSaveable: the Activity is destroyed and rebuilt
     // for a rotation, a dark-mode or a language switch, and everything held in
@@ -120,8 +123,9 @@ fun ClipLinkApp(
     // single AnimatedContent below only ever has ONE of Detail/Pairing/
     // Synced/... mounted at a time), so a locally-remembered layout choice
     // was getting reset back to its default every time a card's detail
-    // view closed and SyncedScreen recomposed fresh. Defaults to Grid.
-    var syncedLayout by rememberSaveable { mutableStateOf(SyncedLayout.Grid) }
+    // view closed and SyncedScreen recomposed fresh. Starts as it was left
+    // (initialSyncedLayout), and each change is handed to the caller to keep.
+    var syncedLayout by rememberSaveable { mutableStateOf(initialSyncedLayout) }
     // Keeps each screen's own rememberSaveable state (typed text, dialogs,
     // scroll position) while another screen is on show - the pairing screen
     // is swapped out for the scanner and back, and its typed address with it.
@@ -314,7 +318,10 @@ fun ClipLinkApp(
                             onOpen = { detailKey = it.key },
                             actions = actions.synced,
                             layout = syncedLayout,
-                            onLayoutChange = { syncedLayout = it },
+                            onLayoutChange = {
+                                syncedLayout = it
+                                onSyncedLayoutChange(it)
+                            },
                         )
 
                         Screen.Devices -> DevicesScreen(
