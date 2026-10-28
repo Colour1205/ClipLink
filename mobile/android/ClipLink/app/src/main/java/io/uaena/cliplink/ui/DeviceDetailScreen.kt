@@ -208,9 +208,6 @@ fun DeviceDetailScreen(
                     // From the id, so it is the same on every device that shows it - a
                     // name is whatever the device calls itself, a fingerprint cannot be copied.
                     DetailRow("Fingerprint", fingerprintOf(device.deviceId), primary, secondary, mono = true)
-                    if (device.pairing && !blocked) {
-                        DetailRow("Pairing", "Its pairing screen is open", primary, secondary)
-                    }
                     Column {
                         Text(
                             "Device ID",

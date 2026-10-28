@@ -87,7 +87,7 @@ fun PairScreen(
         Text(
             // The mutual requirement is the whole security story of this
             // screen, so it's stated up front rather than buried.
-            "Open this screen on both devices and they find each other. Neither one can trust " +
+            "Scan the other device's code, or let it scan yours. Neither one can trust " +
                 "the other on its own — each side confirms the pairing itself.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -150,8 +150,8 @@ fun PairScreen(
 
         Spacer(Modifier.height(24.dp))
         Text(
-            "Devices on the same Wi-Fi pair on their own while both of these screens are open — " +
-                "the code is only needed when they can't hear each other.",
+            "Devices on the same Wi-Fi are already in your Devices list — tap Trust there. " +
+                "The code is for devices that can't hear each other.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

@@ -7,6 +7,7 @@ import io.uaena.cliplink.engine.BeaconBook.Recorded
 import io.uaena.cliplink.engine.DeviceRow
 import io.uaena.cliplink.engine.PeerNames
 import io.uaena.cliplink.engine.SyncedItem
+import io.uaena.cliplink.engine.dialsOnBeacon
 import io.uaena.cliplink.engine.uniqueKeysFor
 import io.uaena.cliplink.net.Discovery
 import org.junit.Assert.assertEquals
@@ -17,8 +18,8 @@ import org.junit.Test
 
 /**
  * The engine's pure state logic: the Tailscale address check and the beacon
- * fields it protects, the beacon book's aging and bound, and the keys the
- * Synced list rows are told apart by.
+ * fields it protects, the beacon book's aging and bound, who a beacon gets
+ * dialled for, and the keys the Synced list rows are told apart by.
  */
 class EngineStateTest {
 
@@ -49,32 +50,31 @@ class EngineStateTest {
     @Test
     fun `a beacon built with a hostile address carries no address at all`() {
         // A colon in the address used to shift every field after it, so every
-        // receiver read the pairing flag and the name from the wrong place.
+        // receiver read the name from the wrong place.
         for (bad in listOf("fd7a::1", "1.2.3.4:5", "evil:1:name", "host name", "1.2.3.256")) {
-            val line = Discovery.build(49000, "KEY", "PROOF", bad, true, "Pixel 8")
-            assertEquals("49000:KEY:PROOF:-:1:UGl4ZWwgOA==", line)
+            val line = Discovery.build(49000, "KEY", "PROOF", bad, "Pixel 8")
+            assertEquals("49000:KEY:PROOF:-:-:UGl4ZWwgOA==", line)
         }
-        assertEquals(6, Discovery.build(49000, "KEY", null, "100.64.0.1", false, "n").split(':').size)
+        assertEquals(6, Discovery.build(49000, "KEY", null, "100.64.0.1", "n").split(':').size)
     }
 
     @Test
     fun `colons spaces and control characters are removed from every field`() {
-        val line = Discovery.build(49000, "KE:Y\n 2", "PRO:OF\t", "100.64.0.1", true, "a:b")
+        val line = Discovery.build(49000, "KE:Y\n 2", "PRO:OF\t", "100.64.0.1", "a:b")
         val parts = line.split(':')
         assertEquals(6, parts.size)
         assertEquals("KEY2", parts[1])
         assertEquals("PROOF", parts[2])
-        assertEquals("1", parts[4])
+        assertEquals("-", parts[4])
         val parsed = checkNotNull(Discovery.parse(line, "10.0.0.2"))
         assertEquals("KEY2", parsed.deviceId)
         assertEquals("a:b", parsed.name) // the name is base64, so its colon is safe
         assertEquals("100.64.0.1", parsed.address)
-        assertTrue(parsed.pairing)
     }
 
     @Test
     fun `fields are capped`() {
-        val line = Discovery.build(49000, "K".repeat(1000), "P".repeat(1000), null, false, null)
+        val line = Discovery.build(49000, "K".repeat(1000), "P".repeat(1000), null, null)
         val parts = line.split(':')
         assertEquals(Discovery.MAX_ID_LENGTH, parts[1].length)
         assertEquals(Discovery.MAX_PROOF_LENGTH, parts[2].length)
@@ -99,8 +99,8 @@ class EngineStateTest {
 
     private class Clock(var now: Long = 1_000_000L)
 
-    private fun beacon(id: String, ip: String = "192.168.1.5", name: String? = null, pairing: Boolean = false, address: String? = null) =
-        Discovery.Beacon(49000, id, null, address, pairing, name, ip)
+    private fun beacon(id: String, ip: String = "192.168.1.5", name: String? = null, address: String? = null) =
+        Discovery.Beacon(49000, id, null, address, name, ip)
 
     private val nobody: (String) -> Boolean = { false }
 
@@ -132,7 +132,7 @@ class EngineStateTest {
 
         assertEquals(listOf("STRANGER"), gone)
         assertEquals("192.168.1.7", book.get("TRUSTED")?.senderIp) // still dialable
-        assertFalse(book.isRecent("TRUSTED")) // but its "pairing screen open" is stale
+        assertFalse(book.isRecent("TRUSTED")) // but it no longer counts as here
         assertEquals(clock.now - 60_000, book.lastSeenAt("TRUSTED"))
     }
 
@@ -181,12 +181,11 @@ class EngineStateTest {
         // Every two seconds, the same: nothing for the Devices tab to redraw.
         assertEquals(Recorded.Refreshed, book.record(beacon("A", name = "Pixel"), nobody))
         assertEquals(Recorded.Refreshed, book.record(beacon("A", name = "Pixel"), nobody))
-        // Its pairing screen opens, it moves, it is renamed, it learns an address: those show.
-        assertEquals(Recorded.Changed, book.record(beacon("A", name = "Pixel", pairing = true), nobody))
-        assertEquals(Recorded.Changed, book.record(beacon("A", name = "Pixel", pairing = true, ip = "192.168.1.9"), nobody))
-        assertEquals(Recorded.Changed, book.record(beacon("A", name = "Pixel 8", pairing = true, ip = "192.168.1.9"), nobody))
-        assertEquals(Recorded.Changed, book.record(beacon("A", name = "Pixel 8", pairing = true, ip = "192.168.1.9", address = "100.64.0.2"), nobody))
-        assertEquals(Recorded.Refreshed, book.record(beacon("A", name = "Pixel 8", pairing = true, ip = "192.168.1.9", address = "100.64.0.2"), nobody))
+        // It moves, it is renamed, it learns an address: those show.
+        assertEquals(Recorded.Changed, book.record(beacon("A", name = "Pixel", ip = "192.168.1.9"), nobody))
+        assertEquals(Recorded.Changed, book.record(beacon("A", name = "Pixel 8", ip = "192.168.1.9"), nobody))
+        assertEquals(Recorded.Changed, book.record(beacon("A", name = "Pixel 8", ip = "192.168.1.9", address = "100.64.0.2"), nobody))
+        assertEquals(Recorded.Refreshed, book.record(beacon("A", name = "Pixel 8", ip = "192.168.1.9", address = "100.64.0.2"), nobody))
     }
 
     @Test
@@ -201,11 +200,22 @@ class EngineStateTest {
         assertEquals("Handshake name", names.display("B", null))
     }
 
+    // ---- who a beacon gets dialled for -----------------------------------------------------
+
+    @Test
+    fun `a stranger is not dialled just because it beacons`() {
+        assertFalse(dialsOnBeacon(trusted = false, connected = false))
+        assertFalse(dialsOnBeacon(trusted = false, connected = true))
+        // A trusted device is, until it is connected.
+        assertTrue(dialsOnBeacon(trusted = true, connected = false))
+        assertFalse(dialsOnBeacon(trusted = true, connected = true))
+    }
+
     // ---- device rows -----------------------------------------------------------------------
 
     @Test
     fun `a row is the same row however recently its beacon was heard`() {
-        fun row(seen: Long?) = DeviceRow("id", "name", true, false, listOf("1.2.3.4"), false, seen)
+        fun row(seen: Long?) = DeviceRow("id", "name", true, false, listOf("1.2.3.4"), seen)
         assertEquals(row(1), row(2))
         assertEquals(row(null), row(99))
         assertEquals(row(1).hashCode(), row(2).hashCode())
@@ -213,7 +223,6 @@ class EngineStateTest {
         assertFalse(row(1) == row(1).copy(connected = true))
         assertFalse(row(1) == row(1).copy(addresses = emptyList()))
         assertFalse(row(1) == row(1).copy(name = null))
-        assertFalse(row(1) == row(1).copy(pairing = true))
         assertFalse(row(1) == row(1).copy(trusted = false))
         // And whether it is on the network: the Devices list is redrawn from a
         // flow that drops equal lists, so a row coming or going quiet has to
@@ -226,8 +235,8 @@ class EngineStateTest {
     fun `a device is online when connected unless said otherwise`() {
         // The default keeps a positional constructor call honest: a row built
         // as connected is never also offline.
-        assertTrue(DeviceRow("id", "name", true, true, emptyList(), false, null).online)
-        assertFalse(DeviceRow("id", "name", true, false, emptyList(), false, null).online)
+        assertTrue(DeviceRow("id", "name", true, true, emptyList(), null).online)
+        assertFalse(DeviceRow("id", "name", true, false, emptyList(), null).online)
     }
 
     // ---- synced item keys ----------------------------------------------------------------------
