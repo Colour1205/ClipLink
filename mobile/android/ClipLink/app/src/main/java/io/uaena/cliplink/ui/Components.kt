@@ -54,8 +54,14 @@ data class TypeStyle(
     val onContainer: Color,
 )
 
+/**
+ * [showsPicture]: the item is a file whose picture the screen is showing (a
+ * photo sent from a phone arrives as a file). It then wears the generic image
+ * glyph like an inline image does - the photo is already on display, so a
+ * file icon beside it would only say it again.
+ */
 @Composable
-fun typeStyleOf(item: SyncedItem): TypeStyle {
+fun typeStyleOf(item: SyncedItem, showsPicture: Boolean = false): TypeStyle {
     val colors = MaterialTheme.colorScheme
     // Worked out once per entry, not on every recomposition: isLink trims a
     // copy of the whole content and runs a regex over it, and a copied file's
@@ -70,7 +76,7 @@ fun typeStyleOf(item: SyncedItem): TypeStyle {
             colors.onTertiaryContainer,
         )
 
-        item.type == ClipboardEntry.TYPE_IMAGE -> TypeStyle(
+        item.type == ClipboardEntry.TYPE_IMAGE || showsPicture -> TypeStyle(
             Icons.Outlined.Image,
             "Image",
             colors.secondaryContainer,
