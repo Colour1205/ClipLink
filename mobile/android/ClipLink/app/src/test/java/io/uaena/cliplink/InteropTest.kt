@@ -294,14 +294,27 @@ class InteropTest {
 
     @Test
     fun `beacon parses the full five field form`() {
-        val beacon = Discovery.parse("49000:SOMEKEY:SOMEPROOF:100.64.0.1:1", "192.168.1.5")
+        val beacon = Discovery.parse("49000:SOMEKEY:SOMEPROOF:100.64.0.1:-", "192.168.1.5")
         checkNotNull(beacon)
         assertEquals(49000, beacon.tcpPort)
         assertEquals("SOMEKEY", beacon.deviceId)
         assertEquals("SOMEPROOF", beacon.proof)
         assertEquals("100.64.0.1", beacon.address)
-        assertTrue(beacon.pairing)
         assertEquals("192.168.1.5", beacon.senderIp)
+    }
+
+    @Test
+    fun `beacon ignores what the field before the name says`() {
+        // An older build wrote "1" there while its pairing screen was open. It
+        // parses to exactly what the same beacon with "-" does.
+        val expected = Discovery.parse("49000:SOMEKEY:SOMEPROOF:100.64.0.1:-", "192.168.1.5")
+        assertEquals(expected, Discovery.parse("49000:SOMEKEY:SOMEPROOF:100.64.0.1:1", "192.168.1.5"))
+        assertEquals(expected, Discovery.parse("49000:SOMEKEY:SOMEPROOF:100.64.0.1:0", "192.168.1.5"))
+        assertEquals(expected, Discovery.parse("49000:SOMEKEY:SOMEPROOF:100.64.0.1:", "192.168.1.5"))
+
+        val named = Discovery.parse("49000:SOMEKEY:-:-:-:UGl4ZWwgOA==", "10.0.0.2")
+        assertEquals(named, Discovery.parse("49000:SOMEKEY:-:-:1:UGl4ZWwgOA==", "10.0.0.2"))
+        assertEquals("Pixel 8", named?.name)
     }
 
     @Test
@@ -310,13 +323,11 @@ class InteropTest {
         checkNotNull(beacon)
         assertNull(beacon.proof)
         assertNull(beacon.address)
-        assertFalse(beacon.pairing)
 
         // An older three-field beacon must still parse rather than be dropped.
         val legacy = Discovery.parse("49000:SOMEKEY:-", "10.0.0.2")
         checkNotNull(legacy)
         assertNull(legacy.address)
-        assertFalse(legacy.pairing)
     }
 
     @Test
@@ -345,12 +356,11 @@ class InteropTest {
     fun `beacon parses the six field form with a name`() {
         // "Colour's PC: 8 ✨" - a colon and a non-ASCII character, both of
         // which only survive the colon split because the field is base64.
-        val beacon = Discovery.parse("49000:SOMEKEY:-:100.64.0.1:1:Q29sb3VyJ3MgUEM6IDgg4pyo", "192.168.1.5")
+        val beacon = Discovery.parse("49000:SOMEKEY:-:100.64.0.1:-:Q29sb3VyJ3MgUEM6IDgg4pyo", "192.168.1.5")
         checkNotNull(beacon)
         assertEquals("Colour's PC: 8 ✨", beacon.name)
         // ...and the fields before it are unaffected.
         assertEquals("100.64.0.1", beacon.address)
-        assertTrue(beacon.pairing)
         assertEquals("192.168.1.5", beacon.senderIp)
     }
 
@@ -368,11 +378,10 @@ class InteropTest {
     @Test
     fun `beacon with a malformed name keeps the beacon and drops only the name`() {
         // Not base64 at all.
-        val badBase64 = Discovery.parse("49000:SOMEKEY:PROOF:-:1:@@not base64@@", "10.0.0.2")
+        val badBase64 = Discovery.parse("49000:SOMEKEY:PROOF:-:-:@@not base64@@", "10.0.0.2")
         checkNotNull(badBase64)
         assertNull(badBase64.name)
         assertEquals("PROOF", badBase64.proof)
-        assertTrue(badBase64.pairing)
         // Valid base64 of bytes that are not valid UTF-8 (FF FE FD).
         val badUtf8 = Discovery.parse("49000:SOMEKEY:-:-:-://79", "10.0.0.2")
         checkNotNull(badUtf8)
@@ -383,20 +392,34 @@ class InteropTest {
 
     @Test
     fun `beacon build always writes six fields and round trips`() {
-        val named = Discovery.build(49000, "SOMEKEY", null, null, false, "Pixel 8")
-        // The pairing field is written as "-" rather than left off, so the
-        // name is always at index 5 for every receiver.
+        val named = Discovery.build(49000, "SOMEKEY", null, null, "Pixel 8")
+        // The field before the name is written as "-" rather than left off,
+        // so the name is always at index 5 for every receiver.
         assertEquals("49000:SOMEKEY:-:-:-:UGl4ZWwgOA==", named)
         assertEquals("Pixel 8", checkNotNull(Discovery.parse(named, "10.0.0.2")).name)
 
-        assertEquals("49000:SOMEKEY:P:100.64.0.1:1:-", Discovery.build(49000, "SOMEKEY", "P", "100.64.0.1", true, null))
-        assertEquals("49000:SOMEKEY:-:-:-:-", Discovery.build(49000, "SOMEKEY", null, null, false, "   "))
+        assertEquals("49000:SOMEKEY:P:100.64.0.1:-:-", Discovery.build(49000, "SOMEKEY", "P", "100.64.0.1", null))
+        assertEquals("49000:SOMEKEY:-:-:-:-", Discovery.build(49000, "SOMEKEY", null, null, "   "))
 
         val unicode = "Colour's PC: 8 ✨"
         assertEquals(
             unicode,
-            Discovery.parse(Discovery.build(49000, "SOMEKEY", null, null, false, unicode), "")?.name,
+            Discovery.parse(Discovery.build(49000, "SOMEKEY", null, null, unicode), "")?.name,
         )
+    }
+
+    @Test
+    fun `beacon build always writes a dash in the field before the name`() {
+        // Whatever else the beacon carries.
+        for (proof in listOf(null, "P")) {
+            for (address in listOf(null, "100.64.0.1")) {
+                for (name in listOf(null, "Pixel 8")) {
+                    val parts = Discovery.build(49000, "SOMEKEY", proof, address, name).split(':')
+                    assertEquals(6, parts.size)
+                    assertEquals("-", parts[4])
+                }
+            }
+        }
     }
 
     @Test
@@ -416,7 +439,7 @@ class InteropTest {
         assertEquals("😀".repeat(64), capped)
 
         // Capped BEFORE encoding: what goes out decodes to at most 64.
-        val sent = Discovery.parse(Discovery.build(49000, "K", null, null, false, "b".repeat(80)), "")
+        val sent = Discovery.parse(Discovery.build(49000, "K", null, null, "b".repeat(80)), "")
         assertEquals("b".repeat(64), sent?.name)
     }
 
@@ -753,7 +776,7 @@ class InteropTest {
     @Test
     fun `device rows sort trusted first then by name then by id`() {
         fun row(id: String, name: String?, trusted: Boolean, connected: Boolean = false, seen: Long? = null) =
-            DeviceRow(id, name, trusted, connected, emptyList(), pairing = false, lastSeenAtMs = seen)
+            DeviceRow(id, name, trusted, connected, emptyList(), lastSeenAtMs = seen)
 
         val rows = listOf(
             row("id-9", null, trusted = false),

@@ -160,9 +160,6 @@ class ClipLinkEngine(context: Context) {
     /** Numbers the log lines (declared up here so it exists before anything can log); log() runs on network threads too. */
     private val logSequence = java.util.concurrent.atomic.AtomicLong()
 
-    private val _pairingOpen = MutableStateFlow(false)
-    val pairingOpen: StateFlow<Boolean> = _pairingOpen.asStateFlow()
-
     private val _pairingRequest = MutableStateFlow<PairingRequest?>(null)
     val pairingRequest: StateFlow<PairingRequest?> = _pairingRequest.asStateFlow()
 
@@ -321,8 +318,8 @@ class ClipLinkEngine(context: Context) {
                 delay(HOUSEKEEPING_INTERVAL_MS)
                 step("housekeeping") {
                     pruneBeacons()
-                    // Always: a trusted device that went quiet stops being "pairing" and
-                    // "here" without any event to say so. The state flow drops a list
+                    // Always: a trusted device that went quiet stops being "here"
+                    // without any event to say so. The state flow drops a list
                     // that came out equal, so this costs nothing when nothing changed.
                     refreshDevices()
                     syncManager.tidyTransfers()
@@ -462,7 +459,6 @@ class ClipLinkEngine(context: Context) {
             tcpPort = Protocol.TCP_PORT,
             proof = { cachedProof },
             ownAddress = { _tailscaleIp.value.takeIf { it.isNotEmpty() } },
-            pairingOpen = { _pairingOpen.value },
             ownName = ::ownName,
         )
         _discoveryRunning.value = true
@@ -494,15 +490,13 @@ class ClipLinkEngine(context: Context) {
 
         // Nothing to launch for a beacon that asks nothing of us.
         val wantsTrust = beacon.proof != null && !trusted
-        val wantsDial = (trusted && !syncManager.isConnected(beacon.deviceId)) ||
-            (_pairingOpen.value && beacon.pairing)
+        val wantsDial = dialsOnBeacon(trusted, syncManager.isConnected(beacon.deviceId))
         if (!wantsTrust && !wantsDial) return
         scope.launch {
             // Each on its own: a Keystore failure checking a passcode proof is no
             // reason not to connect to a device that is already trusted.
             step("checking a beacon's passcode proof") { maybeAutoTrustViaPassphrase(beacon) }
             step("connecting to a device") { maybeAutoConnect(beacon) }
-            step("connecting to pair") { maybeConnectForPairing(beacon) }
         }
     }
 
@@ -553,27 +547,6 @@ class ClipLinkEngine(context: Context) {
             // The other device should dial; if it has not after a while it does not trust
             // this one, and the dial from here is what asks it (see DialFallback).
             if (losesTieBreaker(beacon.deviceId) && !dialFallback.due(beacon.deviceId)) return
-            connectToAddress(beacon.senderIp, beacon.tcpPort)
-        } finally {
-            connectingTo.remove(beacon.deviceId)
-        }
-    }
-
-    /**
-     * The untrusted sibling of [maybeAutoConnect]. Only attempts a handshake
-     * when BOTH this device's pairing screen is open AND the beacon says the
-     * sender's is - two independent, live "I'm expecting to pair right now"
-     * signals rather than one side's assumption.
-     */
-    private suspend fun maybeConnectForPairing(beacon: Discovery.Beacon) {
-        if (!_pairingOpen.value || !beacon.pairing) return
-        if (syncManager.isConnected(beacon.deviceId)) return
-        if (blockStore.isBlocked(beacon.deviceId)) return
-        if (_pairingRequest.value != null) return // already awaiting a decision
-        if (!connectingTo.add(beacon.deviceId)) return
-        try {
-            if (losesTieBreaker(beacon.deviceId)) return
-            if (trustStore.isTrusted(beacon.deviceId)) return // maybeAutoConnect's job
             connectToAddress(beacon.senderIp, beacon.tcpPort)
         } finally {
             connectingTo.remove(beacon.deviceId)
@@ -951,8 +924,7 @@ class ClipLinkEngine(context: Context) {
      * Ignore: closes the waiting connection and nothing else. Nothing is
      * remembered - the device can ask again, which is what separates this
      * from blocking it (see [blockDevice]). Safe to call with nothing
-     * pending: it then does nothing, as the pairing screen closing does.
-     * [expecting] is as for [acceptPairing].
+     * pending: it then does nothing. [expecting] is as for [acceptPairing].
      */
     fun rejectPairing(expecting: String? = null, expired: Boolean = false) {
         val conn = synchronized(pairingLock) {
@@ -1043,16 +1015,11 @@ class ClipLinkEngine(context: Context) {
     // ---- pairing ----------------------------------------------------------
 
     /**
-     * Whether this device's Pairing screen is open: it is advertised in the
-     * beacon, and it lets this device dial a stranger that advertises the
-     * same. A request from a stranger no longer depends on it - they reach
-     * the device whenever it is running - so closing the screen leaves a
-     * request that is waiting for an answer alone.
+     * Ends every quiet time (see [RequestQuiet]), for when the Pairing screen
+     * opens: somebody is expecting requests now, so no device stays held back.
      */
-    fun setPairingOpen(open: Boolean) {
-        _pairingOpen.value = open
-        // Somebody is expecting requests now: no device stays held back.
-        if (open) requestQuiet.clear()
+    fun clearRequestQuiet() {
+        requestQuiet.clear()
     }
 
     fun pairingPayload(): String =
@@ -1095,8 +1062,7 @@ class ClipLinkEngine(context: Context) {
                 // The id beside the name: a code's name is self-claimed.
                 val who = info.name?.let { "$it (${shortIdOf(info.publicKey)})" } ?: shortIdOf(info.publicKey)
                 return "$who has no address in its code. " +
-                    "If it's on the same network, keep this screen open and its beacon will " +
-                    "pair automatically."
+                    "If it's on the same network, find it in the Devices list and tap Trust."
             }
             for (candidate in candidates) {
                 if (connectToAddress(candidate, Protocol.TCP_PORT)) {
@@ -1570,9 +1536,6 @@ class ClipLinkEngine(context: Context) {
                     trusted = trustedEntry != null,
                     connected = connected.contains(id),
                     addresses = addresses.toList(),
-                    // A pairing screen that was open when its device was last
-                    // heard, long ago, is not open now.
-                    pairing = beacon?.pairing == true && beaconBook.isRecent(id),
                     lastSeenAtMs = beaconBook.lastSeenAt(id),
                     online = linked.contains(id) || beaconBook.isRecent(id),
                     blocked = blockedEntry != null,

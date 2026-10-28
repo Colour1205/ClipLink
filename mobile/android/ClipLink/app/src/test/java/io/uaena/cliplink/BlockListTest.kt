@@ -81,7 +81,7 @@ class BlockListTest {
     // ---- rows ------------------------------------------------------------------
 
     private fun row(id: String, trusted: Boolean = false, blocked: Boolean = false, name: String? = null) =
-        DeviceRow(id, name, trusted, false, emptyList(), false, null, blocked = blocked)
+        DeviceRow(id, name, trusted, false, emptyList(), null, blocked = blocked)
 
     @Test
     fun aRowThatBecameBlockedIsADifferentRow() {

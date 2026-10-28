@@ -60,7 +60,6 @@ internal fun deviceStatusLabel(device: DeviceRow): String = when {
     device.trusted && device.online -> "Trusted — connecting…"
     // Not connected and not heard from: gone, not "waiting".
     device.trusted -> "Trusted — offline"
-    device.pairing -> "Discovered — pairing mode open"
     else -> "Discovered"
 }
 
