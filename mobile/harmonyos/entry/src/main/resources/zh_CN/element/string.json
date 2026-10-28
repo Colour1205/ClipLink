@@ -509,6 +509,10 @@
       "value": "清除已同步历史记录"
     },
     {
+      "name": "me_version",
+      "value": "版本 %1$s（%2$s）"
+    },
+    {
       "name": "pairing_title",
       "value": "配对"
     },

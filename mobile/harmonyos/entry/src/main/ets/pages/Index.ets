@@ -14,7 +14,7 @@
 // PeerConnection, and SyncManager, all built and verified in earlier steps.
 
 import hilog from '@ohos.hilog';
-import { common, Want, WantAgent, wantConstant, wantAgent } from '@kit.AbilityKit';
+import { bundleManager, common, Want, WantAgent, wantConstant, wantAgent } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { isPasteboardReadGranted, requestPasteboardRead } from '../clipboard/PasteboardPermission';
@@ -677,6 +677,11 @@ struct Index {
   // What's typed on the Device name screen, saved by saveDeviceName.
   @State deviceNameInput: string = '';
   @State savingDeviceName: boolean = false;
+  // This app's versionName / versionCode (app.json5), read once from the
+  // installed package for the Me page's version line. Only the data is kept,
+  // not the finished "Version ..." text, so the label follows a language change.
+  private appVersionName: string = '';
+  private appVersionCode: number = 0;
   // Mirror of DeviceSettings.getAutoApply, pushed into SyncManager too.
   @State autoApply: boolean = true;
   // "Notify about new items" (see notifyReceivedItem), and how many arrived
@@ -891,6 +896,7 @@ struct Index {
     }
     // Here rather than later so the very first beacon already carries it.
     this.refreshSystemDeviceName();
+    this.readAppVersion();
 
     // Initial (home) route on each stack, pushed with animation off (the
     // `false` second argument) - matches Huawei's own documented pattern
@@ -1190,6 +1196,19 @@ struct Index {
     if (name === this.systemDeviceName) return;
     this.systemDeviceName = name;
     if (this.ownDeviceId.length > 0) this.refreshPairingPayload();
+  }
+
+  // From the installed package itself, so a version bump in app.json5 can't
+  // leave the Me page's line stale. If the lookup fails the line stays hidden.
+  private readAppVersion(): void {
+    try {
+      const info: bundleManager.BundleInfo =
+        bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+      this.appVersionName = info.versionName;
+      this.appVersionCode = info.versionCode;
+    } catch (e) {
+      // keep the empty defaults
+    }
   }
 
   aboutToDisappear(): void {
@@ -6075,6 +6094,15 @@ struct Index {
       .width('100%')
       .borderRadius(16)
       .backgroundColor(this.cardFill())
+      // The version line, as the footer of the last section (like iOS).
+      if (this.appVersionName.length > 0) {
+        Text($r('app.string.me_version', this.appVersionName, `${this.appVersionCode}`))
+          .fontSize(12)
+          .fontColor($r('sys.color.font_secondary'))
+          .width('100%')
+          .textAlign(TextAlign.Center)
+          .margin({ top: 12 })
+      }
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
