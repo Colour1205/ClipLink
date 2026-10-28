@@ -201,7 +201,6 @@ public sealed partial class SyncedPage : Page
         detail = card;
         card.PropertyChanged += Detail_PropertyChanged;
 
-        DetailTitle.ItemsSource = new[] { "Synced", card.KindText };
         DetailOrigin.Text = card.Origin;
         ShowDetailContent(card);
         UpdateDetail();
@@ -215,13 +214,13 @@ public sealed partial class SyncedPage : Page
             () => (DetailCopy.Visibility == Visibility.Visible ? DetailCopy : DetailDelete).Focus(FocusState.Programmatic));
     }
 
-    // A picture file whose bytes haven't arrived is shown as a file for now:
-    // there's nothing to decode (UpdateDetail swaps in the picture when it has).
-    private static bool ShowsPicture(HistoryCard card) => card.IsImage || (card.IsPicture && card.Item.IsAvailable);
-
+    // A picture file with no picture to show (its bytes haven't arrived, or
+    // they won't decode) is shown as a file; UpdateDetail swaps the one for
+    // the other as that changes.
     private void ShowDetailContent(HistoryCard card)
     {
-        bool picture = ShowsPicture(card);
+        DetailTitle.ItemsSource = new[] { "Synced", card.KindText };
+        bool picture = card.ShowsPicture;
         bool file = card.IsFile && !picture;
         DetailText.Visibility = picture || file ? Visibility.Collapsed : Visibility.Visible;
         DetailImage.Visibility = picture ? Visibility.Visible : Visibility.Collapsed;
@@ -269,9 +268,9 @@ public sealed partial class SyncedPage : Page
     {
         if (detail is not { } card) return;
         DetailOrigin.Text = card.Origin;
-        // A picture file's bytes have just arrived.
-        bool picture = ShowsPicture(card);
-        if (picture && DetailImage.Visibility != Visibility.Visible) ShowDetailContent(card);
+        // A picture file's bytes have just arrived, or turned out not to be one.
+        bool picture = card.ShowsPicture;
+        if (card.IsFile && picture != (DetailImage.Visibility == Visibility.Visible)) ShowDetailContent(card);
         DetailCopy.Visibility = card.CanCopy ? Visibility.Visible : Visibility.Collapsed;
         DetailOpen.Visibility = DetailShowInFolder.Visibility = card.CanOpen ? Visibility.Visible : Visibility.Collapsed;
         DetailFacts.Text = picture ? card.ImageDetail
