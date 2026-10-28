@@ -104,12 +104,17 @@ public sealed partial class SyncedPage : Page
         UpdatePasscodeTip();
     }
 
-    // The grid's thumbnail: as wide as the card, as high as the image (a
-    // very tall one cropped at the border's MaxHeight, like the phones' grid).
+    // The grid's thumbnail: as wide as the card, as high as the image is, so
+    // the whole picture shows. One taller than 3 times its width gets a box
+    // of that height and is fitted into it, never cropped.
+    private const double MaxThumbRatio = 3;
+
     private void GridThumb_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (sender is not Border { DataContext: HistoryCard { AspectRatio: > 0 } card } border) return;
-        double height = Math.Min(border.MaxHeight, Math.Round(e.NewSize.Width * card.AspectRatio));
+        // (The border's 1 px line is outside the picture, on both sides.)
+        double inner = Math.Max(0, e.NewSize.Width - 2);
+        double height = Math.Round(inner * Math.Min(card.AspectRatio, MaxThumbRatio)) + 2;
         if (double.IsNaN(border.Height) || Math.Abs(border.Height - height) > 0.5) border.Height = height;
     }
 
@@ -117,12 +122,23 @@ public sealed partial class SyncedPage : Page
 
     // ---- a card -------------------------------------------------------------
 
-    // A click on the card itself, or Enter / Space on it (its buttons handle
-    // their own clicks).
+    // When a card's button last ran. The click (or Enter / Space) on a button
+    // inside a card also reaches the card, which reports it as the card being
+    // invoked - and Copy must not then open the item as well.
+    private long actionTick = long.MinValue;
+
+    // A click on the card itself, or Enter / Space on it. Waits a moment for a
+    // button's own Click, which may come either side of this.
     private void Cards_ItemInvoked(ItemsView sender, ItemsViewItemInvokedEventArgs args)
     {
-        if (args.InvokedItem is HistoryCard card) ShowDetail(card);
+        if (args.InvokedItem is not HistoryCard card) return;
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal, () =>
+        {
+            if (Environment.TickCount64 - actionTick > 500) ShowDetail(card);
+        });
     }
+
+    private void ActionClicked() => actionTick = Environment.TickCount64;
 
     // Right-click or Shift+F10 on a card - the mobile apps' long-press menu.
     private void Cards_ContextRequested(UIElement sender, ContextRequestedEventArgs args)
@@ -161,16 +177,19 @@ public sealed partial class SyncedPage : Page
 
     private void Copy_Click(object sender, RoutedEventArgs e)
     {
+        ActionClicked();
         if (CardOf(sender) is { } card) Copy(card);
     }
 
     private async void Open_Click(object sender, RoutedEventArgs e)
     {
+        ActionClicked();
         if (CardOf(sender) is { } card) await OpenAsync(card, showInFolder: false);
     }
 
     private async void Delete_Click(object sender, RoutedEventArgs e)
     {
+        ActionClicked();
         if (CardOf(sender) is { } card) await DeleteAsync(card);
     }
 
