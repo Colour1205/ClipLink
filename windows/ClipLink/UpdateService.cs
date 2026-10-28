@@ -32,6 +32,10 @@ internal sealed class UpdateService : IDisposable
     private CancellationTokenSource? operation;
     // The installer that is running, held (VerifiedInstaller) until it ends.
     private VerifiedInstaller? runningInstaller;
+    // The first tick, set going by Start(), hasn't come yet. It cleans up
+    // %TEMP% (and looks, if a look is due), so a check or the switch before
+    // it must not take its place: it picks the next time itself.
+    private bool firstTickPending = true;
     private bool disposed;
 
     public UpdateService(DispatcherQueue dispatcher, AppOptions options, AppSettings settings)
@@ -89,6 +93,7 @@ internal sealed class UpdateService : IDisposable
 
     private void ScheduleNext(TimeSpan? after = null)
     {
+        if (firstTickPending) return;
         timer.Stop();
         if (disposed || !AutomaticChecksAllowed) return;
         Schedule(after ?? DueIn());
@@ -105,6 +110,7 @@ internal sealed class UpdateService : IDisposable
     private async void OnTimer(DispatcherQueueTimer sender, object args)
     {
         sender.Stop();
+        firstTickPending = false;
         TimeSpan? next = null;
         try
         {
