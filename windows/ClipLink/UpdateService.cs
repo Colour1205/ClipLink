@@ -115,7 +115,10 @@ internal sealed class UpdateService : IDisposable
         try
         {
             // The first time round, and quietly: what earlier updates left in %TEMP%.
-            if (!State.IsBusy && runningInstaller == null) _ = Task.Run(() => UpdateFolder.Clear(UpdateFolder.DefaultPath));
+            // (Not while a check is running: a check never touches that folder, and
+            // with automatic checks off no later tick would clear it.)
+            if (State.Phase is not (UpdatePhase.Downloading or UpdatePhase.Verifying or UpdatePhase.Installing) && runningInstaller == null)
+                _ = Task.Run(() => UpdateFolder.Clear(UpdateFolder.DefaultPath));
 
             if (AutomaticChecksAllowed)
             {
@@ -154,7 +157,8 @@ internal sealed class UpdateService : IDisposable
         ScheduleNext();
     }
 
-    // False when GitHub didn't answer at all.
+    // False when no look was made (this build can't read its own version) or
+    // GitHub didn't answer at all.
     private async Task<bool> CheckCoreAsync()
     {
         if (disposed || State.IsBusy) return true;
@@ -162,7 +166,9 @@ internal sealed class UpdateService : IDisposable
         {
             Console.WriteLine($"[update] can't tell which version this is (\"{App.Version}\")");
             Fail("Couldn't check for updates: this build doesn't know its own version.");
-            return true;
+            // Not stamped as a look, so false: the timer then waits RetryAfterNoAnswer
+            // instead of finding a check due again every 100 ms.
+            return false;
         }
 
         using var cancel = CancellationTokenSource.CreateLinkedTokenSource(quitting.Token);
