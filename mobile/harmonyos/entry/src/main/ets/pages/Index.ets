@@ -4854,11 +4854,12 @@ struct Index {
   emptyState(headline: ResourceStr, detail: ResourceStr, art: Resource) {
     Column({ space: 8 }) {
       // A small plain mark, like the Windows app's, not an illustration: the
-      // words are what the screen is about.
+      // words are what the screen is about. The Windows glyph is about twice
+      // the headline's size and sits close above it; this is the same.
       Image(art)
-        .width(64)
-        .height(64)
-        .margin({ bottom: 16 })
+        .width(40)
+        .height(40)
+        .margin({ bottom: 8 })
       Text(headline)
         .fontSize(17)
         .fontWeight(FontWeight.Medium)
