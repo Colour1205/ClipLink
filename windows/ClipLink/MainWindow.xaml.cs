@@ -3,6 +3,7 @@ using ClipboardDaemon.Engine;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Media.Imaging;
@@ -69,9 +70,21 @@ public sealed partial class MainWindow : Window
         host.ItemsArrived += OnItemsArrived;
         host.PairingRequested += OnPairingRequested;
         host.PairingResolved += OnPairingResolved;
+        App.Updates.State.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(UpdateState.HasUpdate)) UpdateSettingsBadge();
+        };
         RootNavigation.IsPaneOpen = !App.Settings.NavPaneCollapsed;
         UpdateToastMargin();
         RootNavigation.SelectedItem = RootNavigation.MenuItems[0];    }
+
+    // A dot on Settings while an update is waiting, so it's seen from any page.
+    private void UpdateSettingsBadge()
+    {
+        bool waiting = App.Updates.State.HasUpdate;
+        UpdateBadge.Visibility = waiting ? Visibility.Visible : Visibility.Collapsed;
+        AutomationProperties.SetName(SettingsItem, waiting ? "Settings, update available" : "Settings");
+    }
 
     // Open (icons and labels) or collapsed to icons only: remembered.
     private void RootNavigation_PaneChanged(NavigationView sender, object args)

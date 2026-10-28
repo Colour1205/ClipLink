@@ -9,9 +9,14 @@ with the always-on P2P node running inside it.
   - `ClipLink/Engine/` — the sync engine (`ClipLinkEngine`): discovery, peer
     connections, clipboard watcher, history store, trust and pairing, running
     in-process. See `ClipLink/Engine/README.md`.
-- `ClipLink.Tests/` — xunit tests for the engine parts that need no UI (the
-  beacon codec, who dials whom). The engine's source files are linked in, so
-  running them builds no app.
+  - `ClipLink/Updates/` — the updater's logic, plain C# with no WinUI in it:
+    which release to offer, the download, the size and SHA-256 check. The
+    app's side of it is `UpdateService.cs` and the Updates card in Settings
+    (see [Updates](#updates)).
+- `ClipLink.Tests/` — xUnit tests for the parts that need no UI: the updater
+  (`ClipLink/Updates/`) and the engine's beacon codec and who-dials-whom rule.
+  The source files are linked in (`ClipLink.csproj` is a WinUI exe), so
+  running them builds no app: `dotnet test windows\ClipLink.Tests`.
 - `installer/ClipLink.iss` — the installer script (Inno Setup).
 - `ClipLink.slnx` — the solution, for Visual Studio / `dotnet build`; it
   includes the tests.
@@ -152,6 +157,58 @@ Quit ClipLink first if it's running from `windows\dist`: its files are locked.
   `ClipboardDaemon.exe` + `ClipboardTray.exe`): quit it first. While it holds
   port 49000 the new one shows "Can't listen for other devices…" with a
   **Try again** button, and syncs nothing.
+
+### Updates
+
+**Settings > About > Updates** looks on GitHub for a newer ClipLink and, when
+you click **Download and install**, downloads the installer, checks it and
+runs it. While an update is waiting, the Settings item in the sidebar has a
+dot. Nothing is downloaded or installed without that click.
+
+- **What it contacts:** `https://api.github.com/repos/Colour1205/ClipLink/releases?per_page=15`,
+  a plain HTTPS request with the header `User-Agent: ClipLink/<version>`.
+  Nothing else is sent: nothing about this PC, your devices or your
+  clipboard. The installer comes from the release's download address on
+  `github.com`, which redirects to GitHub's file servers
+  (`*.githubusercontent.com`). Every address, each redirect included, has to be
+  `https` on one of GitHub's hosts, or the update is stopped.
+- **When:** about 10 seconds after ClipLink starts, then at most once every
+  24 hours while it runs; a restart within 24 hours of the last answer doesn't
+  ask again (`LastUpdateCheckUtc` in `settings.json`; a look that couldn't
+  reach GitHub at all doesn't count and is repeated after an hour). The
+  **Check for updates** button asks at once. **Check for updates
+  automatically** (Settings > About, on by default) switches the automatic
+  looks off; the button still works. A test copy started with
+  `--loopback-only` never looks by itself, as it promises to touch no network.
+- **What counts as an update, and so how to publish a release for it:** the
+  release with the highest version that is published (not a draft), not
+  marked as a pre-release, tagged `vX.Y.Z`, with an asset named exactly
+  `ClipLink-Setup-X.Y.Z.exe`, and higher than the running version. That is
+  what `publish.ps1` builds (`windows\dist\ClipLink-Setup-X.Y.Z.exe`), so
+  `gh release create vX.Y.Z windows\dist\ClipLink-Setup-X.Y.Z.exe --repo Colour1205/ClipLink ...`
+  is enough. A release without that file (the Android one, say) is skipped,
+  and the look goes on to the older releases.
+- **The check:** the download must have exactly the size and SHA-256 that
+  GitHub lists for the asset (its `digest` field, which GitHub adds to every
+  uploaded file); without one ClipLink doesn't install and only offers **Open
+  download page**. It is saved as
+  `%TEMP%\ClipLink-update\ClipLink-Setup-X.Y.Z.exe.part` (a name made from the
+  version, never from the release's text), renamed once it matches, checked
+  again and started from that same file, which stays held open so it can't be
+  swapped on the way. The installer isn't code-signed, so this shows the file
+  is what GitHub publishes for that release, not who published it.
+- **Installing:** `ClipLink-Setup-X.Y.Z.exe /SILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH=1`.
+  Setup asks the running ClipLink to quit, as always, replaces the files and,
+  because of `/RELAUNCH=1`, starts ClipLink again; settings, pairings and
+  history are kept. Meanwhile Settings says "Installing - ClipLink will
+  restart". If Windows asks for permission and it's declined, ClipLink stays
+  as it is.
+- **For testing** (Debug builds only; compiled out of Release, there is no
+  way to switch them on there): `CLIPLINK_UPDATE_API_URL=http://127.0.0.1:<port>/<path>`
+  asks that address for the releases instead, and lets the updater use
+  `http://127.0.0.1:<port>` addresses for them and for the installers they
+  list; `CLIPLINK_UPDATE_CHECK_DELAY_SECONDS=<n>` shortens the 10-second wait
+  before the first look.
 
 ### Command line
 

@@ -14,25 +14,37 @@ struct SyncedCard: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
 
+    /// An image file whose picture couldn't be decoded: a card with no
+    /// preview, so it shows the file's name like any other file.
+    @State private var pictureFailed = false
+
     static let gridTextLines = 8
     static let listTextLines = 4
     static let gridLinkLines = 5
     static let listLinkLines = 3
 
+    /// How close a picture sits to the card's edge; text sits further in.
+    private static let pictureEdge: CGFloat = 8
+
     private var actions: SyncedItemActions { SyncedItemActions(model: model, haptics: settings.haptics) }
     private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous) }
-    private var isPictureCard: Bool { item.kind == .image }
-    private var padding: CGFloat { isPictureCard ? 8 : (compact ? 12 : 14) }
+    /// Images and image files that show their picture.
+    private var isPictureCard: Bool { SyncedItemActions.hasPicture(item) && !pictureFailed }
+    private var cardPadding: CGFloat { compact ? 12 : 14 }
+    private var padding: CGFloat { isPictureCard ? Self.pictureEdge : cardPadding }
+    /// The footer takes up what a picture card's padding is short of, so it
+    /// lands in the same place on every card.
+    private var footerInset: CGFloat { isPictureCard ? cardPadding - Self.pictureEdge : 0 }
 
     var body: some View {
         Button {
             onOpen()
         } label: {
-            VStack(alignment: .leading, spacing: isPictureCard ? 8 : 10) {
+            VStack(alignment: .leading, spacing: 10) {
                 content
                 footer
-                    .padding(.horizontal, isPictureCard ? 4 : 0)
-                    .padding(.bottom, isPictureCard ? 2 : 0)
+                    .padding(.horizontal, footerInset)
+                    .padding(.bottom, footerInset)
             }
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -73,14 +85,25 @@ struct SyncedCard: View {
                     .lineLimit(1)
             }
         case .image:
-            SyncedThumbnailView(
-                item: item,
-                maxPixel: compact ? 480 : 900,
-                placeholderHeight: Self.picturePlaceholderHeight(compact: compact)
-            )
+            pictureBody
         case .file:
-            fileBody
+            if isPictureCard {
+                pictureBody
+            } else {
+                fileBody
+            }
         }
+    }
+
+    /// Just the picture, whole: no name or caption, the picture is the content.
+    private var pictureBody: some View {
+        SyncedThumbnailView(
+            item: item,
+            maxPixel: compact ? 480 : 900,
+            placeholderHeight: Self.picturePlaceholderHeight(compact: compact),
+            showsFailure: item.kind == .image,
+            onFailure: { if item.kind == .file { pictureFailed = true } }
+        )
     }
 
     private func textBody(lines: Int) -> some View {
@@ -109,40 +132,32 @@ struct SyncedCard: View {
     private var fileBody: some View {
         let name = item.filePayload?.fileName ?? "File"
         let fraction = SyncedItemActions.transferFraction(item, transfers: model.snapshot.transfers)
-        return VStack(alignment: .leading, spacing: 10) {
-            if SyncedItemActions.hasPicture(item) {
-                SyncedThumbnailView(
-                    item: item,
-                    maxPixel: compact ? 480 : 900,
-                    placeholderHeight: Self.picturePlaceholderHeight(compact: compact),
-                    showsFailure: false
-                )
-            }
-            HStack(alignment: .center, spacing: 10) {
-                SyncedFileTile(fileName: name, size: compact ? 36 : 44)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(name)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundColor(.primary)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(SyncedItemActions.fileStatus(item, transfers: model.snapshot.transfers))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    if let fraction {
-                        ProgressView(value: fraction)
-                            .progressViewStyle(.linear)
-                    }
+        return HStack(alignment: .center, spacing: 10) {
+            SyncedFileTile(fileName: name, size: compact ? 36 : 44)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(name)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(SyncedItemActions.fileStatus(item, transfers: model.snapshot.transfers))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                if let fraction {
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.linear)
                 }
             }
         }
     }
 
+    /// The same on every card, but for the glyph: an image file gets an
+    /// image's, since its picture is already shown above.
     private var footer: some View {
         HStack(spacing: 6) {
-            KindChip(kind: item.kind, size: 20)
+            KindChip(kind: isPictureCard ? .image : item.kind, size: 20)
             Text(TimeLabel.short(item.date))
                 .lineLimit(1)
                 .layoutPriority(1)

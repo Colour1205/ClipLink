@@ -8,8 +8,8 @@
 // pasteboard.createUriData) is best-effort: HarmonyOS's sandboxing means a
 // file:// URI scoped to this app may not resolve for whatever app the user
 // pastes into without an explicit URI permission grant this project doesn't
-// set up. The synced list's "Save to gallery" (images) and "Copy content"
-// actions (Index.ets) are the reliable path; this is a bonus that works
+// set up. The synced list's "Share" (images, files) and "Copy" actions
+// (Index.ets) are the reliable path; this is a bonus that works
 // when it works.
 
 import pasteboard from '@ohos.pasteboard';

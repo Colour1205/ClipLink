@@ -403,11 +403,26 @@ public sealed partial class ClipLinkEngine
 
     // An image entry's bytes - PNG, or JPEG/others from phones (decode by
     // content, not by assuming PNG); null if key isn't an image in history.
-    // They never change for a key, so cache what you make of them.
+    // Also a file entry's, when its name says it's a picture (a photo from a
+    // phone arrives as one - see ImageFiles.IsImageName), its bytes are
+    // stored here and it's no bigger than ImageFiles.MaxDecodeBytes; null
+    // otherwise. They never change for a key, so cache what you make of them.
+    // For a file this reads the whole file, so call it off the UI thread.
     public byte[]? GetImageBytes(string key)
     {
         var entry = FindEntry(key);
-        return entry?.Type == "image" ? DecodeImage(entry) : null;
+        if (entry == null) return null;
+        if (entry.Type == "image") return DecodeImage(entry);
+        if (FilePayloadOf(entry) is not FilePayload payload || !ImageFiles.IsImageName(payload.FileName) || !IsStored(payload)) return null;
+        try
+        {
+            string path = fileStore.GetPath(payload.FileHash);
+            return new FileInfo(path).Length <= ImageFiles.MaxDecodeBytes ? File.ReadAllBytes(path) : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     // A local copy of a file or image entry to open with its default app

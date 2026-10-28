@@ -91,6 +91,9 @@ struct SyncedThumbnailView: View {
     var cornerRadius: CGFloat = Theme.smallRadius
     /// Show "couldn't be decoded" (images) or just nothing (image files).
     var showsFailure = true
+    /// Called when the picture can't be decoded, so a card can fall back to
+    /// showing the file's name.
+    var onFailure: (() -> Void)?
 
     @EnvironmentObject private var model: AppModel
     @State private var loaded: UIImage?
@@ -135,6 +138,7 @@ struct SyncedThumbnailView: View {
                 loaded = result
             } else {
                 failed = true
+                onFailure?()
             }
         }
     }

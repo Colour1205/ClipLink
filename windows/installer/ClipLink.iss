@@ -5,6 +5,12 @@
 ; %LOCALAPPDATA%\Programs\ClipLink); the setup offers "all users" too.
 ; Settings, pairings and history live in %APPDATA% / %LOCALAPPDATA% and are
 ; kept when ClipLink is updated or removed.
+;
+; ClipLink's own updater (Settings > Updates) runs the setup like this:
+;   ClipLink-Setup-<ver>.exe /SILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH=1
+; so the file name has to stay ClipLink-Setup-<version>.exe (OutputBaseFilename
+; below), and AppId must never change. /RELAUNCH=1 is this script's own switch
+; (see RelaunchRequested).
 
 #ifndef AppVersion
   #define AppVersion "2.0.1"
@@ -54,6 +60,12 @@ Name: "{autodesktop}\ClipLink"; Filename: "{app}\ClipLink.exe"; Tasks: desktopic
 
 [Run]
 Filename: "{app}\ClipLink.exe"; Description: "Start ClipLink"; Flags: nowait postinstall skipifsilent
+; An update started from inside ClipLink (Settings > Updates) runs this setup
+; silently with /RELAUNCH=1 and wants ClipLink back afterwards. postinstall is
+; what makes it run as the user who started Setup, not as the administrator
+; of an all-users install (runasoriginaluser says so too); skipifnotsilent
+; leaves the wizard's own "Start ClipLink" checkbox as the only one there.
+Filename: "{app}\ClipLink.exe"; Description: "Start ClipLink"; Flags: nowait postinstall skipifnotsilent runasoriginaluser; Check: RelaunchRequested
 
 [UninstallRun]
 ; Takes "Share to ClipLink" out of File Explorer.
@@ -79,6 +91,14 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   QuitRunningClipLink;
   Result := '';
+end;
+
+// ClipLink's updater runs this setup with /RELAUNCH=1 (and /SILENT): the
+// ClipLink it asked to quit above is started again at the end. Without it,
+// a silent install leaves ClipLink stopped, as before.
+function RelaunchRequested: Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
 end;
 
 // "Start ClipLink when I sign in" (Settings) is a Run entry the app made. It's

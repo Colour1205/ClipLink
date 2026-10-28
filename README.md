@@ -56,6 +56,8 @@ ClipLink does not collect anything. Read the [privacy policy](https://cliplink.u
 3. **Sync between devices that are not on the same network**, without needing a VPN such as Tailscale.
 4. **Better handling of large pictures and files**: send them in smaller pieces, and slow down when the other device cannot keep up.
 5. **A rule for when two devices copy at almost the same moment.** Today both copies are kept, in time order, and neither one wins.
+6. **A direct connection between two devices**, with no router in between, like AirDrop, Nearby Share or Wi-Fi Direct. Today the data goes from one device through your Wi-Fi router to the other. It stays inside your network and is encrypted, but both devices have to be on the same network.
+7. **Stay paired when the network changes.** Two paired devices that move together to a new place, such as from home to the office, should still be paired. They should find each other on the new network and connect again without pairing again.
 
 ## For developers
 

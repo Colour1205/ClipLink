@@ -2,6 +2,26 @@ namespace ClipboardDaemon.Storage;
 
 public static class ImageFiles
 {
+    // Image files GDI+ can decode (what a copied file is also put on the
+    // clipboard as a bitmap for).
+    public static readonly HashSet<string> BitmapExtensions = new(StringComparer.OrdinalIgnoreCase) { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff" };
+
+    // The largest picture file worth decoding - to show it, or to put it on
+    // the clipboard as a bitmap (a decoded bitmap is far bigger than the file).
+    public const long MaxDecodeBytes = 50L * 1024 * 1024;
+
+    // Whether a file's name (the sender's, so only a hint) says it's a
+    // picture: those, and the WebP and HEIC a phone sends - which Windows
+    // decodes with its own codecs, if they're installed.
+    public static bool IsImageName(string? fileName)
+    {
+        string extension = Path.GetExtension(fileName ?? "");
+        return BitmapExtensions.Contains(extension)
+            || extension.Equals(".webp", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".heic", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".heif", StringComparison.OrdinalIgnoreCase);
+    }
+
     // From the file's magic bytes - phones send PNG or JPEG, sometimes others.
     public static string Extension(byte[] bytes)
     {

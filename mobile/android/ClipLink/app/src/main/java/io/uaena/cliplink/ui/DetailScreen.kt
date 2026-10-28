@@ -63,7 +63,6 @@ fun DetailScreen(
     onDelete: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val style = typeStyleOf(item)
     val payload = item.filePayload
     val origin = if (item.isOwn) "Sent from this device" else "From ${displayNameOf(item.entry.deviceId, senderName)}"
     // The item's picture, if it has one: an inline image, or the picture of an
@@ -79,6 +78,8 @@ fun DetailScreen(
         ClipboardEntry.TYPE_FILE -> rememberFileThumbnail(item, DETAIL_IMAGE_EDGE)
         else -> null
     }
+    // An image file wears the image glyph once its picture is up, as on its card.
+    val style = typeStyleOf(item, showsPicture = picture != null)
     var menuOpen by remember { mutableStateOf(false) }
     var confirmingDelete by remember { mutableStateOf(false) }
 
