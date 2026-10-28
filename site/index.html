@@ -125,6 +125,7 @@
             <a class="btn primary" data-asset="windows" data-label-ready="Download installer" href="https://github.com/Colour1205/ClipLink/releases">Download installer</a>
           </div>
           <div class="card dl" data-platform="android">
+            <span class="badge">Alpha</span>
             <h3>Android <span class="badge badge-yours" hidden>Your device</span></h3>
             <p class="meta">Android 12 or later</p>
             <p class="meta js-version">v2.0.0 · APK file</p>
@@ -135,9 +136,10 @@
             </div>
           </div>
           <div class="card dl" data-platform="harmonyos">
+            <span class="badge">Release</span>
             <h3>HarmonyOS <span class="badge badge-yours" hidden>Your device</span></h3>
             <p class="meta">HarmonyOS 7</p>
-            <p class="meta">Huawei AppGallery</p>
+            <p class="meta">v2.1.0 · Huawei AppGallery</p>
             <p class="note">Get ClipLink from Huawei AppGallery.</p>
             <a class="btn primary" href="https://appgallery.huawei.com/app/detail?id=io.uaena.cliplink">Get it on AppGallery</a>
           </div>
@@ -172,6 +174,7 @@
         <details><summary>Does my clipboard go through a server?</summary><p>No. Items go straight from one of your paired devices to another. ClipLink has no servers and no accounts.</p></details>
         <details><summary>Does it work away from my home network?</summary><p>On the same network, devices find each other on their own. Elsewhere, you can pair by address, for example over a VPN such as Tailscale, as long as the devices can reach each other.</p></details>
         <details><summary>Why does my phone only sync when the app is open?</summary><p>iOS and HarmonyOS don't let apps keep running in the background, so those phones catch up when you open ClipLink. Android can stay running if you turn that on in settings. Windows runs in the tray, so it syncs all the time.</p></details>
+        <details><summary>How do I update ClipLink?</summary><p>On Windows, open <strong>Settings</strong> in ClipLink and look under <strong>About</strong>: it checks for a newer version and, when you click <strong>Download and install</strong>, installs it and starts ClipLink again, keeping your settings, pairings and history. The other apps don't update themselves: install the newer version the same way you installed the first. See the <a href="privacy.html">privacy policy</a> for what the Windows check sends.</p></details>
         <details><summary>Windows says "Windows protected your PC".</summary><p>The beta installer isn't code-signed yet, so Windows SmartScreen warns about it. Choose <strong>More info</strong>, then <strong>Run anyway</strong>. Code signing for releases is being set up; see the <a href="code-signing-policy.html">code signing policy</a>.</p></details>
         <details><summary>Is it free?</summary><p>Yes. ClipLink is free and open source under the Apache 2.0 licence. The code is on <a href="https://github.com/Colour1205/ClipLink">GitHub</a>.</p></details>
       </div>
