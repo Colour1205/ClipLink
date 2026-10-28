@@ -125,7 +125,8 @@ public sealed partial class SyncedPage : Page
     // When a card's button last ran. The click (or Enter / Space) on a button
     // inside a card also reaches the card, which reports it as the card being
     // invoked - and Copy must not then open the item as well.
-    private long actionTick = long.MinValue;
+    // (Null until one has: a long.MinValue start would overflow the age sum.)
+    private long? actionTick;
 
     // A click on the card itself, or Enter / Space on it. Waits a moment for a
     // button's own Click, which may come either side of this.
@@ -134,7 +135,7 @@ public sealed partial class SyncedPage : Page
         if (args.InvokedItem is not HistoryCard card) return;
         DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal, () =>
         {
-            if (Environment.TickCount64 - actionTick > 500) ShowDetail(card);
+            if (actionTick is not long tick || Environment.TickCount64 - tick > 500) ShowDetail(card);
         });
     }
 
