@@ -202,24 +202,8 @@ public sealed partial class SyncedPage : Page
         detail = card;
         card.PropertyChanged += Detail_PropertyChanged;
 
-        DetailTitle.ItemsSource = new[] { "Synced", card.KindText };
         DetailOrigin.Text = card.Origin;
-        DetailText.Visibility = card.IsImage || card.IsFile ? Visibility.Collapsed : Visibility.Visible;
-        DetailImage.Visibility = card.IsImage ? Visibility.Visible : Visibility.Collapsed;
-        DetailFile.Visibility = card.IsFile ? Visibility.Visible : Visibility.Collapsed;
-        DetailFile.Content = card.IsFile ? card : null;
-        DetailText.Text = "";
-        DetailImage.Source = null;
-        if (card.IsImage)
-        {
-            _ = LoadDetailImageAsync(card);
-        }
-        else if (!card.IsFile)
-        {
-            // All of it - the card only had the first 1000 characters.
-            string text = card.IsText ? host.Engine.GetText(card.Key) ?? card.Text ?? "" : card.Text ?? "";
-            DetailText.Text = text.Length > MaxDetailChars ? text[..MaxDetailChars] : text;
-        }
+        ShowDetailContent(card);
         UpdateDetail();
 
         ListTitle.Visibility = ListSubtitle.Visibility = ViewSwitch.Visibility = Cards.Visibility = PasscodeTip.Visibility = Visibility.Collapsed;
@@ -229,6 +213,32 @@ public sealed partial class SyncedPage : Page
         // Keyboard users land on the first action.
         DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
             () => (DetailCopy.Visibility == Visibility.Visible ? DetailCopy : DetailDelete).Focus(FocusState.Programmatic));
+    }
+
+    // A picture file with no picture to show (its bytes haven't arrived, or
+    // they won't decode) is shown as a file; UpdateDetail swaps the one for
+    // the other as that changes.
+    private void ShowDetailContent(HistoryCard card)
+    {
+        DetailTitle.ItemsSource = new[] { "Synced", card.KindText };
+        bool picture = card.ShowsPicture;
+        bool file = card.IsFile && !picture;
+        DetailText.Visibility = picture || file ? Visibility.Collapsed : Visibility.Visible;
+        DetailImage.Visibility = picture ? Visibility.Visible : Visibility.Collapsed;
+        DetailFile.Visibility = file ? Visibility.Visible : Visibility.Collapsed;
+        DetailFile.Content = file ? card : null;
+        DetailText.Text = "";
+        DetailImage.Source = null;
+        if (picture)
+        {
+            _ = LoadDetailImageAsync(card);
+        }
+        else if (!file)
+        {
+            // All of it - the card only had the first 1000 characters.
+            string text = card.IsText ? host.Engine.GetText(card.Key) ?? card.Text ?? "" : card.Text ?? "";
+            DetailText.Text = text.Length > MaxDetailChars ? text[..MaxDetailChars] : text;
+        }
     }
 
     // Back to the cards.
@@ -259,9 +269,12 @@ public sealed partial class SyncedPage : Page
     {
         if (detail is not { } card) return;
         DetailOrigin.Text = card.Origin;
+        // A picture file's bytes have just arrived, or turned out not to be one.
+        bool picture = card.ShowsPicture;
+        if (card.IsFile && picture != (DetailImage.Visibility == Visibility.Visible)) ShowDetailContent(card);
         DetailCopy.Visibility = card.CanCopy ? Visibility.Visible : Visibility.Collapsed;
         DetailOpen.Visibility = DetailShowInFolder.Visibility = card.CanOpen ? Visibility.Visible : Visibility.Collapsed;
-        DetailFacts.Text = card.IsImage ? card.ImageDetail
+        DetailFacts.Text = picture ? card.ImageDetail
             : card.IsFile ? ""
             : card.IsText ? Format.Count(card.Item.TextLength, "character", "characters")
                 + (card.Item.TextLength > MaxDetailChars ? $" - showing the first {MaxDetailChars:N0}. Copy copies all of it." : "")
@@ -400,7 +413,7 @@ public sealed class HistoryContentSelector : DataTemplateSelector
 
     protected override DataTemplate? SelectTemplateCore(object item) => item switch
     {
-        HistoryCard { IsImage: true } => ImageTemplate,
+        HistoryCard { IsPicture: true } => ImageTemplate,
         HistoryCard { IsFile: true } => FileTemplate,
         _ => TextTemplate,
     };

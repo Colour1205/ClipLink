@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using ClipboardDaemon.Engine;
+using ClipboardDaemon.Storage;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 
@@ -32,11 +33,23 @@ public sealed class HistoryCard : Observable
     public bool IsFile => Item.Type == "file";
     public bool IsLink => IsText && LooksLikeLink(Item.TextPreview);
 
-    public string KindText => IsLink ? "Link" : IsText ? "Text" : IsImage ? "Image" : IsFile ? "File" : "Item";
+    // Shown as a picture: an image entry, or a file whose name says it's one
+    // (a photo from a phone arrives as a file). By the name alone - never by
+    // whether the bytes are here yet: a card's template is picked once, so a
+    // file whose bytes arrive later must not need another.
+    public bool IsPicture => IsImage || (IsFile && ImageFiles.IsImageName(Item.FileName));
+
+    // A picture file with no picture to show - its bytes haven't arrived, or
+    // they won't decode (a HEIC without the codec, a corrupt or huge file) -
+    // is a file like any other: its name is all there is of it.
+    public bool ShowsFileName => IsFile && IsPicture && (!Item.IsAvailable || thumbnailFailed);
+    public bool ShowsPicture => IsPicture && !ShowsFileName;
+
+    public string KindText => IsLink ? "Link" : IsText ? "Text" : ShowsPicture ? "Image" : IsFile ? "File" : "Item";
 
     public Symbol KindSymbol => IsLink ? Symbol.Link
         : IsText ? Symbol.Font
-        : IsImage ? Symbol.Pictures
+        : ShowsPicture ? Symbol.Pictures
         : IsFile ? Symbol.Document
         : Symbol.Help;
 
@@ -81,18 +94,25 @@ public sealed class HistoryCard : Observable
         set
         {
             thumbnail = value;
-            Raise(nameof(Thumbnail), nameof(HasThumbnail), nameof(NoThumbnail), nameof(ImageDetail), nameof(ThumbnailWidth), nameof(ThumbnailHeight), nameof(AspectRatio));
+            Raise(nameof(Thumbnail), nameof(HasThumbnail), nameof(ShowsPlaceholder), nameof(ImageDetail), nameof(ThumbnailWidth), nameof(ThumbnailHeight), nameof(AspectRatio));
         }
     }
 
     public bool HasThumbnail => thumbnail != null;
-    public bool NoThumbnail => thumbnail == null;
+    // The gray box standing in for the picture, while it decodes or if it
+    // can't be (not for a file that is shown as one: its name takes the place).
+    public bool ShowsPlaceholder => thumbnail == null && !ShowsFileName;
 
     private bool thumbnailFailed;
     public bool ThumbnailFailed
     {
         get => thumbnailFailed;
-        set { thumbnailFailed = value; Raise(nameof(ThumbnailFailed), nameof(PlaceholderSymbol), nameof(ImageDetail)); }
+        set
+        {
+            thumbnailFailed = value;
+            Raise(nameof(ThumbnailFailed), nameof(PlaceholderSymbol), nameof(ImageDetail), nameof(ShowsFileName), nameof(ShowsPicture), nameof(ShowsPlaceholder),
+                nameof(KindText), nameof(KindSymbol), nameof(Summary), nameof(AutomationName));
+        }
     }
 
     public Symbol PlaceholderSymbol => thumbnailFailed ? Symbol.Cancel : Symbol.Pictures;
@@ -150,6 +170,7 @@ public sealed class HistoryCard : Observable
         if (item == Item) return;
         Item = item;
         Raise(nameof(Item), nameof(Source), nameof(Summary), nameof(Text), nameof(PreviewText), nameof(GridPreviewText), nameof(FileName), nameof(FileDetail), nameof(ImageDetail),
+            nameof(ShowsFileName), nameof(ShowsPicture), nameof(ShowsPlaceholder), nameof(KindText), nameof(KindSymbol),
             nameof(CanCopy), nameof(CanOpen), nameof(AutomationName), nameof(Origin));
     }
 

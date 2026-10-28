@@ -21,7 +21,7 @@
 
         <DataTemplate x:Key="ImageContent" x:DataType="local:HistoryCard">
             <StackPanel>
-                <Grid HorizontalAlignment="Left">
+                <Grid HorizontalAlignment="Left" Visibility="{x:Bind ShowsPicture, Mode=OneWay}">
                     <!-- Rounded corners: the image is the border's background. -->
                     <Border Width="{x:Bind ThumbnailWidth, Mode=OneWay}" Height="{x:Bind ThumbnailHeight, Mode=OneWay}"
                             CornerRadius="4" BorderThickness="1"
@@ -34,12 +34,17 @@
                     <!-- While an image is decoding, or if it can't be. -->
                     <Border Width="160" Height="90" CornerRadius="4"
                             Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                            Visibility="{x:Bind NoThumbnail, Mode=OneWay}">
+                            Visibility="{x:Bind ShowsPlaceholder, Mode=OneWay}">
                         <SymbolIcon Symbol="{x:Bind PlaceholderSymbol, Mode=OneWay}"
                                     Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
                     </Border>
                 </Grid>
-                <TextBlock Text="{x:Bind ImageDetail, Mode=OneWay}" Style="{StaticResource CaptionSecondary}" Margin="0,8,0,0" />
+                <TextBlock Text="{x:Bind ImageDetail, Mode=OneWay}" Style="{StaticResource CaptionSecondary}" Margin="0,8,0,0"
+                           Visibility="{x:Bind ShowsPicture, Mode=OneWay}" />
+                <!-- A picture file with no picture to show: its name, as any file's. -->
+                <ContentControl Content="{x:Bind}" ContentTemplate="{StaticResource FileContent}"
+                                HorizontalContentAlignment="Stretch" IsTabStop="False"
+                                Visibility="{x:Bind ShowsFileName, Mode=OneWay}" />
             </StackPanel>
         </DataTemplate>
 
@@ -86,10 +91,14 @@
                 </Border>
                 <Border Height="120" CornerRadius="4"
                         Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                        Visibility="{x:Bind NoThumbnail, Mode=OneWay}">
+                        Visibility="{x:Bind ShowsPlaceholder, Mode=OneWay}">
                     <SymbolIcon Symbol="{x:Bind PlaceholderSymbol, Mode=OneWay}"
                                 Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
                 </Border>
+                <!-- A picture file with no picture to show: its name, as any file's. -->
+                <ContentControl Content="{x:Bind}" ContentTemplate="{StaticResource GridFileContent}"
+                                HorizontalContentAlignment="Stretch" IsTabStop="False"
+                                Visibility="{x:Bind ShowsFileName, Mode=OneWay}" />
             </Grid>
         </DataTemplate>
 
