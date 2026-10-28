@@ -23,7 +23,7 @@ enum DebugFixtures {
         s.devices = [
             DeviceRow(
                 deviceId: office, name: "Office PC", trusted: true, connected: true,
-                addresses: ["192.168.1.20", "100.101.102.103"], pairing: false, lastSeen: now, nearby: true,
+                addresses: ["192.168.1.20", "100.101.102.103"], lastSeen: now, nearby: true,
                 blocked: false, connectionAddress: "192.168.1.20",
                 addressDetails: [
                     DeviceAddress(ip: "192.168.1.20", inUse: true, sources: [.heard, .reached, .stored], lastSeen: now),
@@ -32,25 +32,25 @@ enum DebugFixtures {
             ),
             DeviceRow(
                 deviceId: phone, name: "Pixel 9", trusted: true, connected: false,
-                addresses: ["192.168.1.34"], pairing: false, lastSeen: now.addingTimeInterval(-12), nearby: true,
+                addresses: ["192.168.1.34"], lastSeen: now.addingTimeInterval(-12), nearby: true,
                 blocked: false, connectionAddress: nil,
                 addressDetails: [DeviceAddress(ip: "192.168.1.34", inUse: false, sources: [.heard, .stored], lastSeen: now.addingTimeInterval(-12))]
             ),
             DeviceRow(
                 deviceId: laptop, name: "Old Laptop", trusted: true, connected: false,
-                addresses: ["192.168.1.51"], pairing: false, lastSeen: now.addingTimeInterval(-3 * 3600), nearby: false,
+                addresses: ["192.168.1.51"], lastSeen: now.addingTimeInterval(-3 * 3600), nearby: false,
                 blocked: false, connectionAddress: nil,
                 addressDetails: [DeviceAddress(ip: "192.168.1.51", inUse: false, sources: [.stored], lastSeen: nil)]
             ),
             DeviceRow(
                 deviceId: stranger, name: "Guest Tablet", trusted: false, connected: false,
-                addresses: ["192.168.1.88"], pairing: true, lastSeen: now, nearby: true,
+                addresses: ["192.168.1.88"], lastSeen: now, nearby: true,
                 blocked: false, connectionAddress: nil,
                 addressDetails: [DeviceAddress(ip: "192.168.1.88", inUse: false, sources: [.heard], lastSeen: now)]
             ),
             DeviceRow(
                 deviceId: spam, name: "Spammy Phone", trusted: false, connected: false,
-                addresses: [], pairing: false, lastSeen: nil, nearby: false,
+                addresses: [], lastSeen: nil, nearby: false,
                 blocked: true, connectionAddress: nil, addressDetails: []
             ),
         ]
@@ -76,7 +76,7 @@ enum DebugFixtures {
         let isConnected = connected ?? r.connected
         return DeviceRow(
             deviceId: r.deviceId, name: r.name, trusted: trusted ?? r.trusted, connected: isConnected,
-            addresses: r.addresses, pairing: r.pairing, lastSeen: r.lastSeen, nearby: r.nearby,
+            addresses: r.addresses, lastSeen: r.lastSeen, nearby: r.nearby,
             blocked: blocked ?? r.blocked, connectionAddress: isConnected ? r.connectionAddress : nil,
             addressDetails: r.addressDetails.map { DeviceAddress(ip: $0.ip, inUse: isConnected && $0.inUse, sources: $0.sources, lastSeen: $0.lastSeen) }
         )

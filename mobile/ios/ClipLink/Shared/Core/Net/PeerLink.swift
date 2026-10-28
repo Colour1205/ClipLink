@@ -3,24 +3,20 @@ import Foundation
 import Network
 
 /// What a handshake needs to know about this device, sampled once when the
-/// handshake starts (every other platform samples pairing mode the same way).
+/// handshake starts.
 struct HandshakeContext {
     let identity: IdentitySigner
     /// Trusted device IDs at the moment the handshake began.
     let trusted: Set<String>
     let passphraseKey: Data?
-    /// "My pairing screen is open right now": lets an untrusted peer finish
-    /// the handshake so the user can accept or reject it.
-    let pairingOpen: Bool
     /// This device's display name, sent as the handshake's `DeviceName`.
     let deviceName: String?
     /// Devices the user blocked: refused before anything else, whatever they
     /// bring - a matching passcode proof included.
     var blocked: Set<String> = []
     /// An untrusted peer that DIALS US may finish the handshake as a pairing
-    /// request even while our pairing screen is closed: it is held, nothing
-    /// is read or sent, and the user is asked. (When we dial, only our own
-    /// open pairing screen lets an untrusted peer through.)
+    /// request: it is held, nothing is read or sent, and the user is asked.
+    /// (When we dial, the dial's gate has already chosen who to go on with.)
     var acceptRequests = false
 }
 
@@ -34,7 +30,7 @@ enum HandshakeFailure: Error, CustomStringConvertible {
     /// The peer hung up before sending its handshake line.
     case closedEarly
     case malformed
-    /// We refused them: untrusted, no matching passcode, pairing closed.
+    /// We refused them: untrusted, no matching passcode, not taking requests.
     /// `name` is their handshake's `DeviceName` (nil from older builds).
     case refused(peerId: String, name: String?)
     /// A device the user blocked.
@@ -85,8 +81,8 @@ final class PeerLink {
     private(set) var peerDeviceId = ""
     /// The name the peer's handshake gave itself; nil for older builds.
     private(set) var peerName: String?
-    /// False: only here because our pairing screen was open - must be
-    /// accepted by the user before it is registered.
+    /// False: an untrusted device (a pairing request) - must be accepted by
+    /// the user before it is registered.
     private(set) var wasAlreadyTrusted = false
     /// True when THIS handshake's passcode proof is what established trust.
     private(set) var newlyTrustedViaPassphrase = false
@@ -332,8 +328,11 @@ final class PeerLink {
                 PassphraseAuth.verifyProof(key: $0, deviceId: theirs.identityPublicKey, proofBase64: theirs.passphraseProof)
             } == true
             let effectivelyTrusted = alreadyTrusted || passphraseVerified
-            let asksToPair = direction == .inbound && context.acceptRequests
-            guard effectivelyTrusted || context.pairingOpen || asksToPair else {
+            // An untrusted peer finishes as a pairing request when it dialled
+            // us and we take requests, or when we dialled it: the gate has
+            // already chosen it (a pairing dial), nothing more to ask.
+            let becomesRequest = direction == .outbound || context.acceptRequests
+            guard effectivelyTrusted || becomesRequest else {
                 finish(.failure(.refused(peerId: theirs.identityPublicKey, name: theirs.deviceName)))
                 return
             }

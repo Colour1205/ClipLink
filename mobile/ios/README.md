@@ -42,7 +42,7 @@ cd CoreTests && swift test
 
 Runs on the Mac, no simulator: protocol/crypto interop vectors produced by an
 independent implementation (OpenSSL), JSON/timestamp edge cases, and two full
-sync engines talking over real sockets (passcode pairing, QR-style pairing,
+sync engines talking over real sockets (passcode pairing, pairing by address,
 text/image/file sync, history catch-up, background refresh rounds).
 
 Against the **actual Windows engine code** (needs the .NET 10 SDK):
@@ -54,10 +54,9 @@ cd CoreTests && DOTNET=/path/to/dotnet ./run-daemon-interop.sh
 This compiles `windows/ClipLink/Engine` (the engine library the Windows app runs
 in-process) for macOS with only platform shims (DPAPI, WinForms clipboard,
 ports) and runs the iOS engine against it: passcode pairing in both
-tie-breaker directions with and without broadcast, QR-style pairing with
-Accept on both sides through the engine's pairing methods (the harness host
-still takes the old tray pipe commands), text/image/file both ways, echo
-suppression, untrust.
+tie-breaker directions with and without broadcast, pairing by address from
+either side with Accept on both sides (the harness host still takes the old
+tray pipe commands), text/image/file both ways, echo suppression, untrust.
 
 ## Things that will surprise you
 
@@ -150,7 +149,7 @@ platform): a pairing request shows it beside the requester's name, to compare
 with *Me › Fingerprint* on that device.
 
 **Pairing requests.** A device that has never been trusted can ask to pair at
-any time ClipLink is open, not only while the pairing screen is up: the
+any time ClipLink is open: the
 acceptor takes its handshake (nothing is trusted yet) and raises a system alert
 over whatever is on screen - a tab, the pairing sheet, the QR scanner, Quick
 Look - with the requester's name, its fingerprint ("Device AB12·CD34", to
@@ -166,9 +165,11 @@ extension never does. Protections, since anyone on the Wi-Fi can knock: a
 blocked device is refused before anything else, one request per device at a
 time (the first connection wins, like the other platforms), at most 3 waiting,
 and at most 6 new requests per 10 minutes - past that they're dropped without a
-prompt. The other platforms still only list requests while their own pairing
-screen is open, so a request from one of them reaches us any time, but ours
-reaches them only then.
+prompt. A stranger's beacon is never a reason to dial it: a request starts from
+a scanned code, a typed address, or *Trust* on a nearby device in Devices (the
+beacon's fifth field is always `-` and ignored on receipt). Opening the pairing
+screen, pairing by address or code and trusting a device all end any quiet time
+held against ignored or removed devices (`SyncEngine.liftRequestQuiet`).
 
 **Blocking.** A device's ⋯ menu in Devices has *Block Device*: from then on its
 connections, beacons and pairing requests - even with the right passcode or a

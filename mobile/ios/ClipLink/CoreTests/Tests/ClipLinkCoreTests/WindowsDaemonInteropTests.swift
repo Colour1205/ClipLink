@@ -307,13 +307,17 @@ final class WindowsDaemonInteropTests: XCTestCase {
         assertNoRejections(daemon)
     }
 
-    /// The tray's Pairing window flow over the daemon's real IPC: pairing mode
-    /// on both sides, a pairing handshake, and Accept on BOTH devices.
-    func testQRStylePairingWithAcceptOnBothSides() throws {
+    /// Pairing by address over the daemon's real IPC, from either side: the
+    /// stranger's handshake, and Accept on BOTH devices.
+    func testPairByAddressWithAcceptOnBothSides() throws {
         for order in [Order.daemonDials, .iOSDials] {
-            let (daemon, engine) = try start(order: order, passcode: nil, daemonBeaconsReachIOS: order == .iOSDials)
-            XCTAssertNotNil(daemon.ipc("set_pairing_mode", "1"), "IPC reachable")
-            engine.setPairingOpen(true)
+            let (daemon, engine) = try start(order: order, passcode: nil, daemonBeaconsReachIOS: false)
+            if order == .iOSDials {
+                engine.pair(with: "127.0.0.1:\(daemon.tcpPort)") { _ in }
+            } else {
+                wait("iOS listening [\(order)]") { engine.queue.sync { engine.status.listening } }
+                XCTAssertNotNil(daemon.ipc("pair_by_address", "127.0.0.1:\(engine.config.listenPort)"), "IPC reachable")
+            }
 
             wait("iOS shows the pairing prompt [\(order)]") { recorder.pairingRequest?.deviceId == daemon.deviceId }
             var pendingOnDaemon = ""
@@ -329,8 +333,8 @@ final class WindowsDaemonInteropTests: XCTestCase {
             engine.acceptPairing()
             wait("connected [\(order)]") { recorder.connectedCount == 1 }
 
-            engine.sendText("paired via QR flow \(order)")
-            wait("daemon applied [\(order)]") { applied(daemon, text: "paired via QR flow \(order)") }
+            engine.sendText("paired by address \(order)")
+            wait("daemon applied [\(order)]") { applied(daemon, text: "paired by address \(order)") }
             daemon.copyText("hello back \(order)")
             wait("iOS received [\(order)]") { recorder.receivedEntries.contains { $0.0.content == "hello back \(order)" } }
             assertNoRejections(daemon)

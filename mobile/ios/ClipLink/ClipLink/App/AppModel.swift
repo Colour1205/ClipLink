@@ -42,14 +42,15 @@ final class AppModel: ObservableObject {
     /// is gone: Trust still saves the device, and it connects when it next can.
     @Published private(set) var offlineRequest: PairingRequest?
 
-    /// True while the pairing sheet is on screen - that IS pairing mode.
+    /// True while the pairing sheet is on screen.
     @Published var pairingPresented = false {
         didSet {
             guard pairingPresented != oldValue else { return }
-            engine?.setPairingOpen(pairingPresented)
-            // The moment someone expects a request is the moment to ask
-            // whether they may be told about one while ClipLink is closed.
+            // Somebody expects a request now: nothing stays held back, and it
+            // is the moment to ask whether they may be told about one while
+            // ClipLink is closed.
             if pairingPresented {
+                engine?.liftRequestQuiet()
                 #if DEBUG
                 if !usingFixtures { Notifier.requestPairingAuthorizationIfNeeded() }
                 #else
@@ -57,6 +58,7 @@ final class AppModel: ObservableObject {
                 #endif
             }
             if !pairingPresented {
+                engine?.cancelPairingSearch()
                 pairStatus = nil
                 pairInProgress = false
             }
@@ -162,7 +164,6 @@ final class AppModel: ObservableObject {
         // Already in the foreground: bring the new node up like becameActive.
         guard let engine, isActive else { return }
         engine.enterForeground()
-        if pairingPresented { engine.setPairingOpen(true) }
     }
 
     /// The App Group container shared with the Share extension (migrating
@@ -201,9 +202,8 @@ final class AppModel: ObservableObject {
         // The user may have renamed the device in Settings meanwhile.
         engine?.setSystemDeviceName(Self.systemDeviceName)
         engine?.enterForeground()
-        // Pairing mode was switched off for the background: back on if the
-        // pairing sheet is still up.
-        if pairingPresented { engine?.setPairingOpen(true) }
+        // Back with the pairing sheet still up counts as opening it again.
+        if pairingPresented { engine?.liftRequestQuiet() }
 
         #if DEBUG
         // Test hook: `-ClipLinkDebugOpenPairing` opens the pairing sheet at launch.
@@ -245,10 +245,9 @@ final class AppModel: ObservableObject {
             Notifier.notifyPairingRequest(request, name: name(for: request.deviceId))
         }
         changeCountAtBackground = clipboard.changeCount
-        // Pairing mode never outlives the visible screen: nobody can accept a
-        // request from the background, and the grace period below keeps the
-        // node reachable for a while.
-        engine?.setPairingOpen(false)
+        // Stop looking for a scanned code's device: nobody is here to answer
+        // it, and the grace period below keeps the node up for a while.
+        engine?.cancelPairingSearch()
         // Time to finish in-flight transfers and close links cleanly (peers
         // then drop us at once instead of after their heartbeat timeout).
         // Each task is ended exactly once, by its own id: a completion from

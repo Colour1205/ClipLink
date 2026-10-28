@@ -105,9 +105,6 @@ public static class HarnessHost
             case "untrust_device" when payload != null:
                 engine.UntrustDevice(payload);
                 return new IpcResponse(true, "untrusted");
-            case "set_pairing_mode" when payload != null:
-                engine.SetPairingMode(payload == "1");
-                return new IpcResponse(true, engine.PairingMode.ToString());
             case "get_pending_pairing":
                 return new IpcResponse(true, engine.GetPendingPairing()?.DeviceId ?? "");
             case "get_pending_pairing_info":
