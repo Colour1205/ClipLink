@@ -236,26 +236,10 @@ public sealed partial class ClipLinkEngine
 
     // ---- pairing -----------------------------------------------------
 
-    // Pairing mode - mirrors the mobile apps' Pairing screens (HarmonyOS's
-    // Index.ets pairingOpen): turn it on while the pairing UI is showing
-    // and off when it goes. Only while it's on does a handshake from an
-    // untrusted device complete at all (as a PairingRequested prompt - see
-    // PeerConnection.CreateAsync), and this PC's beacon says it's open, so
-    // a device whose own pairing screen is open dials it. ("set_pairing_mode")
-    public bool PairingMode => pairingState.ModeOpen;
-
-    public void SetPairingMode(bool open)
-    {
-        // Pairing mode now only decides what this PC advertises and dials: a
-        // beacon that says its pairing screen is open, and a dial to a
-        // stranger that says the same. A request from a stranger no longer
-        // depends on it - it reaches this PC whenever the app is running - so
-        // closing the pairing UI leaves a request that is waiting alone (it
-        // expires on its own, see IgnoreWhenUnanswered).
-        pairingState.ModeOpen = open;
-        // Somebody is expecting requests now: no device stays held back.
-        if (open) requestQuiet.Clear();
-    }
+    // Ends every quiet time (see RequestQuiet): the app calls it when its
+    // pairing screen opens - somebody is expecting requests now, so no device
+    // stays held back.
+    public void LiftRequestQuiet() => requestQuiet.Clear();
 
     // The pairing request waiting for Accept/Reject, or null. The same thing
     // PairingRequested delivered. ("get_pending_pairing_info")

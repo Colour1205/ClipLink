@@ -56,10 +56,6 @@ public sealed partial class MainWindow : Window
                 AppWindow.Hide();
             }
         };
-        AppWindow.Changed += (_, e) =>
-        {
-            if (e.DidVisibilityChange || e.DidPresenterChange) OnScreenChanged?.Invoke();
-        };
         Activated += (_, e) =>
         {
             isActive = e.WindowActivationState != WindowActivationState.Deactivated;
@@ -106,14 +102,12 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    // On the screen and not minimised: what pairing mode needs to know.
+    // On the screen and not minimised.
     public bool IsOnScreen => AppWindow.IsVisible
         && AppWindow.Presenter is not OverlappedPresenter { State: OverlappedPresenterState.Minimized };
 
     // ... and also the window in front of the others.
     public bool IsInFront => IsOnScreen && isActive;
-
-    public event Action? OnScreenChanged;
 
     // Brings the window to the front, from the tray or a second launch.
     public void Present()

@@ -54,12 +54,11 @@ public record PairingInfo(string PublicKey, string? Address = null, string? Name
 // known at, deduplicated: the LAN address its last beacon came from, then its
 // off-LAN (Tailscale) one - the one its beacon advertises and/or the one
 // stored with its trust (which the latest connection back-fills).
-// PairingOpen: its latest beacon (within the last 30s) says its own pairing
-// screen is open. Blocked: this PC refuses to hear from it - it is listed last,
+// Blocked: this PC refuses to hear from it - it is listed last,
 // and even when silent, so it can be unblocked. ConnectedAddress: the address
 // the live connection runs over, only while there is one - the one address a
 // device card shows (Addresses is the full list, for the detail view).
-public record DeviceListing(string PublicKey, string? Name, bool Trusted, bool Connected, bool PairingOpen, IReadOnlyList<string> Addresses, bool Blocked = false, string? ConnectedAddress = null, bool Waiting = false);
+public record DeviceListing(string PublicKey, string? Name, bool Trusted, bool Connected, IReadOnlyList<string> Addresses, bool Blocked = false, string? ConnectedAddress = null, bool Waiting = false);
 
 // A pairing request waiting for Accept/Reject: the peer's (signature-
 // verified) device id, the display name its handshake or beacon carried
@@ -90,7 +89,7 @@ public enum PairOutcome
     Busy,
     // Reached the device but it refused: it didn't take this PC (it blocked
     // it, or it is an older build whose pairing screen is closed and has no
-    // matching passcode) - or this PC's own pairing mode is off.
+    // matching passcode).
     Refused,
     // Nothing answered at that address (or it didn't finish the handshake).
     Unreachable,

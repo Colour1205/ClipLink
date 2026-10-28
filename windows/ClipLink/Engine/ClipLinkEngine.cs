@@ -43,12 +43,12 @@ public sealed partial class ClipLinkEngine : IDisposable
 
     // GetDevices() changed - a device connected or disconnected, was
     // trusted or removed, appeared on / dropped off the LAN, or changed its
-    // name, addresses or pairing flag. Carries the new list (same as
+    // name or addresses. Carries the new list (same as
     // GetDevices()). Only raised when the list actually differs.
     public event Action<IReadOnlyList<DeviceListing>>? DevicesChanged;
 
-    // A new device wants to pair (only possible while PairingMode is on):
-    // show an Accept/Reject prompt and call AcceptPairing/RejectPairing.
+    // A new device wants to pair: show an Accept/Reject prompt and call
+    // AcceptPairing/RejectPairing.
     public event Action<PendingPairing>? PairingRequested;
 
     // The pending request for this device id was accepted, rejected or
@@ -90,7 +90,7 @@ public sealed partial class ClipLinkEngine : IDisposable
     // and it's shown for an untrusted device, or a trusted one with no
     // stored name yet (nor a live connection's). Name keeps the last known
     // one when a later beacon carries none.
-    private record SeenPeer(string? Name, string LanAddress, string? AdvertisedAddress, bool PairingOpen, DateTime LastSeenUtc);
+    private record SeenPeer(string? Name, string LanAddress, string? AdvertisedAddress, DateTime LastSeenUtc);
 
     // Set once by Start, before anything can use them.
     private string label = DefaultLabel;
@@ -257,7 +257,6 @@ public sealed partial class ClipLinkEngine : IDisposable
             try { tcpListener?.Stop(); } catch (Exception) { }
             if (wasStarted)
             {
-                pairingState.ModeOpen = false;
                 var abandoned = pairingState.TakePending();
                 if (abandoned != null)
                 {
@@ -409,7 +408,6 @@ public sealed partial class ClipLinkEngine : IDisposable
                     ? PassphraseAuth.ComputeProof(passphraseKey, ownId)
                     : null,
                 ownTailscaleAddress,
-                () => pairingState.ModeOpen,
                 () => deviceName.Current,
                 token);
         }
@@ -425,7 +423,7 @@ public sealed partial class ClipLinkEngine : IDisposable
 
     // This handler is async void: an exception escaping it doesn't just
     // end the handler, it crashes the whole app - hence the catch-all.
-    private async void OnPeerDiscovered(string other_device_id, IPAddress sender, int other_port, string? proof, string? peerAddress, bool otherPairingOpen, string? otherName)
+    private async void OnPeerDiscovered(string other_device_id, IPAddress sender, int other_port, string? proof, string? peerAddress, string? otherName)
     {
         try
         {
@@ -443,7 +441,7 @@ public sealed partial class ClipLinkEngine : IDisposable
             // memory only: nothing a beacon says about a name is ever saved
             // (see SeenPeer).
             RememberBeacon(other_device_id,
-                new SeenPeer(otherName, sender.ToString(), peerAddress, otherPairingOpen, DateTime.UtcNow));
+                new SeenPeer(otherName, sender.ToString(), peerAddress, DateTime.UtcNow));
 
             // A blocked device is listed (so it can be unblocked) and that is
             // all: no passcode auto-trust, no dial, no pairing.
@@ -496,21 +494,6 @@ public sealed partial class ClipLinkEngine : IDisposable
                 {
                     connectingTo.TryRemove(other_device_id, out _);
                 }
-            }
-            // Sibling path for UNTRUSTED peers - only attempts a handshake at
-            // all when BOTH this device's own pairing mode is open
-            // (pairingState.ModeOpen) AND the beacon says the sender's is too
-            // (otherPairingOpen) - two independent, live, local "I'm expecting
-            // to pair right now" signals, not just one side's assumption. Same
-            // tie-breaker as above so both sides don't dial each other
-            // simultaneously; the handshake that results is what actually
-            // surfaces the accept/reject prompt (see HandleNewConnection).
-            else if (pairingState.ModeOpen && otherPairingOpen && !isTrusted
-                && !connectionsByDeviceId.ContainsKey(other_device_id) && string.CompareOrdinal(other_device_id, ownId) < 0
-                && pairingState.PendingPeerId == null)
-            {
-                Console.WriteLine($"Discovered pairing candidate {other_device_id} at {other_port}");
-                await PairByAddress(sender.ToString(), other_port);
             }
         }
         catch (Exception ex)
@@ -723,7 +706,7 @@ public sealed partial class ClipLinkEngine : IDisposable
                 {
                     var devices = ListDevices();
                     string signature = string.Join("\n", devices.Select(d =>
-                        $"{d.PublicKey}|{d.Name}|{d.Trusted}|{d.Connected}|{d.PairingOpen}|{string.Join(",", d.Addresses)}"));
+                        $"{d.PublicKey}|{d.Name}|{d.Trusted}|{d.Connected}|{string.Join(",", d.Addresses)}"));
                     if (signature == lastDevicesSignature) return;
                     lastDevicesSignature = signature;
                     Raise(DevicesChanged, devices, nameof(DevicesChanged));
