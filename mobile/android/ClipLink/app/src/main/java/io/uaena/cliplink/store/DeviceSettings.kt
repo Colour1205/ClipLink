@@ -94,6 +94,18 @@ class DeviceSettings(context: Context) {
             prefs.edit().putBoolean(AUTO_CAPTURE_KEY, value).commit()
         }
 
+    /**
+     * The Synced tab's layout, "grid" (the default) or "list": kept so the tab
+     * opens the way it was left. A string, so this class needn't know the UI's
+     * enum; anything unknown reads as the default.
+     */
+    var syncedLayout: String
+        get() = if (prefs.getString(SYNCED_LAYOUT_KEY, "grid") == "list") "list" else "grid"
+        set(value) {
+            // apply(), not commit(): a tap on the toggle shouldn't wait for the disk.
+            prefs.edit().putString(SYNCED_LAYOUT_KEY, value).apply()
+        }
+
     /** Take the color scheme from the wallpaper instead of ClipLink's own palette. */
     var dynamicColor: Boolean
         get() = prefs.getBoolean(DYNAMIC_COLOR_KEY, true)
@@ -108,5 +120,6 @@ class DeviceSettings(context: Context) {
         const val AUTO_APPLY_KEY = "auto_apply"
         const val AUTO_CAPTURE_KEY = "auto_capture"
         const val DYNAMIC_COLOR_KEY = "dynamic_color"
+        const val SYNCED_LAYOUT_KEY = "synced_layout"
     }
 }
