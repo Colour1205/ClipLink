@@ -3760,7 +3760,8 @@ struct Index {
   }
 
   private chipKindFor(item: SyncedItem): string {
-    if (item.type === 'image') return 'image';
+    // A file that is really a picture is an image to look at, like a native one.
+    if (item.type === 'image' || this.imagePreviewUri(item) !== null) return 'image';
     if (item.type === 'file') return 'file';
     if (this.looksLikeOpaqueData(item.preview)) return 'key';
     const t: string = item.preview.trim();
@@ -3839,22 +3840,54 @@ struct Index {
         .objectFit(ImageFit.Cover)
         .autoResize(true)
     } else {
-      Stack() {
-        // White is baked into the chip SVGs rather than applied with
-        // .fillColor(), which does not reach stroke-drawn art (see the
-        // settingsRow note). The chip fill is always a saturated theme
-        // colour, so one fixed white asset is correct.
-        Image(this.typeIcon(this.chipKindFor(item)))
-          .width(size * 0.52)
-          .height(size * 0.52)
-      }
-      .width(size)
-      .height(size)
-      // The chosen theme colour for every type (the glyph carries the
-      // type), so the cards follow the theme picker like everything else.
-      .backgroundColor(this.accent())
-      .borderRadius(size / 3.2)
+      this.typeGlyphTile(item, size)
     }
+  }
+
+  // The solid colored tile with a type's glyph, never a thumbnail - a
+  // picture gets the image glyph (see chipKindFor). Alone, it is what the
+  // grid cards' footer uses (see syncedCardFooter).
+  @Builder
+  typeGlyphTile(item: SyncedItem, size: number) {
+    Stack() {
+      // White is baked into the chip SVGs rather than applied with
+      // .fillColor(), which does not reach stroke-drawn art (see the
+      // settingsRow note). The chip fill is always a saturated theme
+      // colour, so one fixed white asset is correct.
+      Image(this.typeIcon(this.chipKindFor(item)))
+        .width(size * 0.52)
+        .height(size * 0.52)
+    }
+    .width(size)
+    .height(size)
+    // The chosen theme colour for every type (the glyph carries the
+    // type), so the cards follow the theme picker like everything else.
+    .backgroundColor(this.accent())
+    .borderRadius(size / 3.2)
+  }
+
+  // The footer every grid card ends in, whatever it holds - text, link, key,
+  // picture or file: the type's glyph and the time in one row. Only the glyph
+  // differs between kinds. The tile fixes the row's height, so a card is the
+  // same size from its first layout whatever kind it is (see syncedGridCard).
+  @Builder
+  syncedCardFooter(item: SyncedItem) {
+    Row({ space: 6 }) {
+      // The chip tile, shrunk - not a bare Image. The chip SVGs have white
+      // baked in (they normally sit on a saturated tile), and fillColor
+      // cannot retint stroke-drawn art, so drawing one directly onto a
+      // white card left it invisible. Keeping the tile keeps the type
+      // colour legible and matches the list card's language.
+      this.typeGlyphTile(item, 18)
+      Text(item.time)
+        .fontSize(10)
+        .fontColor($r('sys.color.font_secondary'))
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .layoutWeight(1)
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Center)
   }
 
   @Builder
@@ -3863,42 +3896,46 @@ struct Index {
       this.typeChip(item, 44)
 
       Column({ space: 3 }) {
-        if (this.looksLikeOpaqueData(item.preview)) {
-          // Machine noise: label what it is, then show a short fragment
-          // rather than two lines of characters nobody can read. The full
-          // value is still one tap away in the detail view.
-          Text(item.type === 'file' ? $r('app.string.item_file') : $r('app.string.item_encoded_data'))
-            .fontSize(14)
-            .fontColor($r('sys.color.font_primary'))
-            .fontWeight(FontWeight.Medium)
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(item.preview.slice(0, 24))
-            .fontSize(11)
-            .fontColor($r('sys.color.font_tertiary'))
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .wordBreak(WordBreak.BREAK_ALL)
-        } else {
-          Text(this.cardBodyText(item))
-            .fontSize(14)
-            // font_primary, not the type accent - a themed token that
-            // inverts with the background instead of a fixed accent that
-            // could land the same color as whatever is behind it.
-            .fontColor($r('sys.color.font_primary'))
-            .fontWeight(FontWeight.Medium)
-            // Grid cells are narrow but tall, so 2 lines truncated almost
-            // every note to an ellipsis. Show the body instead, capped so
-            // one long note can't grow a cell past itemConstraintSize.
-            .maxLines(this.syncedViewMode === 'list' ? 2 : 8)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            // BREAK_WORD (the default) for prose - BREAK_ALL here was
-            // splitting ordinary words mid-character ("bro/wn fox",
-            // "develo/per.huawei"). The unbreakable-blob case that
-            // originally motivated BREAK_ALL no longer reaches this
-            // branch: looksLikeOpaqueData catches it above and renders a
-            // short labeled fragment instead.
-            .wordBreak(WordBreak.BREAK_WORD)
+        // A picture is its own content (the thumbnail beside it), so no
+        // name or caption - a file with nothing to preview keeps its name.
+        if (this.chipKindFor(item) !== 'image') {
+          if (this.looksLikeOpaqueData(item.preview)) {
+            // Machine noise: label what it is, then show a short fragment
+            // rather than two lines of characters nobody can read. The full
+            // value is still one tap away in the detail view.
+            Text(item.type === 'file' ? $r('app.string.item_file') : $r('app.string.item_encoded_data'))
+              .fontSize(14)
+              .fontColor($r('sys.color.font_primary'))
+              .fontWeight(FontWeight.Medium)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(item.preview.slice(0, 24))
+              .fontSize(11)
+              .fontColor($r('sys.color.font_tertiary'))
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .wordBreak(WordBreak.BREAK_ALL)
+          } else {
+            Text(this.cardBodyText(item))
+              .fontSize(14)
+              // font_primary, not the type accent - a themed token that
+              // inverts with the background instead of a fixed accent that
+              // could land the same color as whatever is behind it.
+              .fontColor($r('sys.color.font_primary'))
+              .fontWeight(FontWeight.Medium)
+              // Grid cells are narrow but tall, so 2 lines truncated almost
+              // every note to an ellipsis. Show the body instead, capped so
+              // one long note can't grow a cell past itemConstraintSize.
+              .maxLines(this.syncedViewMode === 'list' ? 2 : 8)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              // BREAK_WORD (the default) for prose - BREAK_ALL here was
+              // splitting ordinary words mid-character ("bro/wn fox",
+              // "develo/per.huawei"). The unbreakable-blob case that
+              // originally motivated BREAK_ALL no longer reaches this
+              // branch: looksLikeOpaqueData catches it above and renders a
+              // short labeled fragment instead.
+              .wordBreak(WordBreak.BREAK_WORD)
+          }
         }
         // This builder is ALSO the grid fallback for every non-image item
         // (see syncedGridCard), where a half-width cell can't fit
@@ -4031,22 +4068,7 @@ struct Index {
           .width('100%')
       }
 
-      Row({ space: 6 }) {
-        // The chip tile, shrunk - not a bare Image. The chip SVGs have white
-        // baked in (they normally sit on a saturated tile), and fillColor
-        // cannot retint stroke-drawn art, so drawing one directly onto a
-        // white card left it invisible. Keeping the tile keeps the type
-        // colour legible and matches the list card's language.
-        this.typeChip(item, 18)
-        Text(item.time)
-          .fontSize(10)
-          .fontColor($r('sys.color.font_secondary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
+      this.syncedCardFooter(item)
     }
     .width('100%')
     .padding(12)
@@ -4083,7 +4105,7 @@ struct Index {
     if (item.type !== 'image' && this.imagePreviewUri(item) === null) {
       this.syncedGridTextCard(item)
     } else {
-      Column({ space: 6 }) {
+      Column({ space: 8 }) {
         Image(item.type === 'image' ? `data:image/png;base64,${item.content}` : this.imagePreviewUri(item) as string)
           .width('100%')
           // The picture's own proportions, whole: the card is as tall as the
@@ -4094,26 +4116,18 @@ struct Index {
           .objectFit(ImageFit.Contain)
           .autoResize(true) // see typeChip
           .borderRadius(12)
-        Text(this.looksLikeOpaqueData(item.preview) ? $r('app.string.item_image') : this.previewLabel(item))
-          .fontSize(13)
-          .fontColor($r('sys.color.font_primary'))
-          .fontWeight(FontWeight.Medium)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          // See syncedItemCard's identical comment - wordBreak is what
-          // actually lets textOverflow truncate an unbroken blob instead
-          // of it painting past the card at full width.
-          .wordBreak(WordBreak.BREAK_ALL)
-          .padding({ left: 4, right: 4 })
-        // Time only here - the full "time · source" byline does not fit a
-        // half-width grid cell and truncated to a meaningless "· ...".
-        // The source is still on the list card and in the detail view.
-        Text(item.time)
-          .fontSize(10)
-          .fontColor($r('sys.color.font_secondary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .padding({ left: 4, right: 4, bottom: 4 })
+        // The picture is the content, so no name or caption under it - a file
+        // with nothing to preview keeps its name (see syncedGridTextCard).
+        // The standard footer, time only: the full "time · source" byline
+        // does not fit a half-width grid cell and truncated to a meaningless
+        // "· ...". The source is still on the list card and in the detail
+        // view. The 4 of padding on top of the card's 8 puts the glyph where
+        // the text card's 12 does.
+        Row() {
+          this.syncedCardFooter(item)
+        }
+        .width('100%')
+        .padding({ left: 4, right: 4, bottom: 4 })
       }
       .width('100%')
       .padding(8)
