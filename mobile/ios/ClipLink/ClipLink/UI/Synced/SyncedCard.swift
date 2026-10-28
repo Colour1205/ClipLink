@@ -76,7 +76,6 @@ struct SyncedCard: View {
             SyncedThumbnailView(
                 item: item,
                 maxPixel: compact ? 480 : 900,
-                maxHeight: compact ? 260 : 340,
                 placeholderHeight: Self.picturePlaceholderHeight(compact: compact)
             )
         case .file:
@@ -115,7 +114,6 @@ struct SyncedCard: View {
                 SyncedThumbnailView(
                     item: item,
                     maxPixel: compact ? 480 : 900,
-                    maxHeight: compact ? 220 : 300,
                     placeholderHeight: Self.picturePlaceholderHeight(compact: compact),
                     showsFailure: false
                 )
