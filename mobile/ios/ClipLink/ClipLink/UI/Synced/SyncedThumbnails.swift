@@ -77,12 +77,16 @@ final class SyncedThumbnailCache: @unchecked Sendable {
     }
 }
 
-/// A card's picture: full width, natural aspect ratio up to `maxHeight`
-/// (then cropped to fill), with a placeholder while it decodes.
+/// A card's picture: full width and as tall as the picture is, whole - never
+/// cropped. One taller than `maxHeightToWidth` times its width (a very long
+/// screenshot) gets a box of that height and is fitted into it. A placeholder
+/// shows while it decodes.
 struct SyncedThumbnailView: View {
+    /// The tallest box, as a multiple of the card's width.
+    static let maxHeightToWidth: CGFloat = 3
+
     let item: SyncedItem
     let maxPixel: CGFloat
-    let maxHeight: CGFloat
     let placeholderHeight: CGFloat
     var cornerRadius: CGFloat = Theme.smallRadius
     /// Show "couldn't be decoded" (images) or just nothing (image files).
@@ -98,9 +102,12 @@ struct SyncedThumbnailView: View {
         Group {
             if let image {
                 Color.clear
-                    .aspectRatio(max(image.size.width, 1) / max(image.size.height, 1), contentMode: .fit)
-                    .frame(maxWidth: .infinity, maxHeight: maxHeight)
-                    .overlay(Image(uiImage: image).resizable().scaledToFill())
+                    .aspectRatio(
+                        max(max(image.size.width, 1) / max(image.size.height, 1), 1 / Self.maxHeightToWidth),
+                        contentMode: .fit
+                    )
+                    .frame(maxWidth: .infinity)
+                    .overlay(Image(uiImage: image).resizable().scaledToFit())
                     .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                     .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                     .accessibilityElement()
