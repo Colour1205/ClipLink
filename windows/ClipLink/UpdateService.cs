@@ -18,6 +18,8 @@ internal sealed class UpdateService : IDisposable
     // A check that couldn't reach GitHub at all (no network yet at sign-in,
     // say) doesn't count: it is tried again after this, not tomorrow.
     private static readonly TimeSpan RetryAfterNoAnswer = TimeSpan.FromHours(1);
+    // The timer ticked while a check or a download of the user's was going on.
+    private static readonly TimeSpan RetryWhileBusy = TimeSpan.FromMinutes(1);
 
     private readonly DispatcherQueue dispatcher;
     private readonly AppOptions options;
@@ -109,13 +111,22 @@ internal sealed class UpdateService : IDisposable
             // The first time round, and quietly: what earlier updates left in %TEMP%.
             if (!State.IsBusy && runningInstaller == null) _ = Task.Run(() => UpdateFolder.Clear(UpdateFolder.DefaultPath));
 
-            if (AutomaticChecksAllowed && !State.IsBusy)
+            if (AutomaticChecksAllowed)
             {
-                // The first look after start waits for the startup delay and
-                // is due only if a day has passed since the last answer.
-                TimeSpan due = DueIn();
-                if (due > TimeSpan.Zero) next = due;
-                else if (!await CheckCoreAsync()) next = RetryAfterNoAnswer;
+                if (State.IsBusy)
+                {
+                    // (Not DueIn(): that is ~0 once a check is due, and the timer
+                    // would tick every 100 ms until this one ends.)
+                    next = RetryWhileBusy;
+                }
+                else
+                {
+                    // The first look after start waits for the startup delay and
+                    // is due only if a day has passed since the last answer.
+                    TimeSpan due = DueIn();
+                    if (due > TimeSpan.Zero) next = due;
+                    else if (!await CheckCoreAsync()) next = RetryAfterNoAnswer;
+                }
             }
         }
         catch (Exception ex)
@@ -181,7 +192,8 @@ internal sealed class UpdateService : IDisposable
         {
             LogFailure("check", ex);
             if (ex.Kind != UpdateFailure.Network) RememberCheck();
-            Fail($"Couldn't check for updates. {ex.Message}");
+            // (The message says what went wrong; "Couldn't check..." in front would say it twice.)
+            Fail(ex.Message);
             return ex.Kind != UpdateFailure.Network;
         }
         catch (Exception ex)
@@ -233,8 +245,19 @@ internal sealed class UpdateService : IDisposable
             var process = await Task.Run(() => InstallerLauncher.Start(path), CancellationToken.None);
             runningInstaller = installer;
             installer = null;
+            // The handler first, then the events: an installer that ends at once
+            // must not leave this on "Installing" for good.
+            bool reported = false;
+            void OnExited()
+            {
+                // (The event and the look below can find the same exit.)
+                if (reported) return;
+                reported = true;
+                OnInstallerExited(process);
+            }
+            process.Exited += (_, _) => dispatcher.TryEnqueue(OnExited);
             process.EnableRaisingEvents = true;
-            process.Exited += (_, _) => dispatcher.TryEnqueue(() => OnInstallerExited(process));
+            if (process.HasExited) OnExited();
         }
         catch (OperationCanceledException)
         {

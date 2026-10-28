@@ -20,10 +20,14 @@ public sealed partial class SettingsPage : Page
 {
     private readonly EngineHost host = App.Host;
     private bool loadingToggle;
-    // An update button was used: when the one with the focus goes away
-    // (Check -> Cancel, Download -> Retry...), the focus moves to the next
-    // one that's there instead of being lost.
+    // The update button that had the focus went away (Check -> Cancel,
+    // Download -> Retry...): the focus moves to the next one that's there
+    // instead of being lost - unless the user has moved it elsewhere meanwhile.
     private bool restoreUpdateFocus;
+    // Where WinUI left the focus when the button went away (on the next
+    // control that can have it): as long as it is still there, the user
+    // hasn't moved it.
+    private object? focusLeftAt;
     private UpdatePhase announcedPhase;
 
     public SettingsPage()
@@ -358,7 +362,9 @@ public sealed partial class SettingsPage : Page
         };
         UpdateCard.Description = description;
 
-        WhatsNewButton.Visibility = Show(phase == UpdatePhase.Available);
+        var focused = FocusedUpdateButton();
+        // (Without a checksum, "Open download page" is the one: "What's new" would open the same page.)
+        WhatsNewButton.Visibility = Show(phase == UpdatePhase.Available && canInstall);
         CheckUpdateButton.Visibility = Show(phase is UpdatePhase.Idle or UpdatePhase.UpToDate or UpdatePhase.Checking);
         CheckUpdateButton.IsEnabled = phase != UpdatePhase.Checking;
         InstallUpdateButton.Visibility = Show(phase == UpdatePhase.Available && canInstall);
@@ -368,7 +374,14 @@ public sealed partial class SettingsPage : Page
         AutomationProperties.SetName(WhatsNewButton, $"What's new in version {version}");
         ShowUpdateProgress();
 
+        if (focused != null && (focused.Visibility != Visibility.Visible || !focused.IsEnabled))
+        {
+            restoreUpdateFocus = true;
+            focusLeftAt = FocusedElement();
+        }
         if (restoreUpdateFocus) FocusAnUpdateButton();
+        // (While something is going on there may be no button yet; once it has settled, there is no more waiting.)
+        if (!state.IsBusy) restoreUpdateFocus = false;
         if (phase != announcedPhase)
         {
             announcedPhase = phase;
@@ -397,11 +410,28 @@ public sealed partial class SettingsPage : Page
 
     private static Visibility Show(bool visible) => visible ? Visibility.Visible : Visibility.Collapsed;
 
-    // The first update button that's there, in the order of what the user
-    // most likely wants next.
+    // In the order of what the user most likely wants next.
+    private Control[] UpdateButtons() =>
+        new Control[] { InstallUpdateButton, RetryUpdateButton, CancelUpdateButton, CheckUpdateButton, DownloadPageButton, WhatsNewButton };
+
+    private object? FocusedElement() => XamlRoot == null ? null : FocusManager.GetFocusedElement(XamlRoot);
+
+    private bool IsUpdateButton(object? element) => UpdateButtons().Any(button => ReferenceEquals(button, element));
+
+    // The update button that has the focus, if one does.
+    private Control? FocusedUpdateButton() => FocusedElement() is Control focused && IsUpdateButton(focused) ? focused : null;
+
+    // The first update button that's there.
     private void FocusAnUpdateButton()
     {
-        foreach (var button in new Control[] { InstallUpdateButton, RetryUpdateButton, CancelUpdateButton, CheckUpdateButton, DownloadPageButton })
+        // Not taken from where the user has gone meanwhile (another control, a dialog).
+        object? there = FocusedElement();
+        if (!ReferenceEquals(there, focusLeftAt) && !IsUpdateButton(there))
+        {
+            restoreUpdateFocus = false;
+            return;
+        }
+        foreach (var button in UpdateButtons())
         {
             if (button.Visibility != Visibility.Visible || !button.IsEnabled) continue;
             button.Focus(FocusState.Programmatic);
@@ -412,26 +442,22 @@ public sealed partial class SettingsPage : Page
 
     private async void CheckUpdate_Click(object sender, RoutedEventArgs e)
     {
-        restoreUpdateFocus = true;
         await App.Updates.CheckAsync();
     }
 
     private async void InstallUpdate_Click(object sender, RoutedEventArgs e)
     {
-        restoreUpdateFocus = true;
         await App.Updates.InstallAsync();
     }
 
     private void CancelUpdate_Click(object sender, RoutedEventArgs e)
     {
-        restoreUpdateFocus = true;
         App.Updates.Cancel();
     }
 
     // Again whatever failed: the check, or the download and install.
     private async void RetryUpdate_Click(object sender, RoutedEventArgs e)
     {
-        restoreUpdateFocus = true;
         if (App.Updates.State.FailedToInstall) await App.Updates.InstallAsync();
         else await App.Updates.CheckAsync();
     }
