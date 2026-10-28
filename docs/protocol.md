@@ -45,7 +45,7 @@ All four apps (Windows, Android, HarmonyOS and iOS) follow this page, which is w
 **Beacons.** Each device sends a beacon by UDP broadcast to port 49000. The Windows app sends one every 2 seconds. The beacon is one line of text, with fields separated by colons:
 
 ```
-{tcpPort}:{deviceId}:{proof|-}:{address|-}:{pairing 1|-}:{name|-}
+{tcpPort}:{deviceId}:{proof|-}:{address|-}:-:{name|-}
 ```
 
 | Position | Field | What it holds |
@@ -54,11 +54,12 @@ All four apps (Windows, Android, HarmonyOS and iOS) follow this page, which is w
 | 1 | `deviceId` | This device's public key (Base64) |
 | 2 | `proof` | The passcode proof, or `-` if no passcode is set |
 | 3 | `address` | This device's own address outside the local network (a Tailscale address), or `-` |
-| 4 | `pairing` | `1` while this device's pairing screen is open, otherwise `-` |
+| 4 | reserved | Always `-`. Receivers ignore it. Older builds wrote `1` here while their pairing screen was open |
 | 5 | `name` | The device name, as Base64 of its text (with `=` padding), or `-` if not known |
 
 - A beacon never contains clipboard content.
-- A sender always writes all six fields. The Base64 alphabet has no colon, so splitting on `:` is safe.
+- A sender always writes all six fields, with `-` in position 4. The Base64 alphabet has no colon, so splitting on `:` is safe.
+- A receiver ignores position 4 whatever it holds, so older builds (which may send `1`) and newer ones still hear each other.
 - A receiver may get fewer than six. A missing, empty or `-` name, bad Base64 or bad text all mean "name not known". A bad name never makes the receiver throw the whole beacon away.
 - Nobody checks a beacon, so anyone on the network can send one. The name in a beacon is only shown, and never saved. See [Device names](#device-names).
 
@@ -71,6 +72,8 @@ All four apps (Windows, Android, HarmonyOS and iOS) follow this page, which is w
 **The connection.** Devices talk over TCP on port 49000.
 
 **Who connects to whom.** Only one of two devices opens the connection: the one whose device id sorts after the other's. That way the two never open two connections at once.
+
+**Who a device dials.** A device dials a device it trusts, or an address the user gave it (typed in, or in a pairing code). It never dials a stranger just because it heard its beacon. A stranger can still dial in at any time, and is held for its user (see Refusals below).
 
 **Trust can be one-sided.** A device you have just trusted may not trust you yet. If its id sorts higher, it would wait for you to connect while you wait for it, and your pairing request would never arrive. So a trusted device that has not connected 8 seconds after it was first heard is connected to anyway, whatever the order, and again every 30 seconds while it stays unconnected. A device that already trusts you will have connected long before, so this does nothing there.
 
@@ -99,7 +102,7 @@ An acceptor writes its own handshake first and then reads the connecting device'
 **Refusals.**
 
 - A device that has blocked your key reads your handshake, closes the connection and tells you nothing. To you it looks like a connection that came up and dropped at once, the same as a device that has stopped trusting you.
-- A stranger that is not blocked is held for its user (see [security](security.md)). You see nothing until it is trusted, or the request is ignored or runs out.
+- A stranger that is not blocked is held for its user, at any time while the app is running (see [security](security.md)). You see nothing until it is trusted, or the request is ignored or runs out.
 
 **If a handshake does not arrive.** A connection that never sends its handshake is closed after 10 seconds (15 on Windows), so one stranger cannot keep a connection open.
 

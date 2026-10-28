@@ -40,7 +40,7 @@ A pairing request can come from any device on the network at any time while the 
 
 ## Talking to a peer
 
-- **Presence beacons** (UDP broadcast) carry the device's id, name and port, its Tailscale address if one is set, a passcode proof if a passcode is set, and whether its pairing screen is open. They never contain clipboard content. They are not authenticated, so a name in a beacon is only shown, never saved.
+- **Presence beacons** (UDP broadcast) carry the device's id, name and port, its Tailscale address if one is set, and a passcode proof if a passcode is set. They never contain clipboard content. They are not authenticated, so a name in a beacon is only shown, never saved.
 - **The connection** is TCP. Each side sends a handshake first: a fresh P-256 key made for this connection, signed with the device's long-term key. Each side checks the other's signature and that the other is trusted (or is a pairing request). The two fresh keys give a shared secret, and its SHA-256 is the session key. So a stolen long-term key cannot decrypt old sessions, and someone in the middle cannot swap in their own key without the real private key.
 - **Everything after the handshake** is AES-256-GCM, with a random 12-byte nonce and a 16-byte tag on each message. A message that fails to decrypt ends the connection. Each side remembers the nonces it sent until the connection has proved itself, and ends the connection if one comes back to it: this stops a device from being tricked into talking to itself or into repeating a replayed handshake.
 - **Entries are signed.** Each clipboard entry is signed by the device that made it (ECDSA P-256 over its content, type, device id and time). A device only accepts an entry whose signature is valid and whose signer is trusted.
