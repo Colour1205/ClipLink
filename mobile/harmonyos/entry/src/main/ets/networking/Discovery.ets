@@ -19,6 +19,8 @@ import { normalizeDeviceName } from '../identity/DeviceName';
 const PORT = 49000;
 const BROADCAST_ADDRESS = '255.255.255.255';
 const SEND_INTERVAL_MS = 2000;
+// The two extra beacons after the first, from the moment discovery is up.
+const FOLLOW_UP_MS: number[] = [300, 900];
 // Standard Base64 with padding - what every platform's name field uses.
 const BASE64_PATTERN = new RegExp('^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$');
 
@@ -89,6 +91,13 @@ export class Discovery {
   private peerCallback: ((beacon: PeerBeacon) => void) | null = null;
   private errorCallback: ((context: string, error: BusinessError) => void) | null = null;
   private decoder = util.TextDecoder.create('utf-8');
+  // start() and stop() run one at a time, in the order they were asked for.
+  // A cold start asks for a start and, within moments, onPageShow asks for a
+  // restart: run side by side they bind the fixed port twice, and the loser
+  // fails with EADDRINUSE and has to wait to try again.
+  private turn: Promise<void> = Promise.resolve();
+  // Sends one beacon now, for as long as the socket it belongs to is up.
+  private sendNow: (() => void) | null = null;
 
   onPeerDiscovered(callback: (beacon: PeerBeacon) => void): void {
     this.peerCallback = callback;
@@ -107,7 +116,37 @@ export class Discovery {
   // screen opening/closing, or the device renamed on the Me screen) and must
   // take effect without a restart, same reasoning as Discovery.cs's own
   // getProof callback.
-  async start(deviceId: string, tcpPort: number, getProof: () => string | null, getOwnAddress: () => string | null, getPairingOpen: () => boolean, getOwnName: () => string | null): Promise<void> {
+  start(deviceId: string, tcpPort: number, getProof: () => string | null, getOwnAddress: () => string | null, getPairingOpen: () => boolean, getOwnName: () => string | null): Promise<void> {
+    const run: Promise<void> = this.turn.then(() => this.begin(deviceId, tcpPort, getProof, getOwnAddress, getPairingOpen, getOwnName));
+    // The caller gets the failure; the next turn starts either way.
+    this.turn = run.catch((): void => { /* reported to the caller */ });
+    return run;
+  }
+
+  // Awaits the socket close instead of firing it off. A caller that stops
+  // and immediately restarts discovery (see Index.ets's onPageShow) would
+  // otherwise race the old socket's release and get EADDRINUSE from the
+  // new bind on the same fixed port - which killed discovery for the rest
+  // of the session, because the failed start was never retried.
+  stop(): Promise<void> {
+    const run: Promise<void> = this.turn.then(() => this.end());
+    this.turn = run.catch((): void => { /* nothing to report */ });
+    return run;
+  }
+
+  // One beacon right now, if discovery is up: a device that just came into
+  // view (see Index.ets's onPageShow) says so at once instead of at the next tick.
+  beaconNow(): void {
+    this.sendNow?.();
+  }
+
+  private async begin(deviceId: string, tcpPort: number, getProof: () => string | null, getOwnAddress: () => string | null, getPairingOpen: () => boolean, getOwnName: () => string | null): Promise<void> {
+    if (this.udp !== null) {
+      // Already up (a second start asked for just after the first): say so
+      // again at once, rather than binding the port a second time.
+      this.beaconNow();
+      return;
+    }
     const udp = socket.constructUDPSocketInstance();
     this.udp = udp;
 
@@ -133,10 +172,19 @@ export class Discovery {
       await udp.setExtraOptions({ broadcast: true });
     } catch (e) {
       this.errorCallback?.('bind/setExtraOptions', e as BusinessError);
+      // Not left looking "up": the next start must bind again.
+      this.udp = null;
+      try {
+        await udp.close();
+      } catch (closeError) {
+        // never opened - fine
+      }
       throw e as Error;
     }
 
-    this.sendTimerId = setInterval(() => {
+    const send = (): void => {
+      // A beacon after a stop (a late follow-up below) is not sent.
+      if (this.udp !== udp) return;
       const proof = getProof() ?? '-';
       const addr = getOwnAddress() ?? '-';
       // Always sent, even as "-", so the name is always the 6th field.
@@ -147,19 +195,23 @@ export class Discovery {
         .catch((e: BusinessError) => {
           this.errorCallback?.('send', e);
         });
-    }, SEND_INTERVAL_MS);
+    };
+    this.sendNow = send;
+    // At once - the other devices dial a device they hear, so waiting for
+    // the first tick would put 2 s on every start - and twice more soon
+    // after: Wi-Fi coming out of power save can drop the very first broadcast.
+    send();
+    setTimeout(send, FOLLOW_UP_MS[0]);
+    setTimeout(send, FOLLOW_UP_MS[1]);
+    this.sendTimerId = setInterval(send, SEND_INTERVAL_MS);
   }
 
-  // Awaits the socket close instead of firing it off. A caller that stops
-  // and immediately restarts discovery (see Index.ets's onPageShow) would
-  // otherwise race the old socket's release and get EADDRINUSE from the
-  // new bind on the same fixed port - which killed discovery for the rest
-  // of the session, because the failed start was never retried.
-  async stop(): Promise<void> {
+  private async end(): Promise<void> {
     if (this.sendTimerId !== -1) {
       clearInterval(this.sendTimerId);
       this.sendTimerId = -1;
     }
+    this.sendNow = null;
     const udp = this.udp;
     this.udp = null;
     if (udp !== null) {
