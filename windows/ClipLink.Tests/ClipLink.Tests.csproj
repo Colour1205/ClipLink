@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Unit tests for the parts of ClipLink that are plain C#: today the
+       updater (ClipLink\Updates). Run with `dotnet test windows\ClipLink.Tests`.
+       ClipLink.csproj is a WinUI exe, which a test project can't sensibly
+       reference, so the files are linked in instead - which is also why
+       ClipLink\Updates must stay free of WinUI. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>ClipLink.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\ClipLink\Updates\*.cs" Link="Updates\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>
