@@ -75,13 +75,14 @@
 
         <DataTemplate x:Key="GridImageContent" x:DataType="local:HistoryCard">
             <Grid>
-                <!-- As wide as the card, as high as the image (a very tall
-                     one cropped at 320). -->
-                <Border CornerRadius="4" BorderThickness="1" MaxHeight="320"
+                <!-- As wide as the card, as high as the image, whole (the
+                     height is set in code; a very tall one is fitted into
+                     a capped box, never cropped). -->
+                <Border CornerRadius="4" BorderThickness="1"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                         Visibility="{x:Bind HasThumbnail, Mode=OneWay}"
                         SizeChanged="GridThumb_SizeChanged">
-                    <Image Source="{x:Bind Thumbnail, Mode=OneWay}" Stretch="UniformToFill" />
+                    <Image Source="{x:Bind Thumbnail, Mode=OneWay}" Stretch="Uniform" />
                 </Border>
                 <Border Height="120" CornerRadius="4"
                         Background="{ThemeResource SubtleFillColorSecondaryBrush}"

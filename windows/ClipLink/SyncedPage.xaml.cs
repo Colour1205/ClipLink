@@ -104,12 +104,17 @@ public sealed partial class SyncedPage : Page
         UpdatePasscodeTip();
     }
 
-    // The grid's thumbnail: as wide as the card, as high as the image (a
-    // very tall one cropped at the border's MaxHeight, like the phones' grid).
+    // The grid's thumbnail: as wide as the card, as high as the image is, so
+    // the whole picture shows. One taller than 3 times its width gets a box
+    // of that height and is fitted into it, never cropped.
+    private const double MaxThumbRatio = 3;
+
     private void GridThumb_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (sender is not Border { DataContext: HistoryCard { AspectRatio: > 0 } card } border) return;
-        double height = Math.Min(border.MaxHeight, Math.Round(e.NewSize.Width * card.AspectRatio));
+        // (The border's 1 px line is outside the picture, on both sides.)
+        double inner = Math.Max(0, e.NewSize.Width - 2);
+        double height = Math.Round(inner * Math.Min(card.AspectRatio, MaxThumbRatio)) + 2;
         if (double.IsNaN(border.Height) || Math.Abs(border.Height - height) > 0.5) border.Height = height;
     }
 
