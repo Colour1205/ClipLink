@@ -4973,8 +4973,13 @@ struct Index {
         // itemConstraintSize applies a hard constraintSize to every
         // FlowItem directly (not a nested grandchild), so no single
         // item's post-reflow box can ever exceed this regardless of what
-        // its content does.
-        .itemConstraintSize({ maxHeight: 320 })
+        // its content does. The bound has to clear the tallest card that is
+        // allowed: a picture 3 times as tall as it is wide (see
+        // syncedGridCard) in the widest column (about 280 vp, 2 columns at
+        // the 600 vp split width) is about 3 x 264 + 46 of padding, gap and
+        // footer. A phone screenshot (about 2.2 : 1) in the 2-column phone
+        // grid already passed the old 320 and had its footer cut off.
+        .itemConstraintSize({ maxHeight: 840 })
         .padding({ left: 16, right: 16 })
         // Same contentStartOffset/contentEndOffset treatment as the List
         // branch. An earlier revision claimed these were "List-only" after
