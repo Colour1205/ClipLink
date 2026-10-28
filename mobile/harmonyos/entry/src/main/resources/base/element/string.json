@@ -330,7 +330,7 @@
     },
     {
       "name": "outcome_refused",
-      "value": "%1$s answered but didn't accept this device. Set the same passcode on both, or finish any pairing request waiting on that device, then try again."
+      "value": "%1$s answered but didn't accept this device. It may have blocked it, be holding its requests back for a while, or be busy with another request. Try again in a couple of minutes, or open ClipLink there and tap Trust on this device."
     },
     {
       "name": "outcome_silent",
@@ -514,7 +514,7 @@
     },
     {
       "name": "pairing_intro_title",
-      "value": "Scan its code, or trust it from the list."
+      "value": "Scan the other device's code, or trust it from the list."
     },
     {
       "name": "pairing_intro_detail",
