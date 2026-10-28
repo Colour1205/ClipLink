@@ -27,6 +27,7 @@ import { pdfService, PdfView, pdfViewManager } from '@kit.PDFKit';
 import { filePreview } from '@kit.PreviewKit';
 import { uniformTypeDescriptor } from '@kit.ArkData';
 import { util } from '@kit.ArkTS';
+import { image as imageKit } from '@kit.ImageKit';
 import pasteboard from '@ohos.pasteboard';
 import fs from '@ohos.file.fs';
 import fileUri from '@ohos.file.fileuri';
@@ -74,6 +75,9 @@ const base64Helper = new util.Base64Helper();
 // off-LAN reconnect attempt silently dials the wrong port and never
 // connects, with nothing in the log to say why.
 const TCP_PORT = 49000;
+// Discovery brought up this recently counts as fresh: a foreground right
+// after a cold start does not restart it (see restartDiscovery).
+const FRESH_DISCOVERY_MS = 1500;
 // How long a pairing dial waits, after the handshake, to see whether the
 // other side kept the connection (Index's connectToAddress). Accepting
 // sends history straight away, and its first byte counts, so the full wait
@@ -711,7 +715,8 @@ struct Index {
   // shared clickEffect() feedback every card gets, per request.
   @State selectedItemId: string = '';
   // List vs 2-column WaterFlow grid for the Synced tab - toggled by the
-  // title bar's menu icon (see syncedTitleBar).
+  // title bar's menu icon (see syncedTitleBar). The choice is kept across
+  // launches (read in aboutToAppear, written by the toggle).
   @State syncedViewMode: string = 'waterfall';
   // Two-finger pinch zoom on the item detail image - imageZoomScale is what
   // Image.scale() actually reads; imageZoomBase is the scale it was at when
@@ -768,6 +773,8 @@ struct Index {
 
   private watcher: ClipboardWatcher = new ClipboardWatcher();
   private discovery: Discovery = new Discovery();
+  // When discovery last came up (see restartDiscovery); 0 until it has.
+  private discoveryUpAtMs: number = 0;
   private tcpServer: TcpServer = new TcpServer();
   private trustStore: TrustStore = new TrustStore();
   private passphraseKeyStore: PassphraseKeyStore = new PassphraseKeyStore();
@@ -876,6 +883,7 @@ struct Index {
       this.accentTheme = this.deviceSettings.getAccentThemeSync(ctx);
       this.bottomGlowOn = this.deviceSettings.getBottomGlowSync(ctx);
       this.cardTransparency = this.deviceSettings.getCardTransparencySync(ctx);
+      this.syncedViewMode = this.deviceSettings.getSyncedViewModeSync(ctx);
       this.watcher.restoreSeen(this.deviceSettings.getLastSeenClipCountSync(ctx));
       this.deviceNameOverride = this.deviceSettings.getDeviceNameSync(ctx);
     } catch (e) {
@@ -1132,6 +1140,13 @@ struct Index {
 
   private async restartDiscovery(): Promise<void> {
     if (this.ownDeviceId.length === 0) return;
+    // A cold start has just brought discovery up (aboutToAppear), and the
+    // first onPageShow comes right after: no need to tear down a socket bound
+    // moments ago - just say we are here again.
+    if (Date.now() - this.discoveryUpAtMs < FRESH_DISCOVERY_MS) {
+      this.discovery.beaconNow();
+      return;
+    }
     await this.discovery.stop();
     try {
       await this.startDiscovery();
@@ -1148,8 +1163,8 @@ struct Index {
 
   // Single definition of how discovery is started, so the cold-start path
   // and the foreground-restart path cannot drift apart.
-  private startDiscovery(): Promise<void> {
-    return this.discovery.start(
+  private async startDiscovery(): Promise<void> {
+    await this.discovery.start(
       this.ownDeviceId,
       TCP_PORT,
       () => this.cachedProof,
@@ -1157,6 +1172,7 @@ struct Index {
       () => this.pairingOpen,
       () => this.ownDeviceName(),
     );
+    this.discoveryUpAtMs = Date.now();
   }
 
   // The name this device sends in beacons, handshakes and its pairing code:
@@ -3084,6 +3100,18 @@ struct Index {
   // finished downloading yet (nothing to preview until they have). An empty
   // file is never a picture, whatever its name: it opens with the system.
   private imagePreviewUri(item: SyncedItem): string | null {
+    const path: string | null = this.imageFilePath(item);
+    if (path === null) return null;
+    try {
+      return fileUri.getUriFromPath(path);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // The sandbox path of an image file's stored bytes (what imagePreviewUri
+  // makes a URI of), or null under the same conditions.
+  private imageFilePath(item: SyncedItem): string | null {
     if (item.type !== 'file') return null;
     try {
       const payload = JSON.parse(item.content) as FilePayload;
@@ -3092,10 +3120,54 @@ struct Index {
       if (!isImageFileName(safeFileName(payload.FileName, 'file')) || payload.FileSize === 0) return null;
       const fileStore = this.fileStore;
       if (fileStore === null || !fileStore.exists(payload.FileHash)) return null;
-      return fileUri.getUriFromPath(fileStore.getPath(payload.FileHash));
+      return fileStore.getPath(payload.FileHash);
     } catch (e) {
       return null;
     }
+  }
+
+  // Width over height of a picture, read from its header - not from the
+  // decoded image - so a card has its final shape the moment it is built: a
+  // size that changes after layout makes the WaterFlow lay everything out
+  // again (see syncedGridCard). 1 when it can't be told. Kept per item.
+  private pictureRatios: Map<string, number> = new Map<string, number>();
+
+  private pictureRatio(item: SyncedItem): number {
+    const known: number | undefined = this.pictureRatios.get(item.id);
+    if (known !== undefined) return known;
+    let width: number = 0;
+    let height: number = 0;
+    try {
+      if (item.type === 'image') {
+        // A PNG says its size in the first 24 bytes (32 characters of Base64).
+        const head: Uint8Array = base64Helper.decodeSync(item.content.substring(0, 32));
+        if (head.length >= 24 && head[1] === 0x50 && head[2] === 0x4E && head[3] === 0x47) {
+          width = head[16] * 16777216 + head[17] * 65536 + head[18] * 256 + head[19];
+          height = head[20] * 16777216 + head[21] * 65536 + head[22] * 256 + head[23];
+        } else {
+          const source: imageKit.ImageSource = imageKit.createImageSource(base64Helper.decodeSync(item.content).buffer as ArrayBuffer);
+          const info: imageKit.ImageInfo = source.getImageInfoSync();
+          width = info.size.width;
+          height = info.size.height;
+          source.release();
+        }
+      } else {
+        const path: string | null = this.imageFilePath(item);
+        if (path !== null) {
+          const source: imageKit.ImageSource = imageKit.createImageSource(path);
+          const info: imageKit.ImageInfo = source.getImageInfoSync();
+          width = info.size.width;
+          height = info.size.height;
+          source.release();
+        }
+      }
+    } catch (e) {
+      // unreadable header - the square below
+    }
+    if (width <= 0 || height <= 0) return 1;
+    const ratio: number = width / height;
+    this.pictureRatios.set(item.id, ratio);
+    return ratio;
   }
 
   // The Synced list's ForEach key: the item's id (see SyncedItem.id), marked
@@ -3909,23 +3981,19 @@ struct Index {
   // (native 'image' type, or a 'file' entry imagePreviewUri recognizes)
   // gets the photo featured full-width on top with the caption below,
   // instead of the same fixed 44x44 thumbnail every card uses in list
-  // mode. Image now gets an explicit .height(220) alongside
-  // constraintSize's maxHeight, not maxHeight alone - per the official
-  // WaterFlow reference, "When the main axis size of a FlowItem changes
-  // after it is displayed, WaterFlow clears the affected layout
-  // information and recalculates..."; a base64 Image decodes
-  // asynchronously, so its intrinsic size (and therefore its FlowItem's
-  // measured size) still changes once, after the initial layout pass,
-  // even with a maxHeight cap on top of it - that's what was letting a
-  // card's box visually bridge into its neighboring WaterFlow column
-  // (confirmed via on-device pixel measurement: the column gap band
-  // between two cards vanished exactly where a larger image card sat). A
-  // fixed .height() removes that async-driven change at the source
-  // instead of just capping its result. ImageFit.Cover crops to fill that
-  // fixed box instead of squeezing/distorting the image. Trade-off: this
-  // gives up the "landscape images end up shorter" masonry height
-  // variety the box used to have - every image card is now a uniform
-  // 220, which cost less than another round of overlapping cards. Non-image
+  // mode. The picture's box takes the picture's own proportions (see
+  // pictureRatio), so the card is as tall as the picture is and nothing is
+  // cropped - a landscape one is short, a phone screenshot is tall.
+  // The box has its final size from the first layout, which matters: per
+  // the official WaterFlow reference, "When the main axis size of a
+  // FlowItem changes after it is displayed, WaterFlow clears the affected
+  // layout information and recalculates...", and a base64 Image decodes
+  // asynchronously, so a box that took its size from the decoded image
+  // changed once after the first layout - that is what let a card's box
+  // visually bridge into its neighboring WaterFlow column (confirmed via
+  // on-device pixel measurement: the column gap band between two cards
+  // vanished exactly where a larger image card sat). The ratio comes from
+  // the file header instead, read before the card is built. Non-image
   // items don't get this treatment - the compact row card already fits a
   // 2-column cell fine without manufacturing a fake masonry effect for
   // plain text.
@@ -4018,9 +4086,12 @@ struct Index {
       Column({ space: 6 }) {
         Image(item.type === 'image' ? `data:image/png;base64,${item.content}` : this.imagePreviewUri(item) as string)
           .width('100%')
-          .height(220)
-          .constraintSize({ maxHeight: 220 })
-          .objectFit(ImageFit.Cover)
+          // The picture's own proportions, whole: the card is as tall as the
+          // picture is (never cropped). One more than 3 times as tall as wide
+          // gets a box of that height and is fitted into it. Known from the
+          // header, so the box never changes size once the picture decodes.
+          .aspectRatio(Math.max(this.pictureRatio(item), 1 / 3))
+          .objectFit(ImageFit.Contain)
           .autoResize(true) // see typeChip
           .borderRadius(12)
         Text(this.looksLikeOpaqueData(item.preview) ? $r('app.string.item_image') : this.previewLabel(item))
@@ -4461,6 +4532,7 @@ struct Index {
         action: () => {
           tapHaptic();
           this.syncedViewMode = toGrid ? 'waterfall' : 'list';
+          void this.deviceSettings.setSyncedViewMode(getContext(this) as common.UIAbilityContext, this.syncedViewMode);
         },
       },
     }]);

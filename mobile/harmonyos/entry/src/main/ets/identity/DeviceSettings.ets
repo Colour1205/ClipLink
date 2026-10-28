@@ -28,6 +28,7 @@ const ACCENT_THEME_KEY = 'accent_theme';
 const LAST_SEEN_CLIP_COUNT_KEY = 'last_seen_clip_count';
 const BOTTOM_GLOW_KEY = 'bottom_glow';
 const CARD_TRANSPARENCY_KEY = 'card_transparency';
+const SYNCED_VIEW_MODE_KEY = 'synced_view_mode';
 // The Card transparency slider's default (percent), the same on every platform that has the slider.
 const DEFAULT_CARD_TRANSPARENCY = 35;
 // The user's own name for this device (see DeviceName.ets); '' means use
@@ -133,6 +134,21 @@ export class DeviceSettings {
   async setCardTransparency(context: common.UIAbilityContext, percent: number): Promise<void> {
     const prefs = await this.getPrefs(context);
     prefs.putSync(CARD_TRANSPARENCY_KEY, percent);
+    await prefs.flush();
+  }
+
+  // The Synced tab's layout, 'waterfall' (the grid, the default) or 'list'.
+  // Synchronous for the same reason as getAccentThemeSync: the tab should
+  // open the way it was left, not flip to it after its first frame.
+  getSyncedViewModeSync(context: common.UIAbilityContext): string {
+    const prefs = preferences.getPreferencesSync(context, { name: PREFERENCES_NAME });
+    const mode: string = prefs.getSync(SYNCED_VIEW_MODE_KEY, 'waterfall') as string;
+    return mode === 'list' ? 'list' : 'waterfall';
+  }
+
+  async setSyncedViewMode(context: common.UIAbilityContext, mode: string): Promise<void> {
+    const prefs = await this.getPrefs(context);
+    prefs.putSync(SYNCED_VIEW_MODE_KEY, mode);
     await prefs.flush();
   }
 
