@@ -510,7 +510,7 @@
     },
     {
       "name": "me_version",
-      "value": "版本 %1$s（%2$s）"
+      "value": "版本 %1$s"
     },
     {
       "name": "pairing_title",

@@ -510,7 +510,7 @@
     },
     {
       "name": "me_version",
-      "value": "Version %1$s (%2$s)"
+      "value": "Version %1$s"
     },
     {
       "name": "pairing_title",

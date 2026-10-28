@@ -681,7 +681,6 @@ struct Index {
   // installed package for the Me page's version line. Only the data is kept,
   // not the finished "Version ..." text, so the label follows a language change.
   private appVersionName: string = '';
-  private appVersionCode: number = 0;
   // Mirror of DeviceSettings.getAutoApply, pushed into SyncManager too.
   @State autoApply: boolean = true;
   // "Notify about new items" (see notifyReceivedItem), and how many arrived
@@ -1205,7 +1204,6 @@ struct Index {
       const info: bundleManager.BundleInfo =
         bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
       this.appVersionName = info.versionName;
-      this.appVersionCode = info.versionCode;
     } catch (e) {
       // keep the empty defaults
     }
@@ -6096,7 +6094,7 @@ struct Index {
       .backgroundColor(this.cardFill())
       // The version line, as the footer of the last section (like iOS).
       if (this.appVersionName.length > 0) {
-        Text($r('app.string.me_version', this.appVersionName, `${this.appVersionCode}`))
+        Text($r('app.string.me_version', this.appVersionName))
           .fontSize(12)
           .fontColor($r('sys.color.font_secondary'))
           .width('100%')
