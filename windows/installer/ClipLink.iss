@@ -1,5 +1,5 @@
 ; The ClipLink installer (Inno Setup 6). Built by ..\publish.ps1:
-;   ISCC.exe /DAppVersion=2.0.1 /DSourceDir=<published app folder> /DOutputDir=<folder> ClipLink.iss
+;   ISCC.exe /DAppVersion=2.1.0 /DSourceDir=<published app folder> /DOutputDir=<folder> ClipLink.iss
 ;
 ; Per-user by default (no administrator prompt, installs under
 ; %LOCALAPPDATA%\Programs\ClipLink); the setup offers "all users" too.
@@ -13,7 +13,7 @@
 ; (see RelaunchRequested).
 
 #ifndef AppVersion
-  #define AppVersion "2.0.1"
+  #define AppVersion "2.1.0"
 #endif
 #ifndef SourceDir
   #error SourceDir (the published app folder) is required

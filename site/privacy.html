@@ -40,7 +40,7 @@
 
   <main id="main" class="wrap prose">
     <h1>Privacy policy</h1>
-    <p><em>Last updated: 12 October 2026</em></p>
+    <p><em>Last updated: 28 October 2026</em></p>
     <p>ClipLink copies what you copy on one of your devices to your other devices. This page says what information ClipLink uses to do that, where it goes, and what you can do about it. It covers the ClipLink apps for Windows, Android, HarmonyOS and iOS, and this website. ClipLink is developed by Uaena (GitHub: <a href="https://github.com/Colour1205">Colour1205</a>) and is open source.</p>
 
     <div class="callout"><strong>In short:</strong> ClipLink has no accounts and no servers of its own. What you copy goes directly from one of your devices to another one you have paired, over your own network, encrypted. The developers never receive it. The apps contain no advertising, no analytics, no crash reporting and no tracking.</div>
@@ -57,8 +57,16 @@
     <ul>
       <li>Devices announce themselves on your local network with a small message: the device ID, its name, a port, and optionally a proof that it knows the same passcode and its Tailscale address. It never contains anything you copied, and other devices on the same network can see it.</li>
       <li>What you copy travels only over a direct, encrypted connection between two devices you have paired, each checked with the other's key. It goes over your local network or, if you use one, over Tailscale or another VPN you set up. It does not pass through any server.</li>
-      <li>The apps send nothing to the developers or to any other company. They use no advertising, analytics or crash reporting services, and no outside service collects data from them.</li>
+      <li>The apps send nothing to the developers. They use no advertising, analytics or crash reporting services, and no outside service collects data from them. The one request an app makes to anyone but your own devices is the Windows app's check for a newer version, described under "Updates on Windows" below.</li>
       <li>Nothing is sold or shared with anyone else.</li>
+    </ul>
+
+    <h2>Updates on Windows</h2>
+    <ul>
+      <li>The Windows app can update itself. About ten seconds after it starts, and then at most once a day, it asks GitHub's public API for ClipLink's list of releases. GitHub sees that request and your PC's IP address, as it would for any web request. The request carries only the app's name and version (<code>ClipLink/&lt;version&gt;</code>); no copied content, device ID or other information is sent.</li>
+      <li>Nothing is downloaded or installed until you click "Download and install". The installer comes from the ClipLink release on GitHub, and the app checks its size and SHA-256 fingerprint against the ones GitHub lists before it runs it.</li>
+      <li>You can turn the automatic check off in Settings (<em>Check for updates automatically</em>); the <em>Check for updates</em> button still works when you press it. GitHub's own privacy policy applies to these requests.</li>
+      <li>The Android, HarmonyOS and iOS apps do not check for updates themselves.</li>
     </ul>
 
     <h2>Permissions</h2>
