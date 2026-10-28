@@ -31,7 +31,6 @@ import { image as imageKit } from '@kit.ImageKit';
 import pasteboard from '@ohos.pasteboard';
 import fs from '@ohos.file.fs';
 import fileUri from '@ohos.file.fileuri';
-import photoAccessHelper from '@ohos.file.photoAccessHelper';
 import picker from '@ohos.file.picker';
 import uiMaterial from '@ohos.arkui.uiMaterial';
 import unifiedDataChannel from '@ohos.data.unifiedDataChannel';
@@ -517,34 +516,6 @@ struct SelectTextDialog {
     }
     .width('100%')
     .padding(16)
-  }
-}
-
-// SaveButton (security component) has to be the actually-tapped element to
-// get its temporary photoAccessHelper grant - it can't be triggered from a
-// plain MenuItem's onClick. Wrapping it in its own small dialog (opened from
-// the long-press menu's "Save to gallery" item) keeps it out of the menu
-// itself while still reusing a pattern (CustomDialogController) already
-// proven to work in this file.
-@CustomDialog
-struct SaveImageDialog {
-  controller?: CustomDialogController;
-  onSave: (result: SaveButtonOnClickResult) => void = () => {};
-
-  build() {
-    Column({ space: 16 }) {
-      Text($r('app.string.dialog_save_image_prompt')).fontSize(14)
-      SaveButton({ text: SaveDescription.SAVE_TO_GALLERY, buttonType: ButtonType.Capsule })
-        .fontSize(14)
-        .onClick((event: ClickEvent, result: SaveButtonOnClickResult) => {
-          tapHaptic();
-          this.onSave(result);
-          this.controller?.close();
-        })
-      Button($r('app.string.common_cancel')).fontSize(13).onClick(() => { tapHaptic(); this.controller?.close(); })
-    }
-    .width('100%')
-    .padding(20)
   }
 }
 
@@ -2804,8 +2775,8 @@ struct Index {
 
   // "Copy" only makes sense for text - for image/file it used to dump the
   // raw base64/JSON descriptor onto the clipboard as literal text, which
-  // was never useful. Those two types get Share + Save instead (see
-  // shareItem/showSaveImageDialog/saveFileToDocuments below).
+  // was never useful. Those two types get Share (and Save, for files)
+  // instead (see shareItem/saveFileToDocuments below).
   copyItemContent(item: SyncedItem): void {
     const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, item.content);
     pasteboard.getSystemPasteboard().setData(data)
@@ -2821,10 +2792,10 @@ struct Index {
     dialogController.open();
   }
 
-  // Real system share sheet (@kit.ShareKit's systemShare) - unlike
-  // SaveButton, this is a normal API call, not gated behind a security
-  // component. Images get materialized to a temp file first since
-  // systemShare needs a URI, not raw base64.
+  // Real system share sheet (@kit.ShareKit's systemShare), a normal API call
+  // not gated behind a security component. Text goes as the record's content;
+  // images get materialized to a temp file first since systemShare needs a
+  // URI, not raw base64.
   // Hands a stored file to the system so the user can actually open it.
   // Two tiers, because neither alone covers everything:
   //   1. Preview Kit's openPreview - the real "view this file" surface on
@@ -2985,6 +2956,11 @@ struct Index {
   async shareItem(item: SyncedItem): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
     try {
+      if (item.type === 'text') {
+        // Text goes as text (the record's content), not as a file.
+        await this.showShareSheet(context, { utd: 'general.plain-text', content: item.content });
+        return;
+      }
       let uri: string;
       let utd: string;
       if (item.type === 'image') {
@@ -3020,53 +2996,22 @@ struct Index {
         uri = named;
         utd = utdForFileName(safeFileName(payload.FileName, 'file'));
       }
-      const sharedData = new systemShare.SharedData({ utd, uri });
-      const controller = new systemShare.ShareController(sharedData);
-      await controller.show(context, { previewMode: systemShare.SharePreviewMode.DETAIL });
+      await this.showShareSheet(context, { utd, uri });
     } catch (e) {
       promptAction.showToast({ message: $r('app.string.toast_share_sheet_failed') });
     }
   }
 
-  showSaveImageDialog(item: SyncedItem): void {
-    const dialogController: CustomDialogController = new CustomDialogController({
-      builder: SaveImageDialog({ onSave: (result: SaveButtonOnClickResult) => { void this.saveImageOnClick(item, result); } }),
-      alignment: DialogAlignment.Bottom,
-    });
-    dialogController.open();
-  }
-
-  // Wired to a SaveButton (security component - see save_button.d.ts),
-  // which is what actually grants the temporary photoAccessHelper access
-  // this needs; it can't be invoked imperatively from a plain Button, the
-  // SaveButton itself has to be the tapped component (see SaveImageDialog).
-  async saveImageOnClick(item: SyncedItem, result: SaveButtonOnClickResult): Promise<void> {
-    if (result !== SaveButtonOnClickResult.SUCCESS) {
-      promptAction.showToast({ message: $r('app.string.toast_save_not_authorized') });
-      return;
-    }
-    try {
-      const context = getContext(this) as common.UIAbilityContext;
-      const helper = photoAccessHelper.getPhotoAccessHelper(context);
-      const uri = await helper.createAsset(photoAccessHelper.PhotoType.IMAGE, 'png');
-      const file = fs.openSync(uri, fs.OpenMode.WRITE_ONLY);
-      try {
-        const bytes = base64Helper.decodeSync(item.content);
-        const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-        fs.writeSync(file.fd, ab);
-      } finally {
-        fs.closeSync(file);
-      }
-      // No toast: the save went through the system's own dialog.
-    } catch (e) {
-      promptAction.showToast({ message: $r('app.string.toast_save_image_failed') });
-    }
+  private async showShareSheet(context: common.UIAbilityContext, record: systemShare.SharedRecord): Promise<void> {
+    const sharedData = new systemShare.SharedData(record);
+    const controller = new systemShare.ShareController(sharedData);
+    await controller.show(context, { previewMode: systemShare.SharePreviewMode.DETAIL });
   }
 
   // Files aren't media-library content, so this goes through
-  // DocumentViewPicker.save() - a normal system file-save picker, not
-  // gated behind a security component the way SaveButton/photoAccessHelper
-  // is - confirmed against @ohos.file.picker.d.ts rather than assumed.
+  // DocumentViewPicker.save() - a normal system file-save picker, not gated
+  // behind a security component - confirmed against @ohos.file.picker.d.ts
+  // rather than assumed.
   async saveFileToDocuments(item: SyncedItem): Promise<void> {
     const fileStore = this.fileStore;
     if (fileStore === null) {
@@ -3801,10 +3746,10 @@ struct Index {
   // Real official long-press menu (bindContextMenu, confirmed to support
   // systemMaterial via ContextMenuOptions) instead of a hand-rolled
   // gesture+conditional-row hack - gets the native menu animation/backdrop
-  // for free. "Copy" only for text; image/file get Share (real system
-  // share sheet) and Save (gallery for images via a SaveButton-backed
-  // dialog since SaveButton must be the tapped element itself; a document
-  // picker for files, which needs no security component).
+  // for free. "Copy" only for text; every type gets Share (the real system
+  // share sheet, which already has Save to gallery / Save to Files, so none of
+  // that is an item of ours); a file also gets Open and Save (a document
+  // picker, which needs no security component).
   @Builder
   itemActionMenu(item: SyncedItem) {
     Menu() {
@@ -3816,17 +3761,14 @@ struct Index {
         // tinted from code. The light/dark resource pair is what makes it
         // adapt.
         MenuItem({ content: $r('app.string.action_copy'), startIcon: $r('app.media.ic_menu_copy') }).onClick(() => { tapHaptic(); this.copyItemContent(item); })
-      } else {
-        MenuItem({ content: $r('app.string.action_share'), startIcon: $r('app.media.ic_menu_share') }).onClick(() => { tapHaptic(); void this.shareItem(item); })
-        if (item.type === 'image') {
-          MenuItem({ content: $r('app.string.action_save_to_gallery'), startIcon: $r('app.media.ic_menu_save_gallery') }).onClick(() => { tapHaptic(); this.showSaveImageDialog(item); })
-        } else {
-          // Same shape as the preview title bar's Open button
-          // (sys.symbol.arrow_right_up_and_square), drawn in this menu's
-          // stroke style.
-          MenuItem({ content: $r('app.string.action_open'), startIcon: $r('app.media.ic_menu_open') }).onClick(() => { tapHaptic(); void this.openFileWithSystem(item); })
-          MenuItem({ content: $r('app.string.action_save_file'), startIcon: $r('app.media.ic_menu_save_file') }).onClick(() => { tapHaptic(); void this.saveFileToDocuments(item); })
-        }
+      }
+      MenuItem({ content: $r('app.string.action_share'), startIcon: $r('app.media.ic_menu_share') }).onClick(() => { tapHaptic(); void this.shareItem(item); })
+      if (item.type !== 'text' && item.type !== 'image') {
+        // Same shape as the preview title bar's Open button
+        // (sys.symbol.arrow_right_up_and_square), drawn in this menu's
+        // stroke style.
+        MenuItem({ content: $r('app.string.action_open'), startIcon: $r('app.media.ic_menu_open') }).onClick(() => { tapHaptic(); void this.openFileWithSystem(item); })
+        MenuItem({ content: $r('app.string.action_save_file'), startIcon: $r('app.media.ic_menu_save_file') }).onClick(() => { tapHaptic(); void this.saveFileToDocuments(item); })
       }
       // Every type, last. Removes the item from this device only.
       MenuItem({ content: $r('app.string.action_delete'), startIcon: $r('app.media.ic_menu_delete') }).onClick(() => { tapHaptic(); this.confirmDeleteItem(item); })
@@ -4569,7 +4511,7 @@ struct Index {
     }]);
   }
 
-  // Item preview: Copy for text, Share for images/files, and Open (left of
+  // Item preview: Copy for text, Share for every type, and Open (left of
   // Share) for files - the same split itemActionMenu's long-press menu
   // uses - then Delete, last, for every type. Open is files-only because
   // openFileWithSystem hands the system a stored file; an 'image' item is
@@ -4587,15 +4529,6 @@ struct Index {
         action: () => { tapHaptic(); this.confirmDeleteItem(item); },
       },
     };
-    if (item.type === 'text') {
-      return this.hdsTitleBar('', false, [{
-        content: {
-          label: $r('app.string.action_copy'),
-          icon: $r('sys.symbol.rectangle_on_rectangle'),
-          action: () => { tapHaptic(); this.copyItemContent(item); },
-        },
-      }, deleteButton]);
-    }
     const share: HdsNavigationMenuItemOptions = {
       content: {
         label: $r('app.string.action_share'),
@@ -4603,6 +4536,15 @@ struct Index {
         action: () => { tapHaptic(); void this.shareItem(item); },
       },
     };
+    if (item.type === 'text') {
+      return this.hdsTitleBar('', false, [{
+        content: {
+          label: $r('app.string.action_copy'),
+          icon: $r('sys.symbol.rectangle_on_rectangle'),
+          action: () => { tapHaptic(); this.copyItemContent(item); },
+        },
+      }, share, deleteButton]);
+    }
     if (item.type === 'file') {
       return this.hdsTitleBar('', false, [{
         content: {

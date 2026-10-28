@@ -89,10 +89,6 @@
       "value": "删除"
     },
     {
-      "name": "action_save_to_gallery",
-      "value": "保存到相册"
-    },
-    {
       "name": "action_save_file",
       "value": "保存文件"
     },
@@ -131,10 +127,6 @@
     {
       "name": "theme_violet",
       "value": "紫罗兰"
-    },
-    {
-      "name": "dialog_save_image_prompt",
-      "value": "要将此图片保存到相册吗？"
     },
     {
       "name": "dialog_pairing_request_title",
@@ -251,14 +243,6 @@
     {
       "name": "toast_share_sheet_failed",
       "value": "无法打开分享面板。"
-    },
-    {
-      "name": "toast_save_not_authorized",
-      "value": "保存未获授权。"
-    },
-    {
-      "name": "toast_save_image_failed",
-      "value": "无法保存图片。"
     },
     {
       "name": "toast_save_file_failed",
