@@ -149,27 +149,27 @@ platform): a pairing request shows it beside the requester's name, to compare
 with *Me › Fingerprint* on that device.
 
 **Pairing requests.** A device that has never been trusted can ask to pair at
-any time ClipLink is open: the
-acceptor takes its handshake (nothing is trusted yet) and raises a system alert
-over whatever is on screen - a tab, the pairing sheet, the QR scanner, Quick
-Look - with the requester's name, its fingerprint ("Device AB12·CD34", to
-compare with *Me › Fingerprint* there) and its address. **Ignore** is the bold
-default and **Trust** the other button; there is no Deny, because ignoring
-leaves that device free to ask again at any time (Block is how you stop one).
-With ClipLink in the background, a request becomes a notification with the same
-two actions (Trust needs the phone unlocked; the notification carries the
-device's id and address, so Trust works after the connection is gone and the
-device is dialled when it next can be). iOS asks for notification permission
-the first time the pairing screen opens. Only the app takes requests: the Share
-extension never does. Protections, since anyone on the Wi-Fi can knock: a
-blocked device is refused before anything else, one request per device at a
-time (the first connection wins, like the other platforms), at most 3 waiting,
-and at most 6 new requests per 10 minutes - past that they're dropped without a
-prompt. A stranger's beacon is never a reason to dial it: a request starts from
-a scanned code, a typed address, or *Trust* on a nearby device in Devices (the
-beacon's fifth field is always `-` and ignored on receipt). Opening the pairing
-screen, pairing by address or code and trusting a device all end any quiet time
-held against ignored or removed devices (`SyncEngine.liftRequestQuiet`).
+any time ClipLink is open: the acceptor takes its handshake (nothing is trusted
+yet) and raises a system alert over whatever is on screen - a tab, the pairing
+sheet, the QR scanner, Quick Look - with the requester's name, its fingerprint
+("Device AB12·CD34", to compare with *Me › Fingerprint* there) and its address.
+**Ignore** is the bold default and **Trust** the other button; there is no Deny,
+because ignoring leaves that device free to ask again at any time (Block is how
+you stop one). With ClipLink in the background, a request becomes a notification
+with the same two actions (Trust needs the phone unlocked; the notification
+carries the device's id and address, so Trust works after the connection is gone
+and the device is dialled when it next can be). iOS asks for notification
+permission the first time the pairing screen opens. Only the app takes requests:
+the Share extension never does. Protections, since anyone on the Wi-Fi can
+knock: a blocked device is refused before anything else, one request per device
+at a time (the first connection wins, like the other platforms), at most 3
+waiting, and at most 6 new requests per 10 minutes - past that they're dropped
+without a prompt. A stranger's beacon is never a reason to dial it: a request
+starts from a scanned code, a typed address, or *Trust* on a nearby device in
+Devices (the beacon's fifth field is always `-` and ignored on receipt). Opening
+the pairing screen, pairing by address or code and trusting a device all end any
+quiet time held against ignored or removed devices
+(`SyncEngine.liftRequestQuiet`).
 
 **Blocking.** A device's ⋯ menu in Devices has *Block Device*: from then on its
 connections, beacons and pairing requests - even with the right passcode or a

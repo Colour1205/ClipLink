@@ -35,7 +35,7 @@ struct PairingView: View {
                                 .id(PairingAnchor.status)
                                 .transition(.opacity)
                         }
-                        Text("Devices on the same Wi-Fi also show up under Devices › Nearby: tap Trust there to send a request. Codes are only needed when they can't find each other. Devices with the same passcode (Me › Passcode) pair with no prompts at all.")
+                        Text("Devices on the same Wi-Fi also show up under Devices › Nearby: tap Trust there to send a request, and pull down on the list to refresh if one is missing. Codes are only needed when they can't find each other. Devices with the same passcode (Me › Passcode) pair with no prompts at all.")
                             .font(.footnote)
                             .foregroundColor(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -89,7 +89,6 @@ struct PairingView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Nothing is trusted until you accept it on both sides.")
                         .font(.subheadline.weight(.semibold))
-                        .fixedSize(horizontal: false, vertical: true)
                     Text("A request from another device can reach this \(ThisDeviceNoun.current) any time ClipLink is open, and you'll be asked before anything is trusted.")
                         .font(.subheadline)
                         .foregroundColor(.secondary)

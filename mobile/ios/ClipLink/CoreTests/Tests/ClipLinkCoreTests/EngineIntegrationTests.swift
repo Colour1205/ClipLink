@@ -629,7 +629,9 @@ final class EngineIntegrationTests: XCTestCase {
         links.forEach { $0.close() }
     }
 
-    func testIgnoringIsNotBlockingAndItMayAskAgainAtOnce() throws {
+    /// Ignoring a request is not a block: the device is only held back for the
+    /// quiet time (the next test lifts it).
+    func testIgnoringIsNotBlockingButHoldsTheDeviceBack() throws {
         let (a, b) = makePair()
         a.engine.enterForeground()
         b.engine.enterForeground()
@@ -640,10 +642,9 @@ final class EngineIntegrationTests: XCTestCase {
         wait("request gone") { b.recorder.pairingRequests.isEmpty }
         XCTAssertNotEqual(b.recorder.device(a.engine.ownId)?.blocked, true, "ignoring is not blocking")
 
-        // No cooldown: it may ask again straight away - an ignore is not a no.
         wait("a let go of its side") { a.recorder.pairingRequests.isEmpty }
-        XCTAssertEqual(reach(a, b), .prompt("127.0.0.1"))
-        wait("asked again at once") { b.recorder.pairingRequests.count == 1 }
+        _ = reach(a, b)
+        XCTAssertTrue(b.recorder.pairingRequests.isEmpty, "held back: it was ignored a moment ago")
     }
 
     /// Ignoring a request keeps that device quiet for a while; the pairing
@@ -910,10 +911,10 @@ final class EngineIntegrationTests: XCTestCase {
 
     /// The handshake itself turns our own key away however it is spelt, as
     /// the dialer and as the acceptor: "that's this device", before trust or
-    /// a passcode count. Compared as text, a
-    /// spelling this decoder rejects would end as a bad signature instead
-    /// (a pairing dial says "refused", not "your own code"), and one it
-    /// takes would connect us to ourselves. Anyone else's key gets through.
+    /// a passcode count. Compared as text, a spelling this decoder rejects
+    /// would end as a bad signature instead (a pairing dial says "refused",
+    /// not "your own code"), and one it takes would connect us to ourselves.
+    /// Anyone else's key gets through.
     func testHandshakeRefusesOurOwnKeyHoweverItIsSpelt() throws {
         let me = SoftwareIdentity()
         let own = me.publicKeyBase64

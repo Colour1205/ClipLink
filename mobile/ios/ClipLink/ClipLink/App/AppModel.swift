@@ -51,6 +51,11 @@ final class AppModel: ObservableObject {
             // ClipLink is closed.
             if pairingPresented {
                 engine?.liftRequestQuiet()
+                // One round of discovery, as if pulled to refresh: without the
+                // multicast entitlement iOS hears no broadcast beacons, so a
+                // nearby device never paired before only shows under Devices ›
+                // Nearby once a sweep has read it.
+                engine?.refreshNetwork()
                 #if DEBUG
                 if !usingFixtures { Notifier.requestPairingAuthorizationIfNeeded() }
                 #else
