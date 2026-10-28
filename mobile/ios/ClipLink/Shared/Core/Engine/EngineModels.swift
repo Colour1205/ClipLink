@@ -9,7 +9,6 @@ public struct EngineSnapshot: Equatable {
     public var connectedCount: Int = 0
     public var network = NetworkStatus()
     public var log: [LogLine] = []
-    public var pairingOpen = false
     /// Everyone asking to pair right now, oldest first. Each is held with
     /// nothing read or sent until the user trusts or ignores it.
     public var pairingRequests: [PairingRequest] = []
@@ -129,8 +128,6 @@ public struct DeviceRow: Identifiable, Equatable {
     /// from or reached at, then its stored and self-advertised (off-LAN)
     /// addresses.
     public let addresses: [String]
-    /// The peer's beacon says its own pairing screen is open right now.
-    public let pairing: Bool
     public let lastSeen: Date?
     /// Recently heard from (beacon, probe or connection) - within ~30s.
     public let nearby: Bool
@@ -226,10 +223,9 @@ public struct PairingRequest: Equatable, Identifiable {
     public let name: String?
     /// When it arrived.
     public var date = Date()
-    /// True when WE reached out from our own pairing screen (QR scan, typed
-    /// address, a pairing beacon): the user is expecting it. False when the
-    /// device dialled us - a request out of the blue, possibly while this
-    /// device is locked or ClipLink is closed.
+    /// True when WE reached out (QR scan, typed address): the user is
+    /// expecting it. False when the device dialled us - a request out of the
+    /// blue, possibly while this device is locked or ClipLink is closed.
     public var initiatedByUs = false
 
     public init(deviceId: String, address: String?, name: String?, date: Date = Date(), initiatedByUs: Bool = false) {
@@ -266,16 +262,16 @@ public enum PairOutcome: Equatable {
         case .ownCode: return "That's this device's own code."
         case .empty: return "Enter a pairing code or address first."
         case .noAddress(let key, let name):
-            return "\(name ?? DeviceLabel.short(key)) has no address in its code. If it's on the same network, keep this screen open on both devices and it will pair automatically."
+            return "\(name ?? DeviceLabel.short(key)) has no address in its code. If it's on the same network, find it under Devices › Nearby and tap Trust."
         case .searching(let key, let name):
-            return "Looking for \(name ?? DeviceLabel.short(key)) on this network — keep this screen open on both devices."
+            return "Looking for \(name ?? DeviceLabel.short(key)) on this network…"
         case .connected(let a): return "Already paired with \(a) - connected."
         case .passcode(let a): return "Paired with \(a) using your passcode."
         case .prompt(let a): return "Reached \(a) - accept the pairing prompt on both devices to finish."
         case .awaitingOther(let a): return "Reached \(a) - accept the request on that device to finish."
         case .busy: return "Another pairing request is already waiting here - accept or reject it first."
         case .refused(let a):
-            return "\(a) answered but didn't accept this device. Set the same passcode on both, or open its Pairing screen (and finish any other pairing request there), then try again."
+            return "\(a) answered but didn't accept this device. Set the same passcode on both, or finish any other pairing request waiting there, then try again."
         case .silent(let a):
             return "\(a) accepted the connection but ClipLink there didn't respond - try restarting it on that device."
         case .unreachable(let a):

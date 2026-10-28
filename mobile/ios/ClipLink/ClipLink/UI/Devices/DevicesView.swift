@@ -3,8 +3,8 @@ import UIKit
 
 /// The Devices tab: paired devices, devices discovered nearby, blocked
 /// devices, and the state of the local network, in an inset-grouped list.
-/// Pull to refresh re-runs discovery; "+" opens the pairing sheet (which is
-/// pairing mode); a device opens its detail screen.
+/// Pull to refresh re-runs discovery; "+" opens the pairing sheet; a device
+/// opens its detail screen.
 struct DevicesView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
@@ -101,7 +101,7 @@ struct DevicesView: View {
             if !nearby.isEmpty {
                 Section(
                     header: Text("Nearby"),
-                    footer: Text("Trust lets this device accept it. The other device must also trust this \(ThisDeviceNoun.current) (same passcode, or its pairing screen open).")
+                    footer: Text("Trust lets this device accept it and sends it a request. It must also trust this \(ThisDeviceNoun.current): accept the request there, or use the same passcode.")
                 ) {
                     ForEach(nearby) { row in
                         cell(for: row)
