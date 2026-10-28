@@ -154,8 +154,8 @@ yet) and raises a system alert over whatever is on screen - a tab, the pairing
 sheet, the QR scanner, Quick Look - with the requester's name, its fingerprint
 ("Device AB12·CD34", to compare with *Me › Fingerprint* there) and its address.
 **Ignore** is the bold default and **Trust** the other button; there is no Deny,
-because ignoring leaves that device free to ask again at any time (Block is how
-you stop one). With ClipLink in the background, a request becomes a notification
+because ignoring only holds that device back for two minutes (Block is how you
+stop one). With ClipLink in the background, a request becomes a notification
 with the same two actions (Trust needs the phone unlocked; the notification
 carries the device's id and address, so Trust works after the connection is gone
 and the device is dialled when it next can be). iOS asks for notification

@@ -529,8 +529,10 @@ public final class SyncEngine {
         schedulePublish()
     }
 
-    /// "Ignore": closes the oldest request. Not a block, and no cooldown - the
-    /// device may ask again whenever it likes (Block is the way to stop it).
+    /// "Ignore": closes the oldest request. Not a block, but the device is held
+    /// back for a while (RequestQuiet.afterIgnored; opening the pairing sheet,
+    /// pairing or trusting it lifts that) before it may ask again (Block is the
+    /// way to stop it).
     public func rejectPairing() {
         queue.async { [self] in
             guard let first = pendingRequests.first else { return }
