@@ -89,10 +89,6 @@
       "value": "Delete"
     },
     {
-      "name": "action_save_to_gallery",
-      "value": "Save to gallery"
-    },
-    {
       "name": "action_save_file",
       "value": "Save file"
     },
@@ -131,10 +127,6 @@
     {
       "name": "theme_violet",
       "value": "Violet"
-    },
-    {
-      "name": "dialog_save_image_prompt",
-      "value": "Save this image to your gallery?"
     },
     {
       "name": "dialog_pairing_request_title",
@@ -251,14 +243,6 @@
     {
       "name": "toast_share_sheet_failed",
       "value": "Could not open share sheet."
-    },
-    {
-      "name": "toast_save_not_authorized",
-      "value": "Save was not authorized."
-    },
-    {
-      "name": "toast_save_image_failed",
-      "value": "Could not save image."
     },
     {
       "name": "toast_save_file_failed",
