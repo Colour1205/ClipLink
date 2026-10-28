@@ -4480,7 +4480,7 @@ struct Index {
     }]);
   }
 
-  // Item preview: Copy for text, Share for images/files, and Open (left of
+  // Item preview: Copy for text, Share for every type, and Open (left of
   // Share) for files - the same split itemActionMenu's long-press menu
   // uses - then Delete, last, for every type. Open is files-only because
   // openFileWithSystem hands the system a stored file; an 'image' item is
@@ -4498,15 +4498,6 @@ struct Index {
         action: () => { tapHaptic(); this.confirmDeleteItem(item); },
       },
     };
-    if (item.type === 'text') {
-      return this.hdsTitleBar('', false, [{
-        content: {
-          label: $r('app.string.action_copy'),
-          icon: $r('sys.symbol.rectangle_on_rectangle'),
-          action: () => { tapHaptic(); this.copyItemContent(item); },
-        },
-      }, deleteButton]);
-    }
     const share: HdsNavigationMenuItemOptions = {
       content: {
         label: $r('app.string.action_share'),
@@ -4514,6 +4505,15 @@ struct Index {
         action: () => { tapHaptic(); void this.shareItem(item); },
       },
     };
+    if (item.type === 'text') {
+      return this.hdsTitleBar('', false, [{
+        content: {
+          label: $r('app.string.action_copy'),
+          icon: $r('sys.symbol.rectangle_on_rectangle'),
+          action: () => { tapHaptic(); this.copyItemContent(item); },
+        },
+      }, share, deleteButton]);
+    }
     if (item.type === 'file') {
       return this.hdsTitleBar('', false, [{
         content: {
