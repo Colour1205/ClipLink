@@ -73,7 +73,7 @@ All four apps (Windows, Android, HarmonyOS and iOS) follow this page, which is w
 
 **Who connects to whom.** Only one of two devices opens the connection: the one whose device id sorts after the other's. That way the two never open two connections at once.
 
-**Who a device dials.** A device dials a device it trusts, at the address it heard the device's beacon from or saved from an earlier connection, and an address the user gave it (typed in, or in a pairing code). It never dials a stranger just because it heard its beacon. The one exception is the passcode: a beacon whose proof matches this device's passcode makes its sender trusted on the spot (see [security](security.md)), and it is then dialled like any trusted device.
+**Who a device dials.** A device dials a device it trusts, at the address its beacon came from or one saved from an earlier connection, or an address the user gave it (typed in, or in a pairing code). It never dials a stranger just because it heard its beacon. The one exception is the passcode: a beacon whose proof matches this device's passcode makes its sender trusted on the spot (see [security](security.md)), and it is then dialled like any trusted device.
 
 **Trust can be one-sided.** A device you have just trusted may not trust you yet. If its id sorts higher, it would wait for you to connect while you wait for it, and your pairing request would never arrive. So a trusted device that has not connected 8 seconds after it was first heard is connected to anyway, whatever the order, and again every 30 seconds while it stays unconnected. A device that already trusts you will have connected long before, so this does nothing there.
 
