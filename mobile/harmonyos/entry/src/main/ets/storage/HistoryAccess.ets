@@ -11,10 +11,11 @@ import { ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
 import { FileStore, isEmptyFile, isValidFileHash } from './FileStore';
 import { FilePayload } from './FilePayload';
 import { DeletedEntries, entryKey } from './DeletedEntries';
+import { MergeResult, mergeBatch } from './HistoryBatch';
 
 const PREFERENCES_NAME = 'cliplink_history';
 const HISTORY_KEY = 'entries';
-const MAX_HISTORY_ITEMS = 25;
+export const MAX_HISTORY_ITEMS = 25;
 
 export class HistoryAccess {
   private fileStore: FileStore;
@@ -24,6 +25,13 @@ export class HistoryAccess {
   // clear wrote [] could write it back afterwards - resurrecting cleared
   // entries whose file blobs had already been deleted.
   private chain: Promise<void> = Promise.resolve();
+  // The saved history, parsed once (see loadHistory); null until it has
+  // been read. The JSON is big - an image item is its PNG in Base64, so 25
+  // items are around 10 MB - and parsing it on every read cost the UI
+  // thread 15 ms a time: a peer's history batch, which adds each of its 25
+  // items in turn, re-parsed it 25 times (0.4 s, measured) the moment the
+  // peer connected.
+  private cached: ClipboardEntry[] | null = null;
 
   constructor(fileStore: FileStore) {
     this.fileStore = fileStore;
@@ -39,19 +47,31 @@ export class HistoryAccess {
     return preferences.getPreferences(context, PREFERENCES_NAME);
   }
 
+  // A copy of the list, as last saved: a caller may sort or add to it
+  // without touching what the next caller reads.
   async getHistory(context: common.UIAbilityContext): Promise<ClipboardEntry[]> {
+    return (await this.loadHistory(context)).slice();
+  }
+
+  private async loadHistory(context: common.UIAbilityContext): Promise<ClipboardEntry[]> {
+    if (this.cached !== null) return this.cached;
     const prefs = await this.getPrefs(context);
     const json = prefs.getSync(HISTORY_KEY, '[]') as string;
+    let entries: ClipboardEntry[];
     try {
-      return JSON.parse(json) as ClipboardEntry[];
+      entries = JSON.parse(json) as ClipboardEntry[];
     } catch (e) {
       // corrupt preferences value — regenerate rather than crash, same
       // policy HistoryAccess.cs/TrustStore.cs use on the Windows side
-      return [];
+      entries = [];
     }
+    // Another read may have finished while this one waited for the store.
+    if (this.cached === null) this.cached = entries;
+    return this.cached;
   }
 
   private async saveHistory(context: common.UIAbilityContext, entries: ClipboardEntry[]): Promise<void> {
+    this.cached = entries;
     const prefs = await this.getPrefs(context);
     prefs.putSync(HISTORY_KEY, JSON.stringify(entries));
     await prefs.flush();
@@ -87,6 +107,45 @@ export class HistoryAccess {
       await this.trimToLimit(entries);
       await this.saveHistory(context, entries);
       return true;
+    });
+  }
+
+  // A peer's whole history_batch as one change: one read of the list, every
+  // new entry added to it, one trim, one write. The entries must already be
+  // verified and trusted (see SyncManager.handleHistoryBatch); the same
+  // rules as addToHistory decide which are new - a duplicate, or one deleted
+  // here, is not (checked in here too, for the same reason). `added` is only
+  // what is new AND still in the history after the trim: an entry stored
+  // just to be evicted again is not one to show or apply.
+  addBatch(context: common.UIAbilityContext, candidates: ClipboardEntry[]): Promise<MergeResult> {
+    return this.serialized(async (): Promise<MergeResult> => {
+      const gone: Set<string> = new Set<string>();
+      for (const entry of candidates) {
+        const key: string = entryKey(entry);
+        if (await this.deleted.contains(context, key)) gone.add(key);
+      }
+      const entries = await this.getHistory(context);
+      const result: MergeResult = mergeBatch(entries, candidates, (a: ClipboardEntry, b: ClipboardEntry) => this.isSameEntry(a, b),
+        (entry: ClipboardEntry) => gone.has(entryKey(entry)), MAX_HISTORY_ITEMS);
+      if (result.added.length === 0 && result.evicted.length === 0) return result;
+      await this.saveHistory(context, entries);
+      for (const evicted of result.evicted) {
+        this.releaseBlobIfUnused(evicted, entries);
+      }
+      return result;
+    });
+  }
+
+  // Which of these keys (entryKey) this device has already, or deleted: what a
+  // history_head's keys are counted against (see HistoryBatch.applyHead).
+  goneKeys(context: common.UIAbilityContext, keys: string[]): Promise<Set<string>> {
+    return this.serialized(async (): Promise<Set<string>> => {
+      const gone: Set<string> = new Set<string>();
+      const known: Set<string> = new Set<string>((await this.loadHistory(context)).map((e: ClipboardEntry) => entryKey(e)));
+      for (const key of keys) {
+        if (known.has(key) || await this.deleted.contains(context, key)) gone.add(key);
+      }
+      return gone;
     });
   }
 

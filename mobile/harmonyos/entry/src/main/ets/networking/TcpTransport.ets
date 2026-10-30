@@ -15,6 +15,11 @@ const decoder = util.TextDecoder.create('utf-8');
 // maximum - see TcpServer.start. The same pauses as Android's serveTcp.
 const BIND_RETRY_MIN_MS = 1000;
 const BIND_RETRY_MAX_MS = 30000;
+// The socket's receive and send buffers, the most the SDK allows. The
+// default is 8 KB, and a 'message' event carries at most one buffer's
+// worth: a 16 MB history batch arrived as 2000 events, each a callback
+// and a copy on the UI thread (0.44 s of it in all, measured).
+const SOCKET_BUFFER_BYTES = 262144;
 
 export class TcpServer {
   private server: socket.TCPSocketServer | null = null;
@@ -82,7 +87,8 @@ export class TcpServer {
     // without needing real application data to flow. Individual accepted
     // TCPSocketConnections don't expose setExtraOptions themselves in this
     // SDK - only the server does, applying to connections it accepts.
-    await server.setExtraOptions({ keepAlive: true }).catch(() => { /* best-effort - not fatal if unsupported */ });
+    await server.setExtraOptions({ keepAlive: true, receiveBufferSize: SOCKET_BUFFER_BYTES, sendBufferSize: SOCKET_BUFFER_BYTES })
+      .catch(() => { /* best-effort - not fatal if unsupported */ });
   }
 
   stop(): void {
@@ -110,7 +116,8 @@ export async function connectTcp(address: string, port: number, timeoutMs: numbe
   // See TcpServer.start's matching comment - keeps an idle connection (and
   // any NAT mapping it depends on, e.g. over Tailscale) alive without
   // needing real traffic to flow.
-  await client.setExtraOptions({ keepAlive: true }).catch(() => { /* best-effort - not fatal if unsupported */ });
+  await client.setExtraOptions({ keepAlive: true, receiveBufferSize: SOCKET_BUFFER_BYTES, sendBufferSize: SOCKET_BUFFER_BYTES })
+    .catch(() => { /* best-effort - not fatal if unsupported */ });
   return link;
 }
 

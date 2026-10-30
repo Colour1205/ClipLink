@@ -147,6 +147,46 @@ public struct ClipboardEntry: Equatable, Hashable {
     }
 }
 
+// MARK: - History head
+
+/// The small message that goes in front of a big history_batch:
+/// `{"Newest": <entry>, "Keys": ["<key>", ...]}`. `newest` is the sender's most
+/// recent entry; `keys` has one key (`DeletedStore.key(of:)`, the signature) for
+/// every entry of the batch that follows, newest first. A peer that does not
+/// know the type skips it, and the batch itself is unchanged.
+public struct HistoryHead: Equatable {
+    public var newest: ClipboardEntry
+    public var keys: [String]
+
+    public init(newest: ClipboardEntry, keys: [String]) {
+        self.newest = newest
+        self.keys = keys
+    }
+
+    /// The head for a history of `newestFirst`, or nil when the batch would
+    /// hold fewer than 2 entries (nothing to stack, so no head).
+    public static func make(newestFirst entries: [ClipboardEntry]) -> HistoryHead? {
+        guard entries.count >= 2, let newest = entries.first else { return nil }
+        return HistoryHead(newest: newest, keys: entries.map(DeletedStore.key(of:)))
+    }
+
+    public func jsonString() -> String {
+        let object: [String: Any] = ["Newest": newest.jsonObject(), "Keys": keys]
+        return WireJSON.string(object)
+    }
+
+    /// Nil when Newest is missing or malformed. A key that is not a string is
+    /// skipped, like a malformed element of a batch.
+    public static func parse(_ json: String) -> HistoryHead? {
+        guard let obj = WireJSON.object(json),
+              let newestObject = obj["Newest"] as? [String: Any],
+              let newest = ClipboardEntry.from(newestObject)
+        else { return nil }
+        let keys = (obj["Keys"] as? [Any])?.compactMap { $0 as? String } ?? []
+        return HistoryHead(newest: newest, keys: keys)
+    }
+}
+
 // MARK: - File transfer
 
 /// What `ClipboardEntry.Content` holds when `Type == "file"` - a descriptor,

@@ -167,6 +167,7 @@ class MainActivity : ComponentActivity() {
                             onDelete = engine::deleteItem,
                             onSyncClipboard = engine::captureAndBroadcast,
                             onPickFile = { pickFileLauncher.launch(arrayOf("*/*")) },
+                            onExpandGroup = engine::expandGroup,
                         ),
                         me = MeActions(
                             onSetPassphrase = { passphrase ->

@@ -25,6 +25,12 @@ data class SyncedItem(
      * which two different entries of one device can share.
      */
     val uniqueKey: String = entry.deletionKey,
+    /**
+     * The batch group this item arrived in, while it is still stacked with at
+     * least one other (see [BatchGroups]). Null for an ordinary card. Memory
+     * only: it is never saved, and the list is what turns it into a stack.
+     */
+    val group: GroupTag? = null,
 ) {
     /** [uniqueKey] - what every list and cache here keys an item by. */
     val id: String get() = uniqueKey

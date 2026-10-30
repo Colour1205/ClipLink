@@ -353,6 +353,14 @@
       "value": "%1$s · %2$s"
     },
     {
+      "name": "stack_badge",
+      "value": "+%1$d"
+    },
+    {
+      "name": "stack_expand_hint",
+      "value": "Shows each item as its own card."
+    },
+    {
       "name": "devices_unknown_address",
       "value": "Unknown address"
     },

@@ -32,13 +32,15 @@ public sealed class EngineHost : Observable
         clock.Interval = TimeSpan.FromSeconds(30);
         clock.Tick += (_, _) =>
         {
-            foreach (var card in History) card.Tick();
+            foreach (var card in cards.Values) card.Tick();
         };
     }
 
     public ClipLinkEngine Engine { get; } = new();
 
-    // Newest first, as GetHistory() orders it.
+    // The cards on the Synced page, newest first, as GetHistory() orders them.
+    // Items that arrived together in one history batch are ONE card here (a
+    // stack, see BatchGrouping) until it is opened.
     public ObservableCollection<HistoryCard> History { get; } = new();
     // Trusted devices, then untrusted ones on the LAN - each in the engine's
     // stable order.
@@ -143,13 +145,94 @@ public sealed class EngineHost : Observable
 
     private bool historyLoaded;
 
-    private void ReloadHistory()
+    // Every entry's card, shown or folded into a stack, so a card keeps its
+    // thumbnail when it comes out of one.
+    private readonly Dictionary<string, HistoryCard> cards = new();
+    // Stacks the user has opened: their cards stay ordinary ones.
+    private readonly HashSet<string> expandedBatches = new();
+    // Stacks already shown once (one that appears animates in once).
+    private readonly HashSet<string> shownStacks = new();
+    // What the engine listed last.
+    private IReadOnlyList<HistoryItem> latestItems = Array.Empty<HistoryItem>();
+
+    // The page's cards are about to be added to, so the ones that stay can
+    // glide to their new places instead of jumping (SyncedPage).
+    public event Action? CardsWillShift;
+
+    // Only this many cards of an opened stack fly out one after another; a
+    // huge stack would otherwise go on for seconds. The rest just appear.
+    private const int MaxFlyingCards = 12;
+
+    private void ReloadHistory() => ApplyHistory(Engine.GetHistory(), Array.Empty<string>());
+
+    // Opens a stack: its cards come out as ordinary ones, where they belong
+    // in the list. It doesn't fold again (nothing about stacks is saved: after
+    // a restart the history is ordinary cards anyway).
+    public void ExpandBatch(string batchId)
     {
-        var items = Engine.GetHistory();
-        var known = new HashSet<string>(History.Select(card => card.Key));
-        var arrived = historyLoaded ? items.Where(item => !item.FromThisDevice && !known.Contains(item.Key)).ToList() : new List<HistoryItem>();
+        if (expandedBatches.Contains(batchId)) return;
+        var folded = BatchGrouping.Build(ToEntries(latestItems), expandedBatches)
+            .FirstOrDefault(row => row.BatchId == batchId)?.HiddenKeys ?? Array.Empty<string>();
+        expandedBatches.Add(batchId);
+        ApplyHistory(Engine.GetHistory(), folded);
+    }
+
+    private static List<BatchGrouping.Entry> ToEntries(IReadOnlyList<HistoryItem> items) =>
+        items.Select(item => new BatchGrouping.Entry(item.Key, item.BatchId, item.BatchExpected)).ToList();
+
+    // Shows the engine's history: one update, however many items it adds.
+    // reveal: cards coming out of a stack that was just opened, newest first.
+    private void ApplyHistory(IReadOnlyList<HistoryItem> items, IReadOnlyList<string> reveal)
+    {
+        latestItems = items;
+        var arrived = historyLoaded ? items.Where(item => !item.FromThisDevice && !cards.ContainsKey(item.Key)).ToList() : new List<HistoryItem>();
+        bool animate = historyLoaded;
         historyLoaded = true;
-        CollectionSync.ByKey(History, items, card => card.Key, item => item.Key, item => new HistoryCard(item), (card, item) => card.Update(item));
+
+        // A card for every entry: made, updated, or dropped when it's gone.
+        var present = new HashSet<string>(items.Select(item => item.Key));
+        foreach (string gone in cards.Keys.Where(key => !present.Contains(key)).ToList()) cards.Remove(gone);
+        foreach (var item in items)
+        {
+            if (cards.TryGetValue(item.Key, out var card)) card.Update(item);
+            else cards[item.Key] = new HistoryCard(item);
+        }
+
+        // Which of them are cards on the page, and which are folded in a stack.
+        var entries = ToEntries(items);
+        BatchGrouping.ForgetExpandedGone(expandedBatches, entries);
+        shownStacks.IntersectWith(items.Where(item => item.BatchId != null).Select(item => item.BatchId!));
+        var rows = BatchGrouping.Build(entries, expandedBatches);
+        var shown = new List<HistoryItem>(rows.Count);
+        bool newStack = false;
+        var byKey = new Dictionary<string, HistoryItem>();
+        foreach (var item in items) byKey.TryAdd(item.Key, item);
+        var stacks = new Dictionary<string, BatchGrouping.Row>();
+        foreach (var row in rows)
+        {
+            shown.Add(byKey[row.FrontKey]);
+            if (!row.IsStack) continue;
+            stacks[row.FrontKey] = row;
+            if (shownStacks.Add(row.BatchId!) && animate)
+            {
+                cards[row.FrontKey].PlanMotion(HistoryCard.Motion.Appear);
+                newStack = true;
+            }
+        }
+        // (Each card is set once, so a stack's card isn't unstacked and
+        // stacked again in the same update.)
+        foreach (var (key, card) in cards)
+        {
+            if (stacks.TryGetValue(key, out var row)) card.SetStack(row.BatchId, row.Hidden);
+            else card.SetStack(null, 0);
+        }
+        for (int i = 0; i < reveal.Count; i++)
+        {
+            if (cards.TryGetValue(reveal[i], out var revealed) && i < MaxFlyingCards) revealed.PlanMotion(HistoryCard.Motion.Reveal, i);
+        }
+
+        if (newStack || reveal.Count > 0) CardsWillShift?.Invoke();
+        CollectionSync.ByKey(History, shown, card => card.Key, item => item.Key, item => cards[item.Key], (card, item) => card.Update(item));
         foreach (var card in History)
         {
             // (A picture file's bytes may still be on their way: asked for

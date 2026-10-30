@@ -388,9 +388,14 @@ public sealed partial class ClipLinkEngine
         RequireStores();
         var trustedNames = trustStore.GetAllTrustedDevices().ToDictionary(device => device.PublicKey, device => device.Name);
         string ownName = deviceName.Current;
-        return historyAccess.GetHistory()
+        var (entries, batchOf, expected) = historyAccess.GetHistoryWithBatches();
+        return entries
             .OrderByDescending(entry => entry.Timestamp)
-            .Select(entry => ToHistoryItem(entry, trustedNames, ownName))
+            .Select(entry =>
+            {
+                string? batch = batchOf.GetValueOrDefault(entry.Key());
+                return ToHistoryItem(entry, trustedNames, ownName, batch, batch != null && expected.TryGetValue(batch, out int size) ? size : null);
+            })
             .ToList();
     }
 
@@ -632,7 +637,7 @@ public sealed partial class ClipLinkEngine
         return historyAccess.GetHistory().FirstOrDefault(entry => entry.Key() == key);
     }
 
-    private HistoryItem ToHistoryItem(ClipboardEntry entry, Dictionary<string, string?> trustedNames, string ownName)
+    private HistoryItem ToHistoryItem(ClipboardEntry entry, Dictionary<string, string?> trustedNames, string ownName, string? batchId = null, int? batchExpected = null)
     {
         bool own = entry.DeviceId == ownId;
         string? name = own ? ownName
@@ -640,7 +645,7 @@ public sealed partial class ClipLinkEngine
             : seenPeers.TryGetValue(entry.DeviceId, out var seen) ? seen.Name : null;
         string content = entry.Content ?? "";
         var item = new HistoryItem(entry.Key(), entry.Type, entry.DeviceId, name, own, ToUtc(entry.Timestamp),
-            TextPreview: null, TextLength: 0, FileName: null, SizeBytes: null, IsAvailable: true);
+            TextPreview: null, TextLength: 0, FileName: null, SizeBytes: null, IsAvailable: true, BatchId: batchId, BatchExpected: batchExpected);
         switch (entry.Type)
         {
             case "text":

@@ -163,6 +163,9 @@ public final class SyncEngine {
     var unansweredRetries: [String: Int] = [:]
     /// Hashes whose completed download is being hash-checked right now.
     var verifying: Set<String> = []
+    /// Which entries came in together in one history batch (memory only; see
+    /// BatchGroupTracker). Pruned against history whenever a snapshot is built.
+    var batchGroups = BatchGroupTracker()
 
     /// Bumped by every foreground/background transition: a teardown still
     /// waiting out its grace period checks it and stands down if the app came
@@ -794,6 +797,15 @@ public final class SyncEngine {
         }
     }
 
+    /// The user opened a stack in the Synced list: its items are ordinary cards
+    /// from now on and it never closes again. Memory only.
+    public func dissolveGroup(id: String) {
+        queue.async { [self] in
+            batchGroups.dissolve(id: id)
+            schedulePublish()
+        }
+    }
+
     /// Local only, as everywhere: peers keep their copies. Every item is
     /// remembered as deleted first, so their next history_batch doesn't bring
     /// it back. Also drops waiting and in-flight file transfers (the
@@ -805,6 +817,7 @@ public final class SyncEngine {
             history.reload()
             deleted.add(history.entries)
             history.clear()
+            batchGroups.removeAll()
             dropUnreferencedFiles()
             files.clearExports()
             schedulePublish()
@@ -909,7 +922,11 @@ public final class SyncEngine {
     func buildSnapshot() -> EngineSnapshot {
         var s = EngineSnapshot()
         s.ownDeviceId = ownId
-        s.items = history.newestFirst.map(makeItem)
+        let ordered = history.newestFirst
+        // Deleted, cleared or cut by the 25-item cap: a group shrinks with its members.
+        if !batchGroups.groups.isEmpty { batchGroups.prune(keeping: Set(ordered.map(HistoryStore.identity(of:)))) }
+        s.items = ordered.map(makeItem)
+        s.groups = batchGroups.groups
         s.devices = buildDeviceRows()
         // Only links whose peer has answered count.
         s.connectedCount = links.values.filter(\.hasReceivedSessionLine).count

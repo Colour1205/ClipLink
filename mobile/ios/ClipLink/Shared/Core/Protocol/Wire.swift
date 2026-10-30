@@ -14,6 +14,9 @@ public enum Wire {
     public enum MessageType {
         public static let entry = "entry"
         public static let historyBatch = "history_batch"
+        /// Sent just before a history_batch of 2 or more entries: its newest
+        /// entry and every key in it, so the peer can show the stack at once.
+        public static let historyHead = "history_head"
         public static let fileChunk = "file_chunk"
         public static let fileRequest = "file_request"
         /// "I no longer trust you": sent when a device is removed.

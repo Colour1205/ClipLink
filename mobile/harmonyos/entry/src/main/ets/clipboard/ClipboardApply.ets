@@ -33,7 +33,9 @@ export async function applyEntryToClipboard(entry: ClipboardEntry, fileStore?: F
       await pasteboard.getSystemPasteboard().setData(data);
       return 'applied';
     } else if (entry.Type === 'image') {
-      const imageBytes = base64Helper.decodeSync(entry.Content);
+      // Decoded on a worker (the promise form): a photo is MBs of Base64,
+      // and this runs as an item arrives, with the UI thread busy already.
+      const imageBytes = await base64Helper.decode(entry.Content);
       const imageSource = image.createImageSource(imageBytes.buffer as ArrayBuffer);
       const pixelMap = await imageSource.createPixelMap();
       const data = pasteboard.createData(pasteboard.MIMETYPE_PIXELMAP, pixelMap);

@@ -22,6 +22,15 @@ daemon process, so the iOS interop harness and old notes still line up.
   log file (`%LOCALAPPDATA%\ClipLink\logs\cliplink.log`).
 - `Clipboard/`, `Identity/`, `Networking/`, `Storage/`, `Crypto/` — the pieces
   the engine wires together (see `docs/protocol.md` for the wire format).
+  `Storage/HistoryBatch.cs` is a peer's `history_batch` as one unit: all its
+  new entries go into history in one step (one write, one `HistoryChanged`),
+  and a batch that adds two or more gives them a shared `HistoryItem.BatchId`
+  (in memory only), which the app shows as one stack on the Synced page.
+  `Storage/HistoryHead.cs` and `Storage/BatchGroups.cs` are the `history_head`
+  that goes first when a batch has two or more entries: the newest entry and
+  the keys of the whole batch in one small message, so the receiver adds that
+  entry and shows the stack (with its real size) while the big batch is still
+  arriving; the batch then joins the same group.
   `Storage/LocalFiles.cs` is the per-file check and payload (name, size,
   streamed SHA-256, 1 GB cap) shared by copied files and shared ones, and
   their copy into the FileStore, which refuses a file changed since it was

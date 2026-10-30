@@ -174,6 +174,36 @@ class HistoryStoreTest {
     }
 
     @Test
+    fun `a batch is stored in one write and reported once with the entries that survived`() {
+        val history = store()
+        history.addAll((100..123).map { entry("kept$it", it) }) // 24 of 25
+        val told = mutableListOf<List<ClipboardEntry>>()
+        val writtenWhenTold = mutableListOf<Int>()
+
+        val old = entry("old", 1)
+        val fresh = entry("fresh", 300)
+        val survivors = history.addAllNew(listOf(old, fresh)) {
+            told.add(it)
+            // The file already holds the whole batch when it is announced.
+            writtenWhenTold.add(HistoryFile.read(storage).entries.size)
+        }
+
+        assertEquals(listOf(fresh), survivors)
+        assertEquals(listOf(listOf(fresh)), told)
+        assertEquals(listOf(25), writtenWhenTold)
+    }
+
+    @Test
+    fun `nothing new means nothing reported`() {
+        val history = store()
+        val a = entry("a", 5)
+        history.addAll(listOf(a))
+        var told = 0
+        assertTrue(history.addAllNew(listOf(a)) { told++ }.isEmpty())
+        assertEquals(0, told)
+    }
+
+    @Test
     fun `a duplicate is not new, whatever way it is spelt`() {
         val history = store()
         val signed = ClipboardEntry("hi", ClipboardEntry.TYPE_TEXT, "D", "2026-09-26T12:34:56.1234500Z", "sig")
@@ -367,5 +397,22 @@ class HistoryStoreTest {
         // The file is gone, but the store has what it read: a read is a field.
         storage.delete()
         assertEquals(listOf("a"), history.all().map { it.content })
+    }
+
+    @Test
+    fun `countNew counts the keys that are neither here nor deleted, each once`() {
+        val history = store()
+        val here = entry("here", 1)
+        history.addAll(listOf(here))
+        deleted.add("gone")
+        assertEquals(2, history.countNew(listOf(here.signature!!, "gone", "new1", "new2", "new1")))
+        assertEquals(0, history.countNew(listOf(here.signature!!, "gone")))
+        assertEquals(0, history.countNew(emptyList()))
+    }
+
+    @Test
+    fun `countNew never counts more than the history holds`() {
+        val history = store()
+        assertEquals(HistoryStore.MAX_ITEMS, history.countNew((1..500).map { "k$it" }))
     }
 }

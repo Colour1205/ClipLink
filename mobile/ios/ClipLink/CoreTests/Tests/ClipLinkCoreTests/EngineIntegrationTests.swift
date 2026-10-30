@@ -1383,6 +1383,80 @@ final class EngineIntegrationTests: XCTestCase {
         wait("A's streams all ended") { a.engine.queue.sync { a.engine.streaming.isEmpty && a.engine.streamsRunning.isEmpty && a.engine.streamsQueued.isEmpty } }
         link.close()
     }
+
+    /// Every message A sends a freshly connected peer, up to its history_batch.
+    private func firstMessages(of a: Node) throws -> [Envelope] {
+        let link = try handshake(with: a, as: SoftwareIdentity(), named: "Reader", passcode: PassphraseAuth.deriveKey(passphrase: "pw"))
+        var got: [Envelope] = []
+        link.onMessage = { _, text in
+            if let envelope = Envelope.parse(text) { got.append(envelope) }
+        }
+        // What A sends while this side is held waits for goLive, in order.
+        link.goLive()
+        wait("the history batch arrived") { got.contains { $0.type == Wire.MessageType.historyBatch } }
+        link.close()
+        wait("A dropped the reader") { a.engine.queue.sync { a.engine.links.isEmpty } }
+        return got
+    }
+
+    /// A history of 2 or more entries is announced by a history_head sent just
+    /// before the (unchanged) history_batch; one entry, or none, gets no head.
+    func testTheHistoryHeadComesFirstAndOnlyForTwoOrMoreEntries() throws {
+        let (a, _) = makePair()
+        setPasscode(a, "pw")
+        a.engine.enterForeground()
+        wait("A listening") { a.engine.queue.sync { a.engine.status.listening } }
+
+        // Nothing yet, then one entry: a batch alone.
+        XCTAssertEqual(try firstMessages(of: a).map(\.type), [Wire.MessageType.historyBatch])
+        a.engine.sendText("only one")
+        wait("A has it") { a.recorder.items.count == 1 }
+        XCTAssertEqual(try firstMessages(of: a).map(\.type), [Wire.MessageType.historyBatch], "no head for one entry")
+
+        // Three entries: head, then batch.
+        Thread.sleep(forTimeInterval: 0.05)
+        a.engine.sendText("second")
+        Thread.sleep(forTimeInterval: 0.05)
+        a.engine.sendText("third")
+        wait("A has three") { a.recorder.items.count == 3 }
+        let messages = try firstMessages(of: a)
+        XCTAssertEqual(messages.map(\.type), [Wire.MessageType.historyHead, Wire.MessageType.historyBatch])
+
+        let head = try XCTUnwrap(HistoryHead.parse(messages[0].payload))
+        let batch = try XCTUnwrap(ClipboardEntry.parseList(messages[1].payload))
+        XCTAssertEqual(batch.map(\.content), ["only one", "second", "third"], "the batch is unchanged: oldest first")
+        XCTAssertEqual(head.keys, batch.reversed().map(DeletedStore.key(of:)), "the same entries, newest first")
+        XCTAssertEqual(head.newest, batch.last, "the newest entry, signature and all")
+        XCTAssertNotNil(EntrySigning.verified(head.newest))
+    }
+
+    /// A's head and batch reach another engine over a real link: B ends with
+    /// ONE stack of the same size the head announced, and the clipboard hears
+    /// the newest item once.
+    func testAHeadAndBatchOverARealLinkMakeOneStack() throws {
+        let (a, b) = makePair()
+        setPasscode(a, "pw")
+        setPasscode(b, "pw")
+        a.engine.enterForeground()
+        a.engine.sendText("first")
+        Thread.sleep(forTimeInterval: 0.05)
+        a.engine.sendText("second")
+        Thread.sleep(forTimeInterval: 0.05)
+        a.engine.sendText("third")
+        wait("A has history") { a.recorder.items.count == 3 }
+
+        b.engine.enterForeground()
+        wait("connected") { a.recorder.connectedCount == 1 && b.recorder.connectedCount == 1 }
+        wait("B caught up") { b.recorder.items.count == 3 }
+        Thread.sleep(forTimeInterval: 0.5)
+
+        let snap = b.engine.queue.sync { b.engine.buildSnapshot() }
+        XCTAssertEqual(snap.groups.count, 1)
+        XCTAssertEqual(snap.groups.first?.memberIDs.count, 3)
+        XCTAssertNil(snap.groups.first?.expectedSize, "the batch arrived: the real count")
+        XCTAssertEqual(StackPlanner.rows(items: snap.items, groups: snap.groups).first?.stack?.hiddenCount, 2)
+        XCTAssertEqual(b.recorder.receivedEntries.map(\.0.content), ["third"], "applied once")
+    }
 }
 
 /// A replayer's socket: writes a handshake line, then sends back every line

@@ -54,6 +54,10 @@ public sealed partial class ClipLinkEngine
                 NotifyHistoryChanged();
             }
         }
+        else if (envelope.Type == "history_head")
+        {
+            HandleHistoryHead(envelope.Payload, conn);
+        }
         else if (envelope.Type == "history_batch")
         {
             var entries = JsonSerializer.Deserialize<List<ClipboardEntry>>(envelope.Payload);
@@ -62,33 +66,7 @@ public sealed partial class ClipLinkEngine
                 Console.WriteLine("Received invalid message from peer."); // debug
                 return;
             }
-            foreach (var entry in entries)
-            {
-                if (!SigningService.Verify(entry, entry.DeviceId) || !trustStore.IsTrusted(entry.DeviceId))
-                {
-                    Console.WriteLine("Received message with invalid signature from peer.");
-                    continue; // skip just this bad entry, keep processing the rest of the batch
-                }
-                if (historyAccess.isEntryDeleted(entry))
-                {
-                    continue; // deleted here earlier - peers keep resending it in every batch
-                }
-                if (historyAccess.addToHistory(entry)) // true only if genuinely new, not a duplicate (or deleted)
-                {
-                    NotifyHistoryChanged();
-                    if (entry.Type == "file")
-                    {
-                        // same handling as a live entry now: if we don't have the
-                        // bytes, ask the whole network for them, not just whoever
-                        // we're reconciling with
-                        HandleIncomingFileEntry(entry);
-                    }
-                    else
-                    {
-                        clipboardSync.addToQueue(entry.Content, entry.Type);
-                    }
-                }
-            }
+            HandleHistoryBatch(entries, conn);
         }
         else if (envelope.Type == "file_chunk")
         {
@@ -106,6 +84,93 @@ public sealed partial class ClipLinkEngine
         {
             Console.WriteLine("Received message with unknown type from peer.");
             return;
+        }
+    }
+
+    // A peer's history_head: the newest entry of the history_batch that
+    // follows, and the keys of all its entries (small, while the batch can be
+    // many MB). The newest entry is checked like a live "entry" and added at
+    // once, with what a received item does besides, so the Synced page shows
+    // it (as the front of a stack, when the keys promise two or more new
+    // entries) while the batch is still arriving. A head that does not check
+    // out is ignored, and the batch then works as it always did.
+    private void HandleHistoryHead(string payload, PeerConnection conn)
+    {
+        var head = JsonSerializer.Deserialize<HistoryHead.Payload>(payload);
+        if (!HistoryHead.Accept(head, entry => SigningService.Verify(entry, entry.DeviceId) && trustStore.IsTrusted(entry.DeviceId)))
+        {
+            Console.WriteLine("Received invalid history head from peer, ignoring it.");
+            return;
+        }
+        var newest = head!.Newest;
+        var result = historyAccess.AddHead(conn, head);
+        if (result.Changed)
+        {
+            NotifyHistoryChanged();
+        }
+        if (result.Added != null)
+        {
+            Console.WriteLine($"[clip] history head from {DeviceLabel.ShortId(conn.PeerDeviceId)}: newest {newest.Type} entry added, {head.Keys.Count} in the batch to come");
+            ApplyReceivedEntry(result.Added);
+        }
+    }
+
+    // A peer's history_batch as ONE unit: every entry is checked as before
+    // (signature, trusted maker, not deleted here), then all the new ones go
+    // into history in one step, with one write to disk and one "history
+    // changed" - not one of each per entry, which showed the Synced page's
+    // cards arriving one at a time. What a received item does besides
+    // (onto the clipboard, asking for a file's bytes) happens once for the
+    // batch's newest item, not once for every item.
+    private void HandleHistoryBatch(List<ClipboardEntry> entries, PeerConnection conn)
+    {
+        var outcome = HistoryBatch.Apply(entries,
+            isAcceptable: entry =>
+            {
+                if (SigningService.Verify(entry, entry.DeviceId) && trustStore.IsTrusted(entry.DeviceId)) return true;
+                Console.WriteLine("Received message with invalid signature from peer.");
+                return false;
+            },
+            isDeleted: historyAccess.isEntryDeleted,
+            add: batch => historyAccess.AddBatch(batch, conn),
+            changed: NotifyHistoryChanged);
+        if (outcome.Added.Count == 0) return;
+        Console.WriteLine($"[clip] history batch: {outcome.Added.Count} new, {outcome.Duplicates} known, {outcome.Deleted} deleted here, {outcome.Rejected} rejected");
+
+        // (The first of equal timestamps wins, so the result doesn't depend on
+        // how the OrderBy happens to break a tie.)
+        var newest = outcome.Added.OrderByDescending(entry => entry.Timestamp).First();
+        foreach (var entry in outcome.Added)
+        {
+            // (After a history_head the newest entry is already on the
+            // clipboard, and this batch's newest is older: not again.)
+            if (entry == newest && !outcome.HeadApplied)
+            {
+                ApplyReceivedEntry(entry);
+            }
+            else if (entry.Type == "file")
+            {
+                // Not for the clipboard, but its bytes are still wanted: the
+                // ask when a device connects went out before this batch came.
+                HandleIncomingFileEntry(entry, applyToClipboard: false);
+            }
+        }
+    }
+
+    // Puts a received entry on this PC's clipboard (a file's once its bytes
+    // are here, asking for them if they aren't).
+    private void ApplyReceivedEntry(ClipboardEntry entry)
+    {
+        if (entry.Type == "file")
+        {
+            // Same handling as a live entry: if we don't have the bytes, ask
+            // the whole network for them, not just whoever we're reconciling
+            // with.
+            HandleIncomingFileEntry(entry);
+        }
+        else
+        {
+            clipboardSync.addToQueue(entry.Content, entry.Type);
         }
     }
 
@@ -149,7 +214,10 @@ public sealed partial class ClipLinkEngine
         });
     }
 
-    private void HandleIncomingFileEntry(ClipboardEntry entry)
+    // applyToClipboard false: only make sure the bytes are on their way (a
+    // batch's older file entries); the entry then isn't put on the clipboard
+    // when they arrive.
+    private void HandleIncomingFileEntry(ClipboardEntry entry, bool applyToClipboard = true)
     {
         FilePayload? payload;
         try
@@ -174,14 +242,14 @@ public sealed partial class ClipLinkEngine
         if (fileStore.Exists(payload.FileHash))
         {
             // already have these exact bytes locally — apply right away
-            clipboardSync.addToQueue(entry.Content, entry.Type);
+            if (applyToClipboard) clipboardSync.addToQueue(entry.Content, entry.Type);
             return;
         }
 
         // don't have it yet — remember to apply it once file_chunk messages for
         // this hash finish arriving and verify, and ask every connected peer
         // (not just whoever handed us this entry) whether they have it
-        fileTransferState.PendingEntries[payload.FileHash] = entry;
+        if (applyToClipboard) fileTransferState.PendingEntries[payload.FileHash] = entry;
         SendFileRequest(payload.FileHash, connectionsByDeviceId.Values);
     }
 
@@ -576,6 +644,14 @@ public sealed partial class ClipLinkEngine
     private void SendHistoryBatch(PeerConnection conn)
     {
         var history = historyAccess.GetHistory();
+        // With two or more entries, the newest and the keys go first, in a
+        // small message the other side can show at once (the batch can be
+        // many MB). Send() writes in the order it is called. Builds that do
+        // not know "history_head" skip it.
+        if (HistoryHead.ForBatch(history) is { } head)
+        {
+            _ = conn.Send(JsonSerializer.Serialize(new Envelope("history_head", JsonSerializer.Serialize(head))));
+        }
         var envelope = new Envelope("history_batch", JsonSerializer.Serialize(history));
         var json = JsonSerializer.Serialize(envelope);
         _ = conn.Send(json);
@@ -650,6 +726,9 @@ public sealed partial class ClipLinkEngine
             // Either way, what it was still sending is cut short, and is
             // asked for elsewhere - from the live link that replaced it, say.
             AbandonTransfersFrom(conn);
+            // A stack its history_head started, whose batch never came, is
+            // not waiting for more.
+            if (historyAccess.EndHead(conn)) NotifyHistoryChanged();
         };
         _ = conn.Listen();
         if (previous != null && previous != conn)

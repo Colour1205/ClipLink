@@ -22,6 +22,7 @@ import { LineFramer } from './LineFramer';
 
 const base64Helper = new util.Base64Helper();
 const decoder = util.TextDecoder.create('utf-8');
+const CARRIAGE_RETURN = 13;
 
 interface HandshakeMessage {
   EphemeralPublicKey: string;
@@ -226,13 +227,20 @@ async function sha256(data: Uint8Array): Promise<Uint8Array> {
 // enough for this protocol's purposes. Used for the whole connection
 // lifetime, handshake and session phase alike, same as the Windows side
 // reuses one StreamReader/StreamWriter throughout.
+//
+// Lines come out as bytes, not text. Only the handshake line is read as
+// text; every session line is Base64, which Base64Helper decodes straight
+// from the bytes. Decoding a line to a string first cost a pass over it on
+// the UI thread - measured at about 90 ms for a 16 MB history batch - for
+// nothing. (A line that long is ordinary: an image item is its PNG in
+// Base64, and a history batch carries 25 items.)
 class TcpLineChannel {
   private client: TcpLike;
   // Splits the socket's bytes into lines - bounded, and linear in what
   // arrives (see LineFramer).
   private framer: LineFramer = new LineFramer();
-  private pendingLines: string[] = [];
-  private waiters: Array<(line: string | null) => void> = [];
+  private pendingLines: Uint8Array[] = [];
+  private waiters: Array<(line: Uint8Array | null) => void> = [];
   // Notified whenever a line arrives or the socket closes - see
   // waitForActivity.
   private activityListeners: Array<() => void> = [];
@@ -271,9 +279,10 @@ class TcpLineChannel {
       return;
     }
     for (const lineBytes of lines) {
-      let line = decoder.decodeToString(lineBytes);
-      if (line.endsWith('\r')) line = line.slice(0, -1);
-      this.deliverLine(line);
+      // A peer that ends its lines with "\r\n": the '\r' is not part of the line.
+      const end: number = lineBytes.length > 0 && lineBytes[lineBytes.length - 1] === CARRIAGE_RETURN
+        ? lineBytes.length - 1 : lineBytes.length;
+      this.deliverLine(end === lineBytes.length ? lineBytes : lineBytes.subarray(0, end));
     }
     // For waitForActivity, a partial line is already proof the peer is
     // talking (a big first message can take seconds to arrive in full over
@@ -281,7 +290,7 @@ class TcpLineChannel {
     this.notifyActivity();
   }
 
-  private deliverLine(line: string): void {
+  private deliverLine(line: Uint8Array): void {
     const waiter = this.waiters.shift();
     if (waiter) {
       waiter(line);
@@ -291,7 +300,7 @@ class TcpLineChannel {
     this.notifyActivity();
   }
 
-  private flushWaiters(value: string | null): void {
+  private flushWaiters(value: Uint8Array | null): void {
     while (this.waiters.length > 0) {
       this.waiters.shift()?.(value);
     }
@@ -303,26 +312,26 @@ class TcpLineChannel {
     for (const listener of listeners) listener();
   }
 
-  async readLine(): Promise<string | null> {
+  async readLine(): Promise<Uint8Array | null> {
     if (this.pendingLines.length > 0) {
       return this.pendingLines.shift()!;
     }
     if (this.closed) return null;
-    return new Promise<string | null>((resolve) => {
+    return new Promise<Uint8Array | null>((resolve) => {
       this.waiters.push(resolve);
     });
   }
 
   // readLine with a deadline: null on close OR on timeout. The timed-out
   // waiter is removed so it can't swallow a line that arrives later.
-  async readLineWithin(timeoutMs: number): Promise<string | null> {
+  async readLineWithin(timeoutMs: number): Promise<Uint8Array | null> {
     if (this.pendingLines.length > 0) {
       return this.pendingLines.shift()!;
     }
     if (this.closed) return null;
-    return new Promise<string | null>((resolve) => {
+    return new Promise<Uint8Array | null>((resolve) => {
       let timerId = -1;
-      const waiter = (line: string | null): void => {
+      const waiter = (line: Uint8Array | null): void => {
         clearTimeout(timerId);
         resolve(line);
       };
@@ -539,15 +548,15 @@ export class PeerConnection {
       };
       await channel.writeLine(asciiJson(JSON.stringify(myHandshake)));
 
-      const theirLine = await channel.readLineWithin(HANDSHAKE_TIMEOUT_MS);
-      if (theirLine === null) {
+      const theirLineBytes = await channel.readLineWithin(HANDSHAKE_TIMEOUT_MS);
+      if (theirLineBytes === null) {
         if (report !== undefined && !channel.isClosed) report.timedOut = true;
         return null;
       }
 
       let theirHandshake: HandshakeMessage;
       try {
-        theirHandshake = JSON.parse(theirLine) as HandshakeMessage;
+        theirHandshake = JSON.parse(decoder.decodeToString(theirLineBytes)) as HandshakeMessage;
       } catch (e) {
         return null;
       }
@@ -609,12 +618,15 @@ export class PeerConnection {
     }
   }
 
+  // The Base64 is made off the UI thread (Base64Helper's promise form runs
+  // on a worker), as the read loop's decoding is: a history batch of images
+  // is tens of MB of it.
   async send(message: string): Promise<void> {
     const packed: Uint8Array = await AesGcm.encryptPacked(this.sessionKey, message);
     // Before the write, so its echo can't arrive ahead of it.
     const nonce: string | null = nonceKey(packed);
     if (this.sentNonces !== null && nonce !== null) this.sentNonces.add(nonce);
-    await this.channel.writeLine(base64Helper.encodeToStringSync(packed));
+    await this.channel.writeLine(await base64Helper.encodeToString(packed));
   }
 
   onMessage(callback: (message: string) => void): void {
@@ -675,7 +687,10 @@ export class PeerConnection {
         // nonceKey). Checked before decrypting: an echo of this side's own
         // envelope would decrypt (see sentNonces), and must neither prove
         // the session nor count as activity for the heartbeat watchdog.
-        const packed: Uint8Array = base64Helper.decodeSync(line);
+        // Decoded from the line's bytes, on a worker (the promise form):
+        // decodeSync held the UI thread for 0.4 s on a 16 MB history
+        // batch, right as the peer was about to count as connected.
+        const packed: Uint8Array = await base64Helper.decode(line);
         const nonce: string | null = nonceKey(packed);
         if (this.sentNonces !== null && nonce !== null && this.sentNonces.has(nonce)) {
           throw new Error('reflected line');
@@ -719,7 +734,13 @@ export class PeerConnection {
     }
   }
 
+  // The first ping goes at once, ahead of the history batch that follows
+  // listen() (see SyncManager.registerConnection): the peer counts this
+  // device as connected on the first line that decrypts, and a ping is a
+  // few dozen bytes where the batch can be tens of MB and seconds in
+  // transit. Every build filters pings out, so an early one costs nothing.
   private startHeartbeat(): void {
+    void this.send(PING_SENTINEL).catch(() => { /* as below */ });
     this.heartbeatTimerId = setInterval(() => {
       void this.send(PING_SENTINEL).catch(() => { /* a send failure will also surface via the read loop dying */ });
       if (Date.now() - this.lastActivityAt > HEARTBEAT_TIMEOUT_MS) {

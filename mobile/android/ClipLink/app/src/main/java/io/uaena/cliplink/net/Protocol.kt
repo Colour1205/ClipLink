@@ -5,6 +5,9 @@ import io.uaena.cliplink.core.optStringOrNull
 import io.uaena.cliplink.core.untrusted
 import io.uaena.cliplink.store.FileNames
 import io.uaena.cliplink.store.FileStore
+import io.uaena.cliplink.core.ClipboardEntry
+import io.uaena.cliplink.core.DotNetTimestamp
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -20,6 +23,9 @@ object Protocol {
 
     const val TYPE_ENTRY = "entry"
     const val TYPE_HISTORY_BATCH = "history_batch"
+
+    /** Sent just before a history_batch of two or more entries: its newest entry and its keys - see [HistoryHead]. */
+    const val TYPE_HISTORY_HEAD = "history_head"
     const val TYPE_FILE_CHUNK = "file_chunk"
     const val TYPE_FILE_REQUEST = "file_request"
 
@@ -65,6 +71,46 @@ data class Envelope(val type: String, val payload: String) {
             val obj = JSONObject(json)
             val type = obj.optString("Type", "")
             if (type.isEmpty()) null else Envelope(type, obj.optString("Payload", ""))
+        }
+    }
+}
+
+/**
+ * The small message that goes ahead of a big history_batch: the sender's
+ * newest entry ([newest], signed like any entry) and the key of every entry in
+ * the batch that follows ([keys], newest first - a key is the entry's
+ * [ClipboardEntry.deletionKey]). It lets the receiver show the newest item,
+ * and how many are coming, while the batch (megabytes, with pictures) is still
+ * on its way. Builds that do not know it skip the type and use the batch alone.
+ */
+data class HistoryHead(val newest: ClipboardEntry, val keys: List<String>) {
+    fun toJson(): String = JSONObject().apply {
+        put("Newest", newest.toJson())
+        put("Keys", JSONArray().also { array -> keys.forEach { array.put(it) } })
+    }.toString()
+
+    companion object {
+        /** The head for a batch of [entries] (any order): the newest of them, and all their keys newest first. Null for none. */
+        fun forBatch(entries: List<ClipboardEntry>): HistoryHead? {
+            val newestFirst = entries.sortedByDescending { DotNetTimestamp.canonical(it.timestamp) }
+            val newest = newestFirst.firstOrNull() ?: return null
+            return HistoryHead(newest, newestFirst.map { it.deletionKey })
+        }
+
+        /** Null for anything without a readable entry and a list of keys. */
+        fun parse(json: String): HistoryHead? = untrusted {
+            val obj = JSONObject(json)
+            val newest = obj.optJSONObject("Newest")?.let(ClipboardEntry::fromJson)
+            val array = obj.optJSONArray("Keys")
+            if (newest == null || array == null) {
+                null
+            } else {
+                val keys = ArrayList<String>(array.length())
+                for (i in 0 until array.length()) {
+                    (array.opt(i) as? String)?.takeIf { it.isNotEmpty() }?.let(keys::add)
+                }
+                HistoryHead(newest, keys)
+            }
         }
     }
 }

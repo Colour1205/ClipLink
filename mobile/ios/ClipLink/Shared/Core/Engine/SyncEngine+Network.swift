@@ -879,6 +879,9 @@ extension SyncEngine {
 
     func linkClosed(_ link: PeerLink) {
         let id = link.peerDeviceId
+        // The history_batch behind a head that came in on this link will not
+        // come: its stack keeps only the items it has.
+        finishProvisional(ObjectIdentifier(link))
         // An unproven handshake's name was shown for this connection only:
         // a replay's must not outlive it (off the LAN no beacon replaces it).
         // Kept if the link that replaced this one brought the same name.

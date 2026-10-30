@@ -16,10 +16,28 @@
 //   have no cap and resend the same history batch on every reconnect, so
 //   closing would only loop.
 
+import { buffer } from '@kit.ArkTS';
+
 export const FIRST_LINE_MAX_BYTES = 64 * 1024;
 export const MAX_LINE_BYTES = 192 * 1024 * 1024;
 
-const NEWLINE = 10;
+const NEWLINE_TEXT = '\n';
+
+// Where the next '\n' at or after `from` is, or -1. Searched through the
+// buffer module, as text: Uint8Array.indexOf took 22 to 43 ms per MB on a
+// phone (measured, debug build), and a 16 MB history batch arrives as
+// hundreds of chunks, each searched as it comes - 0.4 to 0.9 s of the UI
+// thread in all, against 1.3 ms per MB this way. The byte must be given as
+// the one-character string: Buffer.indexOf given the number 10 was slower
+// still (115 ms per MB). buffer.from over the chunk's own memory copies
+// nothing, and 0x0A is never inside a multi-byte UTF-8 character, so the
+// byte found is always a line's end.
+function findNewline(chunk: Uint8Array, from: number): number {
+  if (from >= chunk.length) return -1;
+  const view: buffer.Buffer = buffer.from(chunk.buffer as ArrayBuffer, chunk.byteOffset + from, chunk.length - from);
+  const at: number = view.indexOf(NEWLINE_TEXT);
+  return at === -1 ? -1 : from + at;
+}
 
 export class LineFramer {
   private readonly firstLineMaxBytes: number;
@@ -53,7 +71,7 @@ export class LineFramer {
     const lines: Uint8Array[] = [];
     let start = 0;
     while (start < chunk.length) {
-      const newline: number = chunk.indexOf(NEWLINE, start);
+      const newline: number = findNewline(chunk, start);
       const end: number = newline === -1 ? chunk.length : newline;
       if (!this.discarding && end > start) {
         if (this.partBytes + (end - start) > (this.sawFirstLine ? this.maxLineBytes : this.firstLineMaxBytes)) {

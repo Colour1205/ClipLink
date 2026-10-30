@@ -659,6 +659,14 @@ public final class DeletedStore {
         removingDeleted([entry]).isEmpty
     }
 
+    /// The keys (see `key(of:)`) that are NOT remembered as deleted. A
+    /// history_head lists keys, not entries.
+    public func removingDeletedKeys(_ wanted: [String]) -> [String] {
+        if file.stamp() != stamp { reload() }
+        guard !keys.isEmpty else { return wanted }
+        return wanted.filter { !keys.contains($0) }
+    }
+
     /// The entries that were NOT deleted here. Costs one stat per call; the
     /// file is re-read only when the other process (the app, for the Share
     /// extension's node) changed it meanwhile.

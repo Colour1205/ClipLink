@@ -35,6 +35,7 @@ import picker from '@ohos.file.picker';
 import uiMaterial from '@ohos.arkui.uiMaterial';
 import unifiedDataChannel from '@ohos.data.unifiedDataChannel';
 import { vibrator } from '@kit.SensorServiceKit';
+import { accessibility } from '@kit.AccessibilityKit';
 import { ClipboardWatcher } from '../clipboard/ClipboardWatcher';
 import { DeviceIdentity } from '../identity/DeviceIdentity';
 import { TrustStore, TrustedDevice } from '../identity/TrustStore';
@@ -54,7 +55,9 @@ import { PAIRING_ACTION_EVENT, PAIRING_ACTION_OPEN, PAIRING_ACTION_PARAM, PAIRIN
 import { PAIRING_LINK_EVENT, takePendingPairingLink, unwrapPairingLink, wrapPairingLink } from '../networking/PairingLink';
 import { QUIET_AFTER_IGNORED_MS, QUIET_AFTER_REMOVED_MS, QuietState, RequestQuiet } from '../networking/RequestQuiet';
 import { DialFallback } from '../networking/DialFallback';
-import { SyncManager } from '../networking/SyncManager';
+import { BatchApplied, HeadApplied, SyncManager } from '../networking/SyncManager';
+import { StackedCard } from '../stack/StackedCard';
+import { BatchGroupTracker, BatchMember, BatchPlan, StackRow, buildRows, dissolveGroup, hiddenCount, placeBatch, revealAnimates, settleGroup, staggerDelayMs } from '../stack/SyncedRows';
 import { connection } from '@kit.NetworkKit';
 import { signEntry, ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
 import { ApplyResult } from '../clipboard/ClipboardApply';
@@ -198,7 +201,7 @@ function compareDeviceRows(a: DeviceRow, b: DeviceRow): number {
 
 // A single synced clipboard item for the list UI - built from a verified
 // ClipboardEntry (see SyncManager.onEntryApplied), not a raw log line.
-interface SyncedItem {
+interface SyncedItem extends BatchMember {
   // Signature is unique per (content, type, deviceId, timestamp) - used as
   // the ForEach key below. `time` is deliberately truncated to HH:MM for
   // display and must NEVER be reused as a key: two copies from the same
@@ -221,6 +224,15 @@ interface SyncedItem {
   deviceId: string;
   time: string;
   fromPeer: boolean;
+  // The history_batch whose new entries this item arrived with, when that
+  // brought two or more (see SyncedRows.ets): the group's cards are one stack
+  // until the user opens it. '' for every other item. Memory only.
+  groupId: string;
+  // The timestamp in canonical form, to place a batch's items by time.
+  stamp: string;
+  // Set on the members of a group a peer's history_head made, until the batch
+  // behind it has come: the size the group will have (0 otherwise).
+  expected: number;
 }
 
 // Wire shape for QR/pasted pairing exchange - matches windows/ClipLink/Engine/
@@ -600,6 +612,21 @@ struct Index {
   @State pendingChange: boolean = false;
   @State syncLog: string[] = [];
   @State syncedItems: SyncedItem[] = [];
+  // The system's "reduce animations" setting (see aboutToAppear): a stack then
+  // opens with short fades only.
+  @State reduceMotion: boolean = false;
+  private onAnimationReduce = (reduce: boolean): void => { this.reduceMotion = reduce; };
+  // The batch groups of this session, and the ones a history_head started.
+  private batchGroups: BatchGroupTracker = new BatchGroupTracker();
+  // For a moment after they appear, the rows that animate in (see rowTransition):
+  // a stack that just arrived (by its front item's id), and the items an
+  // opened stack revealed (by id, to their place behind the front card).
+  private freshStacks: Set<string> = new Set<string>();
+  private revealSlots: Map<string, number> = new Map<string, number>();
+  // buildRows' answer for the list it was last asked about (see syncedRows).
+  private rowsSource: SyncedItem[] | null = null;
+  private rowsCache: StackRow<SyncedItem>[] = [];
+  private rowsByFront: Map<string, StackRow<SyncedItem>> = new Map<string, StackRow<SyncedItem>>();
   @State immersiveSupported: boolean = false;
   @State connectedCount: number = 0;
   // Counts every change to the links (one coming up, answering, going away), so the
@@ -864,6 +891,12 @@ struct Index {
     } catch (e) {
       // unreadable prefs - keep the defaults
     }
+    try {
+      this.reduceMotion = accessibility.isAnimationReduceEnabledSync();
+      accessibility.onAnimationReduceStateChange(this.onAnimationReduce);
+    } catch (e) {
+      // no such setting here - animations stay on
+    }
     // Here rather than later so the very first beacon already carries it.
     this.refreshSystemDeviceName();
     this.readAppVersion();
@@ -913,11 +946,70 @@ struct Index {
       // history before its bytes arrived - so any copy already listed goes
       // first: a repeated ForEach key breaks the list.
       const item: SyncedItem = this.syncedItemFor(entry, fromPeer);
-      const alreadyListed: boolean = this.syncedItems.some((i: SyncedItem) => i.id === item.id);
-      this.syncedItems = [item, ...this.syncedItems.filter((i: SyncedItem) => i.id !== item.id)].slice(0, 50);
+      const listedAt: number = this.syncedItems.findIndex((i: SyncedItem) => i.id === item.id);
+      const alreadyListed: boolean = listedAt !== -1;
+      if (alreadyListed) {
+        // Listed already - from a history batch, say, while its bytes were on
+        // their way: it stays where it is, in its stack if it is in one.
+        item.groupId = this.syncedItems[listedAt].groupId;
+        item.expected = this.syncedItems[listedAt].expected;
+        const same: SyncedItem[] = this.syncedItems.slice();
+        same[listedAt] = item;
+        this.syncedItems = same;
+      } else {
+        this.syncedItems = [item, ...this.syncedItems].slice(0, 50);
+      }
       // Only what is new to the list: an entry reported a second time (see
       // above) is not news.
       if (fromPeer && !alreadyListed && !this.appVisible) void this.notifyReceivedItem(item);
+    });
+    // A peer's history_batch, as one unit (see SyncManager.onBatchApplied):
+    // all of its new items join the list in ONE assignment, so the cards show
+    // up together and the page lays out once. When there are two or more they
+    // are one stack, whose front card (the newest) goes to the top of the list
+    // (see placeBatch).
+    syncManager.onBatchApplied((batch: BatchApplied) => {
+      netLog(`history batch: ${batch.added.length} new, headDone=${batch.headDone} visible=${this.appVisible}`);
+      if (batch.applied === 'applied') this.noteOwnClipboardWrite();
+      // After a head, the batch joins the group the head started (same card);
+      // without one it makes its own group if it has two or more items.
+      const plan: BatchPlan = this.batchGroups.batchArrived(batch.from, batch.added.length);
+      const fresh: SyncedItem[] = batch.added.map((entry: ClipboardEntry) =>
+        this.syncedItemFor(entry, entry.DeviceId !== this.ownDeviceId, plan.groupId));
+      let placed: SyncedItem[] = placeBatch(this.syncedItems, fresh, 50);
+      if (plan.settleId !== '') {
+        placed = settleGroup<SyncedItem>(placed, plan.settleId, (item: SyncedItem, id: string, expected: number) => this.withGroup(item, id, expected));
+      } else if (plan.groupId !== '') {
+        // The stack's front card is the newest of its items, which is the
+        // first of them in the list.
+        const front: SyncedItem | undefined = placed.find((i: SyncedItem) => i.groupId === plan.groupId);
+        if (front !== undefined) this.noteFreshStack(front.id);
+      }
+      this.syncedItems = placed;
+      const newestKey: string = entryKey(batch.newest);
+      const newest: SyncedItem | undefined = fresh.find((i: SyncedItem) => i.id === newestKey);
+      if (!batch.headDone && newest !== undefined && !this.appVisible) void this.notifyReceivedItem(newest);
+    });
+    // The newest item of a peer's batch, ahead of the batch (see
+    // SyncManager.onHeadApplied): it is listed at once, and when more are
+    // coming it is already the front card of their stack, counting them.
+    syncManager.onHeadApplied((head: HeadApplied) => {
+      netLog(`history head: ${head.expectedNew} to come, visible=${this.appVisible}`);
+      if (head.applied === 'applied') this.noteOwnClipboardWrite();
+      const plain: SyncedItem = this.syncedItemFor(head.newest, head.newest.DeviceId !== this.ownDeviceId);
+      const groupId: string = this.batchGroups.headArrived(head.from, head.expectedNew, plain.id);
+      const item: SyncedItem = groupId === '' ? plain : this.withGroup(plain, groupId, head.expectedNew);
+      if (groupId !== '') this.noteFreshStack(item.id);
+      this.syncedItems = placeBatch(this.syncedItems, [item], 50);
+      if (!this.appVisible) void this.notifyReceivedItem(item);
+    });
+    // The batch a head announced came to nothing new, or its connection closed
+    // before it came: the stack counts what it has.
+    syncManager.onHeadSettled((from: string) => {
+      const groupId: string = this.batchGroups.headSettled(from);
+      if (groupId !== '') {
+        this.syncedItems = settleGroup<SyncedItem>(this.syncedItems, groupId, (item: SyncedItem, id: string, expected: number) => this.withGroup(item, id, expected));
+      }
     });
     // An older item's bytes, fetched again (see SyncManager.onFileStored):
     // the list is laid out again, so its card gets the key - and the image
@@ -945,10 +1037,10 @@ struct Index {
     // Per-row status is derived in deviceRows() instead.
     syncManager.onUnpaired((deviceId: string) => { void this.handleUnpaired(deviceId); });
     syncManager.onConnectionsChanged((count: number) => {
-      netLog(`connections=${count}`);
       // Only links whose peer has answered count (see SyncManager.provenCount).
       this.connectedCount = syncManager.provenCount;
       this.linkChanges++;
+      netLog(`connections=${count} proven=${this.connectedCount}`);
     });
     this.syncManager = syncManager;
     // Shares arriving from now on; one that came before this page existed
@@ -1198,6 +1290,11 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    try {
+      accessibility.offAnimationReduceStateChange(this.onAnimationReduce);
+    } catch (e) {
+      // never subscribed
+    }
     this.mainWindow?.off('avoidAreaChange', this.onAvoidAreaChange);
     this.mainWindow?.off('windowSizeChange', this.onWindowSizeChange);
     (getContext(this) as common.UIAbilityContext).eventHub.off(SHARED_IN_EVENT, this.onSharedIn);
@@ -3486,7 +3583,7 @@ struct Index {
     });
   }
 
-  private syncedItemFor(entry: ClipboardEntry, fromPeer: boolean): SyncedItem {
+  private syncedItemFor(entry: ClipboardEntry, fromPeer: boolean, groupId: string = ''): SyncedItem {
     return {
       id: entryKey(entry),
       type: entry.Type,
@@ -3495,7 +3592,148 @@ struct Index {
       deviceId: entry.DeviceId,
       time: entry.Timestamp.slice(11, 16),
       fromPeer,
+      groupId,
+      stamp: canonicalTimestamp(entry.Timestamp),
+      expected: 0,
     };
+  }
+
+  // A stack that has just come in animates in (see rowTransition) for a moment.
+  private noteFreshStack(frontId: string): void {
+    this.freshStacks.add(frontId);
+    setTimeout(() => { this.freshStacks.delete(frontId); }, 2500);
+  }
+
+  // ---- stacks: the items one history batch brought, as one card ----
+
+  // The rows of the Synced list: an ordinary card, or one stack standing for
+  // the items of a batch (see SyncedRows.buildRows). Worked out again when the
+  // list changes, and once for all the rows that ask.
+  private syncedRows(): StackRow<SyncedItem>[] {
+    const items: SyncedItem[] = this.syncedItems;
+    if (items !== this.rowsSource) {
+      this.rowsSource = items;
+      this.rowsCache = buildRows<SyncedItem>(items);
+      this.rowsByFront = new Map<string, StackRow<SyncedItem>>();
+      for (const row of this.rowsCache) this.rowsByFront.set(row.front.id, row);
+    }
+    return this.rowsCache;
+  }
+
+  // Items hidden behind the card of this item: 0 unless it is the front of a
+  // stack. Asked for where the card is built, so a card that stays in the
+  // list is still told when its stack shrinks or opens.
+  private stackBehind(itemId: string): number {
+    this.syncedRows();
+    const row: StackRow<SyncedItem> | undefined = this.rowsByFront.get(itemId);
+    return row === undefined ? 0 : hiddenCount(row);
+  }
+
+  private stackGroup(itemId: string): string {
+    this.syncedRows();
+    const row: StackRow<SyncedItem> | undefined = this.rowsByFront.get(itemId);
+    return row === undefined ? '' : row.groupId;
+  }
+
+  // The fill of a layer behind a card: the cards' own, with the "Card
+  // transparency" setting applied.
+  private stackLayerFill(): string {
+    return this.colorWithAlpha($r('app.color.card_surface'), 1 - Math.max(0, this.cardTransparency) / 100);
+  }
+
+  private stackBadgeFill(): string {
+    return this.colorWithAlpha(themeFor(this.accentTheme).color, 1);
+  }
+
+  private withGroup(item: SyncedItem, groupId: string, expected: number): SyncedItem {
+    return {
+      id: item.id,
+      type: item.type,
+      preview: item.preview,
+      content: item.content,
+      deviceId: item.deviceId,
+      time: item.time,
+      fromPeer: item.fromPeer,
+      groupId,
+      stamp: item.stamp,
+      expected,
+    };
+  }
+
+  // The user opened a stack: its items become ordinary cards, and it never
+  // stacks again. Done in one animateTo, so the cards below move down smoothly
+  // and the hidden items settle into their places (see rowTransition).
+  private expandStack(groupId: string): void {
+    const row: StackRow<SyncedItem> | undefined = this.syncedRows().find((r: StackRow<SyncedItem>) => r.groupId === groupId);
+    if (row === undefined) return;
+    tapHaptic();
+    this.revealSlots.clear();
+    // memberIds[0] is the front card, which stays; 1 is the one behind it.
+    for (let i = 1; i < row.memberIds.length; i++) this.revealSlots.set(row.memberIds[i], i);
+    this.batchGroups.opened(groupId);
+    const opened: SyncedItem[] = dissolveGroup<SyncedItem>(this.syncedItems, groupId,
+      (item: SyncedItem, id: string, expected: number) => this.withGroup(item, id, expected));
+    if (this.reduceMotion) {
+      this.getUIContext().animateTo({ duration: 150, curve: Curve.EaseInOut }, () => { this.syncedItems = opened; });
+    } else {
+      this.getUIContext().animateTo({ curve: curves.springMotion(0.5, 0.82) }, () => { this.syncedItems = opened; });
+    }
+    setTimeout(() => { this.revealSlots.clear(); }, 1500);
+  }
+
+  // How a row comes in when it is added to the list: a stack that has just
+  // arrived fades and scales in once, however many items it holds; an item
+  // revealed by an opened stack fans out from behind the front card and settles
+  // with a spring, each 30 ms after the one before (only the first 10 - the
+  // rest just appear in place); anything else comes in as it always did. With
+  // "reduce animations" on, short fades and nothing else.
+  private rowTransition(itemId: string): TransitionEffect {
+    const index: number | undefined = this.revealSlots.get(itemId);
+    if (index !== undefined) {
+      if (this.reduceMotion) return TransitionEffect.OPACITY.animation({ duration: 150, curve: Curve.EaseInOut });
+      if (!revealAnimates(index)) return TransitionEffect.IDENTITY;
+      return TransitionEffect.OPACITY
+        .combine(TransitionEffect.translate({ y: -Math.min(index, 4) * 22 }))
+        .combine(TransitionEffect.scale({ x: 0.94, y: 0.94 }))
+        .animation({ curve: curves.springMotion(0.5, 0.8), delay: staggerDelayMs(index) });
+    }
+    if (this.freshStacks.has(itemId)) {
+      if (this.reduceMotion) return TransitionEffect.OPACITY.animation({ duration: 150, curve: Curve.EaseInOut });
+      return TransitionEffect.OPACITY
+        .combine(TransitionEffect.scale({ x: 0.95, y: 0.95 }))
+        .animation({ duration: 320, curve: Curve.EaseOut });
+    }
+    return TransitionEffect.IDENTITY;
+  }
+
+  // A card of the list or the grid in its stack wrapper (see StackedCard):
+  // the wrapper adds nothing to an ordinary card.
+  @Builder
+  syncedListRow(item: SyncedItem) {
+    StackedCard({
+      behind: this.stackBehind(item.id),
+      groupId: this.stackGroup(item.id),
+      layerFill: this.stackLayerFill(),
+      badgeFill: this.stackBadgeFill(),
+      reduceMotion: this.reduceMotion,
+      onExpand: (groupId: string): void => { this.expandStack(groupId); },
+    }) {
+      this.syncedItemCard(item)
+    }
+  }
+
+  @Builder
+  syncedGridRow(item: SyncedItem) {
+    StackedCard({
+      behind: this.stackBehind(item.id),
+      groupId: this.stackGroup(item.id),
+      layerFill: this.stackLayerFill(),
+      badgeFill: this.stackBadgeFill(),
+      reduceMotion: this.reduceMotion,
+      onExpand: (groupId: string): void => { this.expandStack(groupId); },
+    }) {
+      this.syncedGridCard(item)
+    }
   }
 
   // The list used to be filled only by live callbacks, so it came up empty
@@ -4894,9 +5132,10 @@ struct Index {
         this.emptyState($r('app.string.synced_empty_title'), $r('app.string.synced_empty_detail'), $r('app.media.ic_empty_synced'))
       } else if (this.syncedViewMode === 'list') {
         List({ space: 10, scroller: this.syncedListScroller }) {
-          ForEach(this.syncedItems, (item: SyncedItem) => {
-            ListItem() { this.syncedItemCard(item) }
-          }, (item: SyncedItem) => this.syncedItemKey(item))
+          ForEach(this.syncedRows(), (row: StackRow<SyncedItem>) => {
+            ListItem() { this.syncedListRow(row.front) }
+              .transition(this.rowTransition(row.front.id))
+          }, (row: StackRow<SyncedItem>) => this.syncedItemKey(row.front))
         }
         .width('100%')
         .height('100%')
@@ -4934,7 +5173,7 @@ struct Index {
         // Same WaterFlow pattern devicesTab uses below - a 2-column grid
         // rather than a single stacked list, per request.
         WaterFlow({ scroller: this.syncedFlowScroller }) {
-          ForEach(this.syncedItems, (item: SyncedItem) => {
+          ForEach(this.syncedRows(), (row: StackRow<SyncedItem>) => {
             // .width('100%') directly on FlowItem, not just on
             // syncedGridCard's own inner Column two levels down - per the
             // official FlowItem reference, FlowItem itself has no
@@ -4943,8 +5182,9 @@ struct Index {
             // leaving it unset was what let a FlowItem's actual box drift
             // wider than its column after a reflow (see itemConstraintSize
             // below).
-            FlowItem() { this.syncedGridCard(item) }.width('100%')
-          }, (item: SyncedItem) => this.syncedItemKey(item))
+            FlowItem() { this.syncedGridRow(row.front) }.width('100%')
+              .transition(this.rowTransition(row.front.id))
+          }, (row: StackRow<SyncedItem>) => this.syncedItemKey(row.front))
         }
         .width('100%')
         .height('100%')

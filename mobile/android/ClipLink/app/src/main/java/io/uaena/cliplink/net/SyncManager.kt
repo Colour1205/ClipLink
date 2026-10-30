@@ -5,6 +5,7 @@ import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.core.DotNetTimestamp
 import io.uaena.cliplink.core.Signing
 import io.uaena.cliplink.core.untrusted
+import io.uaena.cliplink.engine.GROUP_MIN_ITEMS
 import io.uaena.cliplink.engine.shortIdOf
 import io.uaena.cliplink.store.FileStore
 import io.uaena.cliplink.store.HistoryStore
@@ -54,6 +55,16 @@ class SyncManager(
     /** Verified entries waiting on bytes that are still streaming in, keyed by hash. */
     private val pendingEntries = ConcurrentHashMap<String, ClipboardEntry>()
 
+    /**
+     * What a history_head did on a connection, until the history_batch it
+     * announced arrives (or the connection ends). Only ever touched by that
+     * connection's own handler, which takes its messages one at a time.
+     * [groupId] is the provisional group the head made, if it made one.
+     */
+    private class HeadState(val groupId: Long?)
+
+    private val heads = ConcurrentHashMap<PeerLink, HeadState>()
+
     /** How often each file has been asked for again after a transfer of it failed - see [requestAgain]. */
     private val retries = ConcurrentHashMap<String, Int>()
 
@@ -75,8 +86,45 @@ class SyncManager(
      */
     var onEntryApplied: ((ClipboardEntry) -> Unit)? = null
 
-    /** New entries were stored without being applied - an older one in a batch, or a file's, still arriving. */
+    /**
+     * A live entry was stored without being applied yet: a file's, still
+     * arriving. (A history_batch does not use this - see [onBatchApplied].)
+     */
     var onHistoryChanged: (() -> Unit)? = null
+
+    /**
+     * A history_batch's new entries have just been stored, called once for the
+     * whole batch and before anything can read them back: the place to note
+     * which entries arrived together. The second argument is the provisional
+     * group the batch's history_head made, if there was one: the entries join
+     * it. Runs under the history's lock, so it must be quick - see
+     * [HistoryStore.addAllNew].
+     */
+    var onBatchStored: ((List<ClipboardEntry>, Long?) -> Unit)? = null
+
+    /**
+     * A history_head's newest entry has just been stored (same rules as
+     * [onBatchStored]), and [expectedNew] of the keys in the head are not
+     * here yet, that one included. Returns the id of the provisional group
+     * to show at once, or null for none.
+     */
+    var onHeadStored: ((newest: ClipboardEntry, expectedNew: Int) -> Long?)? = null
+
+    /**
+     * The batch a head announced has been dealt with, or will never come (the
+     * connection ended, or another head came first): the provisional group
+     * given is not a guess any more. Called for every head that made a group,
+     * also when the batch already settled it, so the receiver rebuilds the
+     * list only if it still has to.
+     */
+    var onHeadSettled: ((Long) -> Unit)? = null
+
+    /**
+     * A history_batch was applied as one unit - the one place a batch is
+     * announced, however many entries it added. Not called for a batch that
+     * added nothing.
+     */
+    var onBatchApplied: ((BatchApplied) -> Unit)? = null
 
     /**
      * A file's bytes arrived that no newly received entry was waiting on -
@@ -280,6 +328,8 @@ class SyncManager(
             // Only now: the last chunks of a file it finished sending may
             // still have been queued when the link went.
             abandonTransfersFrom(conn)
+            // A head whose batch never came: its stack is what it is.
+            heads.remove(conn)?.settle()
         }
     }
 
@@ -301,6 +351,14 @@ class SyncManager(
         val selection = selectForRelay(history.all())
         if (selection.skipped > 0) {
             onLog?.invoke("${selection.skipped} large item(s) left out of the history sent to ${shortIdOf(conn.peerDeviceId)}")
+        }
+        // The newest first and on its own: the batch can be megabytes, and the
+        // peer can show the stack from this while it is still arriving. One
+        // entry needs no head, the batch is as small as the head would be.
+        if (selection.entries.size >= GROUP_MIN_ITEMS) {
+            HistoryHead.forBatch(selection.entries)?.let { head ->
+                runCatching { conn.send(Protocol.envelope(Protocol.TYPE_HISTORY_HEAD, head.toJson())) }
+            }
         }
         runCatching {
             conn.send(
@@ -382,7 +440,17 @@ class SyncManager(
                 applyAndReport(entry)
             }
 
-            Protocol.TYPE_HISTORY_BATCH -> handleHistoryBatch(envelope.payload)
+            Protocol.TYPE_HISTORY_HEAD -> handleHistoryHead(envelope.payload, conn)
+
+            Protocol.TYPE_HISTORY_BATCH -> {
+                val head = heads.remove(conn)
+                try {
+                    handleHistoryBatch(envelope.payload, conn.peerDeviceId, head)
+                } finally {
+                    // Normally settled already, by the batch being stored.
+                    head?.settle()
+                }
+            }
 
             // Every FileHash below has passed FileStore.isValidHash - the
             // parsers refuse anything else - so a peer can only ever name a
@@ -415,7 +483,44 @@ class SyncManager(
         }
     }
 
-    private fun handleHistoryBatch(payload: String) {
+    /** The head made a provisional group: it is final now, whatever came of the batch. */
+    private fun HeadState.settle() {
+        groupId?.let { onHeadSettled?.invoke(it) }
+    }
+
+    /**
+     * The newest entry of the history_batch that follows, and how many new
+     * ones it will bring. Checked like an "entry" message; one that fails is
+     * ignored whole and the batch then works on its own. The newest is stored
+     * and applied now (and so not again by the batch); when the head counts
+     * two or more new, the receiver is told to show a stack right away.
+     */
+    private fun handleHistoryHead(payload: String, conn: PeerLink) {
+        // A second head: the first one's batch is not coming.
+        heads.remove(conn)?.settle()
+        val head = HistoryHead.parse(payload) ?: run {
+            onLog?.invoke("received invalid message from peer (bad history_head JSON)")
+            return
+        }
+        val received = head.newest
+        if (received.content.length > maxEntryContentChars) {
+            onLog?.invoke("dropped a history head from ${shortIdOf(received.deviceId)} - too large")
+            return
+        }
+        val newest = verifiedAndTrusted(received) ?: run {
+            onLog?.invoke("dropped a history head from ${shortIdOf(received.deviceId)} - failed signature/trust check")
+            return
+        }
+        val expectedNew = history.countNew(head.keys)
+        var groupId: Long? = null
+        // Empty for an entry that is known, deleted here or older than all a full history keeps.
+        val stored = history.addAllNew(listOf(newest)) { groupId = onHeadStored?.invoke(newest, expectedNew) }
+        if (stored.isEmpty()) return
+        heads[conn] = HeadState(groupId)
+        applyAndReport(newest)
+    }
+
+    private fun handleHistoryBatch(payload: String, from: String, head: HeadState?) {
         val entries = untrusted { ClipboardEntry.listFromJson(JSONArray(payload)) } ?: run {
             onLog?.invoke("received invalid message from peer (bad history_batch JSON)")
             return
@@ -436,17 +541,25 @@ class SyncManager(
         // that are new AND still there after the trim (the peer still has
         // everything deleted here - those, and any older than all this
         // device keeps, are neither stored nor applied).
-        val fresh = history.addAllNew(verified)
+        val fresh = history.addAllNew(verified) { stored -> onBatchStored?.invoke(stored, head?.groupId) }
         if (fresh.isEmpty()) return
 
         // A batch is the peer's whole history, oldest and newest alike. Only
         // the newest of what is new belongs on the clipboard: applying them
         // in batch order left whichever came last there, not the latest copy.
-        val newest = fresh.maxByOrNull { DotNetTimestamp.canonical(it.timestamp) }
+        // After a head the newest is on it already, and the rest is older.
+        val newest = if (head != null) null else fresh.maxByOrNull { DotNetTimestamp.canonical(it.timestamp) }
+        var toApply: ClipboardEntry? = null
         for (entry in fresh) {
-            if (entry === newest) applyAndReport(entry) else fetchWithoutApplying(entry)
+            if (entry === newest) {
+                if (startApplying(entry)) toApply = entry
+            } else {
+                fetchWithoutApplying(entry)
+            }
         }
-        onHistoryChanged?.invoke()
+        // Once, last: the screen hears of the whole batch in one go, not of
+        // each entry as it is dealt with.
+        onBatchApplied?.invoke(BatchApplied(from, fresh, toApply))
     }
 
     private fun parseEntry(payload: String): ClipboardEntry? =
@@ -464,15 +577,32 @@ class SyncManager(
     }
 
     /**
-     * Apply right away if these exact bytes are already cached; otherwise
-     * remember to apply once the chunks finish arriving and verifying, and ask
-     * EVERY connected peer - not just whoever handed us the entry - whether
-     * they have it.
+     * A live file entry: apply right away if the bytes are here, otherwise the
+     * item is shown at once, saying it is still transferring, and is applied
+     * when they have arrived (see [startApplying]).
      */
     private fun handleIncomingFileEntry(entry: ClipboardEntry) {
+        if (startApplying(entry)) {
+            onEntryApplied?.invoke(entry)
+        } else {
+            // So the item is there, saying it is still transferring.
+            onHistoryChanged?.invoke()
+        }
+    }
+
+    /**
+     * Gets [entry] ready to go on the clipboard and says whether it can go
+     * now. Anything but a file can. A file can if these exact bytes are
+     * already cached; otherwise it is remembered, to be applied once the
+     * chunks finish arriving and verifying, and EVERY connected peer - not
+     * just whoever handed us the entry - is asked whether it has them.
+     * Tells nobody about the history: that is the caller's to do, once.
+     */
+    private fun startApplying(entry: ClipboardEntry): Boolean {
+        if (entry.type != ClipboardEntry.TYPE_FILE) return true
         val payload = FilePayload.parse(entry.content) ?: run {
             onLog?.invoke("received malformed file entry from peer")
-            return
+            return false
         }
         if (payload.isEmptyFile) {
             // Nothing to wait for, and nothing would come: most builds send
@@ -483,14 +613,10 @@ class SyncManager(
                 onLog?.invoke("couldn't store an empty file ($e)")
             }
         }
-        if (fileStore.exists(payload.fileHash)) {
-            onEntryApplied?.invoke(entry)
-            return
-        }
+        if (fileStore.exists(payload.fileHash)) return true
         pendingEntries[payload.fileHash] = entry
-        // So the item is there, saying it is still transferring.
-        onHistoryChanged?.invoke()
         sendFileRequest(payload.fileHash, trustedConnections())
+        return false
     }
 
     /**
@@ -673,6 +799,14 @@ class SyncManager(
         onEntryApplied?.invoke(entry)
         return true
     }
+
+    /**
+     * What a history_batch did: the entries it added ([added], the ones that
+     * were new and are still in the history after the trim), and the one to
+     * put on the clipboard now ([toApply]) - the newest of them, unless it is
+     * a file whose bytes are still to come, which is applied when they arrive.
+     */
+    class BatchApplied(val from: String, val added: List<ClipboardEntry>, val toApply: ClipboardEntry?)
 
     companion object {
         const val CHUNK_SIZE = 256 * 1024

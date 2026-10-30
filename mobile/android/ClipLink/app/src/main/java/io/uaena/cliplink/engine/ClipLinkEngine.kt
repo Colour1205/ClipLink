@@ -110,6 +110,9 @@ class ClipLinkEngine(context: Context) {
     private val discovery = Discovery()
     private val syncManager = SyncManager(scope, historyStore, trustStore, fileStore)
 
+    /** Which items arrived together in one history_batch - memory only, see [BatchGroups]. */
+    private val batchGroups = BatchGroups()
+
     /** Caps the sockets that have connected and not yet proved anything - see [admit]. */
     private val handshakeGate = ConnectionGate()
 
@@ -259,6 +262,10 @@ class ClipLinkEngine(context: Context) {
         }
         syncManager.onEntryApplied = { entry -> onEntryReceived(entry) }
         syncManager.onHistoryChanged = { refreshItems() }
+        syncManager.onBatchStored = ::noteBatchGroup
+        syncManager.onHeadStored = ::noteHeadGroup
+        syncManager.onHeadSettled = { groupId -> if (batchGroups.complete(groupId, emptyList())) refreshItems() }
+        syncManager.onBatchApplied = { batch -> onBatchReceived(batch) }
         syncManager.onFileStored = { refreshItems() }
         syncManager.onSessionProven = { conn ->
             rememberProvenName(conn)
@@ -1441,6 +1448,53 @@ class ClipLinkEngine(context: Context) {
         if (deviceSettings.autoApply) clipboard.apply(entry)
     }
 
+    /**
+     * A whole history_batch, applied: one rebuild of the list, one log line,
+     * and the newest item on the clipboard - none of them per entry, so the
+     * screen gets the batch in one update.
+     */
+    private fun onBatchReceived(batch: SyncManager.BatchApplied) {
+        refreshItems()
+        log("received ${batch.added.size} item(s) from ${shortIdOf(batch.from)}")
+        if (deviceSettings.autoApply) batch.toApply?.let { clipboard.apply(it) }
+    }
+
+    /**
+     * Notes the entries a batch added as one group (or as none, if it added
+     * fewer than [GROUP_MIN_ITEMS]). When a history_head came first, they join
+     * its group [headGroup] instead. Called with the history locked, before
+     * the list can be rebuilt with them - see [HistoryStore.addAllNew].
+     */
+    private fun noteBatchGroup(added: List<ClipboardEntry>, headGroup: Long?) {
+        if (headGroup == null) {
+            batchGroups.recordBatch(added, System.currentTimeMillis())
+        } else {
+            batchGroups.complete(headGroup, added.map { it.deletionKey })
+        }
+    }
+
+    /**
+     * The newest entry of a history_batch that is still on its way, stored
+     * from its history_head: when [expectedNew] items are coming, the list
+     * shows their stack at once, with this one in front. Same rules as
+     * [noteBatchGroup].
+     */
+    private fun noteHeadGroup(newest: ClipboardEntry, expectedNew: Int): Long? =
+        batchGroups.provisional(newest.deletionKey, expectedNew, System.currentTimeMillis())
+
+    /**
+     * A stack was opened on the Synced tab: its group ends, and its items are
+     * ordinary cards from now on.
+     */
+    fun expandGroup(groupId: Long) {
+        scope.launch(Dispatchers.IO) {
+            step("opening a stack") {
+                batchGroups.dissolve(groupId)
+                refreshItems()
+            }
+        }
+    }
+
     fun applyToClipboard(item: SyncedItem): Boolean = clipboard.apply(item.entry)
 
     /**
@@ -1463,6 +1517,7 @@ class ClipLinkEngine(context: Context) {
         scope.launch(Dispatchers.IO) {
             step("clearing the history") {
                 historyStore.clear()
+                batchGroups.clear()
                 refreshItems()
             }
         }
@@ -1478,9 +1533,12 @@ class ClipLinkEngine(context: Context) {
     private fun refreshItems() {
         synchronized(itemsLock) {
             val own = _ownDeviceId.value
+            // Before the history is read, never after: see BatchGroups.horizon.
+            val horizon = batchGroups.horizon()
             // .NET round-trip format sorts chronologically once canonicalised.
             val entries = historyStore.all().sortedByDescending { DotNetTimestamp.canonical(it.timestamp) }
             val keys = uniqueKeysFor(entries)
+            val groups = batchGroups.resolve(entries.mapTo(HashSet()) { it.deletionKey }, horizon)
             _items.value = entries.mapIndexed { index, entry ->
                 val file = if (entry.type == ClipboardEntry.TYPE_FILE) {
                     FilePayload.parse(entry.content)?.let { fileStore.path(it.fileHash) }?.takeIf { it.exists() }
@@ -1493,6 +1551,7 @@ class ClipLinkEngine(context: Context) {
                     fileAvailable = entry.type != ClipboardEntry.TYPE_FILE || file != null,
                     file = file,
                     uniqueKey = keys[index],
+                    group = groups[entry.deletionKey],
                 )
             }
         }

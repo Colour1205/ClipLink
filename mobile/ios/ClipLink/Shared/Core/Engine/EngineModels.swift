@@ -5,6 +5,9 @@ import Foundation
 public struct EngineSnapshot: Equatable {
     public var ownDeviceId: String = ""
     public var items: [SyncedItem] = []
+    /// Items that came in together in one history batch and are still stacked
+    /// (see BatchGroup). Memory only: a restart shows them as ordinary cards.
+    public var groups: [BatchGroup] = []
     public var devices: [DeviceRow] = []
     public var connectedCount: Int = 0
     public var network = NetworkStatus()

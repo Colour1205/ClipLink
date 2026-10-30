@@ -127,6 +127,14 @@ public sealed record SkippedShare(string Path, FileSkipReason Reason, string? Er
 //   IsAvailable   file: its bytes are stored here (Copy/Open work); false
 //                 while they're still arriving or were never received.
 //                 Always true for text and images.
+//   BatchId       set when this entry came in a peer's history_batch that
+//                 added two or more new entries (HistoryBatch.GroupMinItems):
+//                 entries with the same BatchId arrived together, and the UI
+//                 may show them as one stack. Null otherwise. In memory only:
+//                 nothing is saved or sent, so it is null again after a restart.
+//   BatchExpected while that batch's history_head promised more entries than
+//                 have arrived (the batch is still on its way): how many in
+//                 all, so the stack can show its size at once. Null otherwise.
 public sealed record HistoryItem(
     string Key,
     string Type,
@@ -138,7 +146,9 @@ public sealed record HistoryItem(
     int TextLength,
     string? FileName,
     long? SizeBytes,
-    bool IsAvailable)
+    bool IsAvailable,
+    string? BatchId = null,
+    int? BatchExpected = null)
 {
     public const int PreviewLength = 1000;
 }

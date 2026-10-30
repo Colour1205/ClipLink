@@ -133,6 +133,13 @@ few hundred MB, so what a peer can make the app hold is capped (`net/Limits.kt`)
   dropped on arrival; one over 12 M characters is not repeated in a history_batch
   (which carries at most 16 M in all, newest first). History is not rebuilt per
   read: see below.
+- **history_head.** With two or more entries to send, a connection first sends a
+  small `history_head` (the newest entry and the key of every entry in the batch,
+  newest first) and then the unchanged history_batch, which can be megabytes. A
+  receiver stores and applies the newest at once and shows the stack right away,
+  from the count of keys it does not have (`BatchGroups.provisional`); the batch
+  then fills the same stack (`complete`). A head that fails the signature or trust
+  check is ignored, and builds that do not know the type skip it.
 - **Files.** A received file may not pass 1 GB, nor the size its signed entry
   says; at most 8 are received at once (4 per peer); a stream that stops getting
   chunks is dropped after 5 minutes, and stray `.tmp` files are deleted at

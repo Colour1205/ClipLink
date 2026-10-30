@@ -105,9 +105,18 @@ class HistoryStore internal constructor(
      * survived the trim, in the order given. A peer's history_batch is
      * applied from this: an entry that was stored only to be evicted at once
      * is not one to put on the clipboard or fetch a file for.
+     *
+     * One batch is one change: one update in memory, one write to the file.
+     * [onStored] is called with the survivors while the lock is still held,
+     * so nothing reading [all] can see them before whoever is told here
+     * (the batch groups, see BatchGroups) knows they belong together. It must
+     * be quick and must not call back into this store.
      */
     @Synchronized
-    fun addAllNew(entries: List<ClipboardEntry>): List<ClipboardEntry> {
+    fun addAllNew(
+        entries: List<ClipboardEntry>,
+        onStored: ((List<ClipboardEntry>) -> Unit)? = null,
+    ): List<ClipboardEntry> {
         var history = loaded()
         val added = ArrayList<ClipboardEntry>()
         for (entry in entries) {
@@ -118,7 +127,21 @@ class HistoryStore internal constructor(
         trim(trimmed)
         commit(trimmed)
         // By identity: an entry equal to a survivor isn't one if it was a duplicate.
-        return added.filter { candidate -> trimmed.any { it === candidate } }
+        val survivors = added.filter { candidate -> trimmed.any { it === candidate } }
+        if (survivors.isNotEmpty()) onStored?.invoke(survivors)
+        return survivors
+    }
+
+    /**
+     * How many of [keys] (entry deletion keys, see ClipboardEntry.deletionKey)
+     * a history_batch carrying them would add: those neither in the history
+     * nor deleted here, each counted once. Never more than the history holds.
+     * Read from a history_head, to show the size of the stack that is coming.
+     */
+    @Synchronized
+    fun countNew(keys: Collection<String>): Int {
+        val here = loaded().mapTo(HashSet()) { it.deletionKey }
+        return keys.toSet().count { it !in here && !isDeletedKey(it) }.coerceAtMost(MAX_ITEMS)
     }
 
     /**

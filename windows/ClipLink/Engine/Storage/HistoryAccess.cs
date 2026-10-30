@@ -19,6 +19,12 @@ public class HistoryAccess
     // Serializing history for a batch while another thread trimmed it could
     // also throw mid-enumeration.
     private readonly object gate = new();
+    // Which history_batch each entry came in, for a batch that added
+    // HistoryBatch.GroupMinItems or more: the UI shows those together as one
+    // stack (also early, from the batch's history_head). In memory only
+    // (nothing about it is saved or sent), so after a restart the history is
+    // plain cards.
+    private readonly BatchGroups groups = new();
 
     public HistoryAccess(string label, FileStore fileStore, DeletedEntries deletedEntries)
     {
@@ -51,6 +57,18 @@ public class HistoryAccess
     {
         lock (gate) { return inMemoryHistory.ToList(); }
     }
+    // The same, with which batch each entry came in (Key() -> batch id) and
+    // how many entries a batch's head still promises (batch id -> size, while
+    // its batch is on its way), taken together so a stack never shows up
+    // half-known.
+    public (List<ClipboardEntry> Entries, Dictionary<string, string> BatchOf, Dictionary<string, int> Expected) GetHistoryWithBatches()
+    {
+        lock (gate)
+        {
+            var (batchOf, expected) = groups.Snapshot();
+            return (inMemoryHistory.ToList(), batchOf, expected);
+        }
+    }
     /*
     merges history from peer into local history
     return True if operation succeeded, False otherwise
@@ -72,9 +90,61 @@ public class HistoryAccess
             }
             inMemoryHistory.Add(entry);
             TrimToLimit();
+            groups.Forget(inMemoryHistory);
             saveHistory();
             return true;
         }
+    }
+
+    // A whole history_batch in one step: one change to the list, one trim, one
+    // write to disk. What it returns is what the caller needs to notify once.
+    // Two or more new entries make a batch group, or join the one this
+    // connection's history_head made (see BatchGroups).
+    public HistoryBatch.MergeResult AddBatch(IReadOnlyList<ClipboardEntry> entries, object conn)
+    {
+        lock (gate)
+        {
+            // Deleted is checked again here, under the lock, as in addToHistory.
+            var merged = groups.ApplyBatch(conn, inMemoryHistory, entries, e => deletedEntries.Contains(e.Key()), MaxHistoryItems);
+            if (merged.Added.Count == 0 && merged.Evicted.Count == 0)
+            {
+                return merged;
+            }
+            foreach (var evicted in merged.Evicted)
+            {
+                DeleteBlobIfUnused(evicted);
+            }
+            saveHistory();
+            return merged;
+        }
+    }
+
+    // A peer's history_head (already verified): its newest entry goes into
+    // history at once, and may start a provisional batch group. One write to
+    // disk, and the caller notifies once.
+    public BatchGroups.HeadResult AddHead(object conn, HistoryHead.Payload head)
+    {
+        lock (gate)
+        {
+            var result = groups.HeadReceived(conn, inMemoryHistory, head, key => deletedEntries.Contains(key), MaxHistoryItems);
+            if (result.Added != null || result.Evicted.Count > 0)
+            {
+                foreach (var evicted in result.Evicted)
+                {
+                    DeleteBlobIfUnused(evicted);
+                }
+                saveHistory();
+            }
+            return result;
+        }
+    }
+
+    // conn closed: a head still waiting for its batch is finished (the
+    // expected size goes, a group of fewer than two is plain cards). Returns
+    // whether the stacks changed.
+    public bool EndHead(object conn)
+    {
+        lock (gate) { return groups.FinishHead(conn, inMemoryHistory); }
     }
 
     // Whether the user deleted this entry here (see DeletedEntries) - if so,
@@ -104,6 +174,7 @@ public class HistoryAccess
             {
                 DeleteBlobIfUnused(entry);
             }
+            groups.Forget(inMemoryHistory);
             saveHistory();
             return removed;
         }
@@ -114,10 +185,8 @@ public class HistoryAccess
     // would grow forever even though the history record itself is capped.
     private void TrimToLimit()
     {
-        while (inMemoryHistory.Count > MaxHistoryItems)
+        foreach (var oldest in HistoryBatch.TrimOldest(inMemoryHistory, MaxHistoryItems))
         {
-            var oldest = inMemoryHistory.OrderBy(e => e.Timestamp).First();
-            inMemoryHistory.Remove(oldest);
             DeleteBlobIfUnused(oldest);
         }
     }
@@ -203,6 +272,7 @@ public class HistoryAccess
             {
                 DeleteBlobIfUnused(entry);
             }
+            groups.Clear();
             saveHistory();
             return removed;
         }
