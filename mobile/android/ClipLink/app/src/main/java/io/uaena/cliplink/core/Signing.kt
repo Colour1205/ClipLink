@@ -3,7 +3,9 @@ package io.uaena.cliplink.core
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
+import java.time.DateTimeException
 import java.time.Instant
+import java.time.OffsetDateTime
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 
@@ -127,6 +129,19 @@ object DotNetTimestamp {
      * "...:56.5Z" just because 'Z' > '.'.
      */
     fun canonical(timestamp: String): String = padded(timestamp) ?: timestamp
+
+    /**
+     * The instant as Unix milliseconds - what a v2 history_head carries as an entry's time. Only for
+     * comparing ages; nothing signed or stored goes through it. Null for text that is not a timestamp.
+     */
+    fun epochMillis(timestamp: String): Long? = try {
+        // No zone suffix counts as UTC, as on the other platforms.
+        val match = PATTERN.matchEntire(timestamp)
+        val text = if (match != null && match.groupValues[3].isEmpty()) "${canonical(timestamp)}Z" else canonical(timestamp)
+        OffsetDateTime.parse(text).toInstant().toEpochMilli()
+    } catch (e: DateTimeException) {
+        null
+    }
 }
 
 object Signing {

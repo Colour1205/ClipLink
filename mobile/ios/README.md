@@ -121,12 +121,48 @@ text, so a caption and the link an app passes beside it both arrive. Files over
 "Open in ClipLink" from Files sends the file as a file too. The extension's
 node is a sender only: it never takes, or asks for, file bytes.
 
+**History sync (version 2).** Both sides announce `Protocol: 2` in the handshake
+(not signed: stripping it only forces version 1). When both did, a connection no
+longer swaps whole histories: each side sends a `history_head` (the keys of its
+history, newest first, with their times, and the keys it deleted), works out
+which keys it is missing - leaving out the ones it deleted, the ones it is
+already asking another connection for, and the ones older than its 25 newest
+(except the newest missing one) - and sends two `history_request`s back to back:
+the newest missing key alone, then the rest. Each is answered with one
+`history_batch`, in order. Only the first answer's newest new item (the
+"convenience item", C) goes on the clipboard, even if it is older than what is
+already here; the rest is just added. When several peers connect in one
+reconnect, each head asks for its own convenience item, but the clipboard changes
+once: a convenience item that is not newer (by its own time) than one that went
+there less than 90 s ago is only added to the history (and still leads its
+stack, but only the item on the clipboard is spared by the trim). A request
+unanswered for 90 s loses its keys but stays in the queue as an expired marker:
+its late answer is stored quietly (nothing on the clipboard, no stack) and the
+marker leaves with it or with the connection. When a connection closes its keys
+are asked of the other connections (as a convenience request only if the closed
+one still owed C). With
+an older peer (no `Protocol`) nothing changes: head and the whole batch, and a
+batch puts its newest NEW item on the clipboard. The code is in
+`SyncEngine+HistorySync.swift`.
+
+**Where things show.** What arrived since the app started is on top of Synced,
+the last arrival first: a live item (or your own copy) is a block of one, a
+reconnect is one block - a stack card with C in front, which opens into its
+items right under C, above every older card, whatever their timestamps. Below
+come all other items by time. Nothing of this is saved: after a restart the
+list is the plain timeline. History keeps 25 items and drops the oldest by time,
+except the item that went to the clipboard as C, which is spared until a newer
+convenience item goes there.
+
 **Deleting.** Delete (a card's menu or the item screen; both ask first)
-and *Me › Clear Synced History* are local: nothing goes on the wire, the clipboard is left
-alone, and peers keep their copies. Each removed item is remembered by its
-signature (the latest 2000, in the App Group, so the Share extension's node
-honours them too), and incoming entries and history batches skip those - so
-nothing deleted comes back when a peer reconnects and resends its history.
+and *Me › Clear Synced History* remove the item here, and are sent as a `delete`
+to every connected peer on version 2 (an older peer keeps its copy; devices that
+are away learn from the `Deleted` list of the next head). A `delete` from a peer
+does the same here, and never touches the clipboard. Each removed item is
+remembered by its signature (the latest 2000, in the App Group, so the Share
+extension's node honours them too), and incoming entries and history batches skip
+those - so nothing deleted comes back, even from an older peer that resends its
+history.
 
 **Device names.** Without Apple's user-assigned-device-name entitlement, iOS
 16+ reports every device as plain "iPhone" or "iPad", so that is what peers
@@ -210,5 +246,5 @@ cut by code point with its extension kept.
 - Android/HarmonyOS reject ~10% of Windows entries (timestamp trimming, above).
 - Android reads Windows' `"Address":null` pairing payload as the string `"null"`.
 - Every port applies *every* new entry of a history batch to the clipboard, so
-  it ends on whichever came last; iOS applies only the newest.
+  it ends on whichever came last; iOS applies only the newest new one.
 - Untrust doesn't close the live link on Android/HarmonyOS (it does here, like Windows).

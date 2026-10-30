@@ -37,6 +37,11 @@ public sealed record EngineOptions
     // and run no LAN discovery - nothing is reachable from the network (and
     // no Windows Firewall prompt).
     public bool LoopbackOnly { get; init; } = false;
+
+    // For tests and tools only: the sync protocol this engine sends in its
+    // handshake and speaks (see HandshakeMessage.Protocol). 1 stands in for a
+    // build from before protocol 2.
+    public int Protocol { get; init; } = Networking.HandshakeMessage.CurrentProtocol;
 }
 
 // A device's pairing payload - what the QR code and "copy pairing info" carry,
@@ -111,8 +116,11 @@ public sealed record ShareResult(IReadOnlyList<string> Shared, IReadOnlyList<Ski
 
 public sealed record SkippedShare(string Path, FileSkipReason Reason, string? Error);
 
-// One synced-history row for the UI, newest first from GetHistory(). Light
-// on purpose: never the full text, the image or the file bytes - fetch those
+// One synced-history row for the UI, in display order from GetHistory(): what
+// just arrived on top - a live item alone, a sync from a device as a block with
+// its newest new item (the one put on the clipboard) first - newest block
+// first, then everything else newest first by time. In memory only: after a
+// restart it is all newest first by time. Light on purpose: never the full text, the image or the file bytes - fetch those
 // by Key (GetText, GetImageBytes, GetFileToOpen) only when needed. Key is
 // stable for the entry's lifetime (ClipboardEntry.Key(): its signature), so
 // it also works as a cache key for thumbnails.
@@ -127,6 +135,18 @@ public sealed record SkippedShare(string Path, FileSkipReason Reason, string? Er
 //   IsAvailable   file: its bytes are stored here (Copy/Open work); false
 //                 while they're still arriving or were never received.
 //                 Always true for text and images.
+//   BatchId       set when this entry came in a peer's sync (a history_batch, or
+//                 the answers to a history_request) that added two or more new
+//                 entries (HistoryBatch.GroupMinItems): entries with the same
+//                 BatchId arrived together, are listed together (the front card
+//                 first), and the UI may show them as one stack. Null otherwise.
+//                 In memory only: nothing is saved or sent, so it is null again
+//                 after a restart.
+//   BatchExpected while that sync's history_head promised more entries than
+//                 have arrived (the rest is still on its way): how many in
+//                 all, so the stack can show its size at once. Null otherwise.
+//   Quiet         arrived in a version 2 sync after its first item: shown, but
+//                 not announced with a notification (only the first is).
 public sealed record HistoryItem(
     string Key,
     string Type,
@@ -138,7 +158,10 @@ public sealed record HistoryItem(
     int TextLength,
     string? FileName,
     long? SizeBytes,
-    bool IsAvailable)
+    bool IsAvailable,
+    string? BatchId = null,
+    int? BatchExpected = null,
+    bool Quiet = false)
 {
     public const int PreviewLength = 1000;
 }

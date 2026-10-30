@@ -15,6 +15,15 @@ interface PeerLink {
 
     val isClosed: Boolean
 
+    /** The `Protocol` the peer's handshake said it speaks; 1 for a build that does not send one. */
+    val peerProtocol: Int get() = 1
+
+    /** What this link speaks: the lower of the two sides' versions, and never more than [Protocol.VERSION]. */
+    val protocol: Int get() = minOf(Protocol.VERSION, peerProtocol)
+
+    /** Whether the link speaks v2 (history_head with keys, history_request, delete) rather than the older head and batch. */
+    val isV2: Boolean get() = protocol >= 2
+
     /** Whether a line has decrypted with the session key yet - see [PeerConnection.onSessionProven]. */
     val isSessionProven: Boolean
 

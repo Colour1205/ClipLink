@@ -5,6 +5,11 @@ import identityKeyTest from './IdentityKey.test';
 import chunkOrderTest from './ChunkOrder.test';
 import nonceKeyTest from './NonceKey.test';
 import beaconTest from './Beacon.test';
+import messageRelayTest from './MessageRelay.test';
+import historyBatchTest from './HistoryBatch.test';
+import syncedRowsTest from './SyncedRows.test';
+import syncProtocolTest from './SyncProtocol.test';
+import historySyncTest from './HistorySync.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -14,4 +19,9 @@ export default function testsuite() {
   chunkOrderTest();
   nonceKeyTest();
   beaconTest();
+  messageRelayTest();
+  historyBatchTest();
+  syncedRowsTest();
+  syncProtocolTest();
+  historySyncTest();
 }

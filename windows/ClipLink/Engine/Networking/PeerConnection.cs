@@ -62,6 +62,14 @@ public class PeerConnection
     // SessionProven fires.
     public string? PeerDeviceName { get; }
 
+    // The protocol the peer's handshake said it speaks (1 when it said nothing,
+    // or less than 2) and the one this connection speaks: 2 only when both sides
+    // do (see HandshakeMessage.Protocol). Read from the handshake, which is
+    // not signed: a man in the middle can only make it 1.
+    public int PeerProtocol { get; }
+    public int Protocol => Math.Min(ownProtocol, PeerProtocol);
+    private readonly int ownProtocol;
+
     // The address this connection runs over, read when it was created (the
     // socket may be closed by the time anyone asks): what the Devices list
     // shows for a connected device. Null if it couldn't be read.
@@ -95,7 +103,7 @@ public class PeerConnection
     private HashSet<string>? sentNonces = new();
     private readonly object sentNoncesGate = new(); // Send runs off the read loop
 
-    private PeerConnection(TcpClient client, StreamReader reader, StreamWriter writer, byte[] sessionKey, string peerDeviceId, bool wasAlreadyTrusted, bool newlyTrustedViaPassphrase, string? peerDeviceName)
+    private PeerConnection(TcpClient client, StreamReader reader, StreamWriter writer, byte[] sessionKey, string peerDeviceId, bool wasAlreadyTrusted, bool newlyTrustedViaPassphrase, string? peerDeviceName, int peerProtocol, int ownProtocol)
     {
         this.client = client;
         this.reader = reader;
@@ -105,6 +113,8 @@ public class PeerConnection
         WasAlreadyTrusted = wasAlreadyTrusted;
         NewlyTrustedViaPassphrase = newlyTrustedViaPassphrase;
         PeerDeviceName = peerDeviceName;
+        PeerProtocol = peerProtocol;
+        this.ownProtocol = ownProtocol;
         try
         {
             RemoteAddress = (client.Client.RemoteEndPoint as System.Net.IPEndPoint)?.Address.ToString();
@@ -142,7 +152,11 @@ public class PeerConnection
     // A handshake carrying this device's own identity is always refused
     // (null); answeredAsSelf, if given, is called first, so a caller that
     // dialled an address can tell "that's this device" from a refusal.
-    public static async Task<PeerConnection?> CreateAsync(TcpClient client, DeviceIdentity myIdentity, TrustStore trustStore, PassphraseKeyStore passphraseKeyStore, string? myDeviceName = null, Action? answeredAsSelf = null, Func<string, bool>? isBlocked = null)
+    //
+    // protocol is the sync protocol this side sends and speaks (see
+    // HandshakeMessage.Protocol): always the current one, except in tests and
+    // tools that stand in for an older build.
+    public static async Task<PeerConnection?> CreateAsync(TcpClient client, DeviceIdentity myIdentity, TrustStore trustStore, PassphraseKeyStore passphraseKeyStore, string? myDeviceName = null, Action? answeredAsSelf = null, Func<string, bool>? isBlocked = null, int protocol = HandshakeMessage.CurrentProtocol)
     {
         Stream stream = client.GetStream();
         var reader = new StreamReader(stream);
@@ -161,7 +175,8 @@ public class PeerConnection
             myIdentityPublicKey,
             Convert.ToBase64String(mySignature),
             myProof,
-            DeviceNameStore.Normalize(myDeviceName));
+            DeviceNameStore.Normalize(myDeviceName),
+            protocol);
         await writer.WriteLineAsync(JsonSerializer.Serialize(myHandshake));
 
         string? theirHandshakeJson = await reader.ReadLineAsync();
@@ -231,7 +246,8 @@ public class PeerConnection
 
         byte[] sessionKey = ecdh.DeriveKeyFromHash(theirEcdh.PublicKey, HashAlgorithmName.SHA256);
 
-        return new PeerConnection(client, reader, writer, sessionKey, theirHandshake.IdentityPublicKey, effectivelyTrusted, passphraseVerified, DeviceNameStore.Normalize(theirHandshake.DeviceName));
+        return new PeerConnection(client, reader, writer, sessionKey, theirHandshake.IdentityPublicKey, effectivelyTrusted, passphraseVerified, DeviceNameStore.Normalize(theirHandshake.DeviceName),
+            HandshakeMessage.Normalize(theirHandshake.Protocol), protocol);
     }
 
     public async Task Send(string message)

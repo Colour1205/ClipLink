@@ -6,6 +6,7 @@ import UIKit
 struct SyncedView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// One programmatic link for every card: a NavigationLink inside a card
     /// would pop the detail screen whenever the masonry grid moves that card
@@ -16,8 +17,19 @@ struct SyncedView: View {
     /// asks for: a deleted item stays deleted (peers don't send it back).
     /// Asked here, not on the card: the dialog must outlive the context menu.
     @State private var deleting: SyncedItem?
+    /// Stacks the user opened (see StackPlanner). The engine forgets a group a
+    /// moment after being told, so this keeps one open if a snapshot made in
+    /// between still lists it. Only the ids of this session.
+    @State private var expandedGroups: Set<String> = []
+    /// For each card a stack just revealed, its place in the fan-out.
+    @State private var fanIndex: [String: Int] = [:]
 
     private var items: [SyncedItem] { model.snapshot.items }
+    /// What arrived since the app started on top, the last arrival first, then
+    /// everything else by time (see StackPlanner).
+    private var rows: [SyncedRow] {
+        StackPlanner.rows(items: items, groups: model.snapshot.blocks, expanded: expandedGroups)
+    }
     private var actions: SyncedItemActions { SyncedItemActions(model: model, haptics: settings.haptics) }
 
     var body: some View {
@@ -31,7 +43,7 @@ struct SyncedView: View {
                 .padding(.horizontal, Theme.pagePadding)
                 .padding(.top, 4)
                 .padding(.bottom, 20)
-                .animation(.spring(response: 0.4, dampingFraction: 0.86), value: items.map(\.id))
+                .animation(.spring(response: 0.4, dampingFraction: 0.86), value: rows.map(\.id))
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { SyncedDock() }
             .pageBackground(glow: settings.bottomGlow, accent: settings.accentTheme.color)
@@ -58,7 +70,7 @@ struct SyncedView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: { _ in
-                Text("It's removed from this device only. Paired devices keep their own copies, but won't send it back.")
+                Text("It's removed here and on your paired devices, and won't come back. A device with an older ClipLink keeps its copy.")
             }
         }
         .navigationViewStyle(.stack)
@@ -74,36 +86,66 @@ struct SyncedView: View {
             )
             .padding(.top, 24)
             .transition(.opacity)
-        } else if settings.syncedLayout == .grid {
-            grid.transition(.opacity)
         } else {
-            list.transition(.opacity)
+            let rows = self.rows
+            if settings.syncedLayout == .grid {
+                grid(rows).transition(.opacity)
+            } else {
+                list(rows).transition(.opacity)
+            }
         }
     }
 
-    private var grid: some View {
-        let columns = SyncedMasonry.columns(for: items)
+    private func grid(_ rows: [SyncedRow]) -> some View {
+        let columns = SyncedMasonry.columns(for: rows)
         return HStack(alignment: .top, spacing: Theme.cardSpacing) {
             column(columns.left)
             column(columns.right)
         }
     }
 
-    private func column(_ columnItems: [SyncedItem]) -> some View {
+    private func column(_ columnRows: [SyncedRow]) -> some View {
         LazyVStack(spacing: Theme.cardSpacing) {
-            ForEach(columnItems) { item in
-                SyncedCard(item: item, compact: true, onOpen: { open(item) }, onDelete: { deleting = item })
+            ForEach(columnRows) { row in
+                rowView(row, compact: true)
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)
     }
 
-    private var list: some View {
+    private func list(_ rows: [SyncedRow]) -> some View {
         LazyVStack(spacing: Theme.cardSpacing) {
-            ForEach(items) { item in
-                SyncedCard(item: item, compact: false, onOpen: { open(item) }, onDelete: { deleting = item })
+            ForEach(rows) { row in
+                rowView(row, compact: false)
             }
         }
+    }
+
+    private func rowView(_ row: SyncedRow, compact: Bool) -> some View {
+        SyncedRowView(
+            row: row,
+            compact: compact,
+            fanIndex: fanIndex[row.id],
+            onOpen: { open($0) },
+            onDelete: { deleting = $0 },
+            onExpand: { expand($0) }
+        )
+    }
+
+    /// The stack's items become ordinary cards, for good, right under its front
+    /// card. Revealed cards fan out one after the other; the ones below move
+    /// down with the same spring.
+    private func expand(_ stack: StackInfo) {
+        var fan = fanIndex
+        // Only cards that are still there: the map must not grow for ever.
+        let present = Set(items.map(\.id))
+        fan = fan.filter { present.contains($0.key) }
+        for (index, id) in stack.memberIDs.enumerated() where index > 0 { fan[id] = index }
+        withAnimation(SyncedStackStyle.openAnimation(reduceMotion: reduceMotion)) {
+            fanIndex = fan
+            expandedGroups.insert(stack.groupID)
+        }
+        model.expandGroup(stack.groupID)
     }
 
     private var layoutToggle: some View {
@@ -134,21 +176,23 @@ struct SyncedView: View {
 /// cards never hop columns when their images finish loading.
 @MainActor
 enum SyncedMasonry {
-    static func columns(for items: [SyncedItem]) -> (left: [SyncedItem], right: [SyncedItem]) {
+    static func columns(for rows: [SyncedRow]) -> (left: [SyncedRow], right: [SyncedRow]) {
         let screenWidth = UIScreen.main.bounds.width
         let columnWidth = max(120, (screenWidth - 2 * Theme.pagePadding - Theme.cardSpacing) / 2)
         let metrics = Metrics()
-        var left: [SyncedItem] = []
-        var right: [SyncedItem] = []
+        var left: [SyncedRow] = []
+        var right: [SyncedRow] = []
         var leftHeight: CGFloat = 0
         var rightHeight: CGFloat = 0
-        for item in items {
-            let height = estimatedHeight(item, columnWidth: columnWidth, metrics: metrics) + Theme.cardSpacing
+        for row in rows {
+            var height = estimatedHeight(row.item, columnWidth: columnWidth, metrics: metrics) + Theme.cardSpacing
+            // The layers peeking out below a stack's front card.
+            if let stack = row.stack { height += CGFloat(stack.layerCount) * SyncedStackStyle.layerStep }
             if leftHeight <= rightHeight {
-                left.append(item)
+                left.append(row)
                 leftHeight += height
             } else {
-                right.append(item)
+                right.append(row)
                 rightHeight += height
             }
         }

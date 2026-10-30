@@ -146,7 +146,7 @@
     },
     {
       "name": "dialog_clear_history_message",
-      "value": "将从此设备移除所有已同步的项目及其保存的文件。已配对的设备会保留各自的副本，但不会再把这些内容发回来。"
+      "value": "将从此设备和你已配对的设备上移除所有已同步的项目及其保存的文件，之后不会再出现。使用旧版 ClipLink 的设备会保留各自的副本。"
     },
     {
       "name": "dialog_delete_item_title",
@@ -154,7 +154,7 @@
     },
     {
       "name": "dialog_delete_item_message",
-      "value": "将从此设备移除该项目及其保存的文件。已配对的设备会保留各自的副本，但不会再把它发回来。"
+      "value": "将从此设备和你已配对的设备上移除该项目及其保存的文件，之后不会再出现。使用旧版 ClipLink 的设备会保留它的副本。"
     },
     {
       "name": "pairing_request_named",
@@ -351,6 +351,14 @@
     {
       "name": "synced_byline",
       "value": "%1$s · %2$s"
+    },
+    {
+      "name": "stack_badge",
+      "value": "+%1$d"
+    },
+    {
+      "name": "stack_expand_hint",
+      "value": "将每一项显示为单独的卡片。"
     },
     {
       "name": "devices_unknown_address",

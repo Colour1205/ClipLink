@@ -35,6 +35,7 @@ import picker from '@ohos.file.picker';
 import uiMaterial from '@ohos.arkui.uiMaterial';
 import unifiedDataChannel from '@ohos.data.unifiedDataChannel';
 import { vibrator } from '@kit.SensorServiceKit';
+import { accessibility } from '@kit.AccessibilityKit';
 import { ClipboardWatcher } from '../clipboard/ClipboardWatcher';
 import { DeviceIdentity } from '../identity/DeviceIdentity';
 import { TrustStore, TrustedDevice } from '../identity/TrustStore';
@@ -55,6 +56,9 @@ import { PAIRING_LINK_EVENT, takePendingPairingLink, unwrapPairingLink, wrapPair
 import { QUIET_AFTER_IGNORED_MS, QUIET_AFTER_REMOVED_MS, QuietState, RequestQuiet } from '../networking/RequestQuiet';
 import { DialFallback } from '../networking/DialFallback';
 import { SyncManager } from '../networking/SyncManager';
+import { BatchApplied, HeadApplied, SyncApplied } from '../networking/HistorySync';
+import { StackedCard } from '../stack/StackedCard';
+import { BatchGroupTracker, BatchMember, BatchPlan, StackRow, buildRows, dissolveGroup, hiddenCount, placeBatch, placeQuiet, revealAnimates, settleGroup, staggerDelayMs } from '../stack/SyncedRows';
 import { connection } from '@kit.NetworkKit';
 import { signEntry, ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
 import { ApplyResult } from '../clipboard/ClipboardApply';
@@ -77,6 +81,10 @@ const TCP_PORT = 49000;
 // Discovery brought up this recently counts as fresh: a foreground right
 // after a cold start does not restart it (see restartDiscovery).
 const FRESH_DISCOVERY_MS = 1500;
+// How long a failed start of discovery waits before the next try, doubling
+// up to the maximum (see startDiscoveryOrRetry).
+const DISCOVERY_RETRY_MIN_MS = 1000;
+const DISCOVERY_RETRY_MAX_MS = 30000;
 // How long a pairing dial waits, after the handshake, to see whether the
 // other side kept the connection (Index's connectToAddress). Accepting
 // sends history straight away, and its first byte counts, so the full wait
@@ -194,7 +202,7 @@ function compareDeviceRows(a: DeviceRow, b: DeviceRow): number {
 
 // A single synced clipboard item for the list UI - built from a verified
 // ClipboardEntry (see SyncManager.onEntryApplied), not a raw log line.
-interface SyncedItem {
+interface SyncedItem extends BatchMember {
   // Signature is unique per (content, type, deviceId, timestamp) - used as
   // the ForEach key below. `time` is deliberately truncated to HH:MM for
   // display and must NEVER be reused as a key: two copies from the same
@@ -217,6 +225,18 @@ interface SyncedItem {
   deviceId: string;
   time: string;
   fromPeer: boolean;
+  // The history_batch whose new entries this item arrived with, when that
+  // brought two or more (see SyncedRows.ets): the group's cards are one stack
+  // until the user opens it. '' for every other item. Memory only.
+  groupId: string;
+  // The same id for good, also once the stack is opened: the items that
+  // arrived together stay together, right below the front card. Memory only.
+  blockId: string;
+  // The timestamp in canonical form, to place a batch's items by time.
+  stamp: string;
+  // Set on the members of a group a peer's history_head made, until the batch
+  // behind it has come: the size the group will have (0 otherwise).
+  expected: number;
 }
 
 // Wire shape for QR/pasted pairing exchange - matches windows/ClipLink/Engine/
@@ -596,6 +616,21 @@ struct Index {
   @State pendingChange: boolean = false;
   @State syncLog: string[] = [];
   @State syncedItems: SyncedItem[] = [];
+  // The system's "reduce animations" setting (see aboutToAppear): a stack then
+  // opens with short fades only.
+  @State reduceMotion: boolean = false;
+  private onAnimationReduce = (reduce: boolean): void => { this.reduceMotion = reduce; };
+  // The batch groups of this session, and the ones a history_head started.
+  private batchGroups: BatchGroupTracker = new BatchGroupTracker();
+  // For a moment after they appear, the rows that animate in (see rowTransition):
+  // a stack that just arrived (by its front item's id), and the items an
+  // opened stack revealed (by id, to their place behind the front card).
+  private freshStacks: Set<string> = new Set<string>();
+  private revealSlots: Map<string, number> = new Map<string, number>();
+  // buildRows' answer for the list it was last asked about (see syncedRows).
+  private rowsSource: SyncedItem[] | null = null;
+  private rowsCache: StackRow<SyncedItem>[] = [];
+  private rowsByFront: Map<string, StackRow<SyncedItem>> = new Map<string, StackRow<SyncedItem>>();
   @State immersiveSupported: boolean = false;
   @State connectedCount: number = 0;
   // Counts every change to the links (one coming up, answering, going away), so the
@@ -744,6 +779,8 @@ struct Index {
   private discovery: Discovery = new Discovery();
   // When discovery last came up (see restartDiscovery); 0 until it has.
   private discoveryUpAtMs: number = 0;
+  // A start of discovery waiting to be tried again (see startDiscoveryOrRetry).
+  private discoveryRetryTimerId: number = -1;
   private tcpServer: TcpServer = new TcpServer();
   private trustStore: TrustStore = new TrustStore();
   private passphraseKeyStore: PassphraseKeyStore = new PassphraseKeyStore();
@@ -858,6 +895,12 @@ struct Index {
     } catch (e) {
       // unreadable prefs - keep the defaults
     }
+    try {
+      this.reduceMotion = accessibility.isAnimationReduceEnabledSync();
+      accessibility.onAnimationReduceStateChange(this.onAnimationReduce);
+    } catch (e) {
+      // no such setting here - animations stay on
+    }
     // Here rather than later so the very first beacon already carries it.
     this.refreshSystemDeviceName();
     this.readAppVersion();
@@ -907,11 +950,113 @@ struct Index {
       // history before its bytes arrived - so any copy already listed goes
       // first: a repeated ForEach key breaks the list.
       const item: SyncedItem = this.syncedItemFor(entry, fromPeer);
-      const alreadyListed: boolean = this.syncedItems.some((i: SyncedItem) => i.id === item.id);
-      this.syncedItems = [item, ...this.syncedItems.filter((i: SyncedItem) => i.id !== item.id)].slice(0, 50);
+      const listedAt: number = this.syncedItems.findIndex((i: SyncedItem) => i.id === item.id);
+      const alreadyListed: boolean = listedAt !== -1;
+      if (alreadyListed) {
+        // Listed already - from a history batch, say, while its bytes were on
+        // their way: it stays where it is, in its stack if it is in one.
+        item.groupId = this.syncedItems[listedAt].groupId;
+        item.blockId = this.syncedItems[listedAt].blockId;
+        item.expected = this.syncedItems[listedAt].expected;
+        const same: SyncedItem[] = this.syncedItems.slice();
+        same[listedAt] = item;
+        this.syncedItems = same;
+      } else {
+        this.syncedItems = [item, ...this.syncedItems].slice(0, 50);
+      }
       // Only what is new to the list: an entry reported a second time (see
       // above) is not news.
       if (fromPeer && !alreadyListed && !this.appVisible) void this.notifyReceivedItem(item);
+    });
+    // A peer's history_batch, as one unit (see SyncManager.onBatchApplied):
+    // all of its new items join the list in ONE assignment, so the cards show
+    // up together and the page lays out once. When there are two or more they
+    // are one stack, whose front card (the newest) goes to the top of the list,
+    // the others right below it (see placeBatch).
+    syncManager.onBatchApplied((batch: BatchApplied) => {
+      netLog(`history batch: ${batch.added.length} new, headDone=${batch.headDone} visible=${this.appVisible}`);
+      if (batch.applied === 'applied') this.noteOwnClipboardWrite();
+      // After a head, the batch joins the group the head started (same card);
+      // without one it makes its own group if it has two or more items.
+      const plan: BatchPlan = this.batchGroups.batchArrived(batch.from, batch.added.length);
+      const fresh: SyncedItem[] = batch.added.map((entry: ClipboardEntry) =>
+        this.syncedItemFor(entry, entry.DeviceId !== this.ownDeviceId, plan.groupId, plan.blockId));
+      let placed: SyncedItem[] = placeBatch(this.syncedItems, fresh, 50);
+      if (plan.settleId !== '') {
+        placed = settleGroup<SyncedItem>(placed, plan.settleId, (item: SyncedItem, id: string, expected: number) => this.withGroup(item, id, expected));
+      } else if (plan.groupId !== '') {
+        // The stack's front card is the newest of its items, which is the
+        // first of them in the list.
+        const front: SyncedItem | undefined = placed.find((i: SyncedItem) => i.groupId === plan.groupId);
+        if (front !== undefined) this.noteFreshStack(front.id);
+      }
+      this.syncedItems = placed;
+      const newestKey: string = entryKey(batch.newest);
+      const newest: SyncedItem | undefined = fresh.find((i: SyncedItem) => i.id === newestKey);
+      if (!batch.headDone && newest !== undefined && !this.appVisible) void this.notifyReceivedItem(newest);
+    });
+    // The newest item of a peer's batch, ahead of the batch (see
+    // SyncManager.onHeadApplied): it is listed at once, and when more are
+    // coming it is already the front card of their stack, counting them.
+    syncManager.onHeadApplied((head: HeadApplied) => {
+      netLog(`history head: ${head.expectedNew} to come, visible=${this.appVisible}`);
+      if (head.applied === 'applied') this.noteOwnClipboardWrite();
+      const groupId: string = this.batchGroups.headArrived(head.from, head.expectedNew, entryKey(head.newest));
+      const item: SyncedItem = this.syncedItemFor(head.newest, head.newest.DeviceId !== this.ownDeviceId, groupId);
+      if (groupId !== '') {
+        item.expected = head.expectedNew;
+        this.noteFreshStack(item.id);
+      }
+      this.syncedItems = placeBatch(this.syncedItems, [item], 50);
+      if (!this.appVisible) void this.notifyReceivedItem(item);
+    });
+    // The answer to one of this device's requests (sync v2, see
+    // SyncManager.onSyncApplied). The first one holds the item that went on the
+    // clipboard: it is the front card of the stack of everything the sync asked
+    // for, which counts all of it from the start; the answers after it join that
+    // stack, right below the front card. On top of the list, whatever the
+    // timestamps say (see placeBatch).
+    syncManager.onSyncApplied((sync: SyncApplied) => {
+      netLog(`history answer: ${sync.added.length} new, front=${sync.front !== null} last=${sync.last} superseded=${sync.superseded} quiet=${sync.quiet} visible=${this.appVisible}`);
+      if (sync.quiet) {
+        // The late answer to a request given up on: listed by time, in no stack.
+        this.syncedItems = placeQuiet(this.syncedItems,
+          sync.added.map((entry: ClipboardEntry) => this.syncedItemFor(entry, entry.DeviceId !== this.ownDeviceId)), 50);
+        return;
+      }
+      if (sync.applied === 'applied') this.noteOwnClipboardWrite();
+      const frontKey: string = sync.front !== null ? entryKey(sync.front) : '';
+      const plan: BatchPlan = sync.front !== null
+        ? this.batchGroups.frontArrived(sync.from, sync.expectedTotal, frontKey, sync.added.length, sync.last)
+        : this.batchGroups.answerArrived(sync.from, sync.added.length, sync.last);
+      const fresh: SyncedItem[] = sync.added.map((entry: ClipboardEntry) =>
+        this.syncedItemFor(entry, entry.DeviceId !== this.ownDeviceId, plan.groupId, plan.blockId));
+      const front: SyncedItem | undefined = fresh.find((i: SyncedItem) => i.id === frontKey);
+      if (front !== undefined && plan.groupId !== '' && plan.settleId === '') front.expected = sync.expectedTotal;
+      let placed: SyncedItem[] = placeBatch(this.syncedItems, fresh, 50);
+      if (plan.settleId !== '') {
+        placed = settleGroup<SyncedItem>(placed, plan.settleId, (item: SyncedItem, id: string, expected: number) => this.withGroup(item, id, expected));
+      }
+      if (plan.groupId !== '') {
+        const stackFront: SyncedItem | undefined = placed.find((i: SyncedItem) => i.groupId === plan.groupId);
+        if (stackFront !== undefined) this.noteFreshStack(stackFront.id);
+      }
+      this.syncedItems = placed;
+      if (front !== undefined && !sync.superseded && !this.appVisible) void this.notifyReceivedItem(front);
+    });
+    // The batch a head announced came to nothing new, or its connection closed
+    // before it came, or a v2 sync has nothing more to wait for: the stack
+    // counts what it has.
+    syncManager.onHeadSettled((from: string) => {
+      const groupId: string = this.batchGroups.headSettled(from);
+      if (groupId !== '') {
+        this.syncedItems = settleGroup<SyncedItem>(this.syncedItems, groupId, (item: SyncedItem, id: string, expected: number) => this.withGroup(item, id, expected));
+      }
+    });
+    // A peer deleted items: they leave the list (a stack that loses its front
+    // card gets a new one, one that is left with a single item is a normal card).
+    syncManager.onEntriesDeleted((keys: string[]) => {
+      this.forgetItems(keys);
     });
     // An older item's bytes, fetched again (see SyncManager.onFileStored):
     // the list is laid out again, so its card gets the key - and the image
@@ -939,10 +1084,10 @@ struct Index {
     // Per-row status is derived in deviceRows() instead.
     syncManager.onUnpaired((deviceId: string) => { void this.handleUnpaired(deviceId); });
     syncManager.onConnectionsChanged((count: number) => {
-      netLog(`connections=${count}`);
       // Only links whose peer has answered count (see SyncManager.provenCount).
       this.connectedCount = syncManager.provenCount;
       this.linkChanges++;
+      netLog(`connections=${count} proven=${this.connectedCount}`);
     });
     this.syncManager = syncManager;
     // Shares arriving from now on; one that came before this page existed
@@ -954,6 +1099,9 @@ struct Index {
 
     this.tcpServer.onConnection((conn: socket.TCPSocketConnection) => {
       const identity = new DeviceIdentity();
+      // Listening before anything is awaited: the peer's handshake is on its
+      // way already (see MessageRelay in PeerConnection.ets).
+      const link = new TcpSocketConnectionAdapter(conn);
       // Without capturing this, a device that only ever DIALED OUT to pair
       // (rather than being dialed) would never learn an address for
       // whoever just connected to it - meaning it could never later
@@ -964,15 +1112,22 @@ struct Index {
         .then((addr: socket.NetAddress) => addr.address)
         .catch(() => null)
         .then((remoteAddress: string | null) => {
-          PeerConnection.create(new TcpSocketConnectionAdapter(conn), identity, this.trustStore, context, this.blockCheck(), this.passphraseKeyStore, this.ownDeviceName())
+          PeerConnection.create(link, identity, this.trustStore, context, this.blockCheck(), this.passphraseKeyStore, this.ownDeviceName())
             .then((peerConn: PeerConnection | null) => {
               if (peerConn === null) {
+                netLog(`accepted connection from ${remoteAddress ?? 'unknown'}: no usable handshake`);
                 conn.close().catch(() => { /* already closed - fine */ });
                 return;
               }
               this.handleNewConnection(peerConn, remoteAddress);
             });
         });
+    });
+    // A failed bind is tried again until it works (see TcpServer.start);
+    // each failure is logged, so a port held by something else shows up.
+    this.tcpServer.onError((e: BusinessError, retryInMs: number) => {
+      netLog(`TCP server: listen on ${TCP_PORT} failed (${e.code} ${e.message}) - retrying in ${retryInMs / 1000} s`);
+      this.log(`TCP server error: ${e.message} - retrying`);
     });
     this.tcpServer.start(TCP_PORT).catch((e: BusinessError) => {
       this.log(`TCP server error: ${e.message}`);
@@ -1004,13 +1159,11 @@ struct Index {
       void this.drainPendingShares();
       // A pairing link the app was opened with (a cold start from a scan).
       void this.drainPairingLink();
-      // Same helper the foreground restart uses, and its failure is
-      // surfaced rather than swallowed - a bind failure here means no
-      // peer is ever discovered, which previously looked like "sync just
-      // doesn't work" with nothing in the log to say why.
-      this.startDiscovery().catch((e: BusinessError) => {
-        this.log(`discovery failed to start: ${e.message}`);
-      });
+      // Same helper the foreground restart uses, and a bind failure is
+      // retried rather than swallowed - it means no peer is ever
+      // discovered, which previously looked like "sync just doesn't work"
+      // with nothing in the log to say why.
+      this.startDiscoveryOrRetry();
       void this.refreshPassphraseState();
       // The key and the engine are ready: what was copied before the app
       // opened can go now (see captureOnOpen).
@@ -1117,17 +1270,28 @@ struct Index {
       return;
     }
     await this.discovery.stop();
-    try {
-      await this.startDiscovery();
-    } catch (e) {
-      const be = e as BusinessError;
-      this.log(`discovery restart failed (${be.message}) - retrying`);
-      setTimeout(() => {
-        this.startDiscovery().catch((retryErr: BusinessError) => {
-          this.log(`discovery restart retry failed: ${retryErr.message}`);
-        });
-      }, 1000);
+    this.startDiscoveryOrRetry();
+  }
+
+  // Starts discovery, and if that fails (the port still held by the copy
+  // of this app just killed, say) tries again 1 s, 2 s, 4 s ... 30 s later
+  // until it works. A cold start used to try once and log: with no beacon
+  // going out, no device that dials this one ever heard it, and nothing
+  // dialled from here, until the user happened to leave and come back.
+  // Only one chain of tries at a time: a new start cancels a waiting retry.
+  private startDiscoveryOrRetry(pauseMs: number = DISCOVERY_RETRY_MIN_MS): void {
+    if (this.discoveryRetryTimerId !== -1) {
+      clearTimeout(this.discoveryRetryTimerId);
+      this.discoveryRetryTimerId = -1;
     }
+    this.startDiscovery().catch((e: BusinessError) => {
+      netLog(`discovery: start failed (${e.code} ${e.message}) - retrying in ${pauseMs / 1000} s`);
+      this.log(`discovery failed to start (${e.message}) - retrying`);
+      this.discoveryRetryTimerId = setTimeout(() => {
+        this.discoveryRetryTimerId = -1;
+        this.startDiscoveryOrRetry(Math.min(pauseMs * 2, DISCOVERY_RETRY_MAX_MS));
+      }, pauseMs);
+    });
   }
 
   // Single definition of how discovery is started, so the cold-start path
@@ -1173,12 +1337,21 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    try {
+      accessibility.offAnimationReduceStateChange(this.onAnimationReduce);
+    } catch (e) {
+      // never subscribed
+    }
     this.mainWindow?.off('avoidAreaChange', this.onAvoidAreaChange);
     this.mainWindow?.off('windowSizeChange', this.onWindowSizeChange);
     (getContext(this) as common.UIAbilityContext).eventHub.off(SHARED_IN_EVENT, this.onSharedIn);
     (getContext(this) as common.UIAbilityContext).eventHub.off(PAIRING_ACTION_EVENT, this.onPairingAction);
     (getContext(this) as common.UIAbilityContext).eventHub.off(PAIRING_LINK_EVENT, this.onPairingLinkEvent);
     this.watcher.stopListening();
+    if (this.discoveryRetryTimerId !== -1) {
+      clearTimeout(this.discoveryRetryTimerId);
+      this.discoveryRetryTimerId = -1;
+    }
     void this.discovery.stop();
     this.tcpServer.stop();
     if (this.offLanReconnectTimerId !== -1) {
@@ -1787,18 +1960,21 @@ struct Index {
 
   private async connectToBeacon(beacon: PeerBeacon): Promise<void> {
     try {
-      const client = await connectTcp(beacon.senderIp, beacon.tcpPort);
+      const link = await connectTcp(beacon.senderIp, beacon.tcpPort);
       const identity = new DeviceIdentity();
       const context = getContext(this) as common.UIAbilityContext;
-      const conn = await PeerConnection.create(new TcpSocketAdapter(client), identity, this.trustStore, context, this.blockCheck(), this.passphraseKeyStore, this.ownDeviceName());
+      const report = new HandshakeReport();
+      const conn = await PeerConnection.create(link, identity, this.trustStore, context, this.blockCheck(), this.passphraseKeyStore, this.ownDeviceName(), report);
       if (conn === null) {
-        client.close().catch(() => { /* already closed - fine */ });
+        link.close().catch(() => { /* already closed - fine */ });
+        netLog(`dial ${beacon.senderIp}:${beacon.tcpPort} (${deviceFingerprint(beacon.deviceId)}): no usable handshake (${report.timedOut ? 'no answer' : 'peer closed, or refused locally'})`);
         this.log(`connect failed: ${shortDeviceId(beacon.deviceId)}`);
         return;
       }
       this.handleNewConnection(conn, beacon.senderIp);
     } catch (e) {
       const be = e as BusinessError;
+      netLog(`dial ${beacon.senderIp}:${beacon.tcpPort} (${deviceFingerprint(beacon.deviceId)}): TCP connect failed - ${be.code} ${be.message}`);
       this.log(`connect error (${beacon.senderIp}:${beacon.tcpPort}): ${be.message}`);
     }
   }
@@ -1865,7 +2041,7 @@ struct Index {
   // connection that was already closed - accepting it wrote trust on this
   // side only.
   private async connectToAddress(address: string, port: number, forPairing: boolean = false): Promise<DialOutcome> {
-    let client: socket.TCPSocket;
+    let client: TcpSocketAdapter;
     try {
       client = await connectTcp(address, port);
     } catch (e) {
@@ -1876,7 +2052,7 @@ struct Index {
       const identity = new DeviceIdentity();
       const context = getContext(this) as common.UIAbilityContext;
       const report = new HandshakeReport();
-      const conn = await PeerConnection.create(new TcpSocketAdapter(client), identity, this.trustStore, context, this.blockCheck(), this.passphraseKeyStore, this.ownDeviceName(), report);
+      const conn = await PeerConnection.create(client, identity, this.trustStore, context, this.blockCheck(), this.passphraseKeyStore, this.ownDeviceName(), report);
       if (conn === null) {
         netLog(`connectToAddress ${address}:${port}: TCP connected but no usable handshake (${report.timedOut ? 'no answer' : 'peer closed, or refused locally'})`);
         client.close().catch(() => { /* already closed - fine */ });
@@ -2216,16 +2392,23 @@ struct Index {
     });
   }
 
-  // This device only: never the clipboard, never the peers.
+  // Never the clipboard. Peers that speak sync v2 delete the item too.
   private async deleteItem(item: SyncedItem): Promise<void> {
     await this.syncManager?.deleteEntry(item.id);
-    const previewOpen: boolean = this.syncedNavStack.size() > 1 && this.selectedItemId === item.id;
-    this.syncedItems = this.syncedItems.filter((i: SyncedItem) => i.id !== item.id);
+    this.forgetItems([item.id]);
+  }
+
+  // Takes these items (by id) out of the list, here or at a peer's request.
+  private forgetItems(ids: string[]): void {
+    const gone: Set<string> = new Set<string>(ids);
+    const previewOpen: boolean = this.syncedNavStack.size() > 1 && gone.has(this.selectedItemId);
+    const kept: SyncedItem[] = this.syncedItems.filter((i: SyncedItem) => !gone.has(i.id));
+    if (kept.length !== this.syncedItems.length) this.syncedItems = kept;
     if (previewOpen && !this.isSplitLayout()) {
       this.closeItemDetail();
     }
     // The split's preview moves on to the next item by itself (previewItem).
-    if (this.selectedItemId === item.id) this.selectedItemId = '';
+    if (gone.has(this.selectedItemId)) this.selectedItemId = '';
   }
 
   async saveTailscaleIp(): Promise<void> {
@@ -3454,7 +3637,7 @@ struct Index {
     });
   }
 
-  private syncedItemFor(entry: ClipboardEntry, fromPeer: boolean): SyncedItem {
+  private syncedItemFor(entry: ClipboardEntry, fromPeer: boolean, groupId: string = '', blockId: string = groupId): SyncedItem {
     return {
       id: entryKey(entry),
       type: entry.Type,
@@ -3463,7 +3646,150 @@ struct Index {
       deviceId: entry.DeviceId,
       time: entry.Timestamp.slice(11, 16),
       fromPeer,
+      groupId,
+      blockId,
+      stamp: canonicalTimestamp(entry.Timestamp),
+      expected: 0,
     };
+  }
+
+  // A stack that has just come in animates in (see rowTransition) for a moment.
+  private noteFreshStack(frontId: string): void {
+    this.freshStacks.add(frontId);
+    setTimeout(() => { this.freshStacks.delete(frontId); }, 2500);
+  }
+
+  // ---- stacks: the items one history batch brought, as one card ----
+
+  // The rows of the Synced list: an ordinary card, or one stack standing for
+  // the items of a batch (see SyncedRows.buildRows). Worked out again when the
+  // list changes, and once for all the rows that ask.
+  private syncedRows(): StackRow<SyncedItem>[] {
+    const items: SyncedItem[] = this.syncedItems;
+    if (items !== this.rowsSource) {
+      this.rowsSource = items;
+      this.rowsCache = buildRows<SyncedItem>(items);
+      this.rowsByFront = new Map<string, StackRow<SyncedItem>>();
+      for (const row of this.rowsCache) this.rowsByFront.set(row.front.id, row);
+    }
+    return this.rowsCache;
+  }
+
+  // Items hidden behind the card of this item: 0 unless it is the front of a
+  // stack. Asked for where the card is built, so a card that stays in the
+  // list is still told when its stack shrinks or opens.
+  private stackBehind(itemId: string): number {
+    this.syncedRows();
+    const row: StackRow<SyncedItem> | undefined = this.rowsByFront.get(itemId);
+    return row === undefined ? 0 : hiddenCount(row);
+  }
+
+  private stackGroup(itemId: string): string {
+    this.syncedRows();
+    const row: StackRow<SyncedItem> | undefined = this.rowsByFront.get(itemId);
+    return row === undefined ? '' : row.groupId;
+  }
+
+  // The fill of a layer behind a card: the cards' own, with the "Card
+  // transparency" setting applied.
+  private stackLayerFill(): string {
+    return this.colorWithAlpha($r('app.color.card_surface'), 1 - Math.max(0, this.cardTransparency) / 100);
+  }
+
+  private stackBadgeFill(): string {
+    return this.colorWithAlpha(themeFor(this.accentTheme).color, 1);
+  }
+
+  private withGroup(item: SyncedItem, groupId: string, expected: number): SyncedItem {
+    return {
+      id: item.id,
+      type: item.type,
+      preview: item.preview,
+      content: item.content,
+      deviceId: item.deviceId,
+      time: item.time,
+      fromPeer: item.fromPeer,
+      groupId,
+      blockId: item.blockId,
+      stamp: item.stamp,
+      expected,
+    };
+  }
+
+  // The user opened a stack: its items become ordinary cards, and it never
+  // stacks again. Done in one animateTo, so the cards below move down smoothly
+  // and the hidden items settle into their places (see rowTransition).
+  private expandStack(groupId: string): void {
+    const row: StackRow<SyncedItem> | undefined = this.syncedRows().find((r: StackRow<SyncedItem>) => r.groupId === groupId);
+    if (row === undefined) return;
+    tapHaptic();
+    this.revealSlots.clear();
+    // memberIds[0] is the front card, which stays; 1 is the one behind it.
+    for (let i = 1; i < row.memberIds.length; i++) this.revealSlots.set(row.memberIds[i], i);
+    this.batchGroups.opened(groupId);
+    const opened: SyncedItem[] = dissolveGroup<SyncedItem>(this.syncedItems, groupId,
+      (item: SyncedItem, id: string, expected: number) => this.withGroup(item, id, expected));
+    if (this.reduceMotion) {
+      this.getUIContext().animateTo({ duration: 150, curve: Curve.EaseInOut }, () => { this.syncedItems = opened; });
+    } else {
+      this.getUIContext().animateTo({ curve: curves.springMotion(0.5, 0.82) }, () => { this.syncedItems = opened; });
+    }
+    setTimeout(() => { this.revealSlots.clear(); }, 1500);
+  }
+
+  // How a row comes in when it is added to the list: a stack that has just
+  // arrived fades and scales in once, however many items it holds; an item
+  // revealed by an opened stack fans out from behind the front card and settles
+  // with a spring, each 30 ms after the one before (only the first 10 - the
+  // rest just appear in place); anything else comes in as it always did. With
+  // "reduce animations" on, short fades and nothing else.
+  private rowTransition(itemId: string): TransitionEffect {
+    const index: number | undefined = this.revealSlots.get(itemId);
+    if (index !== undefined) {
+      if (this.reduceMotion) return TransitionEffect.OPACITY.animation({ duration: 150, curve: Curve.EaseInOut });
+      if (!revealAnimates(index)) return TransitionEffect.IDENTITY;
+      return TransitionEffect.OPACITY
+        .combine(TransitionEffect.translate({ y: -Math.min(index, 4) * 22 }))
+        .combine(TransitionEffect.scale({ x: 0.94, y: 0.94 }))
+        .animation({ curve: curves.springMotion(0.5, 0.8), delay: staggerDelayMs(index) });
+    }
+    if (this.freshStacks.has(itemId)) {
+      if (this.reduceMotion) return TransitionEffect.OPACITY.animation({ duration: 150, curve: Curve.EaseInOut });
+      return TransitionEffect.OPACITY
+        .combine(TransitionEffect.scale({ x: 0.95, y: 0.95 }))
+        .animation({ duration: 320, curve: Curve.EaseOut });
+    }
+    return TransitionEffect.IDENTITY;
+  }
+
+  // A card of the list or the grid in its stack wrapper (see StackedCard):
+  // the wrapper adds nothing to an ordinary card.
+  @Builder
+  syncedListRow(item: SyncedItem) {
+    StackedCard({
+      behind: this.stackBehind(item.id),
+      groupId: this.stackGroup(item.id),
+      layerFill: this.stackLayerFill(),
+      badgeFill: this.stackBadgeFill(),
+      reduceMotion: this.reduceMotion,
+      onExpand: (groupId: string): void => { this.expandStack(groupId); },
+    }) {
+      this.syncedItemCard(item)
+    }
+  }
+
+  @Builder
+  syncedGridRow(item: SyncedItem) {
+    StackedCard({
+      behind: this.stackBehind(item.id),
+      groupId: this.stackGroup(item.id),
+      layerFill: this.stackLayerFill(),
+      badgeFill: this.stackBadgeFill(),
+      reduceMotion: this.reduceMotion,
+      onExpand: (groupId: string): void => { this.expandStack(groupId); },
+    }) {
+      this.syncedGridCard(item)
+    }
   }
 
   // The list used to be filled only by live callbacks, so it came up empty
@@ -4453,7 +4779,9 @@ struct Index {
   // These return plain option objects rather than being @Builders: the
   // title bar is data handed to HdsNavDestination.titleBar(), and a method
   // (not a local variable) is how a builder body is allowed to compute it.
-  private hdsTitleBar(title: ResourceStr, isRoot: boolean, menu: HdsNavigationMenuItemOptions[]): HdsNavigationTitleBarOptions {
+  // subTitle is the optional small line under the title (undefined = none).
+  private hdsTitleBar(title: ResourceStr, isRoot: boolean, menu: HdsNavigationMenuItemOptions[],
+    subTitle?: ResourceStr): HdsNavigationTitleBarOptions {
     return {
       // Every destination ignores the top safe area so content can scroll up
       // behind the status bar - without this the title bar followed it and
@@ -4474,6 +4802,7 @@ struct Index {
       content: {
         title: {
           mainTitle: title,
+          subTitle: subTitle,
           mainTitleSize: isRoot ? TitleSize.TITLE_ML : TitleSize.TITLE_S,
         },
         menu: { value: menu },
@@ -4483,10 +4812,15 @@ struct Index {
 
   // Synced tab: one menu icon that flips between list and grid. It shows
   // the layout you'd switch TO, the usual convention for a two-state view
-  // toggle. viewMode is passed in (read at the call site) rather than read
-  // here so the title bar re-evaluates when it changes.
-  private syncedTitleBar(viewMode: string): HdsNavigationTitleBarOptions {
+  // toggle. viewMode and connectedCount are passed in (read at the call
+  // site) rather than read here so the title bar re-evaluates when they
+  // change. Under the title it says how many devices are connected, as
+  // Android and iOS do under their Synced title.
+  private syncedTitleBar(viewMode: string, connectedCount: number): HdsNavigationTitleBarOptions {
     const toGrid: boolean = viewMode === 'list';
+    const status: ResourceStr = connectedCount === 0
+      ? $r('app.string.devices_none_connected')
+      : this.countStr($r('app.plural.devices_connected_count'), connectedCount);
     return this.hdsTitleBar($r('app.string.tab_synced'), true, [{
       content: {
         label: toGrid ? $r('app.string.synced_view_grid') : $r('app.string.synced_view_list'),
@@ -4497,7 +4831,7 @@ struct Index {
           void this.deviceSettings.setSyncedViewMode(getContext(this) as common.UIAbilityContext, this.syncedViewMode);
         },
       },
-    }]);
+    }], status);
   }
 
   // Item preview: Copy for text, Share for every type, and Open (left of
@@ -4585,7 +4919,7 @@ struct Index {
     HdsNavigation(this.syncedSplitStack) {
       this.syncedListContent()
     }
-    .titleBar(this.syncedTitleBar(this.syncedViewMode))
+    .titleBar(this.syncedTitleBar(this.syncedViewMode, this.connectedCount))
     .titleMode(HdsNavigationTitleMode.MINI)
     .bindToScrollable([this.syncedListScroller, this.syncedFlowScroller])
     .hideBackButton(true)
@@ -4671,7 +5005,7 @@ struct Index {
       }
       // syncedViewMode is read here, in the attribute expression itself, so
       // the title bar (and its list/grid icon) re-evaluates when it flips.
-      .titleBar(this.syncedTitleBar(this.syncedViewMode))
+      .titleBar(this.syncedTitleBar(this.syncedViewMode, this.connectedCount))
       .titleMode(HdsNavDestinationTitleMode.MINI)
       // Both scrollers: only one of List/WaterFlow exists at a time, and
       // whichever is showing drives the blur.
@@ -4854,9 +5188,10 @@ struct Index {
         this.emptyState($r('app.string.synced_empty_title'), $r('app.string.synced_empty_detail'), $r('app.media.ic_empty_synced'))
       } else if (this.syncedViewMode === 'list') {
         List({ space: 10, scroller: this.syncedListScroller }) {
-          ForEach(this.syncedItems, (item: SyncedItem) => {
-            ListItem() { this.syncedItemCard(item) }
-          }, (item: SyncedItem) => this.syncedItemKey(item))
+          ForEach(this.syncedRows(), (row: StackRow<SyncedItem>) => {
+            ListItem() { this.syncedListRow(row.front) }
+              .transition(this.rowTransition(row.front.id))
+          }, (row: StackRow<SyncedItem>) => this.syncedItemKey(row.front))
         }
         .width('100%')
         .height('100%')
@@ -4894,7 +5229,7 @@ struct Index {
         // Same WaterFlow pattern devicesTab uses below - a 2-column grid
         // rather than a single stacked list, per request.
         WaterFlow({ scroller: this.syncedFlowScroller }) {
-          ForEach(this.syncedItems, (item: SyncedItem) => {
+          ForEach(this.syncedRows(), (row: StackRow<SyncedItem>) => {
             // .width('100%') directly on FlowItem, not just on
             // syncedGridCard's own inner Column two levels down - per the
             // official FlowItem reference, FlowItem itself has no
@@ -4903,8 +5238,9 @@ struct Index {
             // leaving it unset was what let a FlowItem's actual box drift
             // wider than its column after a reflow (see itemConstraintSize
             // below).
-            FlowItem() { this.syncedGridCard(item) }.width('100%')
-          }, (item: SyncedItem) => this.syncedItemKey(item))
+            FlowItem() { this.syncedGridRow(row.front) }.width('100%')
+              .transition(this.rowTransition(row.front.id))
+          }, (row: StackRow<SyncedItem>) => this.syncedItemKey(row.front))
         }
         .width('100%')
         .height('100%')

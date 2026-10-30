@@ -8,24 +8,75 @@
 import socket from '@ohos.net.socket';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { TcpSocketAdapter } from './PeerConnection';
 
 const decoder = util.TextDecoder.create('utf-8');
+// How long a failed bind waits before the next try, doubling up to the
+// maximum - see TcpServer.start. The same pauses as Android's serveTcp.
+const BIND_RETRY_MIN_MS = 1000;
+const BIND_RETRY_MAX_MS = 30000;
+// The socket's receive and send buffers, the most the SDK allows. The
+// default is 8 KB, and a 'message' event carries at most one buffer's
+// worth: a 16 MB history batch arrived as 2000 events, each a callback
+// and a copy on the UI thread (0.44 s of it in all, measured).
+const SOCKET_BUFFER_BYTES = 262144;
 
 export class TcpServer {
   private server: socket.TCPSocketServer | null = null;
   private connectionCallback: ((conn: socket.TCPSocketConnection) => void) | null = null;
+  private errorCallback: ((error: BusinessError, retryInMs: number) => void) | null = null;
+  // Set by stop(): a start() still waiting to try again gives up.
+  private stopped: boolean = false;
 
   onConnection(callback: (conn: socket.TCPSocketConnection) => void): void {
     this.connectionCallback = callback;
   }
 
+  // A bind that failed, and how long until the next try.
+  onError(callback: (error: BusinessError, retryInMs: number) => void): void {
+    this.errorCallback = callback;
+  }
+
+  // Binds the port and keeps trying - 1 s, 2 s, 4 s ... 30 s apart - until it
+  // does, or stop() is called. The one failed bind used to be logged and
+  // that was all: the port was still held by the copy of this app that was
+  // just killed (its connections' TIME_WAIT, or its socket not yet released
+  // after a quick restart), and for the rest of the session nothing could
+  // dial in - a peer whose key sorts after this device's only connected
+  // once this side's dial fallback reached it, half a minute at a time.
   async start(port: number): Promise<void> {
+    this.stopped = false;
+    let pause: number = BIND_RETRY_MIN_MS;
+    while (!this.stopped) {
+      try {
+        await this.listen(port);
+        return;
+      } catch (e) {
+        this.errorCallback?.(e as BusinessError, pause);
+      }
+      await new Promise<void>((resolve: () => void) => { setTimeout(resolve, pause); });
+      pause = Math.min(pause * 2, BIND_RETRY_MAX_MS);
+    }
+  }
+
+  private async listen(port: number): Promise<void> {
     const server = socket.constructTCPSocketServerInstance();
-    this.server = server;
     server.on('connect', (conn: socket.TCPSocketConnection) => {
       this.connectionCallback?.(conn);
     });
-    await server.listen({ address: '0.0.0.0', port });
+    try {
+      await server.listen({ address: '0.0.0.0', port });
+    } catch (e) {
+      // Its descriptor goes with it: the next try binds a fresh one.
+      server.close().catch(() => { /* never listened - fine */ });
+      throw e as Error;
+    }
+    if (this.stopped) {
+      // stop() came while this bind was in flight.
+      server.close().catch(() => { /* fine */ });
+      return;
+    }
+    this.server = server;
     // Without this, a connection that's been idle for a while (this app
     // only sends when the clipboard actually changes, so idle is the
     // common case) can get silently dropped by an intermediate NAT or
@@ -36,22 +87,25 @@ export class TcpServer {
     // without needing real application data to flow. Individual accepted
     // TCPSocketConnections don't expose setExtraOptions themselves in this
     // SDK - only the server does, applying to connections it accepts.
-    await server.setExtraOptions({ keepAlive: true }).catch(() => { /* best-effort - not fatal if unsupported */ });
+    await server.setExtraOptions({ keepAlive: true, receiveBufferSize: SOCKET_BUFFER_BYTES, sendBufferSize: SOCKET_BUFFER_BYTES })
+      .catch(() => { /* best-effort - not fatal if unsupported */ });
   }
 
   stop(): void {
+    this.stopped = true;
     this.server?.close().catch(() => { /* already closed or never started - fine */ });
     this.server = null;
   }
 }
 
-// Connects out to a peer and returns the raw socket - caller owns framing,
-// sending, and closing from here. No timeout guard here yet deliberately
-// mirrors the fact that PeerConnection.cs itself doesn't have one either
-// (see docs/security.md finding #2) - not copying a known gap silently,
-// just not fixing a Windows-side gap from the HarmonyOS side first.
-export async function connectTcp(address: string, port: number, timeoutMs: number = 5000): Promise<socket.TCPSocket> {
+// Connects out to a peer and returns the socket, wrapped - caller owns
+// framing, sending, and closing from here. Wrapped before connect(): the
+// adapter listens from the moment it is made, and the peer's first bytes
+// can arrive before connect() resolves (see MessageRelay in
+// PeerConnection.ets - a bare TCPSocket drops them).
+export async function connectTcp(address: string, port: number, timeoutMs: number = 5000): Promise<TcpSocketAdapter> {
   const client = socket.constructTCPSocketInstance();
+  const link = new TcpSocketAdapter(client);
   try {
     await client.connect({ address: { address, port }, timeout: timeoutMs });
   } catch (e) {
@@ -62,8 +116,9 @@ export async function connectTcp(address: string, port: number, timeoutMs: numbe
   // See TcpServer.start's matching comment - keeps an idle connection (and
   // any NAT mapping it depends on, e.g. over Tailscale) alive without
   // needing real traffic to flow.
-  await client.setExtraOptions({ keepAlive: true }).catch(() => { /* best-effort - not fatal if unsupported */ });
-  return client;
+  await client.setExtraOptions({ keepAlive: true, receiveBufferSize: SOCKET_BUFFER_BYTES, sendBufferSize: SOCKET_BUFFER_BYTES })
+    .catch(() => { /* best-effort - not fatal if unsupported */ });
+  return link;
 }
 
 export function decodeMessage(message: ArrayBuffer): string {

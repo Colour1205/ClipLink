@@ -1,6 +1,7 @@
 package io.uaena.cliplink.ui
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
@@ -10,6 +11,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -23,9 +25,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
 import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
 import androidx.compose.foundation.lazy.staggeredgrid.items
+import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
@@ -48,10 +52,14 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.ToggleButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateMap
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -60,10 +68,12 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.engine.SyncedItem
 import io.uaena.cliplink.engine.displayNameOf
+import kotlinx.coroutines.delay
 
 enum class SyncedLayout { List, Grid }
 
@@ -73,6 +83,8 @@ data class SyncedActions(
     val onDelete: (SyncedItem) -> Unit,
     val onSyncClipboard: () -> Unit,
     val onPickFile: () -> Unit,
+    /** A stack was opened: its group ends and its items become ordinary cards. */
+    val onExpandGroup: (Long) -> Unit,
 )
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -133,6 +145,52 @@ fun SyncedScreen(
             val enterFade = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
             val exitFade = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
 
+            // A history batch is one stack, not a card per item (see SyncedRow).
+            val rows = remember(items) { buildRows(items) }
+            val reduceMotion = rememberReduceMotion()
+            // The cards of stacks that were just opened, flying out of them -
+            // by key, until they have settled.
+            val reveal = remember { mutableStateMapOf<String, RevealSlot>() }
+            LaunchedEffect(reveal.size) {
+                // Whatever never got composed (scrolled away) is not kept for ever.
+                if (reveal.isNotEmpty()) {
+                    delay(REVEAL_KEEP_MS)
+                    reveal.clear()
+                }
+            }
+            // Cards below an opened stack, and below a deleted card, glide to
+            // their new places rather than jumping.
+            val glide = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
+            val placement = if (reduceMotion) snap<IntOffset>() else glide
+            val listState = rememberLazyListState()
+            val gridState = rememberLazyStaggeredGridState()
+            // A stack that arrives on top while the list is at the very top is
+            // brought into view. The lazy list holds on to the card that was
+            // first (by its key), which would leave the new stack above the
+            // screen, unseen; if it did not, there is nothing to do here.
+            val topRow = remember { arrayOfNulls<String>(1) }
+            LaunchedEffect(rows) {
+                val before = topRow[0]
+                topRow[0] = rows.firstOrNull()?.key
+                if (before == null || before == topRow[0]) return@LaunchedEffect
+                val added = rows.indexOfFirst { it.key == before }
+                if (added <= 0 || rows.take(added).none { it is SyncedRow.Stack }) return@LaunchedEffect
+                // The list measures the change on the next frames, not yet.
+                withFrameNanos { }
+                withFrameNanos { }
+                if (layout == SyncedLayout.List) {
+                    if (listState.firstVisibleItemIndex == added && listState.firstVisibleItemScrollOffset == 0) {
+                        listState.animateScrollToItem(0)
+                    }
+                } else if (gridState.firstVisibleItemIndex == added && gridState.firstVisibleItemScrollOffset == 0) {
+                    gridState.animateScrollToItem(0)
+                }
+            }
+            val onExpand = { stack: SyncedRow.Stack ->
+                reveal.putAll(revealSlots(stack, columns = if (layout == SyncedLayout.Grid) 2 else 1))
+                actions.onExpandGroup(stack.groupId)
+            }
+
             AnimatedContent(
                 targetState = layout,
                 transitionSpec = { fadeIn(enterFade) togetherWith fadeOut(exitFade) },
@@ -140,35 +198,45 @@ fun SyncedScreen(
             ) { current ->
                 when (current) {
                     SyncedLayout.List -> LazyColumn(
+                        state = listState,
                         contentPadding = listPadding,
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(CARD_GAP),
                         modifier = Modifier.fillMaxSize(),
                     ) {
-                        items(items, key = { it.key }) { keyed ->
-                            SyncedCard(
-                                keyed,
-                                deviceNames[keyed.item.entry.deviceId],
-                                onOpen,
-                                actions,
+                        items(rows, key = { it.key }) { row ->
+                            SyncedRowContent(
+                                row = row,
+                                deviceNames = deviceNames,
+                                onOpen = onOpen,
+                                actions = actions,
                                 compact = false,
+                                reveal = reveal,
+                                reduceMotion = reduceMotion,
+                                onExpand = onExpand,
+                                modifier = Modifier.animateItem(fadeInSpec = null, placementSpec = placement, fadeOutSpec = null),
                             )
                         }
                     }
 
                     SyncedLayout.Grid -> LazyVerticalStaggeredGrid(
                         columns = StaggeredGridCells.Fixed(2),
+                        state = gridState,
                         contentPadding = listPadding,
-                        verticalItemSpacing = 12.dp,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalItemSpacing = CARD_GAP,
+                        horizontalArrangement = Arrangement.spacedBy(CARD_GAP),
                         modifier = Modifier.fillMaxSize(),
                     ) {
-                        items(items, key = { it.key }) { keyed ->
-                            SyncedCard(
-                                keyed,
-                                deviceNames[keyed.item.entry.deviceId],
-                                onOpen,
-                                actions,
+                        items(rows, key = { it.key }) { row ->
+                            SyncedRowContent(
+                                row = row,
+                                deviceNames = deviceNames,
+                                onOpen = onOpen,
+                                actions = actions,
                                 compact = true,
+                                reveal = reveal,
+                                reduceMotion = reduceMotion,
+                                onExpand = onExpand,
+                                modifier = Modifier.animateItem(fadeInSpec = null, placementSpec = placement, fadeOutSpec = null),
                             )
                         }
                     }
@@ -253,14 +321,56 @@ private fun SyncedHeader(
     }
 }
 
+/** How long the fly-out of an opened stack's cards is remembered, whether or not they were all on screen. */
+private const val REVEAL_KEEP_MS = 3_000L
+
+/** One row of the list or grid: a card, or a stack standing for a history batch. */
+@Composable
+private fun SyncedRowContent(
+    row: SyncedRow,
+    deviceNames: Map<String, String?>,
+    onOpen: (KeyedItem) -> Unit,
+    actions: SyncedActions,
+    compact: Boolean,
+    reveal: SnapshotStateMap<String, RevealSlot>,
+    reduceMotion: Boolean,
+    onExpand: (SyncedRow.Stack) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    when (row) {
+        is SyncedRow.Single -> SyncedCard(
+            keyed = row.keyed,
+            senderName = deviceNames[row.keyed.item.entry.deviceId],
+            onOpen = onOpen,
+            actions = actions,
+            compact = compact,
+            modifier = modifier.revealIn(reveal[row.key], reduceMotion) { reveal.remove(row.key) },
+        )
+
+        is SyncedRow.Stack -> StackedCard(
+            stack = row,
+            senderName = deviceNames[row.front.item.entry.deviceId],
+            onOpen = onOpen,
+            actions = actions,
+            compact = compact,
+            reduceMotion = reduceMotion,
+            onExpand = onExpand,
+            modifier = modifier,
+        )
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SyncedCard(
+internal fun SyncedCard(
     keyed: KeyedItem,
     senderName: String?,
     onOpen: (KeyedItem) -> Unit,
     actions: SyncedActions,
     compact: Boolean,
+    modifier: Modifier = Modifier,
+    /** Drawn over the bottom of the card, in the room [STACK_HANDLE_ZONE] leaves there: a stack's handle and count. */
+    stackFooter: (@Composable BoxScope.() -> Unit)? = null,
 ) {
     val item = keyed.item
     // The picture of an image file (a photo sent from a phone), once its bytes
@@ -278,7 +388,7 @@ private fun SyncedCard(
     Surface(
         shape = RoundedCornerShape(26.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
     ) {
         Box {
             Column(
@@ -287,7 +397,13 @@ private fun SyncedCard(
                         onClick = { onOpen(keyed) },
                         onLongClick = { menuOpen = true },
                     )
-                    .padding(16.dp),
+                    .padding(
+                        start = 16.dp,
+                        top = 16.dp,
+                        end = 16.dp,
+                        // The handle of a stack sits in its own room below.
+                        bottom = if (stackFooter != null) STACK_HANDLE_ZONE else 16.dp,
+                    ),
             ) {
                 when {
                     item.type == ClipboardEntry.TYPE_IMAGE -> ImagePreview(keyed.key, item, compact)
@@ -343,6 +459,8 @@ private fun SyncedCard(
                     }
                 }
             }
+
+            stackFooter?.invoke(this)
 
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                 DropdownMenuItem(

@@ -541,6 +541,12 @@ final class AppModel: ObservableObject {
         engine?.deleteItem(id: item.id)
     }
 
+    /// A stack in the Synced list was opened: tell the engine, which stops
+    /// listing it (the view has already shown its items as ordinary cards).
+    func expandGroup(_ id: String) {
+        engine?.dissolveGroup(id: id)
+    }
+
     func clearHistory() {
         // No toast: the list visibly empties, after a confirmation.
         clipboard.forgetLastHash()

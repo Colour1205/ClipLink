@@ -6,4 +6,10 @@
     <string name="app_version">Version %1$s</string>
     <string name="pairing_channel_name">Pairing requests</string>
     <string name="pairing_channel_description">Asks whether to trust a device that wants to pair while ClipLink is not open.</string>
+    <string name="stack_badge">+%1$d</string>
+    <string name="stack_expand_hint">Expand</string>
+    <plurals name="stack_expand_description">
+        <item quantity="one">Expand %1$d more item</item>
+        <item quantity="other">Expand %1$d more items</item>
+    </plurals>
 </resources>

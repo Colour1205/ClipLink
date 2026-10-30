@@ -146,7 +146,7 @@
     },
     {
       "name": "dialog_clear_history_message",
-      "value": "Removes every synced item and any files saved for them from this device. Paired devices keep their own copies, but won't send these back."
+      "value": "Removes every synced item and any files saved for them from this device and from your paired devices, and they won't come back. A device with an older ClipLink keeps its copies."
     },
     {
       "name": "dialog_delete_item_title",
@@ -154,7 +154,7 @@
     },
     {
       "name": "dialog_delete_item_message",
-      "value": "Removes it, and any file saved for it, from this device. Paired devices keep their own copies, but won't send this one back."
+      "value": "Removes it, and any file saved for it, from this device and from your paired devices, and it won't come back. A device with an older ClipLink keeps its copy."
     },
     {
       "name": "pairing_request_named",
@@ -351,6 +351,14 @@
     {
       "name": "synced_byline",
       "value": "%1$s · %2$s"
+    },
+    {
+      "name": "stack_badge",
+      "value": "+%1$d"
+    },
+    {
+      "name": "stack_expand_hint",
+      "value": "Shows each item as its own card."
     },
     {
       "name": "devices_unknown_address",

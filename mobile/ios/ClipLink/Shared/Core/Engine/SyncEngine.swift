@@ -163,6 +163,27 @@ public final class SyncEngine {
     var unansweredRetries: [String: Int] = [:]
     /// Hashes whose completed download is being hash-checked right now.
     var verifying: Set<String> = []
+    /// What arrived since the app started, and which entries came in together in
+    /// one history batch or sync (memory only; see BatchGroupTracker). Pruned
+    /// against history whenever a snapshot is built.
+    var batchGroups = BatchGroupTracker()
+    /// Each version 2 connection's requests in flight and last head (see
+    /// SyncEngine+HistorySync).
+    var peerSyncs: [ObjectIdentifier: PeerSync] = [:]
+    /// Keys asked for from some connection and not answered yet: no other
+    /// connection is asked for them meanwhile.
+    var pendingKeys: [String: ObjectIdentifier] = [:]
+    /// Connections whose version 1.5 history_head put its newest entry on the
+    /// clipboard, and when: the history_batch behind it puts nothing there, and
+    /// its stack stops waiting for that batch after `Wire.requestTimeout`. The
+    /// entry stays after that: a batch that comes later still belongs to the head
+    /// (it must not put anything on the clipboard nor start a block). It goes
+    /// with the next head of the connection, or with the connection.
+    var headApplied: [ObjectIdentifier: Date] = [:]
+    /// The convenience item that last went to the clipboard (its time and when),
+    /// for the whole engine: a second one that is not newer and comes within 90
+    /// seconds stays off it (see `shouldApplyConvenience`). Memory only.
+    var lastConvenience: AppliedConvenience?
 
     /// Bumped by every foreground/background transition: a teardown still
     /// waiting out its grace period checks it and stands down if the app came
@@ -260,6 +281,7 @@ public final class SyncEngine {
             reloadFromDisk()
             let added = history.entries.filter { !known.contains(HistoryStore.identity(of: $0)) }
             for entry in added.sorted(by: { DotNetTimestamp.isEarlier($0.timestamp, than: $1.timestamp) }) where entry.deviceId == ownId {
+                batchGroups.registerLive(HistoryStore.identity(of: entry))
                 let json = Envelope(type: Wire.MessageType.entry, payload: entry.jsonString()).jsonString()
                 for link in links.values { link.send(json) }
                 if entry.type == Wire.EntryType.file, let payload = FilePayload.parse(entry.content), files.exists(payload.fileHash) {
@@ -375,7 +397,9 @@ public final class SyncEngine {
                 guard running else { return finish(tearDown: false) }
                 let now = Date()
                 let elapsed = now.timeIntervalSince(started)
-                let busy = !connectingTo.isEmpty || !incoming.isEmpty || !streaming.isEmpty || tcpSweepInFlight
+                // An expired marker waits for nothing the round should wait for.
+                let asking = peerSyncs.values.contains { $0.hasOpenRequests }
+                let busy = !connectingTo.isEmpty || !incoming.isEmpty || !streaming.isEmpty || tcpSweepInFlight || asking
                 let everyoneHere = trust.all.allSatisfy { links[$0.publicKey] != nil || $0.publicKey == ownId }
                 let settled = elapsed >= 6 && !busy && pendingFiles.isEmpty && (everyoneHere || elapsed >= 14)
                 if now >= deadline || settled { return finish(tearDown: true) }
@@ -461,6 +485,10 @@ public final class SyncEngine {
         connectingTo.removeAll()
         inboundFrom.removeAll()
         awaitingInbound.removeAll()
+        peerSyncs.removeAll()
+        pendingKeys.removeAll()
+        headApplied.removeAll()
+        lastConvenience = nil
         for transfer in incoming.values { transfer.abort() }
         incoming.removeAll()
         skippedStreams.removeAll()
@@ -774,10 +802,12 @@ public final class SyncEngine {
 
     // MARK: - History API
 
-    /// Local only: never touches the clipboard or tells peers. The item is
-    /// remembered as deleted (by its signature) BEFORE it goes, so a peer
-    /// that still has it can't bring it back with its next history_batch.
-    /// Its file blob goes too, unless another remaining item has the same bytes.
+    /// Never touches the clipboard. The item is remembered as deleted (by its
+    /// signature) BEFORE it goes, so a peer that still has it can't bring it
+    /// back with its next history_batch, and every connected peer that speaks
+    /// sync version 2 is told to delete it too (an older one keeps its copy; the
+    /// ones offline learn from our next history_head). Its file blob goes too,
+    /// unless another remaining item has the same bytes.
     public func deleteItem(id: String) {
         queue.async { [self] in
             guard let entry = history.entries.first(where: { HistoryStore.identity(of: $0) == id }) else {
@@ -785,26 +815,36 @@ public final class SyncEngine {
                 return
             }
             deleted.add([entry])
-            history.remove(identity: id)
-            if entry.type == Wire.EntryType.file, let payload = FilePayload.parse(entry.content), !files.exists(payload.fileHash) {
-                files.removeExport(payload.fileHash)
-            }
-            dropUnreferencedFiles()
+            removeFromHistory([entry])
+            broadcastDeletion(of: [entry])
             schedulePublish()
         }
     }
 
-    /// Local only, as everywhere: peers keep their copies. Every item is
-    /// remembered as deleted first, so their next history_batch doesn't bring
-    /// it back. Also drops waiting and in-flight file transfers (the
-    /// HarmonyOS fix), so one finishing later can't apply.
+    /// The user opened a stack in the Synced list: its items are ordinary cards
+    /// from now on, still together right under the front card, and it never
+    /// closes again. Memory only.
+    public func dissolveGroup(id: String) {
+        queue.async { [self] in
+            batchGroups.dissolve(id: id)
+            schedulePublish()
+        }
+    }
+
+    /// Like deleteItem for every item: remembered as deleted first, so a peer's
+    /// next history_batch doesn't bring them back, and version 2 peers that are
+    /// connected delete them too. Also drops waiting and in-flight file
+    /// transfers (the HarmonyOS fix), so one finishing later can't apply.
     public func clearHistory() {
         queue.async { [self] in
             // Everything that's about to go, including anything the Share
             // extension added since this process last looked.
             history.reload()
-            deleted.add(history.entries)
+            let everything = history.entries
+            deleted.add(everything)
             history.clear()
+            broadcastDeletion(of: everything)
+            batchGroups.removeAll()
             dropUnreferencedFiles()
             files.clearExports()
             schedulePublish()
@@ -909,7 +949,11 @@ public final class SyncEngine {
     func buildSnapshot() -> EngineSnapshot {
         var s = EngineSnapshot()
         s.ownDeviceId = ownId
-        s.items = history.newestFirst.map(makeItem)
+        let ordered = history.newestFirst
+        // Deleted, cleared or cut by the 25-item cap: a block shrinks with its members.
+        if !batchGroups.blocks.isEmpty { batchGroups.prune(keeping: Set(ordered.map(HistoryStore.identity(of:)))) }
+        s.items = ordered.map(makeItem)
+        s.blocks = batchGroups.blocks
         s.devices = buildDeviceRows()
         // Only links whose peer has answered count.
         s.connectedCount = links.values.filter(\.hasReceivedSessionLine).count

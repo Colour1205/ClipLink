@@ -110,6 +110,9 @@ class ClipLinkEngine(context: Context) {
     private val discovery = Discovery()
     private val syncManager = SyncManager(scope, historyStore, trustStore, fileStore)
 
+    /** Which items arrived together, and in what order - memory only, see [BatchGroups]. */
+    private val batchGroups = BatchGroups()
+
     /** Caps the sockets that have connected and not yet proved anything - see [admit]. */
     private val handshakeGate = ConnectionGate()
 
@@ -259,6 +262,12 @@ class ClipLinkEngine(context: Context) {
         }
         syncManager.onEntryApplied = { entry -> onEntryReceived(entry) }
         syncManager.onHistoryChanged = { refreshItems() }
+        syncManager.onBatchStored = ::noteBatchGroup
+        syncManager.onHeadStored = ::noteHeadGroup
+        syncManager.onSyncStored = ::noteSyncGroup
+        syncManager.onLiveStored = ::noteLive
+        syncManager.onHeadSettled = { groupId -> if (batchGroups.complete(groupId, emptyList())) refreshItems() }
+        syncManager.onBatchApplied = { batch -> onBatchReceived(batch) }
         syncManager.onFileStored = { refreshItems() }
         syncManager.onSessionProven = { conn ->
             rememberProvenName(conn)
@@ -1441,18 +1450,90 @@ class ClipLinkEngine(context: Context) {
         if (deviceSettings.autoApply) clipboard.apply(entry)
     }
 
+    /**
+     * A whole history_batch, applied: one rebuild of the list, one log line,
+     * and the newest item on the clipboard - none of them per entry, so the
+     * screen gets the batch in one update.
+     */
+    private fun onBatchReceived(batch: SyncManager.BatchApplied) {
+        refreshItems()
+        log("received ${batch.added.size} item(s) from ${shortIdOf(batch.from)}")
+        if (deviceSettings.autoApply) batch.toApply?.let { clipboard.apply(it) }
+    }
+
+    /**
+     * Notes the entries a batch added as one group (or as none, if it added
+     * fewer than [GROUP_MIN_ITEMS]). When a history_head came first, they join
+     * its group [headGroup] instead. Called with the history locked, before
+     * the list can be rebuilt with them - see [HistoryStore.addAllNew].
+     */
+    private fun noteBatchGroup(added: List<ClipboardEntry>, headGroup: Long?) {
+        if (headGroup == null) {
+            batchGroups.recordBatch(added, System.currentTimeMillis())
+        } else {
+            batchGroups.complete(headGroup, added.map { it.deletionKey })
+        }
+    }
+
+    /**
+     * The newest entry of a history_batch that is still on its way, stored
+     * from its history_head: when [expectedNew] items are coming, the list
+     * shows their stack at once, with this one in front. Same rules as
+     * [noteBatchGroup].
+     */
+    private fun noteHeadGroup(newest: ClipboardEntry, expectedNew: Int): Long? =
+        batchGroups.provisional(newest.deletionKey, expectedNew, System.currentTimeMillis())
+
+    /**
+     * The answer to a request of a v2 sync, stored. The one with the sync's
+     * convenience item starts the block (and, when more is coming, its stack
+     * with the full count); the next answers join it. Same rules as
+     * [noteBatchGroup]. Returns the group, to be given back with the next answer.
+     */
+    private fun noteSyncGroup(sync: SyncManager.SyncStored): Long? {
+        val now = System.currentTimeMillis()
+        val front = sync.front
+        val others = sync.stored.filter { it !== front }.map { it.deletionKey }
+        val group = sync.groupId
+        return when {
+            front != null -> batchGroups.recordSync(front.deletionKey, others, sync.expectedSize, now)
+            group != null -> group.also { batchGroups.join(it, others) }
+            // The convenience item never came: these are a block, with nothing in front of them.
+            else -> batchGroups.recordBatch(sync.stored, now)
+        }
+    }
+
+    /** Live items - copied here, or arrived on their own - each a block of one, above every earlier block. */
+    private fun noteLive(stored: List<ClipboardEntry>) {
+        val now = System.currentTimeMillis()
+        // Oldest first: the newest of several arrives last, so it is on top.
+        stored.sortedBy { DotNetTimestamp.canonical(it.timestamp) }.forEach { batchGroups.noteLive(it.deletionKey, now) }
+    }
+
+    /**
+     * A stack was opened on the Synced tab: its items are ordinary cards from
+     * now on, together right below the one that was in front.
+     */
+    fun expandGroup(groupId: Long) {
+        scope.launch(Dispatchers.IO) {
+            step("opening a stack") {
+                if (batchGroups.expand(groupId)) refreshItems()
+            }
+        }
+    }
+
     fun applyToClipboard(item: SyncedItem): Boolean = clipboard.apply(item.entry)
 
     /**
-     * Deletes an item from this phone only, and for good - a peer's next
-     * history_batch won't bring it back. The clipboard and the peers are left
-     * exactly as they were.
+     * Deletes an item for good - a peer's next history_batch won't bring it
+     * back - and tells the peers that understand it (v2), which delete it
+     * too. The clipboard is left exactly as it was.
      */
     fun deleteItem(item: SyncedItem) {
         // Off the caller's thread - the UI's - which a disk write doesn't belong on.
         scope.launch(Dispatchers.IO) {
             step("deleting an item") {
-                historyStore.delete(item.entry)
+                syncManager.deleteEntry(item.entry)
                 refreshItems()
             }
         }
@@ -1462,7 +1543,8 @@ class ClipLinkEngine(context: Context) {
     fun clearHistory() {
         scope.launch(Dispatchers.IO) {
             step("clearing the history") {
-                historyStore.clear()
+                syncManager.clearHistory()
+                batchGroups.clear()
                 refreshItems()
             }
         }
@@ -1478,9 +1560,15 @@ class ClipLinkEngine(context: Context) {
     private fun refreshItems() {
         synchronized(itemsLock) {
             val own = _ownDeviceId.value
-            // .NET round-trip format sorts chronologically once canonicalised.
-            val entries = historyStore.all().sortedByDescending { DotNetTimestamp.canonical(it.timestamp) }
+            // Before the history is read, never after: see BatchGroups.horizon.
+            val horizon = batchGroups.horizon()
+            val history = historyStore.all()
+            val placement = batchGroups.place(history.mapTo(HashSet()) { it.deletionKey }, horizon)
+            // The blocks of this session first, the rest by timestamp (.NET round-trip
+            // format sorts chronologically once canonicalised) - see arrange.
+            val entries = arrange(history, placement.blocks)
             val keys = uniqueKeysFor(entries)
+            val groups = placement.tags
             _items.value = entries.mapIndexed { index, entry ->
                 val file = if (entry.type == ClipboardEntry.TYPE_FILE) {
                     FilePayload.parse(entry.content)?.let { fileStore.path(it.fileHash) }?.takeIf { it.exists() }
@@ -1493,6 +1581,7 @@ class ClipLinkEngine(context: Context) {
                     fileAvailable = entry.type != ClipboardEntry.TYPE_FILE || file != null,
                     file = file,
                     uniqueKey = keys[index],
+                    group = groups[entry.deletionKey],
                 )
             }
         }

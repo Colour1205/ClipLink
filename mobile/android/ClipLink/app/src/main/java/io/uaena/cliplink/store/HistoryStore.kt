@@ -49,6 +49,8 @@ class HistoryStore internal constructor(
     private val isDeletedKey: (String) -> Boolean,
     private val recordDeleted: (Collection<String>) -> Unit,
     private val maxStoredChars: Long = Limits.MAX_STORED_CHARS,
+    /** The newest deleted keys, most recently deleted first - what a v2 history_head tells a peer. */
+    private val recentDeleted: (Int) -> List<String> = { emptyList() },
 ) {
 
     constructor(context: Context, fileStore: FileStore, deleted: DeletedStore) : this(
@@ -59,6 +61,7 @@ class HistoryStore internal constructor(
         fileStore = fileStore,
         isDeletedKey = deleted::contains,
         recordDeleted = { keys -> deleted.record(keys) },
+        recentDeleted = deleted::recent,
     )
 
     /** Where a note goes when the history couldn't be read or written whole - the Activity log. */
@@ -67,6 +70,14 @@ class HistoryStore internal constructor(
 
     /** The history in the order it was stored; replaced - never changed - by every write. Null until first needed. */
     private var cache: List<ClipboardEntry>? = null
+
+    /**
+     * The key of the convenience item of the last sync that brought one (see [Arrival.Sync]): the trim
+     * spares it. Memory only - after a restart the history is trimmed by age alone - and ended by the
+     * next arrival that starts a block of its own, or replaced when a newer convenience item goes to the
+     * clipboard. A convenience item that is skipped (see [addAllNew]) leaves it as it is.
+     */
+    private var protectedKey: String? = null
 
     /** An immutable snapshot: the caller may keep it, sort it, and no later write changes it. */
     @Synchronized
@@ -105,26 +116,97 @@ class HistoryStore internal constructor(
      * survived the trim, in the order given. A peer's history_batch is
      * applied from this: an entry that was stored only to be evicted at once
      * is not one to put on the clipboard or fetch a file for.
+     *
+     * One batch is one change: one update in memory, one write to the file.
+     * With [Arrival.Sync], [protectFront] is asked whether the newest of the new
+     * entries (the sync's convenience item) is the one that goes on the clipboard;
+     * only then does the trim spare it. When the answer is no, the item that went to the clipboard before
+     * stays spared instead. Asked under the lock: it must be quick.
+     * [onStored] is called with the survivors while the lock is still held,
+     * so nothing reading [all] can see them before whoever is told here
+     * (the batch groups, see BatchGroups) knows they belong together. It must
+     * be quick and must not call back into this store.
      */
     @Synchronized
-    fun addAllNew(entries: List<ClipboardEntry>): List<ClipboardEntry> {
+    fun addAllNew(
+        entries: List<ClipboardEntry>,
+        arrival: Arrival = Arrival.Live,
+        protectFront: ((ClipboardEntry) -> Boolean)? = null,
+        onStored: ((List<ClipboardEntry>) -> Unit)? = null,
+    ): List<ClipboardEntry> {
         var history = loaded()
         val added = ArrayList<ClipboardEntry>()
         for (entry in entries) {
             history = history.withAdded(entry, isDeletedKey)?.also { added.add(entry) } ?: continue
         }
         if (added.isEmpty()) return emptyList()
+        // What the trim must not drop. A new block ends the protection of the last one's item.
+        // A convenience item that did not go to the clipboard is no new block of protection: the one that
+        // did stays spared (here and after), until a newer one goes there.
+        val grantedFront = if (arrival == Arrival.Sync) newestOf(added)?.takeIf { protectFront?.invoke(it) ?: true }?.deletionKey else null
+        val spared = when (arrival) {
+            Arrival.Sync -> grantedFront ?: protectedKey
+            Arrival.SyncMore -> protectedKey
+            Arrival.Live, Arrival.SyncByAge -> null
+        }
         val trimmed = history.toMutableList()
-        trim(trimmed)
+        trimEntries(trimmed, release = true, spared = spared)
         commit(trimmed)
         // By identity: an entry equal to a survivor isn't one if it was a duplicate.
-        return added.filter { candidate -> trimmed.any { it === candidate } }
+        val survivors = added.filter { candidate -> trimmed.any { it === candidate } }
+        if (survivors.isNotEmpty()) {
+            when (arrival) {
+                Arrival.Live -> protectedKey = null
+                Arrival.Sync -> if (grantedFront != null) protectedKey = grantedFront
+                Arrival.SyncByAge -> protectedKey = newestOf(survivors)?.deletionKey
+                Arrival.SyncMore -> Unit
+            }
+            onStored?.invoke(survivors)
+        }
+        return survivors
+    }
+
+    /**
+     * How an entry (or several) came to be added - see [addAllNew]. It decides whether the trim spares
+     * one of them: the item that goes to the clipboard on a sync stays, even when it is older than
+     * everything else the history keeps, and the oldest other item goes instead.
+     */
+    enum class Arrival {
+        /** One live item, such as a copy on either device: a block of its own, nothing to spare. */
+        Live,
+
+        /**
+         * The first entries of a v2 sync: the newest of the new ones is its convenience item, which is spared
+         * by this trim too, even when it is older than everything else - the oldest other entry goes instead.
+         */
+        Sync,
+
+        /**
+         * The same from an older peer, which sends its whole history: what is older than a full history keeps
+         * is not stored, as ever, and the newest of what is stored is spared from the next trim on.
+         */
+        SyncByAge,
+
+        /** More entries of a sync whose first part is in already: whatever is spared stays spared. */
+        SyncMore,
+    }
+
+    /**
+     * How many of [keys] (entry deletion keys, see ClipboardEntry.deletionKey)
+     * a history_batch carrying them would add: those neither in the history
+     * nor deleted here, each counted once. Never more than the history holds.
+     * Read from a history_head, to show the size of the stack that is coming.
+     */
+    @Synchronized
+    fun countNew(keys: Collection<String>): Int {
+        val here = loaded().mapTo(HashSet()) { it.deletionKey }
+        return keys.toSet().count { it !in here && !isDeletedKey(it) }.coerceAtMost(MAX_ITEMS)
     }
 
     /**
      * Deletes one entry for good: out of the history, its bytes released, and
      * remembered so no peer brings it back. Leaves the clipboard and the peers
-     * alone.
+     * alone (telling them is the caller's, see SyncManager.broadcastDelete).
      */
     @Synchronized
     fun delete(entry: ClipboardEntry) {
@@ -134,16 +216,47 @@ class HistoryStore internal constructor(
         releaseBlob(entry, remaining)
     }
 
-    /** [delete] for every entry at once. */
+    /** [delete] for every entry at once. Returns their keys, the ones to tell the peers. */
     @Synchronized
-    fun clear() {
+    fun clear(): List<String> {
         val entries = loaded()
-        recordDeleted(entries.map { it.deletionKey })
+        val keys = entries.map { it.deletionKey }
+        recordDeleted(keys)
         commit(emptyList())
         entries.forEach { releaseBlob(it, emptyList()) }
+        return keys
+    }
+
+    /**
+     * Deletes what a peer says was deleted there ([keys]): each key is remembered as deleted - also one
+     * for an entry that never was here, so it can't arrive later - and the entries with those keys leave
+     * the history, their bytes released if nothing else uses them. Returns the entries removed. Same as a
+     * local delete, except that a key already remembered is not stamped again (a peer's head repeats its
+     * whole list on every connect), and that nothing is sent on from here.
+     */
+    @Synchronized
+    fun applyDeleted(keys: Collection<String>): List<ClipboardEntry> {
+        if (keys.isEmpty()) return emptyList()
+        // Reversed: they come most recently deleted first, and are stamped in the order given.
+        val unknown = keys.filterNot(isDeletedKey).reversed()
+        if (unknown.isNotEmpty()) recordDeleted(unknown)
+        val doomed = keys.toSet()
+        val history = loaded()
+        val gone = history.filter { it.deletionKey in doomed }
+        if (gone.isEmpty()) return emptyList()
+        val remaining = history.filterNot { it.deletionKey in doomed }
+        commit(remaining)
+        gone.forEach { releaseBlob(it, remaining) }
+        return gone
     }
 
     fun isDeleted(entry: ClipboardEntry): Boolean = isDeletedKey(entry.deletionKey)
+
+    /** Whether [key] is remembered as deleted here. */
+    fun isKeyDeleted(key: String): Boolean = isDeletedKey(key)
+
+    /** The newest [limit] deleted keys, most recently deleted first. */
+    fun recentDeletedKeys(limit: Int): List<String> = recentDeleted(limit)
 
     /** For bytes that finished arriving after their entry was deleted. */
     @Synchronized
@@ -251,21 +364,23 @@ class HistoryStore internal constructor(
         }
     }
 
-    private fun trim(entries: MutableList<ClipboardEntry>) = trimEntries(entries, release = true)
-
-    private fun trimEntries(entries: MutableList<ClipboardEntry>, release: Boolean) {
+    /** Drops the oldest entries until the history fits; the one with key [spared], if any, stays whatever its age. */
+    private fun trimEntries(entries: MutableList<ClipboardEntry>, release: Boolean, spared: String? = null) {
         while (entries.size > MAX_ITEMS || (entries.size > 1 && contentChars(entries) > maxStoredChars)) {
             // Timestamps are .NET round-trip format, which is fixed-width and
             // UTC - so lexicographic order IS chronological order, no parsing.
             // Canonical form restores the fixed width if a relay trimmed it.
-            var oldest = 0
-            for (i in 1 until entries.size) {
-                if (DotNetTimestamp.canonical(entries[i].timestamp) <
+            var oldest = -1
+            for (i in entries.indices) {
+                if (spared != null && entries[i].deletionKey == spared) continue
+                if (oldest < 0 || DotNetTimestamp.canonical(entries[i].timestamp) <
                     DotNetTimestamp.canonical(entries[oldest].timestamp)
                 ) {
                     oldest = i
                 }
             }
+            // Only the spared one is left.
+            if (oldest < 0) return
             val evicted = entries.removeAt(oldest)
             if (release) releaseBlob(evicted, entries)
         }
@@ -450,6 +565,13 @@ internal object HistoryFile {
 
     private fun unicodeEscape(c: Char): String = "\\u" + c.code.toString(16).padStart(4, '0')
 }
+
+/**
+ * The entry with the latest timestamp; the first of them if several share it. The one a sync puts on the
+ * clipboard, and the one the trim spares for it - they must be the same.
+ */
+internal fun newestOf(entries: List<ClipboardEntry>): ClipboardEntry? =
+    entries.maxByOrNull { DotNetTimestamp.canonical(it.timestamp) }
 
 /**
  * [HistoryStore.add]'s decision, kept apart from the file so it is

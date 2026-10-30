@@ -381,16 +381,23 @@ public sealed partial class ClipLinkEngine
 
     // ---- synced history ----------------------------------------------
 
-    // The synced history, newest first - see HistoryItem. ("get_history",
-    // slimmed down: fetch contents by Key with the methods below)
+    // The synced history in the order the Synced page shows it - see
+    // HistoryItem. ("get_history", slimmed down: fetch contents by Key with the
+    // methods below)
     public IReadOnlyList<HistoryItem> GetHistory()
     {
         RequireStores();
         var trustedNames = trustStore.GetAllTrustedDevices().ToDictionary(device => device.PublicKey, device => device.Name);
         string ownName = deviceName.Current;
-        return historyAccess.GetHistory()
-            .OrderByDescending(entry => entry.Timestamp)
-            .Select(entry => ToHistoryItem(entry, trustedNames, ownName))
+        var view = historyAccess.GetHistoryWithBatches();
+        return view.Entries
+            .Select(entry =>
+            {
+                string key = entry.Key();
+                string? batch = view.BatchOf.GetValueOrDefault(key);
+                return ToHistoryItem(entry, trustedNames, ownName, batch, batch != null && view.Expected.TryGetValue(batch, out int size) ? size : null,
+                    view.Quiet.Contains(key));
+            })
             .ToList();
     }
 
@@ -510,11 +517,13 @@ public sealed partial class ClipLinkEngine
         if (!string.IsNullOrEmpty(text)) clipboardSync.addToQueue(text, "text");
     }
 
-    // Deletes one entry (a GetHistory Key) for good - local only: peers keep
-    // their copy, and the clipboard is left alone. Remembered as deleted
-    // either way, so a peer's next history batch can't restore it. Its
-    // copies opened from here (GetFileToOpen) go too, unless the user has
-    // edited them. False if it wasn't in history. ("delete_history_entry")
+    // Deletes one entry (a GetHistory Key) for good - on this PC, and on every
+    // connected device that speaks protocol 2 (they are told; an older one keeps
+    // its copy, and a device that is off hears of it in this PC's next history
+    // head). The clipboard is left alone. Remembered as deleted either way, so a
+    // peer's next history batch can't restore it. Its copies opened from here
+    // (GetFileToOpen) go too, unless the user has edited them. False if it
+    // wasn't in history. ("delete_history_entry")
     public bool DeleteHistoryEntry(string key)
     {
         RequireStores();
@@ -525,15 +534,18 @@ public sealed partial class ClipLinkEngine
         {
             DeleteOpenCopies(OpenFolderFor(entry));
         }
+        // (Told even if it had left history meanwhile: the user deleted it.)
+        BroadcastDelete(new[] { key });
         if (removed.Count == 0) return false;
         NotifyHistoryChanged();
         return true;
     }
 
     // "Clear synced history" - every current entry is remembered as deleted,
-    // so it stays cleared when peers reconnect. Every copy opened from here
-    // (GetFileToOpen) but the ones the user has edited, and every image this
-    // label received and saved for the clipboard (see ReceivedFiles) but the
+    // so it stays cleared when peers reconnect, and deleted on the connected
+    // devices that speak protocol 2 (see DeleteHistoryEntry). Every copy opened
+    // from here (GetFileToOpen) but the ones the user has edited, and every image
+    // this label received and saved for the clipboard (see ReceivedFiles) but the
     // one on the clipboard now, goes too - best effort: one an app still has
     // open stays. The clipboard is left alone. ("clear_history")
     public void ClearHistory()
@@ -543,6 +555,7 @@ public sealed partial class ClipLinkEngine
         ForgetPendingApplies(removed);
         DeleteOpenCopies(OpenCopiesRoot());
         ReceivedFiles.DeleteImages(label, keep: clipboardSync.ImageFileOnClipboard());
+        BroadcastDelete(removed.Select(entry => entry.Key()).ToList());
         NotifyHistoryChanged();
     }
 
@@ -632,7 +645,7 @@ public sealed partial class ClipLinkEngine
         return historyAccess.GetHistory().FirstOrDefault(entry => entry.Key() == key);
     }
 
-    private HistoryItem ToHistoryItem(ClipboardEntry entry, Dictionary<string, string?> trustedNames, string ownName)
+    private HistoryItem ToHistoryItem(ClipboardEntry entry, Dictionary<string, string?> trustedNames, string ownName, string? batchId = null, int? batchExpected = null, bool quiet = false)
     {
         bool own = entry.DeviceId == ownId;
         string? name = own ? ownName
@@ -640,7 +653,7 @@ public sealed partial class ClipLinkEngine
             : seenPeers.TryGetValue(entry.DeviceId, out var seen) ? seen.Name : null;
         string content = entry.Content ?? "";
         var item = new HistoryItem(entry.Key(), entry.Type, entry.DeviceId, name, own, ToUtc(entry.Timestamp),
-            TextPreview: null, TextLength: 0, FileName: null, SizeBytes: null, IsAvailable: true);
+            TextPreview: null, TextLength: 0, FileName: null, SizeBytes: null, IsAvailable: true, BatchId: batchId, BatchExpected: batchExpected, Quiet: quiet);
         switch (entry.Type)
         {
             case "text":

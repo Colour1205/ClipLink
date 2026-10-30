@@ -80,6 +80,15 @@
           "value": "%d 个项目已在 ClipLink 中。"
         }
       ]
+    },
+    {
+      "name": "stack_expand_name",
+      "value": [
+        {
+          "quantity": "other",
+          "value": "展开其余 %d 项"
+        }
+      ]
     }
   ]
 }

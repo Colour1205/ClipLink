@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Tests that run the real sync engine (ClipLink\Engine, ClipLinkEngine) in
+       process: two engines on loopback syncing, and an engine against a scripted
+       peer that sends and reads the messages by hand. Run with
+       `dotnet test windows\ClipLink.EngineTests`. ClipLink.csproj is a WinUI exe,
+       which a test project can't sensibly reference, so the engine's source
+       files are linked in (not copied) instead. Its WinForms clipboard watcher
+       is swapped for TestClipboard.cs, which records what would be put on the
+       clipboard, as the iOS interop harness does. Each engine keeps its files
+       under %APPDATA%\ClipboardDaemon with a label of its own ("zz-e2e-...",
+       never the app's "default"), deleted when the test ends. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>ClipLink.EngineTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- (Where the engine's DPAPI calls are: as in ClipLink.csproj.) -->
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\ClipLink\Engine\**\*.cs" Exclude="..\ClipLink\Engine\Clipboard\ClipboardSync.cs;..\ClipLink\Engine\**\obj\**;..\ClipLink\Engine\**\bin\**" Link="Engine\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

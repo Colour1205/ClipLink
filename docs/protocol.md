@@ -1,6 +1,6 @@
 # Protocol
 
-How ClipLink devices find each other, connect and share. This page is for people who build or test ClipLink. It describes version 2.0.
+How ClipLink devices find each other, connect and share. This page is for people who build or test ClipLink. It describes how the current builds talk to each other, and how they keep older builds working.
 
 All four apps (Windows, Android, HarmonyOS and iOS) follow this page, which is why they work together. The message shapes are written here, so there is no separate schema file. For who is trusted and why, see [security](security.md). For how the apps are built, see [architecture](architecture.md).
 
@@ -25,7 +25,7 @@ All four apps (Windows, Android, HarmonyOS and iOS) follow this page, which is w
 1. Each device announces itself on the local network with a short message called a **beacon**.
 2. Two devices that trust each other open a connection on port 49000.
 3. The first message each way, the **handshake**, proves who they are and sets up encryption.
-4. After that, every message is encrypted. New copies are sent as they happen, and the recent history is swapped when the connection opens.
+4. After that, every message is encrypted. New copies are sent as they happen. When the connection opens, each device tells the other what it has, and only the missing items are sent. Deleting an item deletes it on every paired device.
 
 ## Words used on this page
 
@@ -39,6 +39,8 @@ All four apps (Windows, Android, HarmonyOS and iOS) follow this page, which is w
 | Base64 | A way to write any bytes as plain text |
 | SHA-256 | A way to boil any data down to 32 bytes that identify it. Shown as 64 hex digits |
 | Line | One message. Messages are sent as lines of text, one per message |
+| Key | What identifies one entry: its signature. It is the same on every device |
+| Sync version | Which way of sharing history a device speaks. 1 is the older way, 2 is the newer way |
 
 ## Finding devices
 
@@ -80,7 +82,7 @@ All four apps (Windows, Android, HarmonyOS and iOS) follow this page, which is w
 **The handshake.** The first line each way is JSON, and it is not encrypted:
 
 ```json
-{"EphemeralPublicKey":"…","IdentityPublicKey":"…","Signature":"…","PassphraseProof":null,"DeviceName":"Colour's Laptop"}
+{"EphemeralPublicKey":"…","IdentityPublicKey":"…","Signature":"…","PassphraseProof":null,"DeviceName":"Colour's Laptop","Protocol":2}
 ```
 
 | Field | What it holds |
@@ -90,6 +92,7 @@ All four apps (Windows, Android, HarmonyOS and iOS) follow this page, which is w
 | `Signature` | The device's signature over `EphemeralPublicKey`, which proves the device really owns that id |
 | `PassphraseProof` | The passcode proof, or null if no passcode is set |
 | `DeviceName` | The device name, as plain text, or missing if not known |
+| `Protocol` | The sync version this device speaks (2 now). Missing, null or anything below 2 means 1 |
 
 An acceptor writes its own handshake first and then reads the connecting device's, so a connecting device always sees the acceptor's handshake before the acceptor has decided anything.
 
@@ -119,7 +122,10 @@ After the handshake, every message is an **envelope**, a small piece of JSON tha
 | `Type` | When it is sent | What `Payload` holds |
 | --- | --- | --- |
 | `entry` | Right after something is copied on this device | One entry |
-| `history_batch` | Once, when a connection opens | A list of entries |
+| `history_head` | Once, when a connection opens | The keys of this device's history and its deleted keys (see [Sharing history](#sharing-history)) |
+| `history_request` | After a `history_head`, for the entries it is missing | `{"Keys": ["…"]}` |
+| `history_batch` | In answer to a `history_request`. With an older device: once, when a connection opens | A list of entries |
+| `delete` | When entries are deleted on this device | `{"Keys": ["…"]}` |
 | `file_request` | When a device needs a file's bytes | `{"FileHash": "…"}` |
 | `file_chunk` | In answer to `file_request` | One piece of a file (see [Files](#files)) |
 | `unpair` | When a device is removed | `{}` |
@@ -142,11 +148,48 @@ The signature is over the text `Content:Type:DeviceId:Timestamp`, with the times
 
 ## Sharing history
 
-- **When a connection opens**, each side sends a `history_batch` with its recent history (at most 25 entries). The receiver adds what it does not already have, and skips entries the user deleted.
+**Two sync versions.** The handshake says which sync version a device speaks. A connection uses version 2 only when both devices say 2. If either one says nothing (an older build), the connection uses version 1, which is described at the end of this section. So nobody has to update at the same time as anyone else.
+
+**Version 2: only what is missing.**
+
+1. **The head.** When a connection opens, each side sends a `history_head`. It is small, because it holds no content, only keys:
+
+```json
+{"Keys":["…","…"],"Times":[1730000000123,1730000000100],"Deleted":["…"]}
+```
+
+| Field | What it holds |
+| --- | --- |
+| `Keys` | The key of every entry in this device's history (up to 25), newest first |
+| `Times` | When each of those entries was made, in milliseconds since 1970 (UTC), in the same order. Optional |
+| `Deleted` | The keys of entries the user deleted on this device, most recently deleted first, at most 500. May be empty |
+
+A head is sent even when the history is empty, since the deleted list can matter on its own.
+
+2. **Deletes first.** The receiver removes every entry listed in `Deleted` and remembers those keys as deleted.
+3. **What is missing.** The receiver picks the keys it does not have, has not deleted and is not already asking another device for. Only entries that would still fit in its own 25 are worth fetching, and it uses `Times` to see which. The newest missing entry is always fetched. Without `Times`, it fetches every missing entry.
+4. **Two requests.** It sends two `history_request` messages one straight after the other. The first asks only for the newest missing entry, so that one arrives fast. The second asks for all the other wanted ones. A request holds at most 100 keys.
+5. **The answers.** The other device answers each request with one `history_batch`: the entries it has for those keys, newest first (an empty list if it has none), in the same order as the requests. A request that nobody answers within 90 seconds is given up on, and the next connection tries again. If its answer still arrives later, the entries are added quietly: nothing goes on the clipboard and there is no notification.
+6. **Checks.** Every entry is checked as always: a valid signature, a maker the device trusts, and not deleted here.
+
+**What goes on the clipboard.** Only the newest missing entry, the one in the answer to the first request, is put on the clipboard. It may be older than the newest entry the device already has. The rest are only added to the history. An entry copied live is put on the clipboard as before. If two devices answer at the same time, the clipboard only changes for an entry that is newer than the one it was just set to (within the last 90 seconds), so it ends on the newest.
+
+**Deleting.** When you delete entries on a device, it sends `delete` with their keys to every device connected with version 2. Those devices delete the entries and remember the keys. A device that was off hears about it in the `Deleted` list of the next head it gets. Any paired device can delete any entry, and a deleted entry does not come back: a device remembers deleted keys (up to 2000) and skips them whenever they are offered again. A device that gets `delete` does not pass it on, and it never changes the clipboard.
+
+**How the apps list new entries.** This part is what the apps do, not what goes over the wire. ClipLink is for having what you copied on your other devices at hand, not for showing a timeline.
+
+- An entry copied live goes to the top.
+- The new entries a device gets when it connects show as one stack card, with the newest missing entry in front. Opening the stack puts the others directly below that entry.
+- The list goes back to time order the next time the app starts.
+- While the app is open, the entry in front is not trimmed away by the 25 limit. The oldest of the others goes instead.
+
+**Version 1: the whole history (older builds).** Each side sends its whole recent history (up to 25 entries) as a `history_batch` when the connection opens. The receiver adds what it does not already have, and skips entries the user deleted. Only the newest new entry goes on the clipboard. When the history has two or more entries, a small `history_head` goes first, with `{"Newest": <the newest entry>, "Keys": ["…"]}`. It lets the receiver show the newest entry and how many are coming while the large batch is still on its way. A build that does not know `history_head` skips it. Deletes are not shared in version 1: a device only remembers what the user deleted on that device. A newer device talks to an older one in version 1, and never sends it `history_request` or `delete`.
+
+**The rest of sharing.**
+
 - **When something is copied**, the device signs it and sends it as an `entry` to everyone it is connected to.
 - **A device that was off** catches up from the next device it connects to, which is why no device has to be on all the time.
 - **No winner.** If two devices copy at almost the same moment, both entries are kept, ordered by timestamp. See [Not built yet](#not-built-yet).
-- **Deleted entries.** If you delete an entry on a device, that device remembers it (up to 2000 deletions on Windows), so a peer's history cannot bring it back. Nothing about a deletion is sent to other devices.
 
 ## Files
 
@@ -258,6 +301,9 @@ When the Windows app connects out, it can tell "that address is this PC" from a 
 | What | Limit |
 | --- | --- |
 | History | 25 entries |
+| Keys in one `history_request` or `delete` | 100 |
+| Deleted keys sent in a head | 500 (a device remembers up to 2000) |
+| A request nobody answers | Dropped after 90 seconds |
 | A name | 64 characters |
 | A file | 1 GB |
 | Handshake time | 10 seconds (15 on Windows) |

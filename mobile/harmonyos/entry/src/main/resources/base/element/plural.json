@@ -116,6 +116,19 @@
           "value": "%d items already in ClipLink."
         }
       ]
+    },
+    {
+      "name": "stack_expand_name",
+      "value": [
+        {
+          "quantity": "one",
+          "value": "Expand %d more item"
+        },
+        {
+          "quantity": "other",
+          "value": "Expand %d more items"
+        }
+      ]
     }
   ]
 }

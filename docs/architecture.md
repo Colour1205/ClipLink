@@ -18,9 +18,9 @@ There is no ClipLink server. Every device runs the same program, and every devic
 
 1. **Find** other devices on the local network.
 2. **Connect** to the ones it has been paired with.
-3. **Share** what you copy, and swap recent history.
+3. **Share** what you copy, and catch up on recent history.
 
-Each device keeps its own short history. When two devices connect, they swap histories, so a device that was switched off catches up from whichever device it meets next. No single device has to be on all the time.
+Each device keeps its own short history. When two devices connect, each tells the other which items it has, and only the missing ones are sent, so a device that was switched off catches up from whichever device it meets next. No single device has to be on all the time. Deleting an item on one device deletes it on every paired device that has the new version.
 
 ## The parts inside each app
 
@@ -44,7 +44,7 @@ Every app has the same parts:
 | iOS | An app, with background refresh and a Share extension | When the app is open. iOS closes connections when the app is not in front. On opening, the app announces itself, asks the devices it can reach for their history, and sends the current clipboard. "Share to ClipLink" sends from any app. iOS also runs short background catch-ups when it chooses to |
 | HarmonyOS | An app | While the app is open. HarmonyOS pauses the app soon after you leave it, so a new item that arrives in that short time shows a notification |
 
-A phone cannot stay connected for ever. So phones are built to catch up when they are opened, and swapping histories is what makes that safe: a phone that was closed for two days is fully up to date the next time it opens near any of your devices.
+A phone cannot stay connected for ever. So phones are built to catch up when they are opened, and catching up from the other devices is what makes that safe: a phone that was closed for two days is fully up to date the next time it opens near any of your devices.
 
 ## The Windows app
 

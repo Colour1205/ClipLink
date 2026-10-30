@@ -65,6 +65,7 @@ extension SyncEngine {
         tick.setEventHandler { [weak self] in
             self?.beaconTick()
             self?.retryStalledFiles()
+            self?.expireHistoryRequests()
         }
         tick.resume()
         tickTimer = tick
@@ -201,7 +202,8 @@ extension SyncEngine {
             passphraseKey: passphraseKey,
             deviceName: ownDeviceName,
             blocked: Set(blocks.all.map(\.publicKey)),
-            acceptRequests: acceptsRequests
+            acceptRequests: acceptsRequests,
+            protocolVersion: Wire.protocolVersion
         )
     }
 
@@ -825,8 +827,14 @@ extension SyncEngine {
         pairingTargetKey = pairingTargetKey == id ? nil : pairingTargetKey
 
         // History immediately, even "[]": HarmonyOS treats the first bytes
-        // from us as "the other side accepted".
-        sendHistoryBatch(to: link)
+        // from us as "the other side accepted". With a peer that speaks sync
+        // version 2 that is a head of keys (even with nothing in it) and the
+        // peer asks for what it lacks; otherwise the whole history_batch.
+        if link.speaksV2 {
+            startHistorySync(with: link)
+        } else {
+            sendHistoryBatch(to: link)
+        }
         requestMissingBlobs(from: link)
 
         // The handshake's name is stored only once this link decrypts a line
@@ -879,6 +887,11 @@ extension SyncEngine {
 
     func linkClosed(_ link: PeerLink) {
         let id = link.peerDeviceId
+        // The history_batch behind a head that came in on this link will not
+        // come: its stack keeps only the items it has.
+        finishProvisional(ObjectIdentifier(link))
+        // ... and neither will the answers to its requests.
+        historySyncLinkClosed(link)
         // An unproven handshake's name was shown for this connection only:
         // a replay's must not outlive it (off the LAN no beacon replaces it).
         // Kept if the link that replaced this one brought the same name.

@@ -371,7 +371,7 @@ fun MeScreen(
             // sixty lines, and nobody would scroll past them to find this.
             SettingRow(
                 title = "Clear synced history",
-                subtitle = "Deletes every item from this phone. Your other devices keep theirs.",
+                subtitle = DeleteWording.CLEAR_ROW,
                 onClick = { confirmingClear = true },
             )
         }
@@ -416,10 +416,7 @@ fun MeScreen(
             onDismissRequest = { confirmingClear = false },
             title = { Text("Clear synced history?") },
             text = {
-                Text(
-                    "Every synced item is deleted from this phone, and won't come back from " +
-                        "your other devices. They keep their own copies.",
-                )
+                Text(DeleteWording.CLEAR_BODY)
             },
             confirmButton = {
                 TextButton(

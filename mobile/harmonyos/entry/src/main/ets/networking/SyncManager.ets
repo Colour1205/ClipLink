@@ -1,11 +1,14 @@
 // Step 8/10 of the build order in ../../../../README.md: full sync + file
 // transfer. Mirrors Program.cs's HandleMessage/SendHistoryBatch/
-// ClipboardChanged/HandleFileChunk/HandleFileRequest/StreamFileToPeer.
+// ClipboardChanged/HandleFileChunk/HandleFileRequest/StreamFileToPeer. What is
+// done with the history messages (head, batch, request, delete) is in
+// HistorySync.ets; this class gives it the history, the clipboard and the files.
 
 import { common } from '@kit.AbilityKit';
 import fs from '@ohos.file.fs';
 import { util } from '@kit.ArkTS';
 import { PeerConnection } from './PeerConnection';
+import { BatchApplied, HeadApplied, HistorySync, SyncApplied, SyncLink } from './HistorySync';
 import { ChunkPlace, placeChunk } from './ChunkOrder';
 import { FileChunkMessage } from './FileChunkMessage';
 import { FileRequestMessage } from './FileRequestMessage';
@@ -22,7 +25,6 @@ const base64Helper = new util.Base64Helper();
 const CHUNK_SIZE = 256 * 1024;
 // See requestAgain. Same as Android's SyncManager.MAX_RETRIES.
 const MAX_RETRIES = 3;
-
 interface Envelope {
   Type: string;
   Payload: string;
@@ -45,6 +47,11 @@ export class SyncManager {
   private context: common.UIAbilityContext;
   private fileStore: FileStore;
   private entryAppliedCallback: ((entry: ClipboardEntry, result: ApplyResult, fromPeer: boolean) => void) | null = null;
+  private batchAppliedCallback: ((batch: BatchApplied) => void) | null = null;
+  private headAppliedCallback: ((head: HeadApplied) => void) | null = null;
+  private syncAppliedCallback: ((sync: SyncApplied) => void) | null = null;
+  private headSettledCallback: ((from: string) => void) | null = null;
+  private entriesDeletedCallback: ((keys: string[]) => void) | null = null;
   private fileStoredCallback: ((fileHash: string) => void) | null = null;
   private logCallback: ((message: string) => void) | null = null;
   private connectionsChangedCallback: ((count: number) => void) | null = null;
@@ -81,16 +88,80 @@ export class SyncManager {
   // a received entry is still verified, recorded and reported to the UI -
   // only the write to the system pasteboard is skipped.
   private autoApply: boolean = true;
+  // What is done with the history messages (heads, batches, requests, deletes).
+  private sync: HistorySync;
+  // Numbers the connections (SyncLink.id).
+  private linkSerial: number = 0;
 
   constructor(fileStore: FileStore, trustStore: TrustStore, context: common.UIAbilityContext) {
     this.history = new HistoryAccess(fileStore);
     this.trustStore = trustStore;
     this.context = context;
     this.fileStore = fileStore;
+    this.sync = new HistorySync({
+      verified: (entry: ClipboardEntry) => this.verifiedAndTrusted(entry),
+      getHistory: () => this.history.getHistory(this.context),
+      deletedKeys: (limit: number) => this.history.recentDeleted(this.context, limit),
+      goneKeys: (keys: string[]) => this.history.goneKeys(this.context, keys),
+      isDeleted: (entry: ClipboardEntry) => this.history.isDeleted(this.context, entry),
+      addBatch: (candidates: ClipboardEntry[], newFront: boolean, frontOk: (entry: ClipboardEntry) => boolean) =>
+        this.history.addBatch(this.context, candidates, newFront, frontOk),
+      deleteKeys: (keys: string[]) => this.dropEntries(keys),
+      applyToClipboard: (entry: ClipboardEntry) => this.applyToClipboard(entry),
+      prepareFile: (entry: ClipboardEntry, applyWhenStored: boolean) => this.prepareFileEntry(entry, applyWhenStored),
+      wait: (ms: number) => new Promise<void>((resolve: () => void) => { setTimeout(resolve, ms); }),
+      now: () => Date.now(),
+      log: (message: string) => { this.logCallback?.(message); },
+      headApplied: (head: HeadApplied) => { this.headAppliedCallback?.(head); },
+      batchApplied: (batch: BatchApplied) => { this.batchAppliedCallback?.(batch); },
+      syncApplied: (sync: SyncApplied) => { this.syncAppliedCallback?.(sync); },
+      settled: (link: string) => { this.headSettledCallback?.(link); },
+      deleted: (keys: string[]) => { this.entriesDeletedCallback?.(keys); },
+    });
   }
 
   onEntryApplied(callback: (entry: ClipboardEntry, result: ApplyResult, fromPeer: boolean) => void): void {
     this.entryAppliedCallback = callback;
+  }
+
+  // A peer's history_batch has been dealt with, as ONE unit: called once for
+  // the whole batch (not at all for a batch that added nothing), after all of
+  // its entries are in the history. Not called for a live entry - that is
+  // onEntryApplied.
+  onBatchApplied(callback: (batch: BatchApplied) => void): void {
+    this.batchAppliedCallback = callback;
+  }
+
+  // A peer's history_head (of the old kind, from a device that does not speak
+  // sync v2) has been dealt with: its newest item is in the history and the UI
+  // is told, once, with the number of items to expect. Only called when that
+  // item was new.
+  onHeadApplied(callback: (head: HeadApplied) => void): void {
+    this.headAppliedCallback = callback;
+  }
+
+  // The answer to one of this device's history_requests (sync v2) has been
+  // dealt with, as ONE unit like a batch: called once, after its entries are in
+  // the history, and not at all when it added nothing.
+  onSyncApplied(callback: (sync: SyncApplied) => void): void {
+    this.syncAppliedCallback = callback;
+  }
+
+  // What the UI showed in expectation of more items is final now: the
+  // history_batch a head announced is over - it added nothing new, or the
+  // connection closed before it came - or a v2 sync's last request was
+  // answered with nothing, or given up on, or its connection closed. The
+  // argument is the connection's id, as in the events above. (Not called when
+  // the last batch or answer added items: that is onBatchApplied or
+  // onSyncApplied.)
+  onHeadSettled(callback: (from: string) => void): void {
+    this.headSettledCallback = callback;
+  }
+
+  // A peer deleted these items (a delete message, or the tombstones in its
+  // head): they are gone from the history, and the list is to drop them.
+  onEntriesDeleted(callback: (keys: string[]) => void): void {
+    this.entriesDeletedCallback = callback;
   }
 
   // A file's bytes arrived that no newly received entry was waiting on - an
@@ -148,7 +219,8 @@ export class SyncManager {
   // cleared item would pop back into the list. Everything cleared is
   // tombstoned (listedKeys: what the UI still shows beyond the capped
   // history), so a peer's history_batch on its next reconnect can't re-add
-  // it. Local only - peers aren't told and the clipboard isn't touched.
+  // it. The clipboard isn't touched. Peers that speak sync v2 are told to
+  // delete the items too; the others keep theirs.
   async clearHistory(listedKeys: string[]): Promise<void> {
     const keys: string[] = listedKeys.slice();
     this.pendingEntries.forEach((entry: ClipboardEntry, fileHash: string) => {
@@ -156,21 +228,31 @@ export class SyncManager {
       this.abandonedHashes.add(fileHash);
     });
     this.pendingEntries.clear();
-    await this.history.clearHistory(this.context, keys);
+    const cleared: string[] = await this.history.clearHistory(this.context, keys);
+    this.sync.broadcastDelete(cleared);
   }
 
-  // One item, by entryKey - same rules as clearHistory. A file entry still
-  // waiting for its bytes is dropped too, so their arrival can't re-list it.
+  // One item, by entryKey - same rules as clearHistory.
   async deleteEntry(key: string): Promise<void> {
+    await this.dropEntries([key]);
+    this.sync.broadcastDelete([key]);
+  }
+
+  // Deletes these items (by entryKey) from this device: tombstoned, out of the
+  // history, their files gone unless another entry uses them. A file entry
+  // still waiting for its bytes is dropped too, so their arrival can't re-list
+  // it. Used for the user's own delete and for a peer's.
+  private async dropEntries(keys: string[]): Promise<void> {
+    const gone: Set<string> = new Set<string>(keys);
     const waiting: string[] = [];
     this.pendingEntries.forEach((entry: ClipboardEntry, fileHash: string) => {
-      if (entryKey(entry) === key) waiting.push(fileHash);
+      if (gone.has(entryKey(entry))) waiting.push(fileHash);
     });
     for (const fileHash of waiting) {
       this.pendingEntries.delete(fileHash);
       this.abandonedHashes.add(fileHash);
     }
-    await this.history.deleteEntry(this.context, key);
+    await this.history.deleteEntries(this.context, keys);
   }
 
   get connectionCount(): number {
@@ -196,17 +278,25 @@ export class SyncManager {
   }
 
   // Wires up a freshly-handshaken connection into ongoing sync: registers
-  // it, starts listening, and sends our current history - same sequence
+  // it, starts listening, and tells the peer what we have - same sequence
   // Program.cs runs right after both the accept loop and ConnectToPeer
-  // complete a handshake.
+  // complete a handshake. With a peer that speaks sync v2 that is a head and
+  // nothing else; the peer asks for what it is missing (see HistorySync).
   registerConnection(conn: PeerConnection): void {
     const previous = this.connections.get(conn.peerDeviceId);
     this.connections.set(conn.peerDeviceId, conn);
     this.connectionsChangedCallback?.(this.connections.size);
+    this.linkSerial++;
+    const link: SyncLink = new SyncLink(`link-${this.linkSerial}`, shortDeviceId(conn.peerDeviceId), conn.protocol,
+      (json: string) => conn.send(json));
+    this.sync.open(link);
     // The peer answering changes what the Devices tab shows (waiting -> connected).
     conn.onSessionProven(() => { this.connectionsChangedCallback?.(this.connections.size); });
-    conn.onMessage((msg: string) => { void this.handleMessage(msg, conn); });
+    conn.onMessage((msg: string) => { void this.handleMessage(msg, conn, link); });
+    conn.onTick(() => { this.sync.expire(link); });
     conn.onDisconnected(() => {
+      // Whatever it still owed, and a stack that waited for it.
+      this.sync.close(link);
       // Its streams are dead whether or not it was replaced - see
       // dropTransfersFrom.
       const cutOff: string[] = this.dropTransfersFrom(conn);
@@ -232,7 +322,7 @@ export class SyncManager {
       }
     });
     conn.listen();
-    void this.sendHistoryBatch(conn);
+    void this.sync.announce(link);
     void this.requestMissingFiles(conn);
     if (previous !== undefined && previous !== conn) {
       // A second connection to this same peer just replaced the first one
@@ -294,12 +384,6 @@ export class SyncManager {
     conn.close();
   }
 
-  private async sendHistoryBatch(conn: PeerConnection): Promise<void> {
-    const history = await this.history.getHistory(this.context);
-    const envelope: Envelope = { Type: 'history_batch', Payload: JSON.stringify(history) };
-    await conn.send(JSON.stringify(envelope));
-  }
-
   // Signs, broadcasts to every connected peer, and records locally - same
   // sequence as Program.cs's ClipboardChanged handler. For file entries,
   // the caller (Index.ets) is responsible for caching the bytes into
@@ -355,22 +439,31 @@ export class SyncManager {
   // verifying, and ask every connected peer (not just whoever handed us
   // this entry) whether they have it.
   private handleIncomingFileEntry(entry: ClipboardEntry): void {
+    if (this.prepareFileEntry(entry, true)) void this.applyFileEntry(entry);
+  }
+
+  // The first half of handleIncomingFileEntry: true if the entry's bytes are
+  // here, so it can be applied at once. If they are not, they are asked for
+  // from every peer, and with applyWhenStored the entry waits to be applied
+  // when they arrive (a batch's older files do not: only its newest item goes
+  // on the clipboard, but every file's bytes are wanted all the same). False
+  // as well for an entry that is no good.
+  private prepareFileEntry(entry: ClipboardEntry, applyWhenStored: boolean): boolean {
     let payload: FilePayload;
     try {
       payload = JSON.parse(entry.Content) as FilePayload;
     } catch (e) {
       this.logCallback?.('received malformed file entry from peer');
-      return;
+      return false;
     }
     // Asked for by hash, then written and read under it - so only a real
     // one (see FileStore's isValidFileHash).
     if (!isValidFileHash(payload.FileHash)) {
       this.logCallback?.('received malformed file entry from peer');
-      return;
+      return false;
     }
     if (this.fileStore.exists(payload.FileHash)) {
-      void this.applyFileEntry(entry);
-      return;
+      return true;
     }
     // An empty file might never finish arriving: an older sender has no
     // chunk to stream for one (see streamFileToPeer), so a file_request
@@ -379,16 +472,16 @@ export class SyncManager {
     if (isEmptyFile(payload)) {
       if (!this.fileStore.write(payload.FileHash, new Uint8Array(0))) {
         this.logCallback?.('could not store a received empty file');
-        return;
+        return false;
       }
-      void this.applyFileEntry(entry);
-      return;
+      return true;
     }
-    this.pendingEntries.set(payload.FileHash, entry);
+    if (applyWhenStored) this.pendingEntries.set(payload.FileHash, entry);
     // Already arriving (its sender streams a new file right after its entry,
     // and that can overtake the entry's checks here): more peers sending it
     // too would only be wasted.
     if (!this.isReceiving(payload.FileHash)) this.broadcastFileRequest(payload.FileHash);
+    return false;
   }
 
   // Bytes are still fetched and cached when autoApply is off (handleIncomingFileEntry
@@ -767,7 +860,11 @@ export class SyncManager {
     return true;
   }
 
-  private async handleMessage(msg: string, conn: PeerConnection): Promise<void> {
+  private applyToClipboard(entry: ClipboardEntry): Promise<ApplyResult> {
+    return this.autoApply ? applyEntryToClipboard(entry, this.fileStore) : Promise.resolve<ApplyResult>('skipped');
+  }
+
+  private async handleMessage(msg: string, conn: PeerConnection, link: SyncLink): Promise<void> {
     let envelope: Envelope;
     try {
       envelope = JSON.parse(msg) as Envelope;
@@ -800,27 +897,17 @@ export class SyncManager {
       if (await this.history.isDeleted(this.context, entry)) return;
       await this.applyAndReport(entry);
       await this.history.addToHistory(this.context, entry);
+    } else if (envelope.Type === 'history_head') {
+      await this.sync.onHead(link, envelope.Payload);
     } else if (envelope.Type === 'history_batch') {
-      let entries: ClipboardEntry[];
-      try {
-        entries = JSON.parse(envelope.Payload) as ClipboardEntry[];
-      } catch (e) {
-        this.logCallback?.('received invalid message from peer (bad history_batch JSON)');
-        return;
-      }
-      for (const received of entries) {
-        const entry = await this.verifiedAndTrusted(received);
-        if (entry === null) {
-          continue; // skip just this bad entry, keep processing the rest of the batch
-        }
-        if (await this.history.isDeleted(this.context, entry)) {
-          continue; // deleted here - a peer still having it doesn't bring it back
-        }
-        const isNew = await this.history.addToHistory(this.context, entry);
-        if (isNew) {
-          await this.applyAndReport(entry);
-        }
-      }
+      // Nothing is awaited before this call: a batch that answers a request
+      // takes its place in the connection's queue in the order it came (see
+      // HistorySync.onBatch).
+      await this.sync.onBatch(link, envelope.Payload);
+    } else if (envelope.Type === 'history_request') {
+      this.sync.onRequest(link, envelope.Payload);
+    } else if (envelope.Type === 'delete') {
+      await this.sync.onDelete(link, envelope.Payload);
     } else if (envelope.Type === 'file_chunk') {
       await this.handleFileChunk(envelope.Payload, conn);
     } else if (envelope.Type === 'file_request') {

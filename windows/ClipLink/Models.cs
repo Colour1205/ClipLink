@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using ClipboardDaemon.Engine;
 using ClipboardDaemon.Storage;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 
@@ -141,6 +142,63 @@ public sealed class HistoryCard : Observable
             string size = Item.SizeBytes is long bytes ? Format.Size(bytes) : "";
             return PixelWidth > 0 ? $"{PixelWidth} × {PixelHeight} · {size}" : size;
         }
+    }
+
+    // ---- a stack ------------------------------------------------------------
+    // Several cards that arrived together in one history batch are one card
+    // with this one in front and StackHidden more behind it (see
+    // BatchGrouping). Set by EngineHost every time the history is read; a
+    // card that is not the front of a stack has none.
+
+    // The room a stacked card needs below its content: a row for the handle
+    // inside it, and a tail under it where the layers peek out and the
+    // handle's touch target (44 high) reaches down to.
+    public const double StackHandleRow = 20, StackTail = 24;
+
+    public string? StackBatchId { get; private set; }
+    public int StackHidden { get; private set; }
+    public bool IsStacked => StackHidden > 0;
+    // Layers peeking out behind the card: one for a stack of two, else two.
+    public int StackLayers => Math.Min(2, StackHidden);
+    public Thickness StackCardMargin => new(0, 0, 0, IsStacked ? StackTail : 0);
+    public double StackHandleHeight => IsStacked ? StackHandleRow : 0;
+    public string StackBadge => StackText.Badge(StackHidden);
+    public string StackHandleName => StackText.ExpandName(StackHidden);
+
+    public void SetStack(string? batchId, int hidden)
+    {
+        if (StackBatchId == batchId && StackHidden == hidden) return;
+        StackBatchId = batchId;
+        StackHidden = hidden;
+        Raise(nameof(StackBatchId), nameof(StackHidden), nameof(IsStacked), nameof(StackLayers), nameof(StackCardMargin),
+            nameof(StackHandleHeight), nameof(StackBadge), nameof(StackHandleName));
+    }
+
+    // What the card does when it first shows up (SyncedPage.PlayPlannedMotions):
+    // a new stack fades and scales in; an item that comes out of a stack that
+    // was opened (index = its place among them) flies out of it. Valid
+    // for a short while only, so a card that is made while another page is
+    // showing doesn't animate when that page is left much later.
+    public enum Motion { None, Appear, Reveal }
+
+    private Motion plannedMotion;
+    private int plannedIndex;
+    private long plannedUntil;
+
+    public void PlanMotion(Motion motion, int index = 0)
+    {
+        plannedMotion = motion;
+        plannedIndex = index;
+        plannedUntil = Environment.TickCount64 + 3000;
+    }
+
+    public bool HasPlannedMotion => plannedMotion != Motion.None && Environment.TickCount64 <= plannedUntil;
+
+    public (Motion Motion, int Index) TakeMotion()
+    {
+        var taken = Environment.TickCount64 <= plannedUntil ? (plannedMotion, plannedIndex) : (Motion.None, 0);
+        plannedMotion = Motion.None;
+        return taken;
     }
 
     public bool CanCopy => IsText || IsImage || (IsFile && Item.IsAvailable);

@@ -44,7 +44,7 @@ struct ItemDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("It's removed from this device only. Paired devices keep their own copies, but won't send it back.")
+            Text("It's removed here and on your paired devices, and won't come back. A device with an older ClipLink keeps its copy.")
         }
         .onChange(of: item == nil) { gone in
             if gone { dismiss() }

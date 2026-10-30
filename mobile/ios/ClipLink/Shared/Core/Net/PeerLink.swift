@@ -18,6 +18,10 @@ struct HandshakeContext {
     /// request: it is held, nothing is read or sent, and the user is asked.
     /// (When we dial, the dial's gate has already chosen who to go on with.)
     var acceptRequests = false
+    /// The sync version announced to the peer as the handshake's `Protocol`
+    /// (see `Wire.protocolVersion`). Nil sends none, which is how a build from
+    /// before version 2 looks - the engine always sets it.
+    var protocolVersion: Int?
 }
 
 enum HandshakeFailure: Error, CustomStringConvertible {
@@ -86,6 +90,11 @@ final class PeerLink {
     private(set) var wasAlreadyTrusted = false
     /// True when THIS handshake's passcode proof is what established trust.
     private(set) var newlyTrustedViaPassphrase = false
+    /// The sync version both sides speak (`Wire.negotiatedProtocol`): 1 until the
+    /// handshake is done, and for any peer that announced no `Protocol`.
+    private(set) var negotiatedProtocol = 1
+    /// The connection speaks sync version 2: heads of keys, requests, deletes.
+    var speaksV2: Bool { negotiatedProtocol >= 2 }
     private(set) var connectedAt = Date()
     /// Whether any session line (a ping counts) has arrived yet - used to spot
     /// a peer that completes the handshake and then immediately hangs up,
@@ -283,7 +292,8 @@ final class PeerLink {
                 identityPublicKey: ownId,
                 signature: signature.base64EncodedString(),
                 passphraseProof: context.passphraseKey.map { PassphraseAuth.proof(key: $0, deviceId: ownId) },
-                deviceName: context.deviceName
+                deviceName: context.deviceName,
+                protocolVersion: context.protocolVersion
             )
         } catch {
             finish(.failure(.unreachable("signing failed: \(error)")))
@@ -351,6 +361,7 @@ final class PeerLink {
             peerName = theirs.deviceName
             wasAlreadyTrusted = effectivelyTrusted
             newlyTrustedViaPassphrase = passphraseVerified
+            negotiatedProtocol = Wire.negotiatedProtocol(own: context.protocolVersion, peer: theirs.protocolVersion)
             cipher = SessionCipher(key: key)
             connectedAt = Date()
             lastActivity = Date()

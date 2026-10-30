@@ -5,6 +5,14 @@ import Foundation
 public struct EngineSnapshot: Equatable {
     public var ownDeviceId: String = ""
     public var items: [SyncedItem] = []
+    /// What arrived since the app started, in the order it arrived, oldest first:
+    /// every live item as a block of one, every reconnect's items as one block
+    /// (see BatchGroup). The Synced list puts these on top, the last one first
+    /// (see StackPlanner). Memory only: a restart shows a plain timeline.
+    public var blocks: [BatchGroup] = []
+    /// The blocks that are still stacked. The ones the user opened and the
+    /// blocks of one are not.
+    public var groups: [BatchGroup] { blocks.filter(\.isStack) }
     public var devices: [DeviceRow] = []
     public var connectedCount: Int = 0
     public var network = NetworkStatus()

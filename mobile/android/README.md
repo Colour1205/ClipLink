@@ -133,6 +133,40 @@ few hundred MB, so what a peer can make the app hold is capped (`net/Limits.kt`)
   dropped on arrival; one over 12 M characters is not repeated in a history_batch
   (which carries at most 16 M in all, newest first). History is not rebuilt per
   read: see below.
+- **history_head.** With two or more entries to send, a connection first sends a
+  small `history_head` (the newest entry and the key of every entry in the batch,
+  newest first) and then the unchanged history_batch, which can be megabytes. A
+  receiver stores and applies the newest at once and shows the stack right away,
+  from the count of keys it does not have (`BatchGroups.provisional`); the batch
+  then fills the same stack (`complete`). A head that fails the signature or trust
+  check is ignored, and builds that do not know the type skip it.
+- **Sync v2.** The handshake carries `"Protocol": 2` (unsigned; a peer that strips
+  it only forces v1). A connection speaks v2 only when both sides sent 2 or more
+  (`PeerLink.isV2`); with an older build nothing above changes. On a v2
+  connection a device sends only a `history_head` of `Keys` (newest first, at most
+  25), `Times` (Unix ms) and `Deleted` (its 500 newest tombstones), never the
+  batch. The receiver applies `Deleted`, works out what it lacks and is not
+  already asking another peer for (`SyncManager.ask`, `wantedKeys`), and sends two
+  `history_request`s back to back: the newest alone (the *convenience item*, the
+  only one that goes on the clipboard), then the rest. A peer answers each with one
+  `history_batch`, in order; each connection keeps a FIFO of what it asked
+  (`SyncState.queue`), and an answer nobody asked for is handled as an older
+  peer's. A request unanswered after 90 s is dropped (`expireRequests`, run from
+  `tidyTransfers`) but stays in the FIFO as an expired marker: its late answer is
+  paired with it and stored quietly (no clipboard, no stack, no notification). When
+  two peers answer at once, a convenience item that is not newer than the one applied
+  in the last 90 s is stored but left off the clipboard (`takeConvenienceSlot`).
+  When a connection ends, what it owed is asked of the others from their last heads. A local delete (`SyncManager.deleteEntry`,
+  `clearHistory`) sends `delete` to every v2 peer, which tombstones the keys,
+  removes the items and never touches its clipboard; deletes received are not sent
+  on. All writes to a v2 peer go through one ordered outbox, so a big answer is
+  never overtaken by a later small one.
+- **Placement.** The Synced list is the blocks of this session first, then
+  everything else by timestamp (`BatchGroups.place`, `arrange`): a live item is a
+  block of one, a sync is one block with the convenience item in front (a stack
+  while closed; opened, its members stay right below it). Blocks are memory only.
+  The history's trim spares the convenience item of the last sync
+  (`HistoryStore.Arrival`) until the next block arrives or the app restarts.
 - **Files.** A received file may not pass 1 GB, nor the size its signed entry
   says; at most 8 are received at once (4 per peer); a stream that stops getting
   chunks is dropped after 5 minutes, and stray `.tmp` files are deleted at

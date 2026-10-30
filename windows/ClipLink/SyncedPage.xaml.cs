@@ -1,16 +1,20 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Numerics;
+using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 
 namespace ClipLink;
 
-// The synced history as cards, newest first - text, images and files from
-// every paired device and this PC - in a list or a grid, as on the phones.
+// The synced history as cards - what just arrived on top, then newest first -
+// text, images and files from every paired device and this PC - in a list or a
+// grid, as on the phones.
 // Copy / Open / Delete on each; selecting a card shows it in full (all of
 // its text, the image as big as fits), as tapping one does on the phones.
 public sealed partial class SyncedPage : Page
@@ -38,7 +42,12 @@ public sealed partial class SyncedPage : Page
         host.History.CollectionChanged += (_, _) =>
         {
             if (detail != null && !host.History.Contains(detail)) ShowList();
+            motionPending = true;
         };
+        Cards.LayoutUpdated += PlayPlannedMotions;
+        // Items are about to be added to the cards (a stack arriving, or one
+        // opened): the ones already there glide to their new places.
+        host.CardsWillShift += BeginLayoutGlide;
         // Navigated to another page: back to the cards for next time.
         Unloaded += (_, _) => ShowList();
         // New items arrive at the top: the view must stay where it is, not
@@ -194,6 +203,195 @@ public sealed partial class SyncedPage : Page
         if (CardOf(sender) is { } card) await DeleteAsync(card);
     }
 
+    // ---- stacks ------------------------------------------------------------------
+
+    // The stack card the user opened: the cards that come out of it fly out
+    // of its place.
+    private FrameworkElement? revealAnchor;
+
+    // A press or click on a stack's handle: it is not a click on the card
+    // under it, which would show the item in full.
+    internal void StackTouched() => ActionClicked();
+
+    // Opens a stack (the adornment's handle was dragged down or clicked).
+    internal void StackExpand(HistoryCard card, FrameworkElement? container)
+    {
+        ActionClicked();
+        if (card.StackBatchId is not { } batch) return;
+        revealAnchor = container;
+        host.ExpandBatch(batch);
+    }
+
+    // The most that a card flies, however far its place is from the stack's
+    // (dp): from the stack's side, not from across the window.
+    private const double MaxFlight = 140;
+
+    // True from a change to the cards until the cards that move in have been
+    // found and started.
+    private bool motionPending;
+
+    // After a layout pass: a card that is new on the page, because a stack
+    // was shown or opened, moves in. Found by its place in the list rather
+    // than by its element being loaded: the list reuses elements, and sizes
+    // and places are known only once it has laid them out.
+    private void PlayPlannedMotions(object? sender, object e)
+    {
+        if (!motionPending || FindRepeater(Cards) is not { } repeater) return;
+        var waiting = false;
+        for (int i = 0; i < host.History.Count; i++)
+        {
+            var card = host.History[i];
+            if (!card.HasPlannedMotion) continue;
+            if (repeater.TryGetElement(i) is not FrameworkElement { ActualWidth: > 0 } element)
+            {
+                waiting = true; // not laid out yet (or the page isn't showing)
+                continue;
+            }
+            var (motion, index) = card.TakeMotion();
+            try
+            {
+                if (!MotionPreference.Enabled) FadeIn(element, 0, 120);
+                else if (motion == HistoryCard.Motion.Appear) ScaleIn(element);
+                else FlyOut(element, index);
+            }
+            catch (Exception ex)
+            {
+                // Only the movement is lost.
+                Console.WriteLine($"[app] card animation failed: {ex.Message}");
+            }
+        }
+        motionPending = waiting;
+    }
+
+    private static void FadeIn(UIElement element, int delayMs, int durationMs)
+    {
+        var visual = ElementCompositionPreview.GetElementVisual(element);
+        var fade = visual.Compositor.CreateScalarKeyFrameAnimation();
+        fade.InsertKeyFrame(0f, 0f);
+        fade.InsertKeyFrame(1f, 1f);
+        fade.Duration = TimeSpan.FromMilliseconds(durationMs);
+        fade.DelayTime = TimeSpan.FromMilliseconds(delayMs);
+        fade.DelayBehavior = AnimationDelayBehavior.SetInitialValueBeforeDelay;
+        visual.StartAnimation("Opacity", fade);
+    }
+
+    // A new stack: one fade and a small scale-in for the whole card, however
+    // many items are in it.
+    private static void ScaleIn(FrameworkElement element)
+    {
+        var visual = ElementCompositionPreview.GetElementVisual(element);
+        var compositor = visual.Compositor;
+        visual.CenterPoint = new Vector3((float)element.ActualWidth / 2, (float)element.ActualHeight / 2, 0);
+        FadeIn(element, 0, 240);
+        var scale = compositor.CreateSpringVector3Animation();
+        scale.InitialValue = new Vector3(0.95f, 0.95f, 1f);
+        scale.FinalValue = Vector3.One;
+        scale.DampingRatio = 0.8f;
+        scale.Period = TimeSpan.FromMilliseconds(50);
+        visual.StartAnimation("Scale", scale);
+    }
+
+    // A card coming out of an opened stack: from the stack's place, to its
+    // own with a spring, each 30 ms after the one before (all within 400 ms).
+    private void FlyOut(FrameworkElement element, int index)
+    {
+        var visual = ElementCompositionPreview.GetElementVisual(element);
+        var compositor = visual.Compositor;
+        int delay = Math.Min(30 * index, 400);
+
+        var from = new Vector3(0, -24, 0);
+        if (revealAnchor is { XamlRoot: not null } anchor)
+        {
+            // Where the stack is, as seen from here.
+            var at = anchor.TransformToVisual(element).TransformPoint(new Windows.Foundation.Point(0, 0));
+            var toStack = new Vector2((float)at.X, (float)at.Y);
+            if (!float.IsNaN(toStack.X) && !float.IsNaN(toStack.Y) && toStack.Length() > 1)
+            {
+                if (toStack.Length() > MaxFlight) toStack *= (float)(MaxFlight / toStack.Length());
+                from = new Vector3(toStack, 0);
+            }
+        }
+
+        ElementCompositionPreview.SetIsTranslationEnabled(element, true);
+        visual.CenterPoint = new Vector3((float)element.ActualWidth / 2, (float)element.ActualHeight / 2, 0);
+        FadeIn(element, delay, 180);
+
+        var move = compositor.CreateSpringVector3Animation();
+        move.InitialValue = from;
+        move.FinalValue = Vector3.Zero;
+        move.DampingRatio = 0.72f;
+        move.Period = TimeSpan.FromMilliseconds(55);
+        move.DelayTime = TimeSpan.FromMilliseconds(delay);
+        move.DelayBehavior = AnimationDelayBehavior.SetInitialValueBeforeDelay;
+        visual.StartAnimation("Translation", move);
+
+        var scale = compositor.CreateSpringVector3Animation();
+        scale.InitialValue = new Vector3(0.94f, 0.94f, 1f);
+        scale.FinalValue = Vector3.One;
+        scale.DampingRatio = 0.8f;
+        scale.Period = TimeSpan.FromMilliseconds(50);
+        scale.DelayTime = TimeSpan.FromMilliseconds(delay);
+        scale.DelayBehavior = AnimationDelayBehavior.SetInitialValueBeforeDelay;
+        visual.StartAnimation("Scale", scale);
+    }
+
+    // For a moment, a card that is moved by the layout (the ones below a stack
+    // that appears or opens) glides there instead of jumping. Only for a
+    // moment: otherwise resizing the window would glide too.
+    private readonly List<Visual> gliding = new();
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? glideTimer;
+
+    private void BeginLayoutGlide()
+    {
+        if (!MotionPreference.Enabled || FindRepeater(Cards) is not { } repeater) return;
+        try
+        {
+            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(repeater); i++)
+            {
+                if (VisualTreeHelper.GetChild(repeater, i) is not UIElement child) continue;
+                var visual = ElementCompositionPreview.GetElementVisual(child);
+                var compositor = visual.Compositor;
+                var move = compositor.CreateVector3KeyFrameAnimation();
+                move.Target = "Offset";
+                move.InsertExpressionKeyFrame(1f, "this.FinalValue", compositor.CreateCubicBezierEasingFunction(new Vector2(0.2f, 0), new Vector2(0, 1)));
+                move.Duration = TimeSpan.FromMilliseconds(320);
+                var animations = compositor.CreateImplicitAnimationCollection();
+                animations["Offset"] = move;
+                visual.ImplicitAnimations = animations;
+                gliding.Add(visual);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[app] card glide failed: {ex.Message}");
+            return;
+        }
+        glideTimer ??= DispatcherQueue.CreateTimer();
+        glideTimer.Stop();
+        glideTimer.Interval = TimeSpan.FromMilliseconds(1200);
+        glideTimer.IsRepeating = false;
+        glideTimer.Tick -= EndLayoutGlide;
+        glideTimer.Tick += EndLayoutGlide;
+        glideTimer.Start();
+    }
+
+    private void EndLayoutGlide(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
+    {
+        foreach (var visual in gliding) visual.ImplicitAnimations = null;
+        gliding.Clear();
+        revealAnchor = null;
+    }
+
+    private static ItemsRepeater? FindRepeater(DependencyObject at)
+    {
+        if (at is ItemsRepeater repeater) return repeater;
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(at); i++)
+        {
+            if (FindRepeater(VisualTreeHelper.GetChild(at, i)) is { } found) return found;
+        }
+        return null;
+    }
+
     // ---- one item in full ------------------------------------------------------
 
     private void ShowDetail(HistoryCard card)
@@ -336,7 +534,7 @@ public sealed partial class SyncedPage : Page
     private async Task DeleteAsync(HistoryCard card)
     {
         bool confirmed = await App.MainAppWindow.ConfirmAsync("Delete this item?",
-            "It's deleted from this PC, and won't come back from your other devices. They keep their own copies.",
+            "It's deleted from this PC and from your other devices, and won't come back. A device with an older ClipLink keeps its own copy.",
             "Delete");
         if (confirmed && !host.Engine.DeleteHistoryEntry(card.Key))
         {
