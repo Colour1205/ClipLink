@@ -5,6 +5,7 @@ import identityKeyTest from './IdentityKey.test';
 import chunkOrderTest from './ChunkOrder.test';
 import nonceKeyTest from './NonceKey.test';
 import beaconTest from './Beacon.test';
+import messageRelayTest from './MessageRelay.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -14,4 +15,5 @@ export default function testsuite() {
   chunkOrderTest();
   nonceKeyTest();
   beaconTest();
+  messageRelayTest();
 }

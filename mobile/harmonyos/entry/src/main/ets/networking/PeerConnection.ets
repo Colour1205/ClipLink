@@ -86,20 +86,74 @@ interface TcpLike {
   close(): Promise<void>;
 }
 
+// Holds a socket's 'message' and 'close' events until the channel asks for
+// them. A TCPSocket drops what arrives while it has no 'message' listener
+// (checked on a device: a handshake sent 1.5 s before the listener was
+// registered never came, the lines after it did), and the device at the
+// other end of a dial writes its handshake the moment it accepts - before
+// connect() has even resolved here, let alone the setExtraOptions round
+// trip and the main thread's turn that came between it and the channel
+// registering its listener. Lost, the handshake left the dial reading the
+// peer's history batch as its handshake, which failed, and the peer was
+// redialled: on a cold start, or when the main thread was busy, a trusted
+// device this side dials took one or more 2 s beacons (or the dial
+// fallback's next 30 s) longer to connect. So each adapter registers both
+// listeners as soon as it is made - before connect() - and replays here.
+export class MessageRelay {
+  private messageCallback: ((info: socket.SocketMessageInfo) => void) | null = null;
+  private closeCallback: (() => void) | null = null;
+  private held: socket.SocketMessageInfo[] = [];
+  private closed: boolean = false;
+
+  // From the socket's 'message' event.
+  message(info: socket.SocketMessageInfo): void {
+    if (this.messageCallback !== null) {
+      this.messageCallback(info);
+    } else {
+      this.held.push(info);
+    }
+  }
+
+  // From the socket's 'close' event.
+  close(): void {
+    this.closed = true;
+    this.closeCallback?.();
+  }
+
+  // What was held is delivered now, in order, then everything as it comes.
+  onMessage(callback: (info: socket.SocketMessageInfo) => void): void {
+    this.messageCallback = callback;
+    const held: socket.SocketMessageInfo[] = this.held;
+    this.held = [];
+    for (const info of held) callback(info);
+  }
+
+  onClose(callback: () => void): void {
+    this.closeCallback = callback;
+    if (this.closed) callback();
+  }
+}
+
 // ArkTS has no structural typing (arkts-no-structural-typing) - a
 // socket.TCPSocket or socket.TCPSocketConnection can't be passed where
 // TcpLike is expected just because their shapes match; they need an
-// explicit adapter. Thin pass-through wrappers, one per concrete SDK type.
+// explicit adapter. Thin wrappers, one per concrete SDK type, each
+// listening from the moment it is made (see MessageRelay). Make one before
+// connect() for a dial, and before anything is awaited for an accepted
+// connection.
 export class TcpSocketAdapter implements TcpLike {
   private inner: socket.TCPSocket;
+  private relay: MessageRelay = new MessageRelay();
   constructor(inner: socket.TCPSocket) {
     this.inner = inner;
+    this.inner.on('message', (info: socket.SocketMessageInfo) => { this.relay.message(info); });
+    this.inner.on('close', () => { this.relay.close(); });
   }
   onMessage(callback: (info: socket.SocketMessageInfo) => void): void {
-    this.inner.on('message', callback);
+    this.relay.onMessage(callback);
   }
   onClose(callback: () => void): void {
-    this.inner.on('close', callback);
+    this.relay.onClose(callback);
   }
   send(options: socket.TCPSendOptions): Promise<void> {
     return this.inner.send(options);
@@ -111,14 +165,17 @@ export class TcpSocketAdapter implements TcpLike {
 
 export class TcpSocketConnectionAdapter implements TcpLike {
   private inner: socket.TCPSocketConnection;
+  private relay: MessageRelay = new MessageRelay();
   constructor(inner: socket.TCPSocketConnection) {
     this.inner = inner;
+    this.inner.on('message', (info: socket.SocketMessageInfo) => { this.relay.message(info); });
+    this.inner.on('close', () => { this.relay.close(); });
   }
   onMessage(callback: (info: socket.SocketMessageInfo) => void): void {
-    this.inner.on('message', callback);
+    this.relay.onMessage(callback);
   }
   onClose(callback: () => void): void {
-    this.inner.on('close', callback);
+    this.relay.onClose(callback);
   }
   send(options: socket.TCPSendOptions): Promise<void> {
     return this.inner.send(options);
@@ -328,8 +385,16 @@ class TcpLineChannel {
   }
 
   // Never throws - listenLoop's teardown calls it before telling SyncManager
-  // the link is gone.
+  // the link is gone. Ends the channel here and now rather than waiting for
+  // the socket's own 'close' event: a readLine() still waiting gets null, so
+  // the read loop ends and the link leaves SyncManager's map even if that
+  // event never comes (a socket the OS already tore down while the app was
+  // frozen, say). Left in the map, the link counted as connected, so no
+  // beacon ever redialled its peer and the dial fallback never came due.
   close(): void {
+    this.closed = true;
+    this.flushWaiters(null);
+    this.notifyActivity();
     try {
       this.client.close().catch(() => { /* already closed - fine */ });
     } catch (e) {

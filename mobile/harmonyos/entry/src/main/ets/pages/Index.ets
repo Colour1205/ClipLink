@@ -77,6 +77,10 @@ const TCP_PORT = 49000;
 // Discovery brought up this recently counts as fresh: a foreground right
 // after a cold start does not restart it (see restartDiscovery).
 const FRESH_DISCOVERY_MS = 1500;
+// How long a failed start of discovery waits before the next try, doubling
+// up to the maximum (see startDiscoveryOrRetry).
+const DISCOVERY_RETRY_MIN_MS = 1000;
+const DISCOVERY_RETRY_MAX_MS = 30000;
 // How long a pairing dial waits, after the handshake, to see whether the
 // other side kept the connection (Index's connectToAddress). Accepting
 // sends history straight away, and its first byte counts, so the full wait
@@ -744,6 +748,8 @@ struct Index {
   private discovery: Discovery = new Discovery();
   // When discovery last came up (see restartDiscovery); 0 until it has.
   private discoveryUpAtMs: number = 0;
+  // A start of discovery waiting to be tried again (see startDiscoveryOrRetry).
+  private discoveryRetryTimerId: number = -1;
   private tcpServer: TcpServer = new TcpServer();
   private trustStore: TrustStore = new TrustStore();
   private passphraseKeyStore: PassphraseKeyStore = new PassphraseKeyStore();
@@ -954,6 +960,9 @@ struct Index {
 
     this.tcpServer.onConnection((conn: socket.TCPSocketConnection) => {
       const identity = new DeviceIdentity();
+      // Listening before anything is awaited: the peer's handshake is on its
+      // way already (see MessageRelay in PeerConnection.ets).
+      const link = new TcpSocketConnectionAdapter(conn);
       // Without capturing this, a device that only ever DIALED OUT to pair
       // (rather than being dialed) would never learn an address for
       // whoever just connected to it - meaning it could never later
@@ -964,15 +973,22 @@ struct Index {
         .then((addr: socket.NetAddress) => addr.address)
         .catch(() => null)
         .then((remoteAddress: string | null) => {
-          PeerConnection.create(new TcpSocketConnectionAdapter(conn), identity, this.trustStore, context, this.blockCheck(), this.passphraseKeyStore, this.ownDeviceName())
+          PeerConnection.create(link, identity, this.trustStore, context, this.blockCheck(), this.passphraseKeyStore, this.ownDeviceName())
             .then((peerConn: PeerConnection | null) => {
               if (peerConn === null) {
+                netLog(`accepted connection from ${remoteAddress ?? 'unknown'}: no usable handshake`);
                 conn.close().catch(() => { /* already closed - fine */ });
                 return;
               }
               this.handleNewConnection(peerConn, remoteAddress);
             });
         });
+    });
+    // A failed bind is tried again until it works (see TcpServer.start);
+    // each failure is logged, so a port held by something else shows up.
+    this.tcpServer.onError((e: BusinessError, retryInMs: number) => {
+      netLog(`TCP server: listen on ${TCP_PORT} failed (${e.code} ${e.message}) - retrying in ${retryInMs / 1000} s`);
+      this.log(`TCP server error: ${e.message} - retrying`);
     });
     this.tcpServer.start(TCP_PORT).catch((e: BusinessError) => {
       this.log(`TCP server error: ${e.message}`);
@@ -1004,13 +1020,11 @@ struct Index {
       void this.drainPendingShares();
       // A pairing link the app was opened with (a cold start from a scan).
       void this.drainPairingLink();
-      // Same helper the foreground restart uses, and its failure is
-      // surfaced rather than swallowed - a bind failure here means no
-      // peer is ever discovered, which previously looked like "sync just
-      // doesn't work" with nothing in the log to say why.
-      this.startDiscovery().catch((e: BusinessError) => {
-        this.log(`discovery failed to start: ${e.message}`);
-      });
+      // Same helper the foreground restart uses, and a bind failure is
+      // retried rather than swallowed - it means no peer is ever
+      // discovered, which previously looked like "sync just doesn't work"
+      // with nothing in the log to say why.
+      this.startDiscoveryOrRetry();
       void this.refreshPassphraseState();
       // The key and the engine are ready: what was copied before the app
       // opened can go now (see captureOnOpen).
@@ -1117,17 +1131,28 @@ struct Index {
       return;
     }
     await this.discovery.stop();
-    try {
-      await this.startDiscovery();
-    } catch (e) {
-      const be = e as BusinessError;
-      this.log(`discovery restart failed (${be.message}) - retrying`);
-      setTimeout(() => {
-        this.startDiscovery().catch((retryErr: BusinessError) => {
-          this.log(`discovery restart retry failed: ${retryErr.message}`);
-        });
-      }, 1000);
+    this.startDiscoveryOrRetry();
+  }
+
+  // Starts discovery, and if that fails (the port still held by the copy
+  // of this app just killed, say) tries again 1 s, 2 s, 4 s ... 30 s later
+  // until it works. A cold start used to try once and log: with no beacon
+  // going out, no device that dials this one ever heard it, and nothing
+  // dialled from here, until the user happened to leave and come back.
+  // Only one chain of tries at a time: a new start cancels a waiting retry.
+  private startDiscoveryOrRetry(pauseMs: number = DISCOVERY_RETRY_MIN_MS): void {
+    if (this.discoveryRetryTimerId !== -1) {
+      clearTimeout(this.discoveryRetryTimerId);
+      this.discoveryRetryTimerId = -1;
     }
+    this.startDiscovery().catch((e: BusinessError) => {
+      netLog(`discovery: start failed (${e.code} ${e.message}) - retrying in ${pauseMs / 1000} s`);
+      this.log(`discovery failed to start (${e.message}) - retrying`);
+      this.discoveryRetryTimerId = setTimeout(() => {
+        this.discoveryRetryTimerId = -1;
+        this.startDiscoveryOrRetry(Math.min(pauseMs * 2, DISCOVERY_RETRY_MAX_MS));
+      }, pauseMs);
+    });
   }
 
   // Single definition of how discovery is started, so the cold-start path
@@ -1179,6 +1204,10 @@ struct Index {
     (getContext(this) as common.UIAbilityContext).eventHub.off(PAIRING_ACTION_EVENT, this.onPairingAction);
     (getContext(this) as common.UIAbilityContext).eventHub.off(PAIRING_LINK_EVENT, this.onPairingLinkEvent);
     this.watcher.stopListening();
+    if (this.discoveryRetryTimerId !== -1) {
+      clearTimeout(this.discoveryRetryTimerId);
+      this.discoveryRetryTimerId = -1;
+    }
     void this.discovery.stop();
     this.tcpServer.stop();
     if (this.offLanReconnectTimerId !== -1) {
@@ -1787,18 +1816,21 @@ struct Index {
 
   private async connectToBeacon(beacon: PeerBeacon): Promise<void> {
     try {
-      const client = await connectTcp(beacon.senderIp, beacon.tcpPort);
+      const link = await connectTcp(beacon.senderIp, beacon.tcpPort);
       const identity = new DeviceIdentity();
       const context = getContext(this) as common.UIAbilityContext;
-      const conn = await PeerConnection.create(new TcpSocketAdapter(client), identity, this.trustStore, context, this.blockCheck(), this.passphraseKeyStore, this.ownDeviceName());
+      const report = new HandshakeReport();
+      const conn = await PeerConnection.create(link, identity, this.trustStore, context, this.blockCheck(), this.passphraseKeyStore, this.ownDeviceName(), report);
       if (conn === null) {
-        client.close().catch(() => { /* already closed - fine */ });
+        link.close().catch(() => { /* already closed - fine */ });
+        netLog(`dial ${beacon.senderIp}:${beacon.tcpPort} (${deviceFingerprint(beacon.deviceId)}): no usable handshake (${report.timedOut ? 'no answer' : 'peer closed, or refused locally'})`);
         this.log(`connect failed: ${shortDeviceId(beacon.deviceId)}`);
         return;
       }
       this.handleNewConnection(conn, beacon.senderIp);
     } catch (e) {
       const be = e as BusinessError;
+      netLog(`dial ${beacon.senderIp}:${beacon.tcpPort} (${deviceFingerprint(beacon.deviceId)}): TCP connect failed - ${be.code} ${be.message}`);
       this.log(`connect error (${beacon.senderIp}:${beacon.tcpPort}): ${be.message}`);
     }
   }
@@ -1865,7 +1897,7 @@ struct Index {
   // connection that was already closed - accepting it wrote trust on this
   // side only.
   private async connectToAddress(address: string, port: number, forPairing: boolean = false): Promise<DialOutcome> {
-    let client: socket.TCPSocket;
+    let client: TcpSocketAdapter;
     try {
       client = await connectTcp(address, port);
     } catch (e) {
@@ -1876,7 +1908,7 @@ struct Index {
       const identity = new DeviceIdentity();
       const context = getContext(this) as common.UIAbilityContext;
       const report = new HandshakeReport();
-      const conn = await PeerConnection.create(new TcpSocketAdapter(client), identity, this.trustStore, context, this.blockCheck(), this.passphraseKeyStore, this.ownDeviceName(), report);
+      const conn = await PeerConnection.create(client, identity, this.trustStore, context, this.blockCheck(), this.passphraseKeyStore, this.ownDeviceName(), report);
       if (conn === null) {
         netLog(`connectToAddress ${address}:${port}: TCP connected but no usable handshake (${report.timedOut ? 'no answer' : 'peer closed, or refused locally'})`);
         client.close().catch(() => { /* already closed - fine */ });
@@ -4453,7 +4485,9 @@ struct Index {
   // These return plain option objects rather than being @Builders: the
   // title bar is data handed to HdsNavDestination.titleBar(), and a method
   // (not a local variable) is how a builder body is allowed to compute it.
-  private hdsTitleBar(title: ResourceStr, isRoot: boolean, menu: HdsNavigationMenuItemOptions[]): HdsNavigationTitleBarOptions {
+  // subTitle is the optional small line under the title (undefined = none).
+  private hdsTitleBar(title: ResourceStr, isRoot: boolean, menu: HdsNavigationMenuItemOptions[],
+    subTitle?: ResourceStr): HdsNavigationTitleBarOptions {
     return {
       // Every destination ignores the top safe area so content can scroll up
       // behind the status bar - without this the title bar followed it and
@@ -4474,6 +4508,7 @@ struct Index {
       content: {
         title: {
           mainTitle: title,
+          subTitle: subTitle,
           mainTitleSize: isRoot ? TitleSize.TITLE_ML : TitleSize.TITLE_S,
         },
         menu: { value: menu },
@@ -4483,10 +4518,15 @@ struct Index {
 
   // Synced tab: one menu icon that flips between list and grid. It shows
   // the layout you'd switch TO, the usual convention for a two-state view
-  // toggle. viewMode is passed in (read at the call site) rather than read
-  // here so the title bar re-evaluates when it changes.
-  private syncedTitleBar(viewMode: string): HdsNavigationTitleBarOptions {
+  // toggle. viewMode and connectedCount are passed in (read at the call
+  // site) rather than read here so the title bar re-evaluates when they
+  // change. Under the title it says how many devices are connected, as
+  // Android and iOS do under their Synced title.
+  private syncedTitleBar(viewMode: string, connectedCount: number): HdsNavigationTitleBarOptions {
     const toGrid: boolean = viewMode === 'list';
+    const status: ResourceStr = connectedCount === 0
+      ? $r('app.string.devices_none_connected')
+      : this.countStr($r('app.plural.devices_connected_count'), connectedCount);
     return this.hdsTitleBar($r('app.string.tab_synced'), true, [{
       content: {
         label: toGrid ? $r('app.string.synced_view_grid') : $r('app.string.synced_view_list'),
@@ -4497,7 +4537,7 @@ struct Index {
           void this.deviceSettings.setSyncedViewMode(getContext(this) as common.UIAbilityContext, this.syncedViewMode);
         },
       },
-    }]);
+    }], status);
   }
 
   // Item preview: Copy for text, Share for every type, and Open (left of
@@ -4585,7 +4625,7 @@ struct Index {
     HdsNavigation(this.syncedSplitStack) {
       this.syncedListContent()
     }
-    .titleBar(this.syncedTitleBar(this.syncedViewMode))
+    .titleBar(this.syncedTitleBar(this.syncedViewMode, this.connectedCount))
     .titleMode(HdsNavigationTitleMode.MINI)
     .bindToScrollable([this.syncedListScroller, this.syncedFlowScroller])
     .hideBackButton(true)
@@ -4671,7 +4711,7 @@ struct Index {
       }
       // syncedViewMode is read here, in the attribute expression itself, so
       // the title bar (and its list/grid icon) re-evaluates when it flips.
-      .titleBar(this.syncedTitleBar(this.syncedViewMode))
+      .titleBar(this.syncedTitleBar(this.syncedViewMode, this.connectedCount))
       .titleMode(HdsNavDestinationTitleMode.MINI)
       // Both scrollers: only one of List/WaterFlow exists at a time, and
       // whichever is showing drives the blur.
