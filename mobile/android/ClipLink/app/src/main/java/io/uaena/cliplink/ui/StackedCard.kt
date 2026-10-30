@@ -80,8 +80,8 @@ private val CARD_SHAPE = RoundedCornerShape(26.dp)
  * [SyncedRow.Stack.layers] layers peeking out behind it, and a handle at the
  * bottom. Swiping down from the handle (or tapping it) opens the stack; the
  * opening follows the finger, and on release it completes or springs back.
- * Once it is open, [onExpand] is told, and the engine ends the group - the
- * items are ordinary cards from then on.
+ * Once it is open, [onExpand] is told, and the engine marks the group opened -
+ * the items are ordinary cards from then on, and stay together below this one.
  */
 @Composable
 internal fun StackedCard(

@@ -52,7 +52,7 @@ A pairing request can come from any device on the network at any time while the 
 ## What is kept on a device
 
 - The history is the last 25 items, plus the files they point to, in the app's own private storage (on Windows, the user's `AppData` folder). It is **not encrypted separately**: it is as protected as the user's own files and the operating system's app separation. It can hold anything you copied, such as a password, so the apps let you clear it.
-- If you delete an item, the device remembers that, so a peer's history cannot bring it back.
+- If you delete an item, the device remembers that, so a peer's history cannot bring it back. The delete is sent to your other paired devices, which delete it too. Any paired device can delete any item, which is fine since all of them are yours.
 - The trust list, the blocked list, the device name and the optional Tailscale address are stored in the same private storage. On Windows the trust list is a plain JSON file.
 - The passcode itself is never stored. Only the key made from it is: encrypted with DPAPI on Windows, with the Android Keystore on Android, in the Keychain on iOS, and in the app's private preferences on HarmonyOS.
 - Nothing is sent to the developer or anyone else. There are no accounts, no analytics and no crash reports. See the [privacy policy](https://cliplink.uaena.io/privacy.html).

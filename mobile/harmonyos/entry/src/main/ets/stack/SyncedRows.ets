@@ -7,15 +7,25 @@
 // Nothing here is saved or sent: a group lives in the list the page holds
 // (each member carries its group's id), so after a restart the history shows
 // as ordinary cards, and no peer ever hears of a group.
+//
+// What arrives in one sync is a block: the stack's front card, then (when the
+// stack is opened) its other members, directly below it. Blocks sit at the top
+// of the list, the one that arrived last first; everything else is below them
+// in timeline order. A block is only the order of the list the page holds, so a
+// restart, which sorts by time, leaves none.
 
 import { GROUP_MIN_ITEMS } from '../storage/HistoryBatch';
 
 // What a list item has to say for grouping. `groupId` is '' for an item that
 // is in no group; `stamp` is its timestamp in canonical form (see
-// Signing.canonicalTimestamp), which sorts as text.
+// Signing.canonicalTimestamp), which sorts as text. `blockId` is the id of the
+// block the item arrived in, or '' for an item that is not part of one: it is
+// the group's id, and stays when the group is opened, so the members still
+// belong together.
 export interface BatchMember {
   id: string;
   groupId: string;
+  blockId: string;
   stamp: string;
   // While a history_head has put the front of a group on screen and its batch
   // has not come yet: how many items the group will have. 0 otherwise. The
@@ -37,6 +47,9 @@ interface ProvisionalGroup {
 export interface BatchPlan {
   // The group the batch's new items join: '' for none (they are just cards).
   groupId: string;
+  // The block they belong to: the group's id, also when the user has opened it
+  // already (then groupId is ''); '' for none.
+  blockId: string;
   // The group made on the head that came before this batch, to settle now
   // (its expected size is over; with fewer than GROUP_MIN_ITEMS members it
   // dissolves): '' if there was none.
@@ -78,13 +91,39 @@ export class BatchGroupTracker {
 
   // The batch from `from` has been applied and added `addedCount` new items.
   batchArrived(from: string, addedCount: number): BatchPlan {
-    const waiting: ProvisionalGroup | undefined = this.provisional.get(from);
+    return this.answerArrived(from, addedCount, true);
+  }
+
+  // What a v2 sync's first answer brought: the item that goes on the clipboard
+  // (the front card) and maybe more. The sync asked for `expectedTotal` items
+  // in all (the stack's badge counts them from the start), `addedCount` of
+  // them are here, and `last` says no request of this connection is still
+  // waiting. Returns the plan for the new items, as batchArrived does; with
+  // `last`, the group is settled at once (settleId).
+  frontArrived(from: string, expectedTotal: number, frontId: string, addedCount: number, last: boolean): BatchPlan {
     this.provisional.delete(from);
-    if (waiting === undefined) return { groupId: this.next(addedCount), settleId: '' };
-    if (waiting.opened) return { groupId: '', settleId: '' };
-    // The head's newest item is one of the group, so the batch's own count is
-    // one short of the group's.
-    return { groupId: addedCount + 1 >= GROUP_MIN_ITEMS ? waiting.groupId : '', settleId: waiting.groupId };
+    const groupId: string = expectedTotal >= GROUP_MIN_ITEMS ? this.nextId() : this.next(addedCount);
+    if (groupId === '') return { groupId: '', blockId: '', settleId: '' };
+    if (!last) this.provisional.set(from, { groupId: groupId, newestId: frontId, opened: false });
+    return { groupId: groupId, blockId: groupId, settleId: last ? groupId : '' };
+  }
+
+  // A later answer of a sync, or a batch after a head, from `from`: `addedCount`
+  // new items. They join the block the front card started; with no such block
+  // they make a block of their own, if they are enough for one. `last`: no
+  // request of this connection is still waiting, so the group is settled.
+  answerArrived(from: string, addedCount: number, last: boolean): BatchPlan {
+    const waiting: ProvisionalGroup | undefined = this.provisional.get(from);
+    if (waiting === undefined) {
+      const groupId: string = this.next(addedCount);
+      return { groupId: groupId, blockId: groupId, settleId: '' };
+    }
+    if (last) this.provisional.delete(from);
+    if (waiting.opened) return { groupId: '', blockId: waiting.groupId, settleId: '' };
+    // The front card is one of the group, so the answer's own count is one
+    // short of the group's.
+    const tagged: boolean = !last || addedCount + 1 >= GROUP_MIN_ITEMS;
+    return { groupId: tagged ? waiting.groupId : '', blockId: waiting.groupId, settleId: last ? waiting.groupId : '' };
   }
 
   // The batch behind a head is over without adding anything (all of it was
@@ -106,15 +145,16 @@ export class BatchGroupTracker {
 
 // `list` with `fresh` (a batch's new items, or a head's newest item) put in.
 // This is the one place that decides where received items go:
-//  - the newest of `fresh` goes to the TOP of the list, whatever its timestamp
-//    is (what arrives from another device is shown first, and an item older
-//    than something copied here is not buried in the middle of the list). That
-//    is the front card of a stack, or a lone new card;
-//  - the others keep timeline order: each goes before the first item older
-//    than it, below the top one;
-//  - no item already in the list changes its place;
-//  - a batch that joins the group its head started has no item for the top (the
-//    head's newest item is the front already): all of `fresh` goes by time.
+//  - the items of a new block go to the TOP of the list, whatever their
+//    timestamps are: the newest of them first (the front card of a stack, or a
+//    lone new card), then the others, newest first. What arrives from another
+//    device is shown first, an item older than something copied here is not
+//    buried in the middle of the list, and a stack that is opened later has its
+//    items right below its front card, above every item not in a block;
+//  - items that join a block already in the list (the rest of a sync, or the
+//    batch after a head) go right below its front card, newest first among the
+//    members it has;
+//  - no item already in the list changes its place.
 // An item already in the list with the same id is replaced. At most `maxItems`
 // stay.
 export function placeBatch<T extends BatchMember>(list: T[], fresh: T[], maxItems: number): T[] {
@@ -122,22 +162,37 @@ export function placeBatch<T extends BatchMember>(list: T[], fresh: T[], maxItem
   const ids: Set<string> = new Set<string>();
   for (const item of sorted) ids.add(item.id);
   const placed: T[] = list.filter((item: T) => !ids.has(item.id));
-  const groupId: string = sorted.length > 0 ? sorted[0].groupId : '';
-  const joining: boolean = groupId !== '' && placed.some((item: T) => item.groupId === groupId);
-  let floor: number = 0;
-  if (!joining && sorted.length > 0) {
-    placed.unshift(sorted[0]);
-    floor = 1;
+  const blockId: string = sorted.length > 0 ? sorted[0].blockId : '';
+  const front: number = blockId === '' ? -1 : placed.findIndex((item: T) => item.blockId === blockId);
+  if (front === -1) {
+    return [...sorted, ...placed].slice(0, maxItems);
   }
-  for (let i = joining ? 0 : 1; i < sorted.length; i++) {
-    let at: number = placed.length;
-    for (let j = floor; j < placed.length; j++) {
-      if (placed[j].stamp < sorted[i].stamp) {
-        at = j;
-        break;
-      }
-    }
-    placed.splice(at, 0, sorted[i]);
+  for (const item of sorted) {
+    let at: number = front + 1;
+    while (at < placed.length && placed[at].blockId === blockId && placed[at].stamp >= item.stamp) at++;
+    placed.splice(at, 0, item);
+  }
+  return placed.slice(0, maxItems);
+}
+
+// `list` with `fresh` (items stored quietly: the late answer to a request given
+// up on) put in by time. They make no block and go nowhere near the top: each
+// goes below every item that is part of a block and below every newer card, so
+// the blocks above keep their order. An item already in the list with the same
+// id is replaced. At most `maxItems` stay.
+export function placeQuiet<T extends BatchMember>(list: T[], fresh: T[], maxItems: number): T[] {
+  const sorted: T[] = fresh.slice().sort((a: T, b: T) => (a.stamp < b.stamp ? 1 : (a.stamp > b.stamp ? -1 : 0)));
+  const ids: Set<string> = new Set<string>();
+  for (const item of sorted) ids.add(item.id);
+  const placed: T[] = list.filter((item: T) => !ids.has(item.id));
+  let floor: number = 0;
+  for (let i = 0; i < placed.length; i++) {
+    if (placed[i].blockId !== '') floor = i + 1;
+  }
+  for (const item of sorted) {
+    let at: number = floor;
+    while (at < placed.length && placed[at].stamp >= item.stamp) at++;
+    placed.splice(at, 0, item);
   }
   return placed.slice(0, maxItems);
 }

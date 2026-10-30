@@ -53,7 +53,7 @@ public class HistoryHeadTests
         public List<BatchGrouping.Row> Rows(ISet<string>? opened = null)
         {
             var (batchOf, expected) = Groups.Snapshot();
-            var listing = History.OrderByDescending(e => e.Timestamp).Select(e =>
+            var listing = Groups.Order(History).Select(e =>
             {
                 string? batch = batchOf.GetValueOrDefault(e.Key());
                 return new BatchGrouping.Entry(e.Key(), batch, batch != null && expected.TryGetValue(batch, out int size) ? size : null);
@@ -440,10 +440,13 @@ public class HistoryHeadTests
 
         Assert.False(outcome.HeadApplied);
         Assert.Equal(2, outcome.Added.Count);
-        var rows = rig.Rows(); // the early card stays a plain card; the two others are a stack
-        Assert.Equal("sig-3", rows[0].FrontKey);
-        Assert.False(rows[0].IsStack);
-        Assert.True(rows[1].IsStack);
+        // The early card stays a plain card, now below the two others, which came
+        // later and are a stack of their own.
+        var rows = rig.Rows();
+        Assert.Equal("sig-2", rows[0].FrontKey);
+        Assert.True(rows[0].IsStack);
+        Assert.Equal("sig-3", rows[1].FrontKey);
+        Assert.False(rows[1].IsStack);
     }
 
     [Fact]

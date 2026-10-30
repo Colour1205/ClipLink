@@ -69,17 +69,17 @@ final class BatchGroupTests: XCTestCase {
 
     private func items(_ ids: [String]) -> [SyncedItem] { ids.map(item) }
 
-    func testStackSitsWhereItsNewestMemberIsAndHidesTheOthers() {
-        // "live" arrived on its own, "old" is older than the batch.
+    func testAStackIsOnTopWithItsFrontCardAndTheOtherCardsKeepTheirOrder() {
+        // "live" arrived on its own before the batch, "old" is older than it.
         let list = items(["live", "g1", "mid", "g2", "g3", "old"])
         let groups = [BatchGroup(id: "x", memberIDs: ["g1", "g2", "g3"])]
         let rows = StackPlanner.rows(items: list, groups: groups)
-        XCTAssertEqual(rows.map(\.id), ["live", "g1", "mid", "old"], "every other card keeps its place")
-        XCTAssertNil(rows[0].stack)
-        XCTAssertEqual(rows[1].stack?.memberIDs, ["g1", "g2", "g3"], "the newest member is the front card")
-        XCTAssertEqual(rows[1].stack?.hiddenCount, 2)
-        XCTAssertEqual(rows[1].stack?.layerCount, 2)
-        XCTAssertEqual(rows[1].item.id, "g1")
+        XCTAssertEqual(rows.map(\.id), ["g1", "live", "mid", "old"], "the block is on top, every other card keeps its order")
+        XCTAssertEqual(rows[0].stack?.memberIDs, ["g1", "g2", "g3"], "the newest member is the front card")
+        XCTAssertEqual(rows[0].stack?.hiddenCount, 2)
+        XCTAssertEqual(rows[0].stack?.layerCount, 2)
+        XCTAssertEqual(rows[0].item.id, "g1")
+        XCTAssertNil(rows[1].stack)
     }
 
     func testLayersBehindTheFront() {
@@ -113,9 +113,9 @@ final class BatchGroupTests: XCTestCase {
         let list = items(["a", "c", "b", "d", "e"])
         let groups = [BatchGroup(id: "one", memberIDs: ["a", "b"]), BatchGroup(id: "two", memberIDs: ["c", "d", "e"])]
         let rows = StackPlanner.rows(items: list, groups: groups)
-        XCTAssertEqual(rows.map(\.id), ["a", "c"])
-        XCTAssertEqual(rows[0].stack?.memberIDs, ["a", "b"])
-        XCTAssertEqual(rows[1].stack?.memberIDs, ["c", "d", "e"])
+        XCTAssertEqual(rows.map(\.id), ["c", "a"], "the block that arrived last is on top")
+        XCTAssertEqual(rows[0].stack?.memberIDs, ["c", "d", "e"])
+        XCTAssertEqual(rows[1].stack?.memberIDs, ["a", "b"])
     }
 
     func testNoGroupsLeavesTheListAlone() {
@@ -294,14 +294,14 @@ final class BatchGroupTests: XCTestCase {
         XCTAssertNotEqual(groups[0].id, groups[1].id)
     }
 
-    func testOnlyTheNewestOverallIsAppliedWhenTheBatchIsOlder() throws {
+    func testTheNewestNewItemIsAppliedEvenWhenSomethingNewerIsAlreadyHere() throws {
         let (engine, recorder) = makeEngine()
         let peer = trustedPeer(engine)
         // Something newer is already here.
         engine.history.add(try batch(from: peer, count: 1, start: 1_800_000_000, label: "newer")[0])
         _ = apply(engine, try batch(from: peer, count: 3), from: peer)
         settle()
-        XCTAssertTrue(recorder.received.isEmpty, "a stale batch never lands on the clipboard")
+        XCTAssertEqual(recorder.received.map(\.content), ["item 2"], "a reconnect puts the newest item it brought on the clipboard, old or not")
     }
 
     func testTheHistoryCapTrimsAGroup() throws {

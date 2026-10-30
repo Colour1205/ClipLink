@@ -38,9 +38,10 @@ public sealed class EngineHost : Observable
 
     public ClipLinkEngine Engine { get; } = new();
 
-    // The cards on the Synced page, newest first, as GetHistory() orders them.
-    // Items that arrived together in one history batch are ONE card here (a
-    // stack, see BatchGrouping) until it is opened.
+    // The cards on the Synced page, in the order GetHistory() lists them (what
+    // just arrived on top, then newest first). Items that arrived together in
+    // one history sync are ONE card here (a stack, see BatchGrouping) until it
+    // is opened.
     public ObservableCollection<HistoryCard> History { get; } = new();
     // Trusted devices, then untrusted ones on the LAN - each in the engine's
     // stable order.
@@ -140,7 +141,8 @@ public sealed class EngineHost : Observable
 
     // Items that came from other devices and weren't in History before: what
     // arrived since the last reload (newest first). Never raised for the
-    // first load, nor for this PC's own copies.
+    // first load, nor for this PC's own copies, nor for the items of a sync
+    // after its first (HistoryItem.Quiet).
     public event Action<IReadOnlyList<HistoryItem>>? ItemsArrived;
 
     private bool historyLoaded;
@@ -165,9 +167,10 @@ public sealed class EngineHost : Observable
 
     private void ReloadHistory() => ApplyHistory(Engine.GetHistory(), Array.Empty<string>());
 
-    // Opens a stack: its cards come out as ordinary ones, where they belong
-    // in the list. It doesn't fold again (nothing about stacks is saved: after
-    // a restart the history is ordinary cards anyway).
+    // Opens a stack: its cards come out as ordinary ones, right below the front
+    // card (the engine lists them there, above everything older). It doesn't
+    // fold again (nothing about stacks is saved: after a restart the history is
+    // ordinary cards by time anyway).
     public void ExpandBatch(string batchId)
     {
         if (expandedBatches.Contains(batchId)) return;
@@ -185,7 +188,7 @@ public sealed class EngineHost : Observable
     private void ApplyHistory(IReadOnlyList<HistoryItem> items, IReadOnlyList<string> reveal)
     {
         latestItems = items;
-        var arrived = historyLoaded ? items.Where(item => !item.FromThisDevice && !cards.ContainsKey(item.Key)).ToList() : new List<HistoryItem>();
+        var arrived = historyLoaded ? items.Where(item => !item.FromThisDevice && !item.Quiet && !cards.ContainsKey(item.Key)).ToList() : new List<HistoryItem>();
         bool animate = historyLoaded;
         historyLoaded = true;
 

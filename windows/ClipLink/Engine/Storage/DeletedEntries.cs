@@ -4,13 +4,14 @@ namespace ClipboardDaemon.Storage;
 // since the Unix epoch).
 public record DeletedEntry(string Key, long DeletedAt);
 
-// History entries the user deleted here ("tombstones"), so they stay
-// deleted. Peers keep offering them - every connection's history_batch
-// resends a peer's whole history - and without this each one would come
-// straight back into history, and onto the clipboard. Local only: nothing
-// about a deletion is ever sent to peers. Capped, dropping the oldest - a
-// peer only resends what's still in its own (much smaller) history, so a
-// long-ago deletion stops mattering.
+// History entries the user deleted ("tombstones"), here or on another paired
+// device, so they stay deleted. Peers keep offering them - a version 1 peer's
+// history_batch resends its whole history - and without this each one would
+// come straight back into history, and onto the clipboard. The most recent
+// ones are sent to version 2 peers in every history_head (see Recent), which
+// is how a device that was offline when something was deleted hears of it.
+// Capped, dropping the oldest - a peer only resends what's still in its own
+// (much smaller) history, so a long-ago deletion stops mattering.
 public class DeletedEntries
 {
     public const int MaxEntries = 2000;
@@ -51,6 +52,12 @@ public class DeletedEntries
     public bool Contains(string key)
     {
         lock (gate) { return keys.Contains(key); }
+    }
+
+    // The keys deleted most recently, the latest first (at most count).
+    public List<string> Recent(int count)
+    {
+        lock (gate) { return entries.AsEnumerable().Reverse().Take(count).Select(entry => entry.Key).ToList(); }
     }
 
     // Records these keys as deleted now. One already recorded keeps its

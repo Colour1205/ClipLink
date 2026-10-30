@@ -60,13 +60,34 @@ public sealed partial class ClipLinkEngine
         }
         else if (envelope.Type == "history_batch")
         {
-            var entries = JsonSerializer.Deserialize<List<ClipboardEntry>>(envelope.Payload);
+            List<ClipboardEntry>? entries;
+            try
+            {
+                entries = JsonSerializer.Deserialize<List<ClipboardEntry>>(envelope.Payload);
+            }
+            catch (Exception) when (conn.Protocol >= 2)
+            {
+                // Anything that makes the payload unreadable (not JSON, or no
+                // payload at all) counts as an empty answer on version 2.
+                entries = null;
+            }
             if (entries == null)
             {
                 Console.WriteLine("Received invalid message from peer."); // debug
-                return;
+                // On a version 2 connection a batch answers a request, which
+                // must leave the queue: one nobody can read is an empty answer.
+                if (conn.Protocol < 2) return;
+                entries = new List<ClipboardEntry>();
             }
             HandleHistoryBatch(entries, conn);
+        }
+        else if (envelope.Type == "history_request")
+        {
+            HandleHistoryRequest(envelope.Payload, conn);
+        }
+        else if (envelope.Type == "delete")
+        {
+            HandleDelete(envelope.Payload, conn);
         }
         else if (envelope.Type == "file_chunk")
         {
@@ -87,15 +108,22 @@ public sealed partial class ClipLinkEngine
         }
     }
 
-    // A peer's history_head: the newest entry of the history_batch that
-    // follows, and the keys of all its entries (small, while the batch can be
-    // many MB). The newest entry is checked like a live "entry" and added at
-    // once, with what a received item does besides, so the Synced page shows
-    // it (as the front of a stack, when the keys promise two or more new
-    // entries) while the batch is still arriving. A head that does not check
-    // out is ignored, and the batch then works as it always did.
+    // A peer's history_head. From a version 2 peer (see HandleSyncHead) it is
+    // the keys and times of its history and its deletions. From a version 1 one
+    // it is the newest entry of the history_batch that follows, and the keys of
+    // all its entries (small, while the batch can be many MB). The newest entry is
+    // checked like a live "entry" and added at once, with what a received item
+    // does besides, so the Synced page shows it (as the front of a stack, when
+    // the keys promise two or more new entries) while the batch is still
+    // arriving. A head that does not check out is ignored, and the batch then
+    // works as it always did.
     private void HandleHistoryHead(string payload, PeerConnection conn)
     {
+        if (conn.Protocol >= 2)
+        {
+            HandleSyncHead(payload, conn);
+            return;
+        }
         var head = JsonSerializer.Deserialize<HistoryHead.Payload>(payload);
         if (!HistoryHead.Accept(head, entry => SigningService.Verify(entry, entry.DeviceId) && trustStore.IsTrusted(entry.DeviceId)))
         {
@@ -121,9 +149,26 @@ public sealed partial class ClipLinkEngine
     // changed" - not one of each per entry, which showed the Synced page's
     // cards arriving one at a time. What a received item does besides
     // (onto the clipboard, asking for a file's bytes) happens once for the
-    // batch's newest item, not once for every item.
+    // batch's newest new item, not once for every item - and that is the one
+    // put on the clipboard even when it is older than this PC's own newest.
+    // From a version 2 peer, a batch answers a history_request (see
+    // HandleSyncAnswer, or HandleLateAnswer when the request had expired); one
+    // nobody asked for is handled like a version 1 batch.
     private void HandleHistoryBatch(List<ClipboardEntry> entries, PeerConnection conn)
     {
+        if (conn.Protocol >= 2 && syncRequests.Answered(conn, out int open) is { } request)
+        {
+            try
+            {
+                if (request.Expired) HandleLateAnswer(entries, conn);
+                else HandleSyncAnswer(entries, conn, request, last: open == 0);
+            }
+            finally
+            {
+                syncRequests.Done(conn, request);
+            }
+            return;
+        }
         var outcome = HistoryBatch.Apply(entries,
             isAcceptable: entry =>
             {
@@ -137,14 +182,12 @@ public sealed partial class ClipLinkEngine
         if (outcome.Added.Count == 0) return;
         Console.WriteLine($"[clip] history batch: {outcome.Added.Count} new, {outcome.Duplicates} known, {outcome.Deleted} deleted here, {outcome.Rejected} rejected");
 
-        // (The first of equal timestamps wins, so the result doesn't depend on
-        // how the OrderBy happens to break a tie.)
-        var newest = outcome.Added.OrderByDescending(entry => entry.Timestamp).First();
+        var newest = HistoryBatch.Newest(outcome.Added);
         foreach (var entry in outcome.Added)
         {
             // (After a history_head the newest entry is already on the
             // clipboard, and this batch's newest is older: not again.)
-            if (entry == newest && !outcome.HeadApplied)
+            if (ReferenceEquals(entry, newest) && !outcome.HeadApplied)
             {
                 ApplyReceivedEntry(entry);
             }
@@ -172,6 +215,228 @@ public sealed partial class ClipLinkEngine
         {
             clipboardSync.addToQueue(entry.Content, entry.Type);
         }
+    }
+
+    // ---- version 2 sync -------------------------------------------------------
+    //
+    // On a version 2 connection (both sides sent Protocol 2 in the handshake)
+    // nothing big is sent on connect: each side sends a history_head with the
+    // keys and times of its history and its latest tombstones, deletes what the
+    // other deleted, and asks (history_request) for the entries it is missing,
+    // the newest of them alone first - the convenience item, the only one that
+    // goes on the clipboard - then the rest. A request is answered with one
+    // history_batch, in the order the requests came.
+
+    // A version 2 peer's history_head: what it deleted is deleted here too
+    // (one history update, however many), then the entries it has that this PC
+    // lacks are asked for.
+    private void HandleSyncHead(string payload, PeerConnection conn)
+    {
+        var head = HistoryHead.ParseSync(payload);
+        if (head == null)
+        {
+            Console.WriteLine("Received invalid history head from peer, ignoring it.");
+            return;
+        }
+        int removed = ApplyDeletedKeys(head.Deleted);
+        Console.WriteLine($"[sync] history head from {DeviceLabel.ShortId(conn.PeerDeviceId)}: {head.Keys.Count} entries, {head.Deleted.Count} deleted ({removed} removed here)");
+        AskForMissing(conn, head);
+    }
+
+    // Keys deleted on another device: remembered as deleted here (even when this
+    // PC never had the entry), their entries removed from history and from any
+    // stack, with what a local delete does besides - and never the clipboard.
+    // One history update for all. Returns how many entries were removed.
+    private int ApplyDeletedKeys(IReadOnlyCollection<string> keys)
+    {
+        if (keys.Count == 0) return 0;
+        var removed = historyAccess.RemoveMany(keys);
+        ForgetPendingApplies(removed);
+        foreach (var entry in removed)
+        {
+            DeleteOpenCopies(OpenFolderFor(entry));
+        }
+        if (removed.Count > 0) NotifyHistoryChanged();
+        return removed.Count;
+    }
+
+    // "delete" from a version 2 peer: the user deleted these entries there.
+    // Not sent on again: the heads carry deletions to the devices that were off.
+    private void HandleDelete(string payload, PeerConnection conn)
+    {
+        if (conn.Protocol < 2 || !trustStore.IsTrusted(conn.PeerDeviceId))
+        {
+            Console.WriteLine($"[sync] ignored a delete from {DeviceLabel.ShortId(conn.PeerDeviceId)}: not a trusted version 2 peer");
+            return;
+        }
+        var keys = KeysMessage.Parse(payload);
+        int removed = ApplyDeletedKeys(keys);
+        Console.WriteLine($"[sync] {DeviceLabel.ShortId(conn.PeerDeviceId)} deleted {keys.Count} item(s), {removed} removed here");
+    }
+
+    // Asks conn for what its head lists and this PC lacks. The two requests go
+    // out back to back, without waiting for the first answer; the keys are
+    // pending (not asked of another device) until answered. One thread at a
+    // time, so the queue's order is the order they were written in.
+    // allowConvenience false: none of it is the convenience item (see
+    // SyncRequests.Reserve).
+    private void AskForMissing(PeerConnection conn, HistoryHead.SyncHead head, bool allowConvenience = true)
+    {
+        var local = historyAccess.GetHistory();
+        var have = local.Select(entry => entry.Key()).ToHashSet();
+        var localTimes = local.Select(entry => HistoryHead.UnixMs(entry.Timestamp)).ToList();
+        lock (askGate)
+        {
+            var plan = syncRequests.Reserve(conn, head, have.Contains, historyAccess.IsKeyDeleted, localTimes, Environment.TickCount64, allowConvenience);
+            if (plan.Requests.Count == 0) return;
+            // Before the first request leaves, so its answer finds the stack's size.
+            historyAccess.BeginSync(conn, plan.Wanted);
+            Console.WriteLine($"[sync] asking {DeviceLabel.ShortId(conn.PeerDeviceId)} for {plan.Wanted} missing item(s) in {plan.Requests.Count} request(s)");
+            foreach (var request in plan.Requests)
+            {
+                SendEnvelope(conn, "history_request", JsonSerializer.Serialize(new KeysMessage(request.Keys.ToList())));
+            }
+        }
+    }
+
+    // The answer to the oldest open request of conn: its new entries go into
+    // history as one unit (one write, one update), like a version 1 batch. Only
+    // the answer to the convenience request puts something on the clipboard -
+    // its newest new entry, once, with what a received item does besides (a
+    // notification, asking for a file's bytes) - unless another convenience
+    // item was put on the clipboard less than 90 seconds ago and this one is
+    // not newer (two devices answering at once: see BatchGroups.ApplyAnswer).
+    // The rest is not announced and not applied; a file's bytes are still asked for.
+    private void HandleSyncAnswer(List<ClipboardEntry> entries, PeerConnection conn, SyncRequests.Request request, bool last)
+    {
+        var outcome = HistoryBatch.Apply(entries,
+            isAcceptable: entry =>
+            {
+                if (SigningService.Verify(entry, entry.DeviceId) && trustStore.IsTrusted(entry.DeviceId)) return true;
+                Console.WriteLine("Received message with invalid signature from peer.");
+                return false;
+            },
+            isDeleted: historyAccess.isEntryDeleted,
+            add: batch => historyAccess.AddAnswer(batch, conn, request.Convenience, last),
+            changed: NotifyHistoryChanged);
+        Console.WriteLine($"[sync] answer from {DeviceLabel.ShortId(conn.PeerDeviceId)}{(request.Convenience ? " (newest item)" : "")}: {outcome.Added.Count} new, {outcome.Duplicates} known, {outcome.Deleted} deleted here, {outcome.Rejected} rejected");
+        if (request.Convenience && outcome.Applied == null && outcome.Added.Count > 0)
+        {
+            Console.WriteLine("[sync] newest item not put on the clipboard: another one was, a moment ago, and this one is not newer");
+        }
+        foreach (var entry in outcome.Added)
+        {
+            if (ReferenceEquals(entry, outcome.Applied))
+            {
+                ApplyReceivedEntry(entry);
+            }
+            else if (entry.Type == "file")
+            {
+                HandleIncomingFileEntry(entry, applyToClipboard: false);
+            }
+        }
+    }
+
+    // The answer to a request that had expired (nobody answered in 90 seconds):
+    // its new entries are stored quietly, the way an ordinary answer's would be
+    // but with nothing on the clipboard, no notification and no stack. A file's
+    // bytes are still asked for.
+    private void HandleLateAnswer(List<ClipboardEntry> entries, PeerConnection conn)
+    {
+        var outcome = HistoryBatch.Apply(entries,
+            isAcceptable: entry =>
+            {
+                if (SigningService.Verify(entry, entry.DeviceId) && trustStore.IsTrusted(entry.DeviceId)) return true;
+                Console.WriteLine("Received message with invalid signature from peer.");
+                return false;
+            },
+            isDeleted: historyAccess.isEntryDeleted,
+            add: historyAccess.AddLate,
+            changed: NotifyHistoryChanged);
+        Console.WriteLine($"[sync] late answer from {DeviceLabel.ShortId(conn.PeerDeviceId)}: {outcome.Added.Count} new, {outcome.Duplicates} known, {outcome.Deleted} deleted here, {outcome.Rejected} rejected (stored quietly)");
+        foreach (var entry in outcome.Added)
+        {
+            if (entry.Type == "file") HandleIncomingFileEntry(entry, applyToClipboard: false);
+        }
+    }
+
+    // "history_request": the entries for these keys go back in ONE history_batch,
+    // newest first, the keys this PC no longer has skipped - an empty batch when
+    // it has none, so the asker stops waiting. Written here, on the connection's
+    // read loop, so answers leave in the order the requests came.
+    private void HandleHistoryRequest(string payload, PeerConnection conn)
+    {
+        if (conn.Protocol < 2 || !trustStore.IsTrusted(conn.PeerDeviceId))
+        {
+            Console.WriteLine($"[sync] ignored a history request from {DeviceLabel.ShortId(conn.PeerDeviceId)}: not a trusted version 2 peer");
+            return;
+        }
+        var keys = KeysMessage.Parse(payload).ToHashSet();
+        var answer = historyAccess.GetHistory()
+            .Where(entry => keys.Contains(entry.Key()))
+            .OrderByDescending(entry => HistoryHead.UnixMs(entry.Timestamp))
+            .ToList();
+        Console.WriteLine($"[sync] {DeviceLabel.ShortId(conn.PeerDeviceId)} asked for {keys.Count} item(s), sending {answer.Count}");
+        SendEnvelope(conn, "history_batch", JsonSerializer.Serialize(answer));
+    }
+
+    // Tells every connected version 2 peer the user deleted these entries here
+    // (at most KeysMessage.MaxKeys to a message). An older peer is not told: it
+    // keeps its copy, and what it offers again is refused by the deleted list.
+    private void BroadcastDelete(IReadOnlyList<string> keys)
+    {
+        if (keys.Count == 0) return;
+        var peers = connectionsByDeviceId.Values.Where(conn => conn.Protocol >= 2).ToList();
+        foreach (string payload in KeysMessage.Serialize(keys))
+        {
+            foreach (var conn in peers)
+            {
+                SendEnvelope(conn, "delete", payload);
+            }
+        }
+    }
+
+    // Asks every other connected version 2 device for what is still missing
+    // here: conn's requests were lost, and its keys are no longer pending. Each
+    // is asked from its last head. convenience: one of the lost requests was for
+    // the convenience item, which has not been handled.
+    private void AskAgain(PeerConnection conn, bool convenience)
+    {
+        if (stopping.IsCancellationRequested) return;
+        foreach (var other in connectionsByDeviceId.Values.Where(other => other != conn && other.Protocol >= 2).ToList())
+        {
+            if (syncRequests.LastHead(other) is { } head) AskForMissing(other, head, allowConvenience: convenience);
+        }
+    }
+
+    // A request nobody answered in SyncRequests.TimeoutMs expires (it stays
+    // queued as a marker for its late answer), and so is a stack's waiting for
+    // it - and for the batch a version 1 head promised. Not asked again of the
+    // same device (its next connection does that). Runs on a timer that exists
+    // anyway. now: the clock in ms (a test sets it).
+    internal void ExpireSyncRequests(long? now = null)
+    {
+        now ??= Environment.TickCount64;
+        bool changed = false;
+        foreach (PeerConnection conn in syncRequests.Expire(now.Value, SyncRequests.TimeoutMs))
+        {
+            Console.WriteLine($"[sync] a request to {DeviceLabel.ShortId(conn.PeerDeviceId)} went unanswered and was dropped");
+            if (syncRequests.Open(conn) == 0) changed |= historyAccess.EndSync(conn);
+        }
+        changed |= historyAccess.ExpireHeads(now.Value, SyncRequests.TimeoutMs);
+        if (changed) NotifyHistoryChanged();
+    }
+
+    // One message to a peer, in the order this is called. A failure is logged;
+    // the connection's read loop notices a dead link.
+    private static void SendEnvelope(PeerConnection conn, string type, string payload)
+    {
+        string json = JsonSerializer.Serialize(new Envelope(type, payload));
+        string peerShort = DeviceLabel.ShortId(conn.PeerDeviceId);
+        _ = conn.Send(json).ContinueWith(t =>
+        {
+            Console.WriteLine($"[sync] failed sending {type} to {peerShort}: {t.Exception?.GetBaseException().Message}");
+        }, TaskContinuationOptions.OnlyOnFaulted);
     }
 
     // The peer removed this device, or ignored its request: it no longer trusts
@@ -641,6 +906,19 @@ public sealed partial class ClipLinkEngine
         client.Client.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 5);
     }
 
+    // What a connection that just opened is told about this PC's history: on
+    // version 2 only the keys, times and deletions (the peer asks for what it
+    // lacks), on version 1 the whole history.
+    private void SendHistory(PeerConnection conn)
+    {
+        if (conn.Protocol >= 2)
+        {
+            SendEnvelope(conn, "history_head", JsonSerializer.Serialize(historyAccess.SyncHead()));
+            return;
+        }
+        SendHistoryBatch(conn);
+    }
+
     private void SendHistoryBatch(PeerConnection conn)
     {
         var history = historyAccess.GetHistory();
@@ -668,7 +946,7 @@ public sealed partial class ClipLinkEngine
         Console.WriteLine($"[conn] connected: {DeviceLabel.ShortId(conn.PeerDeviceId)} ({connectionsByDeviceId.Count} total)");
         try
         {
-            SendHistoryBatch(conn);
+            SendHistory(conn);
             RequestMissingFiles(conn);
         }
         catch (Exception ex)
@@ -727,8 +1005,16 @@ public sealed partial class ClipLinkEngine
             // asked for elsewhere - from the live link that replaced it, say.
             AbandonTransfersFrom(conn);
             // A stack its history_head started, whose batch never came, is
-            // not waiting for more.
-            if (historyAccess.EndHead(conn)) NotifyHistoryChanged();
+            // not waiting for more - nor one its answers were making.
+            bool stacksChanged = historyAccess.EndHead(conn);
+            var dropped = syncRequests.Close(conn);
+            stacksChanged |= historyAccess.EndSync(conn);
+            if (stacksChanged) NotifyHistoryChanged();
+            // What it was asked for and never sent is asked of the others.
+            if (dropped.Count > 0)
+            {
+                AskAgain(conn, convenience: dropped.Any(request => request.Convenience));
+            }
         };
         _ = conn.Listen();
         if (previous != null && previous != conn)
@@ -943,7 +1229,7 @@ public sealed partial class ClipLinkEngine
             // and kept this peer reserved in connectingTo, blocking beacon
             // dials to it as well.
             conn = await PeerConnection.CreateAsync(client, identity, trustStore, passphraseKeyStore, deviceName.Current,
-                    answeredAsSelf: () => answeredAsSelf = true, isBlocked: blockStore.IsBlocked)
+                    answeredAsSelf: () => answeredAsSelf = true, isBlocked: blockStore.IsBlocked, protocol: options.Protocol)
                 .WaitAsync(HandshakeTimeout);
         }
         catch
@@ -1017,7 +1303,7 @@ public sealed partial class ClipLinkEngine
             remoteAddress = (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString();
 
             var conn = await PeerConnection.CreateAsync(client, identity, trustStore, passphraseKeyStore, deviceName.Current,
-                    isBlocked: blockStore.IsBlocked)
+                    isBlocked: blockStore.IsBlocked, protocol: options.Protocol)
                 .WaitAsync(HandshakeTimeout);
             if (conn == null)
             {
@@ -1053,7 +1339,7 @@ public sealed partial class ClipLinkEngine
             // Same reason as ConnectToPeer's timeout.
             bool answeredAsSelf = false;
             var conn = await PeerConnection.CreateAsync(client, identity, trustStore, passphraseKeyStore, deviceName.Current,
-                    answeredAsSelf: () => answeredAsSelf = true, isBlocked: blockStore.IsBlocked)
+                    answeredAsSelf: () => answeredAsSelf = true, isBlocked: blockStore.IsBlocked, protocol: options.Protocol)
                 .WaitAsync(HandshakeTimeout);
             if (conn == null)
             {

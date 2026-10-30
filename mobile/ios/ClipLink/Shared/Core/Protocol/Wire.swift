@@ -17,6 +17,11 @@ public enum Wire {
         /// Sent just before a history_batch of 2 or more entries: its newest
         /// entry and every key in it, so the peer can show the stack at once.
         public static let historyHead = "history_head"
+        /// v2 only: "send me the entries with these keys" - answered with one
+        /// history_batch.
+        public static let historyRequest = "history_request"
+        /// v2 only: the user deleted these items (by key) on the sender.
+        public static let delete = "delete"
         public static let fileChunk = "file_chunk"
         public static let fileRequest = "file_request"
         /// "I no longer trust you": sent when a device is removed.
@@ -39,6 +44,28 @@ public enum Wire {
 
     /// History cap with oldest-first eviction - HistoryAccess.cs uses 25.
     public static let historyCap = 25
+
+    /// The sync version this build speaks, sent in the handshake as `Protocol`.
+    /// 1 is every build before it (the whole history on every connect); 2 sends
+    /// a list of keys first and then only the missing items (history_head,
+    /// history_request, delete). A connection speaks the lower of the two sides.
+    public static let protocolVersion = 2
+
+    /// The version a connection speaks: the lower of what both sides announced.
+    /// A side that announced nothing (or less than 1) is a version 1 build.
+    public static func negotiatedProtocol(own: Int?, peer: Int?) -> Int {
+        min(max(1, own ?? 1), max(1, peer ?? 1), protocolVersion)
+    }
+
+    /// At most this many keys in one history_request or delete; a longer list
+    /// is cut (and a sender splits its own).
+    public static let maxKeysPerMessage = 100
+    /// At most this many tombstone keys in a history_head.
+    public static let maxHeadDeleted = 500
+    /// A key longer than this is not one of ours (a signature is ~100 characters).
+    public static let maxKeyLength = 2048
+    /// A history_request unanswered for this long is given up on.
+    public static let requestTimeout: TimeInterval = 90
 
     /// Passcode auto-trust KDF. The salt is fixed on purpose (see
     /// PassphraseAuth.cs); a different salt, count or length derives a

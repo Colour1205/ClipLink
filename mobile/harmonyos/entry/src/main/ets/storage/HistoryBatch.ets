@@ -15,27 +15,42 @@ export const GROUP_MIN_ITEMS: number = 2;
 // and are still in the history afterwards, in the order the batch listed
 // them. evicted: everything the cap pushed out (old entries, or new ones that
 // were older than all the rest). duplicates: already in the history (or twice
-// in the batch). deleted: the user deleted them here earlier.
+// in the batch). deleted: the user deleted them here earlier. front: the
+// newest of `added` when the merge was asked to protect it (see mergeBatch),
+// else null.
 export interface MergeResult {
   added: ClipboardEntry[];
   evicted: ClipboardEntry[];
   duplicates: number;
   deleted: number;
+  front: ClipboardEntry | null;
+}
+
+function neverKept(entry: ClipboardEntry): boolean {
+  return false;
+}
+
+function alwaysOk(entry: ClipboardEntry): boolean {
+  return true;
 }
 
 // Oldest-first eviction (by timestamp, in canonical form, which is
 // fixed-width so text order is time order) down to maxItems. Changes
 // `history` in place and returns what went. Of equal timestamps the one
-// listed first goes first.
-export function trimOldest(history: ClipboardEntry[], maxItems: number): ClipboardEntry[] {
+// listed first goes first. An entry `isKept` says yes to is never the one
+// that goes: the oldest of the others does instead, so the history still ends
+// up at maxItems.
+export function trimOldest(history: ClipboardEntry[], maxItems: number, isKept: (entry: ClipboardEntry) => boolean = neverKept): ClipboardEntry[] {
   const evicted: ClipboardEntry[] = [];
   while (history.length > maxItems) {
-    let oldestIndex = 0;
-    for (let i = 1; i < history.length; i++) {
-      if (canonicalTimestamp(history[i].Timestamp) < canonicalTimestamp(history[oldestIndex].Timestamp)) {
+    let oldestIndex = -1;
+    for (let i = 0; i < history.length; i++) {
+      if (isKept(history[i])) continue;
+      if (oldestIndex === -1 || canonicalTimestamp(history[i].Timestamp) < canonicalTimestamp(history[oldestIndex].Timestamp)) {
         oldestIndex = i;
       }
     }
+    if (oldestIndex === -1) break;
     evicted.push(history.splice(oldestIndex, 1)[0]);
   }
   return evicted;
@@ -44,9 +59,17 @@ export function trimOldest(history: ClipboardEntry[], maxItems: number): Clipboa
 // Adds every new, not deleted entry of `incoming` to `history`, then trims
 // once. Changes `history` in place. Nothing is saved or announced here: that
 // is one step for the whole batch, done by the caller.
+//
+// The trim spares one entry, so that the item a sync puts on the clipboard (and
+// on top of the list) is not the first to go just because it is old: with
+// `newFront` the newest of the entries this call adds (the result's `front`),
+// else the entry `isKept` says yes to (the one an earlier call spared).
+// `frontOk` is asked once, with the newest entry really added, before the trim:
+// with `newFront`, that entry is the front (and spared) only if it says yes.
 export function mergeBatch(history: ClipboardEntry[], incoming: ClipboardEntry[],
   isSame: (a: ClipboardEntry, b: ClipboardEntry) => boolean, isDeleted: (entry: ClipboardEntry) => boolean,
-  maxItems: number): MergeResult {
+  maxItems: number, newFront: boolean = false, isKept: (entry: ClipboardEntry) => boolean = neverKept,
+  frontOk: (entry: ClipboardEntry) => boolean = alwaysOk): MergeResult {
   let added: ClipboardEntry[] = [];
   let duplicates = 0;
   let deleted = 0;
@@ -60,13 +83,16 @@ export function mergeBatch(history: ClipboardEntry[], incoming: ClipboardEntry[]
       added.push(entry);
     }
   }
-  const evicted: ClipboardEntry[] = trimOldest(history, maxItems);
+  const newest: ClipboardEntry | null = newFront ? newestOf(added) : null;
+  const front: ClipboardEntry | null = newest !== null && frontOk(newest) ? newest : null;
+  const evicted: ClipboardEntry[] = trimOldest(history, maxItems,
+    front !== null ? (entry: ClipboardEntry): boolean => entry === front : isKept);
   if (evicted.length > 0) {
     // A new entry older than the whole history is added and trimmed in the
     // same step: it never was in the history, so it is not "added".
     added = added.filter((entry: ClipboardEntry) => !evicted.includes(entry));
   }
-  return { added: added, evicted: evicted, duplicates: duplicates, deleted: deleted };
+  return { added: added, evicted: evicted, duplicates: duplicates, deleted: deleted, front: front };
 }
 
 // What applyBatch did, in numbers and in entries. rejected: a bad signature

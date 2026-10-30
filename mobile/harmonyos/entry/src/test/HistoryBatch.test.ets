@@ -89,6 +89,81 @@ export default function historyBatchTest() {
       expect(sigs(history)).assertEqual('new,mid');
     });
 
+    it('trimOldestSparesAKeptEntryAndDropsTheOldestOtherInstead', 0, () => {
+      const history: ClipboardEntry[] = [e('new', 30), e('old', 1), e('mid', 15)];
+      const evicted: ClipboardEntry[] = trimOldest(history, 2, (x: ClipboardEntry) => x.Signature === 'old');
+      expect(sigs(evicted)).assertEqual('mid');
+      expect(sigs(history)).assertEqual('new,old');
+      expect(history.length).assertEqual(2);
+    });
+
+    it('trimOldestStopsWhenEverythingLeftIsKept', 0, () => {
+      const history: ClipboardEntry[] = [e('a', 1), e('b', 2)];
+      expect(trimOldest(history, 1, () => true).length).assertEqual(0);
+      expect(history.length).assertEqual(2);
+    });
+
+    it('mergeWithNewFrontSparesTheNewestNewEntryEvenWhenItIsTheOldestOfAll', 0, () => {
+      const history: ClipboardEntry[] = [e('a', 10), e('b', 11), e('c', 12)];
+      // Cap 3, full: the new entry is older than all three, as a convenience
+      // item can be. It stays; the oldest of the others goes.
+      const result: MergeResult = mergeBatch(history, [e('front', 1)], same, noneDeleted, 3, true);
+      expect(result.front?.Signature).assertEqual('front');
+      expect(sigs(result.added)).assertEqual('front');
+      expect(sigs(result.evicted)).assertEqual('a');
+      expect(sigs(history)).assertEqual('b,c,front');
+      expect(history.length).assertEqual(3);
+    });
+
+    it('mergeWithoutNewFrontTrimsAsBefore', 0, () => {
+      const history: ClipboardEntry[] = [e('a', 10), e('b', 11), e('c', 12)];
+      const result: MergeResult = mergeBatch(history, [e('x', 1)], same, noneDeleted, 3);
+      expect(result.front).assertEqual(null);
+      expect(sigs(result.evicted)).assertEqual('x');
+      expect(result.added.length).assertEqual(0);
+    });
+
+    it('theFrontIsTheNewestOfWhatIsAddedNotOfWhatIsKnown', 0, () => {
+      const history: ClipboardEntry[] = [e('known', 50)];
+      const result: MergeResult = mergeBatch(history, [e('known', 50), e('x', 3), e('y', 7)], same, noneDeleted, 25, true);
+      expect(result.front?.Signature).assertEqual('y');
+      expect(mergeBatch([], [], same, noneDeleted, 25, true).front).assertEqual(null);
+    });
+
+    it('anEntryAnEarlierMergeSparedStaysSparedByTheNextOne', 0, () => {
+      // 'front' was spared by an earlier sync and is the oldest: a second answer
+      // of that sync (no new front) must not trim it.
+      const history: ClipboardEntry[] = [e('front', 1), e('b', 11), e('c', 12)];
+      const result: MergeResult = mergeBatch(history, [e('more', 13)], same, noneDeleted, 3, false,
+        (x: ClipboardEntry) => x.Signature === 'front');
+      expect(sigs(result.evicted)).assertEqual('b');
+      expect(sigs(history)).assertEqual('front,c,more');
+    });
+
+    it('frontOkIsAskedOnceWithTheNewestEntryReallyAddedAndDecidesWhatTheTrimSpares', 0, () => {
+      const asked: string[] = [];
+      const yes = (x: ClipboardEntry): boolean => { asked.push(x.Signature ?? ''); return true; };
+      const no = (x: ClipboardEntry): boolean => { asked.push(x.Signature ?? ''); return false; };
+      const base = (): ClipboardEntry[] => [e('a', 10), e('b', 11), e('c', 12)];
+      // 'b' is known; of the new ones 'y' is the newest. Cap 3 pushes two out.
+      const spared: ClipboardEntry[] = base();
+      const withYes: MergeResult = mergeBatch(spared, [e('b', 11), e('x', 1), e('y', 2)], same, noneDeleted, 3, true, () => false, yes);
+      expect(asked.join(',')).assertEqual('y');
+      expect(withYes.front?.Signature).assertEqual('y');
+      expect(sigs(withYes.evicted)).assertEqual('x,a');
+      expect(sigs(spared)).assertEqual('b,c,y');
+      const refused: ClipboardEntry[] = base();
+      const withNo: MergeResult = mergeBatch(refused, [e('b', 11), e('x', 1), e('y', 2)], same, noneDeleted, 3, true, () => false, no);
+      expect(asked.join(',')).assertEqual('y,y');
+      expect(withNo.front).assertEqual(null);
+      expect(sigs(withNo.evicted)).assertEqual('x,y');
+      expect(sigs(refused)).assertEqual('a,b,c');
+      // Not asked at all without newFront or without anything added.
+      mergeBatch(base(), [e('x', 1)], same, noneDeleted, 25, false, () => false, no);
+      mergeBatch(base(), [e('a', 10)], same, noneDeleted, 25, true, () => false, no);
+      expect(asked.length).assertEqual(2);
+    });
+
     it('newestOfTakesTheLatestAndTheFirstOfATie', 0, () => {
       expect(newestOf([])).assertEqual(null);
       expect(newestOf([e('a', 1), e('b', 9), e('c', 5)])?.Signature).assertEqual('b');

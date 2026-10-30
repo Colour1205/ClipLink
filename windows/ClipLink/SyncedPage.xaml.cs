@@ -12,8 +12,9 @@ using Microsoft.UI.Xaml.Media;
 
 namespace ClipLink;
 
-// The synced history as cards, newest first - text, images and files from
-// every paired device and this PC - in a list or a grid, as on the phones.
+// The synced history as cards - what just arrived on top, then newest first -
+// text, images and files from every paired device and this PC - in a list or a
+// grid, as on the phones.
 // Copy / Open / Delete on each; selecting a card shows it in full (all of
 // its text, the image as big as fits), as tapping one does on the phones.
 public sealed partial class SyncedPage : Page
@@ -533,7 +534,7 @@ public sealed partial class SyncedPage : Page
     private async Task DeleteAsync(HistoryCard card)
     {
         bool confirmed = await App.MainAppWindow.ConfirmAsync("Delete this item?",
-            "It's deleted from this PC, and won't come back from your other devices. They keep their own copies.",
+            "It's deleted from this PC and from your other devices, and won't come back. A device with an older ClipLink keeps its own copy.",
             "Delete");
         if (confirmed && !host.Engine.DeleteHistoryEntry(card.Key))
         {

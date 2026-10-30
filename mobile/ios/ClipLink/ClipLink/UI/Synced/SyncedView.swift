@@ -25,6 +25,11 @@ struct SyncedView: View {
     @State private var fanIndex: [String: Int] = [:]
 
     private var items: [SyncedItem] { model.snapshot.items }
+    /// What arrived since the app started on top, the last arrival first, then
+    /// everything else by time (see StackPlanner).
+    private var rows: [SyncedRow] {
+        StackPlanner.rows(items: items, groups: model.snapshot.blocks, expanded: expandedGroups)
+    }
     private var actions: SyncedItemActions { SyncedItemActions(model: model, haptics: settings.haptics) }
 
     var body: some View {
@@ -38,7 +43,7 @@ struct SyncedView: View {
                 .padding(.horizontal, Theme.pagePadding)
                 .padding(.top, 4)
                 .padding(.bottom, 20)
-                .animation(.spring(response: 0.4, dampingFraction: 0.86), value: items.map(\.id))
+                .animation(.spring(response: 0.4, dampingFraction: 0.86), value: rows.map(\.id))
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { SyncedDock() }
             .pageBackground(glow: settings.bottomGlow, accent: settings.accentTheme.color)
@@ -65,7 +70,7 @@ struct SyncedView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: { _ in
-                Text("It's removed from this device only. Paired devices keep their own copies, but won't send it back.")
+                Text("It's removed here and on your paired devices, and won't come back. A device with an older ClipLink keeps its copy.")
             }
         }
         .navigationViewStyle(.stack)
@@ -82,7 +87,7 @@ struct SyncedView: View {
             .padding(.top, 24)
             .transition(.opacity)
         } else {
-            let rows = StackPlanner.rows(items: items, groups: model.snapshot.groups, expanded: expandedGroups)
+            let rows = self.rows
             if settings.syncedLayout == .grid {
                 grid(rows).transition(.opacity)
             } else {
@@ -127,8 +132,9 @@ struct SyncedView: View {
         )
     }
 
-    /// The stack's items become ordinary cards, for good. Revealed cards fan out
-    /// one after the other; the ones below move down with the same spring.
+    /// The stack's items become ordinary cards, for good, right under its front
+    /// card. Revealed cards fan out one after the other; the ones below move
+    /// down with the same spring.
     private func expand(_ stack: StackInfo) {
         var fan = fanIndex
         // Only cards that are still there: the map must not grow for ever.

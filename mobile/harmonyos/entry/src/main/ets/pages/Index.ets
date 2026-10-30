@@ -55,9 +55,10 @@ import { PAIRING_ACTION_EVENT, PAIRING_ACTION_OPEN, PAIRING_ACTION_PARAM, PAIRIN
 import { PAIRING_LINK_EVENT, takePendingPairingLink, unwrapPairingLink, wrapPairingLink } from '../networking/PairingLink';
 import { QUIET_AFTER_IGNORED_MS, QUIET_AFTER_REMOVED_MS, QuietState, RequestQuiet } from '../networking/RequestQuiet';
 import { DialFallback } from '../networking/DialFallback';
-import { BatchApplied, HeadApplied, SyncManager } from '../networking/SyncManager';
+import { SyncManager } from '../networking/SyncManager';
+import { BatchApplied, HeadApplied, SyncApplied } from '../networking/HistorySync';
 import { StackedCard } from '../stack/StackedCard';
-import { BatchGroupTracker, BatchMember, BatchPlan, StackRow, buildRows, dissolveGroup, hiddenCount, placeBatch, revealAnimates, settleGroup, staggerDelayMs } from '../stack/SyncedRows';
+import { BatchGroupTracker, BatchMember, BatchPlan, StackRow, buildRows, dissolveGroup, hiddenCount, placeBatch, placeQuiet, revealAnimates, settleGroup, staggerDelayMs } from '../stack/SyncedRows';
 import { connection } from '@kit.NetworkKit';
 import { signEntry, ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
 import { ApplyResult } from '../clipboard/ClipboardApply';
@@ -228,6 +229,9 @@ interface SyncedItem extends BatchMember {
   // brought two or more (see SyncedRows.ets): the group's cards are one stack
   // until the user opens it. '' for every other item. Memory only.
   groupId: string;
+  // The same id for good, also once the stack is opened: the items that
+  // arrived together stay together, right below the front card. Memory only.
+  blockId: string;
   // The timestamp in canonical form, to place a batch's items by time.
   stamp: string;
   // Set on the members of a group a peer's history_head made, until the batch
@@ -952,6 +956,7 @@ struct Index {
         // Listed already - from a history batch, say, while its bytes were on
         // their way: it stays where it is, in its stack if it is in one.
         item.groupId = this.syncedItems[listedAt].groupId;
+        item.blockId = this.syncedItems[listedAt].blockId;
         item.expected = this.syncedItems[listedAt].expected;
         const same: SyncedItem[] = this.syncedItems.slice();
         same[listedAt] = item;
@@ -966,8 +971,8 @@ struct Index {
     // A peer's history_batch, as one unit (see SyncManager.onBatchApplied):
     // all of its new items join the list in ONE assignment, so the cards show
     // up together and the page lays out once. When there are two or more they
-    // are one stack, whose front card (the newest) goes to the top of the list
-    // (see placeBatch).
+    // are one stack, whose front card (the newest) goes to the top of the list,
+    // the others right below it (see placeBatch).
     syncManager.onBatchApplied((batch: BatchApplied) => {
       netLog(`history batch: ${batch.added.length} new, headDone=${batch.headDone} visible=${this.appVisible}`);
       if (batch.applied === 'applied') this.noteOwnClipboardWrite();
@@ -975,7 +980,7 @@ struct Index {
       // without one it makes its own group if it has two or more items.
       const plan: BatchPlan = this.batchGroups.batchArrived(batch.from, batch.added.length);
       const fresh: SyncedItem[] = batch.added.map((entry: ClipboardEntry) =>
-        this.syncedItemFor(entry, entry.DeviceId !== this.ownDeviceId, plan.groupId));
+        this.syncedItemFor(entry, entry.DeviceId !== this.ownDeviceId, plan.groupId, plan.blockId));
       let placed: SyncedItem[] = placeBatch(this.syncedItems, fresh, 50);
       if (plan.settleId !== '') {
         placed = settleGroup<SyncedItem>(placed, plan.settleId, (item: SyncedItem, id: string, expected: number) => this.withGroup(item, id, expected));
@@ -996,20 +1001,62 @@ struct Index {
     syncManager.onHeadApplied((head: HeadApplied) => {
       netLog(`history head: ${head.expectedNew} to come, visible=${this.appVisible}`);
       if (head.applied === 'applied') this.noteOwnClipboardWrite();
-      const plain: SyncedItem = this.syncedItemFor(head.newest, head.newest.DeviceId !== this.ownDeviceId);
-      const groupId: string = this.batchGroups.headArrived(head.from, head.expectedNew, plain.id);
-      const item: SyncedItem = groupId === '' ? plain : this.withGroup(plain, groupId, head.expectedNew);
-      if (groupId !== '') this.noteFreshStack(item.id);
+      const groupId: string = this.batchGroups.headArrived(head.from, head.expectedNew, entryKey(head.newest));
+      const item: SyncedItem = this.syncedItemFor(head.newest, head.newest.DeviceId !== this.ownDeviceId, groupId);
+      if (groupId !== '') {
+        item.expected = head.expectedNew;
+        this.noteFreshStack(item.id);
+      }
       this.syncedItems = placeBatch(this.syncedItems, [item], 50);
       if (!this.appVisible) void this.notifyReceivedItem(item);
     });
+    // The answer to one of this device's requests (sync v2, see
+    // SyncManager.onSyncApplied). The first one holds the item that went on the
+    // clipboard: it is the front card of the stack of everything the sync asked
+    // for, which counts all of it from the start; the answers after it join that
+    // stack, right below the front card. On top of the list, whatever the
+    // timestamps say (see placeBatch).
+    syncManager.onSyncApplied((sync: SyncApplied) => {
+      netLog(`history answer: ${sync.added.length} new, front=${sync.front !== null} last=${sync.last} superseded=${sync.superseded} quiet=${sync.quiet} visible=${this.appVisible}`);
+      if (sync.quiet) {
+        // The late answer to a request given up on: listed by time, in no stack.
+        this.syncedItems = placeQuiet(this.syncedItems,
+          sync.added.map((entry: ClipboardEntry) => this.syncedItemFor(entry, entry.DeviceId !== this.ownDeviceId)), 50);
+        return;
+      }
+      if (sync.applied === 'applied') this.noteOwnClipboardWrite();
+      const frontKey: string = sync.front !== null ? entryKey(sync.front) : '';
+      const plan: BatchPlan = sync.front !== null
+        ? this.batchGroups.frontArrived(sync.from, sync.expectedTotal, frontKey, sync.added.length, sync.last)
+        : this.batchGroups.answerArrived(sync.from, sync.added.length, sync.last);
+      const fresh: SyncedItem[] = sync.added.map((entry: ClipboardEntry) =>
+        this.syncedItemFor(entry, entry.DeviceId !== this.ownDeviceId, plan.groupId, plan.blockId));
+      const front: SyncedItem | undefined = fresh.find((i: SyncedItem) => i.id === frontKey);
+      if (front !== undefined && plan.groupId !== '' && plan.settleId === '') front.expected = sync.expectedTotal;
+      let placed: SyncedItem[] = placeBatch(this.syncedItems, fresh, 50);
+      if (plan.settleId !== '') {
+        placed = settleGroup<SyncedItem>(placed, plan.settleId, (item: SyncedItem, id: string, expected: number) => this.withGroup(item, id, expected));
+      }
+      if (plan.groupId !== '') {
+        const stackFront: SyncedItem | undefined = placed.find((i: SyncedItem) => i.groupId === plan.groupId);
+        if (stackFront !== undefined) this.noteFreshStack(stackFront.id);
+      }
+      this.syncedItems = placed;
+      if (front !== undefined && !sync.superseded && !this.appVisible) void this.notifyReceivedItem(front);
+    });
     // The batch a head announced came to nothing new, or its connection closed
-    // before it came: the stack counts what it has.
+    // before it came, or a v2 sync has nothing more to wait for: the stack
+    // counts what it has.
     syncManager.onHeadSettled((from: string) => {
       const groupId: string = this.batchGroups.headSettled(from);
       if (groupId !== '') {
         this.syncedItems = settleGroup<SyncedItem>(this.syncedItems, groupId, (item: SyncedItem, id: string, expected: number) => this.withGroup(item, id, expected));
       }
+    });
+    // A peer deleted items: they leave the list (a stack that loses its front
+    // card gets a new one, one that is left with a single item is a normal card).
+    syncManager.onEntriesDeleted((keys: string[]) => {
+      this.forgetItems(keys);
     });
     // An older item's bytes, fetched again (see SyncManager.onFileStored):
     // the list is laid out again, so its card gets the key - and the image
@@ -2345,16 +2392,23 @@ struct Index {
     });
   }
 
-  // This device only: never the clipboard, never the peers.
+  // Never the clipboard. Peers that speak sync v2 delete the item too.
   private async deleteItem(item: SyncedItem): Promise<void> {
     await this.syncManager?.deleteEntry(item.id);
-    const previewOpen: boolean = this.syncedNavStack.size() > 1 && this.selectedItemId === item.id;
-    this.syncedItems = this.syncedItems.filter((i: SyncedItem) => i.id !== item.id);
+    this.forgetItems([item.id]);
+  }
+
+  // Takes these items (by id) out of the list, here or at a peer's request.
+  private forgetItems(ids: string[]): void {
+    const gone: Set<string> = new Set<string>(ids);
+    const previewOpen: boolean = this.syncedNavStack.size() > 1 && gone.has(this.selectedItemId);
+    const kept: SyncedItem[] = this.syncedItems.filter((i: SyncedItem) => !gone.has(i.id));
+    if (kept.length !== this.syncedItems.length) this.syncedItems = kept;
     if (previewOpen && !this.isSplitLayout()) {
       this.closeItemDetail();
     }
     // The split's preview moves on to the next item by itself (previewItem).
-    if (this.selectedItemId === item.id) this.selectedItemId = '';
+    if (gone.has(this.selectedItemId)) this.selectedItemId = '';
   }
 
   async saveTailscaleIp(): Promise<void> {
@@ -3583,7 +3637,7 @@ struct Index {
     });
   }
 
-  private syncedItemFor(entry: ClipboardEntry, fromPeer: boolean, groupId: string = ''): SyncedItem {
+  private syncedItemFor(entry: ClipboardEntry, fromPeer: boolean, groupId: string = '', blockId: string = groupId): SyncedItem {
     return {
       id: entryKey(entry),
       type: entry.Type,
@@ -3593,6 +3647,7 @@ struct Index {
       time: entry.Timestamp.slice(11, 16),
       fromPeer,
       groupId,
+      blockId,
       stamp: canonicalTimestamp(entry.Timestamp),
       expected: 0,
     };
@@ -3655,6 +3710,7 @@ struct Index {
       time: item.time,
       fromPeer: item.fromPeer,
       groupId,
+      blockId: item.blockId,
       stamp: item.stamp,
       expected,
     };

@@ -273,6 +273,45 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertEqual(WireJSON.object(sent.jsonString())?["DeviceName"] as? String, String(repeating: "\u{E9}", count: 64))
     }
 
+    func testHandshakeProtocolIsSentAndReadAndAbsentMeansOne() {
+        let sent = HandshakeMessage(ephemeralPublicKey: "E", identityPublicKey: "I", signature: "S", passphraseProof: nil, protocolVersion: 2)
+        let object = WireJSON.object(sent.jsonString())
+        XCTAssertEqual((object?["Protocol"] as? NSNumber)?.intValue, 2, "a plain JSON number")
+        XCTAssertEqual(Set((object ?? [:]).keys), ["EphemeralPublicKey", "IdentityPublicKey", "Signature", "Protocol"])
+        XCTAssertEqual(HandshakeMessage.parse(sent.jsonString())?.protocolVersion, 2)
+        XCTAssertEqual(Wire.protocolVersion, 2)
+
+        // Nothing sent when there is nothing to say (a test standing in for an older build).
+        XCTAssertFalse(HandshakeMessage(ephemeralPublicKey: "E", identityPublicKey: "I", signature: "S", passphraseProof: nil).jsonString().contains("Protocol"))
+
+        // Older builds' lines, and ones that say something odd: still a handshake, version 1.
+        for json in [
+            #"{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S"}"#,
+            #"{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S","DeviceName":"Desk","Protocol":null}"#,
+            #"{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S","Protocol":"2"}"#,
+            #"{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S","Protocol":[2]}"#,
+        ] {
+            let hs = HandshakeMessage.parse(json)
+            XCTAssertNotNil(hs, json)
+            XCTAssertNil(hs?.protocolVersion, json)
+            XCTAssertEqual(Wire.negotiatedProtocol(own: 2, peer: hs?.protocolVersion), 1, json)
+        }
+        // A newer build is read as it says; unknown keys in the line are ignored.
+        let newer = HandshakeMessage.parse(#"{"EphemeralPublicKey":"E","IdentityPublicKey":"I","Signature":"S","Protocol":3,"Future":{"a":1}}"#)
+        XCTAssertEqual(newer?.protocolVersion, 3)
+    }
+
+    func testTheConnectionSpeaksTheLowerOfTheTwoVersions() {
+        XCTAssertEqual(Wire.negotiatedProtocol(own: 2, peer: 2), 2)
+        XCTAssertEqual(Wire.negotiatedProtocol(own: 2, peer: 3), 2, "min(2, PeerProtocol)")
+        XCTAssertEqual(Wire.negotiatedProtocol(own: 2, peer: nil), 1)
+        XCTAssertEqual(Wire.negotiatedProtocol(own: 2, peer: 1), 1)
+        XCTAssertEqual(Wire.negotiatedProtocol(own: 2, peer: 0), 1)
+        XCTAssertEqual(Wire.negotiatedProtocol(own: 2, peer: -7), 1)
+        XCTAssertEqual(Wire.negotiatedProtocol(own: nil, peer: 2), 1, "both sides must have announced 2")
+        XCTAssertEqual(Wire.negotiatedProtocol(own: 3, peer: 3), 2, "never above what this build speaks")
+    }
+
     func testPairingPayloadNameIsOptional() {
         XCTAssertEqual(PairingInfo.parse(#"{"PublicKey":"KEY","Address":"100.64.0.2","Name":" Desk PC "}"#),
                        PairingInfo(publicKey: "KEY", address: "100.64.0.2", name: "Desk PC"))

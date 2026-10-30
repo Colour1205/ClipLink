@@ -9,6 +9,8 @@ import io.uaena.cliplink.engine.GROUP_MIN_ITEMS
 import io.uaena.cliplink.engine.shortIdOf
 import io.uaena.cliplink.store.FileStore
 import io.uaena.cliplink.store.HistoryStore
+import io.uaena.cliplink.store.HistoryStore.Arrival
+import io.uaena.cliplink.store.newestOf
 import io.uaena.cliplink.store.TrustCheck
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -22,9 +24,19 @@ import org.json.JSONArray
 import java.io.File
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /** How long an "unpair" gets to leave before its socket is closed. */
 private const val UNPAIR_FLUSH_MS = 300L
+
+/** How long a history_request, or a history_head with no batch behind it, waits for its answer. */
+private const val REQUEST_TIMEOUT_MS = 90_000L
+
+/** See [SyncManager.takeConvenienceSlot]. */
+private const val CONVENIENCE_WINDOW_MS = 90_000L
+
+/** Answers one v2 peer may have waiting to be sent; a peer asking for more than that is not asking in good faith. */
+private const val MAX_QUEUED_ANSWERS = 32
 
 /**
  * Owns the set of live peer connections and everything that flows over them.
@@ -45,6 +57,8 @@ class SyncManager(
     private val verify: (ClipboardEntry) -> ClipboardEntry? = { Signing.verified(it) },
     /** An entry with more characters of content than this is dropped on arrival, unread. */
     private val maxEntryContentChars: Int = Limits.MAX_ENTRY_CONTENT_CHARS,
+    /** Milliseconds since the epoch - what the request timeouts are counted by. */
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
 
     private val connections = ConcurrentHashMap<String, PeerLink>()
@@ -52,18 +66,93 @@ class SyncManager(
     /** Incoming chunk streams, one sender's per file - see [IncomingFiles]. */
     private val incoming = IncomingFiles<PeerLink>(fileStore, sizeHint = ::expectedSizeOf)
 
+    /** See [takeConvenienceSlot]: the time (Unix milliseconds) of the last convenience item applied, and when. */
+    private var lastConvenience: Pair<Long, Long>? = null
+    private val convenienceLock = Any()
+
     /** Verified entries waiting on bytes that are still streaming in, keyed by hash. */
     private val pendingEntries = ConcurrentHashMap<String, ClipboardEntry>()
 
     /**
      * What a history_head did on a connection, until the history_batch it
-     * announced arrives (or the connection ends). Only ever touched by that
-     * connection's own handler, which takes its messages one at a time.
-     * [groupId] is the provisional group the head made, if it made one.
+     * announced arrives (or the connection ends, or [REQUEST_TIMEOUT_MS] pass
+     * without it - see [expireRequests]). Made by that connection's own
+     * handler, which takes its messages one at a time; a timeout may end it
+     * from another thread, so it is only ever taken out of the map, never
+     * changed. [groupId] is the provisional group the head made, if it made
+     * one, and [since] when it was made.
      */
-    private class HeadState(val groupId: Long?)
+    private class HeadState(val groupId: Long?, val since: Long)
 
     private val heads = ConcurrentHashMap<PeerLink, HeadState>()
+
+    /**
+     * A history_request sent to a peer and not answered yet. The peer answers
+     * in the order it was asked, so a history_batch always belongs to the
+     * front of its connection's queue.
+     */
+    private class Outstanding(
+        val keys: List<String>,
+        /** The request for the one item that goes on the clipboard when it arrives - see [HistoryStore.Arrival.Sync]. */
+        val convenience: Boolean,
+        val sentAt: Long,
+        /** For the convenience request: how many items the whole sync asked for, the number on its stack. */
+        val expectedSize: Int,
+    ) {
+        /**
+         * Given up on after [REQUEST_TIMEOUT_MS] (see [expireRequests]). It stays in the queue as a marker: the
+         * peer may still answer it, and that answer has to be paired with it (and stored quietly, see
+         * [handleLateAnswer]), or it would be paired with a later request, or find the queue empty and be taken
+         * for an older peer's batch. It leaves only with its answer or with the connection, and is no open
+         * request for the timeout or for a stack's waiting. Under [syncLock].
+         */
+        var expired = false
+    }
+
+    /** What goes out on a v2 connection, in this order and nothing else in between - see [SyncState.outbox]. */
+    private sealed interface Outgoing {
+        /** Our history_head, made when its turn comes so that it is up to date. */
+        object Head : Outgoing
+
+        /** A message that is ready: a request, a delete. */
+        class Ready(val message: String) : Outgoing
+
+        /** The answer to a history_request for [keys]. */
+        class Answer(val keys: List<String>) : Outgoing
+    }
+
+    /**
+     * Everything a v2 connection has going. [queue], [head] and [groupId] are
+     * guarded by [syncLock]: the connection's handler, the other connections'
+     * (when one ends) and the periodic tick all reach them.
+     */
+    private class SyncState(val conn: PeerLink) {
+        val queue = ArrayDeque<Outstanding>()
+
+        /** The last history_head the peer sent: kept to ask again of someone else, see [askAgain]. */
+        var head: SyncHead? = null
+
+        /** The group of the sync under way (the stack its items are shown as), if it has one. */
+        var groupId: Long? = null
+
+        /**
+         * One coroutine writes this, so that requests, answers and deletes leave in the order they were
+         * decided: the peer pairs each history_batch with the request it answers by that order alone, and a
+         * big answer must not be overtaken by a small one asked later.
+         */
+        val outbox = Channel<Outgoing>(Channel.UNLIMITED)
+
+        /** Answers in [outbox] not written yet. */
+        val answersQueued = AtomicInteger()
+    }
+
+    private val syncStates = ConcurrentHashMap<PeerLink, SyncState>()
+
+    /** Guards every [SyncState]'s fields and [pending]. Never held while calling out to the screen. */
+    private val syncLock = Any()
+
+    /** Keys asked for and not answered yet, and of whom - so that nobody else is asked for them. Under [syncLock]. */
+    private val pending = HashMap<String, PeerLink>()
 
     /** How often each file has been asked for again after a transfer of it failed - see [requestAgain]. */
     private val retries = ConcurrentHashMap<String, Int>()
@@ -112,12 +201,27 @@ class SyncManager(
 
     /**
      * The batch a head announced has been dealt with, or will never come (the
-     * connection ended, or another head came first): the provisional group
-     * given is not a guess any more. Called for every head that made a group,
-     * also when the batch already settled it, so the receiver rebuilds the
-     * list only if it still has to.
+     * connection ended, another head came first, or it took too long): the
+     * provisional group given is not a guess any more. Called for every head
+     * that made a group, also when the batch already settled it, so the
+     * receiver rebuilds the list only if it still has to. On a v2 connection:
+     * the last request of a sync has been answered, or has been given up.
      */
     var onHeadSettled: ((Long) -> Unit)? = null
+
+    /**
+     * Entries of one live item have just been stored - arrived on their own
+     * as an "entry", or this device's own copy or share: each a block of one.
+     * Same rules as [onBatchStored].
+     */
+    var onLiveStored: ((List<ClipboardEntry>) -> Unit)? = null
+
+    /**
+     * The answer to a v2 history_request has just been stored (same rules as
+     * [onBatchStored]). Returns the id of the group the sync's items are
+     * shown in, if it has one - given back with the next answer of that sync.
+     */
+    var onSyncStored: ((SyncStored) -> Long?)? = null
 
     /**
      * A history_batch was applied as one unit - the one place a batch is
@@ -191,6 +295,9 @@ class SyncManager(
         // through TCP, where an unbounded queue used to hold however much of
         // a 1 GB file the phone could be sent before it ran out of memory.
         val inbox = Channel<String>(Limits.INBOX_CAPACITY)
+        // Before anything can be read: the peer's head may be the first line.
+        val sync = if (conn.isV2) SyncState(conn).also { syncStates[conn] = it } else null
+        if (sync != null) scope.launch { writeOutbox(sync) }
         conn.onMessage = { message ->
             try {
                 inbox.send(message)
@@ -238,7 +345,8 @@ class SyncManager(
         val previous = connections.put(conn.peerDeviceId, conn)
         onConnectionsChanged?.invoke(connections.size)
         scope.launch {
-            sendHistoryBatch(conn)
+            // v2: the head alone, the peer asks for what it lacks. Older: the whole history.
+            if (sync != null) sync.outbox.trySend(Outgoing.Head) else sendHistoryBatch(conn)
             requestMissingFiles(conn)
         }
 
@@ -304,10 +412,11 @@ class SyncManager(
         onConnectionsChanged?.invoke(0)
     }
 
-    /** Periodic housekeeping: gives up on file streams that have gone quiet. */
+    /** Periodic housekeeping: gives up on file streams and requests that have gone quiet. */
     fun tidyTransfers() {
         val stale = incoming.dropStale()
         if (stale.isNotEmpty()) onLog?.invoke("${stale.size} stalled file transfer(s) abandoned")
+        expireRequests()
     }
 
     /** [registerConnection]'s consumer: [conn]'s messages, in order, until it closes and they're all handled. */
@@ -330,6 +439,7 @@ class SyncManager(
             abandonTransfersFrom(conn)
             // A head whose batch never came: its stack is what it is.
             heads.remove(conn)?.settle()
+            endSync(conn)
         }
     }
 
@@ -370,6 +480,318 @@ class SyncManager(
         }
     }
 
+    // ---- v2: head, request, answer, delete -------------------------------------
+
+    /** [state]'s connection's writer: everything for a v2 peer leaves through here, in the order it was queued. */
+    private suspend fun writeOutbox(state: SyncState) {
+        for (item in state.outbox) {
+            val conn = state.conn
+            if (item is Outgoing.Answer) state.answersQueued.decrementAndGet()
+            if (!trust.isTrusted(conn.peerDeviceId)) continue
+            val message = when (item) {
+                Outgoing.Head -> Protocol.envelope(
+                    Protocol.TYPE_HISTORY_HEAD,
+                    SyncHead.forHistory(history.all(), history.recentDeletedKeys(Protocol.MAX_HEAD_DELETED)).toJson(),
+                )
+                is Outgoing.Ready -> item.message
+                is Outgoing.Answer -> answerFor(item.keys, conn)
+            }
+            try {
+                conn.send(message)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                // The link ended; its read loop says so.
+            }
+        }
+    }
+
+    /**
+     * The one history_batch that answers a history_request for [keys]: the entries this device has for them,
+     * newest first, none for a key it no longer has - an empty list when it has none, so the asker stops
+     * waiting. Limited like the batch of an older connection (see [selectForRelay]).
+     */
+    private fun answerFor(keys: List<String>, conn: PeerLink): String {
+        val wanted = keys.toHashSet()
+        val newestFirst = history.all()
+            .filter { it.deletionKey in wanted }
+            .sortedByDescending { DotNetTimestamp.canonical(it.timestamp) }
+        val selection = selectForRelay(newestFirst)
+        if (selection.skipped > 0) {
+            onLog?.invoke("${selection.skipped} large item(s) left out of the answer sent to ${shortIdOf(conn.peerDeviceId)}")
+        }
+        return Protocol.envelope(Protocol.TYPE_HISTORY_BATCH, ClipboardEntry.listToJson(selection.entries).toString())
+    }
+
+    /** Deletes [entry] on this device for good (see [HistoryStore.delete]) and tells the v2 peers to do the same. */
+    fun deleteEntry(entry: ClipboardEntry) {
+        history.delete(entry)
+        broadcastDelete(listOf(entry.deletionKey))
+    }
+
+    /** [deleteEntry] for everything in the history. */
+    fun clearHistory() {
+        broadcastDelete(history.clear())
+    }
+
+    /**
+     * Tells every connected v2 peer that these items were deleted on this device (one the user deleted, or all
+     * of them). Older peers get nothing: they keep their copy, and ours stays out of this history all the same.
+     * Nothing received from a peer is sent on this way - the heads carry that to whoever was away.
+     */
+    fun broadcastDelete(keys: List<String>) {
+        val batches = keys.distinct().chunked(Protocol.MAX_REQUEST_KEYS)
+        if (batches.isEmpty()) return
+        for (conn in trustedConnections()) {
+            val state = syncStates[conn] ?: continue
+            for (batch in batches) {
+                state.outbox.trySend(Outgoing.Ready(Protocol.envelope(Protocol.TYPE_DELETE, KeyListMessage(batch).toJson())))
+            }
+        }
+    }
+
+    /** A v2 history_head: what the peer deleted goes first, then what it has that we lack is asked for. */
+    private fun handleSyncHead(payload: String, conn: PeerLink) {
+        val state = syncStates[conn] ?: return
+        val head = SyncHead.parse(payload) ?: run {
+            onLog?.invoke("received invalid message from peer (bad history_head JSON)")
+            return
+        }
+        applyPeerDeletes(head.deleted)
+        synchronized(syncLock) {
+            state.head = head
+            ask(state, convenienceOwed = true)
+        }
+    }
+
+    /** The peer deleted [keys]: the same as a delete here, and one update of the list for all of them. */
+    private fun applyPeerDeletes(keys: List<String>) {
+        if (history.applyDeleted(keys).isNotEmpty()) onHistoryChanged?.invoke()
+    }
+
+    /**
+     * Asks [state]'s peer for what its last head lists and this device lacks (and has not asked someone else
+     * for): the newest of those first and alone, which will go on the clipboard, then the rest in one request.
+     * With [convenienceOwed] false there is no such item to wait for (it came already from a peer that went
+     * away), and what is wanted goes in a single request that applies nothing. Under [syncLock].
+     */
+    private fun ask(state: SyncState, convenienceOwed: Boolean): Boolean {
+        val head = state.head ?: return false
+        val local = history.all()
+        val have = local.mapTo(HashSet()) { it.deletionKey }
+        val missing = head.keys.distinct().filter { it !in have && !history.isKeyDeleted(it) && it !in pending }
+        val wanted = wantedKeys(missing, head, local)
+        if (wanted.isEmpty()) return false
+        val now = clock()
+        val requests = if (convenienceOwed) {
+            listOfNotNull(
+                Outstanding(listOf(wanted.first()), convenience = true, sentAt = now, expectedSize = wanted.size),
+                wanted.drop(1).takeIf { it.isNotEmpty() }?.let { Outstanding(it, convenience = false, sentAt = now, expectedSize = 0) },
+            )
+        } else {
+            listOf(Outstanding(wanted, convenience = false, sentAt = now, expectedSize = 0))
+        }
+        for (request in requests) {
+            state.queue.addLast(request)
+            request.keys.forEach { pending[it] = state.conn }
+            state.outbox.trySend(Outgoing.Ready(Protocol.envelope(Protocol.TYPE_HISTORY_REQUEST, KeyListMessage(request.keys).toJson())))
+        }
+        onLog?.invoke("asked ${shortIdOf(state.conn.peerDeviceId)} for ${wanted.size} item(s)")
+        return true
+    }
+
+    /** The history_request [peer] sent: answered in its turn, with one history_batch. */
+    private fun handleHistoryRequest(payload: String, conn: PeerLink) {
+        val state = syncStates[conn] ?: return
+        val request = KeyListMessage.parse(payload) ?: run {
+            onLog?.invoke("received invalid message from peer (bad history_request JSON)")
+            return
+        }
+        if (state.answersQueued.incrementAndGet() > MAX_QUEUED_ANSWERS) {
+            conn.close("too many requests")
+            return
+        }
+        state.outbox.trySend(Outgoing.Answer(request.keys))
+    }
+
+    /** The peer deleted these items and says so: gone here too, tombstoned, and the clipboard left alone. */
+    private fun handleDelete(payload: String) {
+        val message = KeyListMessage.parse(payload) ?: run {
+            onLog?.invoke("received invalid message from peer (bad delete JSON)")
+            return
+        }
+        applyPeerDeletes(message.keys)
+    }
+
+    /**
+     * Takes the request that a history_batch just arrived for, off the front of [conn]'s queue; null when it
+     * has none (the batch was not asked for, and is dealt with as an older peer's). Its keys stay pending
+     * until the answer is stored: in between they are neither here nor on their way, and another peer's head
+     * would have them asked for again.
+     */
+    private fun takeOutstanding(conn: PeerLink): Outstanding? = synchronized(syncLock) {
+        val state = syncStates[conn] ?: return null
+        state.queue.removeFirstOrNull()
+    }
+
+    /**
+     * The answer to [request]: every entry in it is checked like any other, and the new ones are stored in
+     * one go. If it was the request for the convenience item, the newest new entry is that item and goes on
+     * the clipboard - once, with the usual side effects; every other answer applies nothing to the
+     * clipboard, though a file's bytes are still asked for.
+     */
+    private fun handleSyncAnswer(payload: String, conn: PeerLink, request: Outstanding) {
+        try {
+            val verified = verifiedBatch(payload) ?: return
+            val state = syncStates[conn] ?: return
+            val groupBefore = synchronized(syncLock) { state.groupId }
+            val arrival = when {
+                request.convenience -> Arrival.Sync
+                groupBefore != null -> Arrival.SyncMore
+                // Nothing of this sync is on the clipboard: its items are a block of their own.
+                else -> Arrival.Live
+            }
+            var group: Long? = groupBefore
+            var told = false
+            // The convenience item as the store sees it (the newest of the new ones, before the trim), and
+            // whether it may go on the clipboard: only that one is spared by the trim.
+            var candidate: ClipboardEntry? = null
+            var mayApply = false
+            val protectFront: ((ClipboardEntry) -> Boolean)? = if (request.convenience) {
+                { entry -> candidate = entry; mayApply = takeConvenienceSlot(entry); mayApply }
+            } else {
+                null
+            }
+            val fresh = history.addAllNew(verified, arrival, protectFront) { stored ->
+                val front = if (request.convenience) newestOf(stored) else null
+                group = onSyncStored?.invoke(SyncStored(stored, front, groupBefore, request.expectedSize))
+                told = true
+            }
+            if (told) synchronized(syncLock) { state.groupId = group }
+            if (fresh.isEmpty()) return
+
+            // Not the newest of what is left when the convenience item itself is gone (trimmed, or it did not
+            // get the slot): nothing else takes its place on the clipboard.
+            val convenience = candidate?.takeIf { mayApply && fresh.any { f -> f === it } }
+            var toApply: ClipboardEntry? = null
+            for (entry in fresh) {
+                if (entry === convenience) {
+                    if (startApplying(entry)) toApply = entry
+                } else {
+                    fetchWithoutApplying(entry)
+                }
+            }
+            onBatchApplied?.invoke(BatchApplied(conn.peerDeviceId, fresh, toApply))
+        } finally {
+            synchronized(syncLock) { request.keys.forEach { if (pending[it] === conn) pending.remove(it) } }
+            settleIfAnswered(conn)
+        }
+    }
+
+    /**
+     * The answer to a request that was given up on (see [Outstanding.expired]), which came after all. Its
+     * entries are checked like any other and the new ones stored, but nothing is put on the clipboard, nobody
+     * is told, and they make no stack: the sync they belonged to is long over. A file's bytes are still asked
+     * for. [Arrival.SyncMore] leaves the item the trim spares as it is - this is not a block of its own.
+     */
+    private fun handleLateAnswer(payload: String, conn: PeerLink) {
+        val verified = verifiedBatch(payload) ?: return
+        val fresh = history.addAllNew(verified, Arrival.SyncMore)
+        if (fresh.isEmpty()) return
+        fresh.forEach(::fetchWithoutApplying)
+        onBatchApplied?.invoke(BatchApplied(conn.peerDeviceId, fresh, null))
+    }
+
+    /**
+     * Whether [candidate], the convenience item of an answer, may go on the clipboard now. Not when another
+     * convenience item went there less than [CONVENIENCE_WINDOW_MS] ago and this one is not newer: two peers
+     * answering at once each bring their newest missing item, and the clipboard changes once. Otherwise it
+     * may, and it becomes the item the next one is compared with. Memory only, and for the whole engine, not
+     * for a connection. Has a lock of its own: it is called under the history's, and must not wait for [syncLock].
+     */
+    private fun takeConvenienceSlot(candidate: ClipboardEntry): Boolean = synchronized(convenienceLock) {
+        val now = clock()
+        // Instants, not text: the same time in two formats is equal, and equal is not newer. No zone counts as UTC.
+        val timestamp = DotNetTimestamp.epochMillis(candidate.timestamp) ?: Long.MIN_VALUE
+        val last = lastConvenience
+        if (last != null && now - last.second < CONVENIENCE_WINDOW_MS && timestamp <= last.first) return false
+        lastConvenience = timestamp to now
+        true
+    }
+
+    /** The last request of [conn]'s sync has been answered: the size of its stack is final. */
+    private fun settleIfAnswered(conn: PeerLink) {
+        val settled = synchronized(syncLock) {
+            val state = syncStates[conn] ?: return
+            if (state.queue.any { !it.expired }) return
+            state.groupId.also { state.groupId = null }
+        }
+        settled?.let { onHeadSettled?.invoke(it) }
+    }
+
+    /**
+     * [conn] has ended and its last messages are handled. What it was asked for and never sent is asked of
+     * the other v2 peers from the heads they last sent (a transfer that broke off is not lost), and the
+     * stack its sync was building is final.
+     */
+    private fun endSync(conn: PeerLink) {
+        val settled: Long?
+        synchronized(syncLock) {
+            val state = syncStates.remove(conn) ?: return
+            state.outbox.close()
+            settled = state.groupId
+            askAgain(excluding = conn, convenienceOwed = state.queue.any { it.convenience && !it.expired })
+            state.queue.clear()
+        }
+        settled?.let { onHeadSettled?.invoke(it) }
+    }
+
+    /**
+     * Asks every other live v2 peer again for what its last head lists and nobody is bringing now. The first
+     * to be asked takes the keys; the item for the clipboard is asked as such only when a connection that
+     * never delivered it was the one that went (it is not applied twice, nor in place of a newer one).
+     * Under [syncLock].
+     */
+    private fun askAgain(excluding: PeerLink, convenienceOwed: Boolean) {
+        // The keys of the connection that went are free again before anyone is asked.
+        pending.values.removeAll { it === excluding }
+        var owed = convenienceOwed
+        for (state in syncStates.values) {
+            if (state.conn === excluding || state.conn.isClosed) continue
+            if (ask(state, owed)) owed = false
+        }
+    }
+
+    /**
+     * Gives up on every request that has gone unanswered for [REQUEST_TIMEOUT_MS] (no retry on the same
+     * connection - the next one does the work), and on a v1.5 head whose batch never came. A stack that was
+     * waiting for them stops waiting. A request given up on stays in its queue as an expired marker, so that
+     * its answer, if it comes after all, is paired with it (see [Outstanding.expired]).
+     */
+    fun expireRequests(now: Long = clock()) {
+        val settled = ArrayList<Long>()
+        synchronized(syncLock) {
+            for (state in syncStates.values) {
+                var dropped = 0
+                for (request in state.queue) {
+                    if (request.expired || now - request.sentAt < REQUEST_TIMEOUT_MS) continue
+                    request.expired = true
+                    request.keys.forEach { if (pending[it] === state.conn) pending.remove(it) }
+                    dropped++
+                }
+                if (dropped == 0) continue
+                onLog?.invoke("gave up waiting for $dropped answer(s) from ${shortIdOf(state.conn.peerDeviceId)}")
+                if (state.queue.any { !it.expired }) continue
+                state.groupId?.let { settled.add(it) }
+                state.groupId = null
+            }
+        }
+        settled.forEach { onHeadSettled?.invoke(it) }
+        for ((conn, head) in heads) {
+            if (now - head.since >= REQUEST_TIMEOUT_MS && heads.remove(conn, head)) head.settle()
+        }
+    }
+
     /**
      * Sends to every connected peer and records locally. For file entries the
      * caller must have cached the bytes into [FileStore] under the hash first;
@@ -387,7 +809,7 @@ class SyncManager(
                 scope.launch { runCatching { conn.send(json) } }
             }
         }
-        history.addAll(entries)
+        history.addAllNew(entries, Arrival.Live) { stored -> onLiveStored?.invoke(stored) }
 
         for (entry in entries) {
             if (entry.type != ClipboardEntry.TYPE_FILE) continue
@@ -436,21 +858,38 @@ class SyncManager(
                 // Empty for anything deleted on this device, and for an entry
                 // so old that it was stored only to be evicted at once, so a
                 // deleted or ancient item is neither stored nor applied.
-                if (history.addAllNew(listOf(entry)).isEmpty()) return
+                if (history.addAllNew(listOf(entry), Arrival.Live) { stored -> onLiveStored?.invoke(stored) }.isEmpty()) return
                 applyAndReport(entry)
             }
 
-            Protocol.TYPE_HISTORY_HEAD -> handleHistoryHead(envelope.payload, conn)
+            // On a v2 connection the head is the keys and tombstones of the peer's history, and a
+            // `Newest` in it is not read. On an older one it is the newest entry and the keys.
+            Protocol.TYPE_HISTORY_HEAD ->
+                if (conn.isV2) handleSyncHead(envelope.payload, conn) else handleHistoryHead(envelope.payload, conn)
 
             Protocol.TYPE_HISTORY_BATCH -> {
-                val head = heads.remove(conn)
-                try {
-                    handleHistoryBatch(envelope.payload, conn.peerDeviceId, head)
-                } finally {
-                    // Normally settled already, by the batch being stored.
-                    head?.settle()
+                // On a v2 connection a batch answers a request - and one that nobody asked for is an older peer's.
+                val request = if (conn.isV2) takeOutstanding(conn) else null
+                if (request != null) {
+                    // Too late: its stack has stopped waiting and minutes may have passed, so what it brings is
+                    // stored like any quiet add and never put on the clipboard.
+                    if (request.expired) handleLateAnswer(envelope.payload, conn)
+                    else handleSyncAnswer(envelope.payload, conn, request)
+                } else {
+                    val head = heads.remove(conn)
+                    try {
+                        handleHistoryBatch(envelope.payload, conn.peerDeviceId, head)
+                    } finally {
+                        // Normally settled already, by the batch being stored.
+                        head?.settle()
+                    }
                 }
             }
+
+            Protocol.TYPE_HISTORY_REQUEST ->
+                if (conn.isV2) handleHistoryRequest(envelope.payload, conn) else logUnknownType(envelope.type)
+
+            Protocol.TYPE_DELETE -> if (conn.isV2) handleDelete(envelope.payload) else logUnknownType(envelope.type)
 
             // Every FileHash below has passed FileStore.isValidHash - the
             // parsers refuse anything else - so a peer can only ever name a
@@ -479,8 +918,12 @@ class SyncManager(
                 conn.close("it removed this device")
             }
 
-            else -> onLog?.invoke("received message with unknown type from peer: ${envelope.type}")
+            else -> logUnknownType(envelope.type)
         }
+    }
+
+    private fun logUnknownType(type: String) {
+        onLog?.invoke("received message with unknown type from peer: $type")
     }
 
     /** The head made a provisional group: it is final now, whatever came of the batch. */
@@ -514,16 +957,20 @@ class SyncManager(
         val expectedNew = history.countNew(head.keys)
         var groupId: Long? = null
         // Empty for an entry that is known, deleted here or older than all a full history keeps.
-        val stored = history.addAllNew(listOf(newest)) { groupId = onHeadStored?.invoke(newest, expectedNew) }
+        val stored = history.addAllNew(listOf(newest), Arrival.SyncByAge) { groupId = onHeadStored?.invoke(newest, expectedNew) }
         if (stored.isEmpty()) return
-        heads[conn] = HeadState(groupId)
+        heads[conn] = HeadState(groupId, clock())
         applyAndReport(newest)
     }
 
-    private fun handleHistoryBatch(payload: String, from: String, head: HeadState?) {
+    /**
+     * The entries of a history_batch payload that are small enough and whose signature and signer hold - one
+     * that fails is skipped and the rest kept - or null when the payload is not a list of entries.
+     */
+    private fun verifiedBatch(payload: String): List<ClipboardEntry>? {
         val entries = untrusted { ClipboardEntry.listFromJson(JSONArray(payload)) } ?: run {
             onLog?.invoke("received invalid message from peer (bad history_batch JSON)")
-            return
+            return null
         }
         var tooLarge = 0
         val verified = ArrayList<ClipboardEntry>(entries.size)
@@ -536,19 +983,27 @@ class SyncManager(
             verifiedAndTrusted(received)?.let(verified::add)
         }
         if (tooLarge > 0) onLog?.invoke("dropped $tooLarge entr${if (tooLarge == 1) "y" else "ies"} in a history batch - too large")
+        return verified
+    }
+
+    private fun handleHistoryBatch(payload: String, from: String, head: HeadState?) {
+        val verified = verifiedBatch(payload) ?: return
 
         // Stored as a whole and trimmed once. What comes back is the entries
         // that are new AND still there after the trim (the peer still has
         // everything deleted here - those, and any older than all this
-        // device keeps, are neither stored nor applied).
-        val fresh = history.addAllNew(verified) { stored -> onBatchStored?.invoke(stored, head?.groupId) }
+        // device keeps, are neither stored nor applied). The newest of them
+        // is the one the trim spares - after a head, the head's.
+        val arrival = if (head != null) Arrival.SyncMore else Arrival.SyncByAge
+        val fresh = history.addAllNew(verified, arrival) { stored -> onBatchStored?.invoke(stored, head?.groupId) }
         if (fresh.isEmpty()) return
 
         // A batch is the peer's whole history, oldest and newest alike. Only
-        // the newest of what is new belongs on the clipboard: applying them
-        // in batch order left whichever came last there, not the latest copy.
+        // the newest of what is new belongs on the clipboard - even when this
+        // device has newer items of its own: applying them in batch order
+        // left whichever came last there, not the latest copy.
         // After a head the newest is on it already, and the rest is older.
-        val newest = if (head != null) null else fresh.maxByOrNull { DotNetTimestamp.canonical(it.timestamp) }
+        val newest = if (head != null) null else newestOf(fresh)
         var toApply: ClipboardEntry? = null
         for (entry in fresh) {
             if (entry === newest) {
@@ -808,11 +1263,49 @@ class SyncManager(
      */
     class BatchApplied(val from: String, val added: List<ClipboardEntry>, val toApply: ClipboardEntry?)
 
+    /**
+     * What the answer to one v2 history_request stored ([stored], the new entries that are still there after
+     * the trim). [front] is the sync's convenience item - the newest of them - when the answer is to the request
+     * for it, and null otherwise; [groupId] is the group the sync has made so far, if it has, and [expectedSize]
+     * how many items the whole sync asked for (for the request for the convenience item).
+     */
+    class SyncStored(
+        val stored: List<ClipboardEntry>,
+        val front: ClipboardEntry?,
+        val groupId: Long?,
+        val expectedSize: Int,
+    )
+
     companion object {
         const val CHUNK_SIZE = 256 * 1024
 
         /** See [requestAgain]. */
         private const val MAX_RETRIES = 3
+
+        /**
+         * Which of the [missing] keys (in the order of the head, newest first) a head makes worth downloading,
+         * in the same order: the history keeps [cap] items, so only those of the [cap] newest by time of what
+         * is here and what [missing] would add are. The first of [missing] is always wanted, though: it is the
+         * item that goes on the clipboard. A head without times cannot say, so everything it offers counts
+         * (up to [cap]).
+         */
+        internal fun wantedKeys(
+            missing: List<String>,
+            head: SyncHead,
+            local: List<ClipboardEntry>,
+            cap: Int = HistoryStore.MAX_ITEMS,
+        ): List<String> {
+            if (missing.isEmpty()) return emptyList()
+            val times = head.times ?: return missing.take(cap)
+            val timeOf = HashMap<String, Long>()
+            head.keys.forEachIndexed { index, key -> timeOf.putIfAbsent(key, times.getOrElse(index) { 0L }) }
+            // What is here first: of two items with the same time, the one already here keeps its place.
+            val pool = local.map { it.deletionKey to (DotNetTimestamp.epochMillis(it.timestamp) ?: 0L) } +
+                missing.map { it to (timeOf[it] ?: 0L) }
+            val inside = pool.sortedByDescending { it.second }.take(cap).mapTo(HashSet()) { it.first }
+            // Times out of order can put the first one outside the set: the total still stays within the cap.
+            return missing.filterIndexed { index, key -> index == 0 || key in inside }.take(cap)
+        }
 
         /** What [selectForRelay] picked, and how many entries it left out. */
         class RelaySelection(val entries: List<ClipboardEntry>, val skipped: Int)

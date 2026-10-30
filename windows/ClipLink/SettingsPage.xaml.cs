@@ -305,7 +305,7 @@ public sealed partial class SettingsPage : Page
     private async void ClearHistory_Click(object sender, RoutedEventArgs e)
     {
         bool confirmed = await App.MainAppWindow.ConfirmAsync("Clear synced history?",
-            "Every synced item is deleted from this PC, and won't come back from your other devices. They keep their own copies.",
+            "Every synced item is deleted from this PC and from your other devices, and won't come back. A device with an older ClipLink keeps its own copies.",
             "Clear");
         if (!confirmed) return;
         host.Engine.ClearHistory();

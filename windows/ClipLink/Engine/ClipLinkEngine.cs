@@ -109,6 +109,12 @@ public sealed partial class ClipLinkEngine : IDisposable
     private volatile bool storesLoaded;
 
     private readonly FileTransferState fileTransferState = new();
+    // What version 2 connections have been asked for and not answered, and
+    // which keys are being asked where - see SyncRequests. askGate: one
+    // connection's asks at a time, so the queue's order is the order they are
+    // written in (AskForMissing).
+    private readonly SyncRequests syncRequests = new();
+    private readonly object askGate = new();
     private readonly PairingState pairingState = new();
     private readonly ConcurrentDictionary<string, PeerConnection> connectionsByDeviceId = new();
     // In-flight dial reservations, keyed by the peer's device id. Unlike
@@ -548,7 +554,8 @@ public sealed partial class ClipLinkEngine : IDisposable
     }
 
     // Untrusted devices drop off the list by time alone (no beacon for
-    // DiscoveredListingWindow), with nothing else happening to notice it.
+    // DiscoveredListingWindow), with nothing else happening to notice it. The
+    // same beat finds the sync requests that nobody answered.
     private async Task DevicesRefreshLoop(CancellationToken token)
     {
         while (!token.IsCancellationRequested)
@@ -562,6 +569,14 @@ public sealed partial class ClipLinkEngine : IDisposable
                 return;
             }
             NotifyDevicesChanged();
+            try
+            {
+                ExpireSyncRequests();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[sync] couldn't drop overdue requests: {ex.GetType().Name}: {ex.Message}");
+            }
         }
     }
 

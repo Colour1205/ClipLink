@@ -538,16 +538,18 @@ public final class HistoryStore {
     /// whether to apply it - saying true for a duplicate would bounce the
     /// same item between peers forever.
     @discardableResult
-    public func add(_ entry: ClipboardEntry) -> Bool {
-        !add(contentsOf: [entry]).isEmpty
+    public func add(_ entry: ClipboardEntry, protecting: Set<String> = []) -> Bool {
+        !add(contentsOf: [entry], protecting: protecting).isEmpty
     }
 
     /// Adds every entry not already present (by identity, also within the
     /// batch), trims once and saves once. Returns the new entries that are
     /// still in history after trimming - one evicted straight away by the
-    /// 25-item cap isn't "new" in any useful sense.
+    /// 25-item cap isn't "new" in any useful sense. `protecting` names entries
+    /// (by identity) the trim must spare while any other one can go instead: the
+    /// item a reconnect put on the clipboard, which may be older than the rest.
     @discardableResult
-    public func add(contentsOf batch: [ClipboardEntry]) -> [ClipboardEntry] {
+    public func add(contentsOf batch: [ClipboardEntry], protecting: Set<String> = []) -> [ClipboardEntry] {
         mutate {
             var known = Set(entries.map(Self.identity(of:)))
             var added: [ClipboardEntry] = []
@@ -556,7 +558,7 @@ public final class HistoryStore {
                 added.append(entry)
             }
             guard !added.isEmpty else { return ([], false) }
-            trim()
+            trim(protecting: protecting)
             let survivors = Set(entries.map(Self.identity(of:)))
             return (added.filter { survivors.contains(Self.identity(of: $0)) }, true)
         }
@@ -567,6 +569,18 @@ public final class HistoryStore {
             guard let index = entries.firstIndex(where: { Self.identity(of: $0) == identity }) else { return ((), false) }
             let removed = entries.remove(at: index)
             releaseBlobIfUnreferenced(removed)
+            return ((), true)
+        }
+    }
+
+    /// Several entries in one write.
+    public func remove(identities: Set<String>) {
+        guard !identities.isEmpty else { return }
+        mutate {
+            let removed = entries.filter { identities.contains(Self.identity(of: $0)) }
+            guard !removed.isEmpty else { return ((), false) }
+            entries.removeAll { identities.contains(Self.identity(of: $0)) }
+            removed.forEach(releaseBlobIfUnreferenced)
             return ((), true)
         }
     }
@@ -587,13 +601,16 @@ public final class HistoryStore {
 
     public var newest: ClipboardEntry? { newestFirst.first }
 
-    private func trim() {
+    /// Drops the oldest entries by timestamp down to the cap - but not the
+    /// protected ones, unless nothing else is left.
+    private func trim(protecting: Set<String> = []) {
         while entries.count > Wire.historyCap {
-            var oldest = 0
-            for i in 1..<entries.count where DotNetTimestamp.isEarlier(entries[i].timestamp, than: entries[oldest].timestamp) {
+            var oldest: Int?
+            for i in entries.indices where !protecting.contains(Self.identity(of: entries[i])) {
+                if let current = oldest, !DotNetTimestamp.isEarlier(entries[i].timestamp, than: entries[current].timestamp) { continue }
                 oldest = i
             }
-            releaseBlobIfUnreferenced(entries.remove(at: oldest))
+            releaseBlobIfUnreferenced(entries.remove(at: oldest ?? 0))
         }
     }
 
@@ -615,10 +632,12 @@ public final class HistoryStore {
 
 // MARK: - Deleted-entries store
 
-/// Tombstones for items the user deleted or cleared on this device, so a
-/// peer - which resends its whole history on every connect - can't bring
-/// them back. Local only: nothing about a deletion goes on the wire. Windows
-/// keeps the same list in deleted{label}.json. Capped, oldest dropped first.
+/// Tombstones for items the user deleted or cleared on this device, or that a
+/// version 2 peer told us it deleted, so no peer - an older one resends its
+/// whole history on every connect - can bring them back. They are what the
+/// history_head's `Deleted` list is made of; a deletion is also sent to the
+/// version 2 peers that are connected (`delete`). Windows keeps the same list in
+/// deleted{label}.json. Capped, oldest dropped first.
 public final class DeletedStore {
     public static let cap = 2000
 
@@ -674,6 +693,35 @@ public final class DeletedStore {
         if file.stamp() != stamp { reload() }
         guard !keys.isEmpty else { return entries }
         return entries.filter { !keys.contains(Self.key(of: $0)) }
+    }
+
+    /// The latest `limit` tombstone keys, most recently deleted first.
+    public func recentKeys(limit: Int) -> [String] {
+        if file.stamp() != stamp { reload() }
+        return tombstones.suffix(limit).reversed().map(\.key)
+    }
+
+    /// Keys a peer deleted, oldest deletion first (so the order here stays the
+    /// order they happened in). Unlike `add`, one already remembered keeps its
+    /// place: a peer's list must not make an old tombstone look new.
+    public func addRemote(keys: [String]) {
+        lock.withLock {
+            if file.stamp() != stamp { load() }
+            var seen = Set(tombstones.map(\.key))
+            let now = Int64((Date().timeIntervalSince1970 * 1000).rounded())
+            var changed = false
+            for key in keys where !key.isEmpty && seen.insert(key).inserted {
+                tombstones.append(Tombstone(key: key, deletedAt: now))
+                changed = true
+            }
+            guard changed else { return }
+            if tombstones.count > Self.cap {
+                tombstones.removeFirst(tombstones.count - Self.cap)
+            }
+            self.keys = Set(tombstones.map(\.key))
+            save()
+            stamp = file.stamp()
+        }
     }
 
     /// Remembers these entries as deleted now. One deleted again moves up to

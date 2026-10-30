@@ -19,12 +19,13 @@ import { PassphraseKeyStore } from '../identity/PassphraseKeyStore';
 import { deviceFingerprint, normalizeDeviceName } from '../identity/DeviceName';
 import * as AesGcm from '../crypto/AesGcm';
 import { LineFramer } from './LineFramer';
+import { PROTOCOL_VERSION, negotiatedProtocol, peerProtocolOf } from './SyncProtocol';
 
 const base64Helper = new util.Base64Helper();
 const decoder = util.TextDecoder.create('utf-8');
 const CARRIAGE_RETURN = 13;
 
-interface HandshakeMessage {
+export interface HandshakeMessage {
   EphemeralPublicKey: string;
   IdentityPublicKey: string;
   Signature: string;
@@ -38,6 +39,12 @@ interface HandshakeMessage {
   // Optional - the sender's display name (see DeviceName.ets), sent whenever
   // it's known. Older builds neither send nor read it.
   DeviceName?: string;
+  // Optional - the sync protocol the sender speaks (see SyncProtocol.ets).
+  // Absent means 1: every build before sync v2. A connection speaks v2 only
+  // when both sides send 2 or more. Like DeviceName, an older build's parser
+  // just skips it. It is not signed (the signature covers only the ephemeral
+  // key): a man in the middle who strips it only forces v1, the safe fallback.
+  Protocol?: number;
 }
 
 // The handshake is the one plaintext line this side writes, and DeviceName is
@@ -52,6 +59,11 @@ function asciiJson(json: string): string {
     out += code < 0x80 ? json.charAt(i) : `\\u${code.toString(16).padStart(4, '0')}`;
   }
   return out;
+}
+
+// The line this side writes as its half of the handshake.
+export function handshakeLine(handshake: HandshakeMessage): string {
+  return asciiJson(JSON.stringify(handshake));
 }
 
 // What the other side did right after a completed handshake - see
@@ -456,6 +468,7 @@ export function nonceKey(packed: Uint8Array): string | null {
 export class PeerConnection {
   private messageCallback: ((message: string) => void) | null = null;
   private disconnectedCallback: (() => void) | null = null;
+  private tickCallback: (() => void) | null = null;
   private channel: TcpLineChannel;
   private sessionKey: Uint8Array;
   private lastActivityAt: number = Date.now();
@@ -478,6 +491,9 @@ export class PeerConnection {
   // (usable) DeviceName - e.g. an older build. Fine to show right away, but
   // not to store until onSessionProven.
   public readonly peerName: string | null;
+  // The sync protocol the peer's handshake says it speaks: 1 when it says
+  // nothing (an older build), see SyncProtocol.peerProtocolOf.
+  public readonly peerProtocol: number;
   // Set by the first line that decrypts - see onSessionProven.
   private sessionProven: boolean = false;
   private sessionProvenCallbacks: Array<() => void> = [];
@@ -494,13 +510,19 @@ export class PeerConnection {
   // ping. listenLoop refuses such a line instead. Keyed by nonceKey.
   private sentNonces: Set<string> | null = new Set<string>();
 
-  private constructor(channel: TcpLineChannel, sessionKey: Uint8Array, peerDeviceId: string, wasAlreadyTrusted: boolean, newlyTrustedViaPassphrase: boolean, peerName: string | null) {
+  private constructor(channel: TcpLineChannel, sessionKey: Uint8Array, peerDeviceId: string, wasAlreadyTrusted: boolean, newlyTrustedViaPassphrase: boolean, peerName: string | null, peerProtocol: number) {
     this.channel = channel;
     this.sessionKey = sessionKey;
     this.peerDeviceId = peerDeviceId;
     this.wasAlreadyTrusted = wasAlreadyTrusted;
     this.newlyTrustedViaPassphrase = newlyTrustedViaPassphrase;
     this.peerName = peerName;
+    this.peerProtocol = peerProtocol;
+  }
+
+  // The protocol this connection speaks: 2 only if both sides sent 2 or more.
+  get protocol(): number {
+    return negotiatedProtocol(this.peerProtocol);
   }
 
   // An untrusted peer's handshake completes once its signature verifies, so
@@ -545,8 +567,9 @@ export class PeerConnection {
         Signature: base64Helper.encodeToStringSync(mySignature),
         PassphraseProof: myProof,
         DeviceName: ownName !== null ? (normalizeDeviceName(ownName) ?? undefined) : undefined,
+        Protocol: PROTOCOL_VERSION,
       };
-      await channel.writeLine(asciiJson(JSON.stringify(myHandshake)));
+      await channel.writeLine(handshakeLine(myHandshake));
 
       const theirLineBytes = await channel.readLineWithin(HANDSHAKE_TIMEOUT_MS);
       if (theirLineBytes === null) {
@@ -612,7 +635,8 @@ export class PeerConnection {
       // Absent, null, empty or not a string: unknown.
       const sentName: string | undefined = theirHandshake.DeviceName;
       const theirName: string | null = typeof sentName === 'string' ? normalizeDeviceName(sentName) : null;
-      return new PeerConnection(channel, sessionKey, theirHandshake.IdentityPublicKey, effectivelyTrusted, passphraseVerified, theirName);
+      return new PeerConnection(channel, sessionKey, theirHandshake.IdentityPublicKey, effectivelyTrusted, passphraseVerified, theirName,
+        peerProtocolOf(theirHandshake.Protocol));
     } catch (e) {
       return null;
     }
@@ -635,6 +659,13 @@ export class PeerConnection {
 
   onDisconnected(callback: () => void): void {
     this.disconnectedCallback = callback;
+  }
+
+  // Called with every heartbeat tick (every HEARTBEAT_INTERVAL_MS while the
+  // connection is up), for checks that need a clock but not a timer of their
+  // own - SyncManager's request timeouts.
+  onTick(callback: () => void): void {
+    this.tickCallback = callback;
   }
 
   // Called once, when the first envelope on this connection (data or
@@ -743,6 +774,11 @@ export class PeerConnection {
     void this.send(PING_SENTINEL).catch(() => { /* as below */ });
     this.heartbeatTimerId = setInterval(() => {
       void this.send(PING_SENTINEL).catch(() => { /* a send failure will also surface via the read loop dying */ });
+      try {
+        this.tickCallback?.();
+      } catch (e) {
+        // a listener's failure must never stop the heartbeat
+      }
       if (Date.now() - this.lastActivityAt > HEARTBEAT_TIMEOUT_MS) {
         // Nothing at all (ping or real data) for HEARTBEAT_TIMEOUT_MS -
         // the peer is gone even though TCP itself hasn't noticed yet.

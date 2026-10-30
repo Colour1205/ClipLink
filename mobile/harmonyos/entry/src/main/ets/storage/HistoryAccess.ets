@@ -11,7 +11,7 @@ import { ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
 import { FileStore, isEmptyFile, isValidFileHash } from './FileStore';
 import { FilePayload } from './FilePayload';
 import { DeletedEntries, entryKey } from './DeletedEntries';
-import { MergeResult, mergeBatch } from './HistoryBatch';
+import { MergeResult, mergeBatch, trimOldest } from './HistoryBatch';
 
 const PREFERENCES_NAME = 'cliplink_history';
 const HISTORY_KEY = 'entries';
@@ -32,6 +32,11 @@ export class HistoryAccess {
   // items in turn, re-parsed it 25 times (0.4 s, measured) the moment the
   // peer connected.
   private cached: ClipboardEntry[] | null = null;
+  // The key of the item the last sync put on the clipboard and on top of the
+  // list: the trim does not drop it while it is set (the oldest other item
+  // goes instead). Memory only: it ends with the app, and when a newer item
+  // arrives (a live one, or another sync's).
+  private protectedKey: string | null = null;
 
   constructor(fileStore: FileStore) {
     this.fileStore = fileStore;
@@ -84,6 +89,10 @@ export class HistoryAccess {
       && canonicalTimestamp(a.Timestamp) === canonicalTimestamp(b.Timestamp) && a.Signature === b.Signature;
   }
 
+  private isProtected(entry: ClipboardEntry): boolean {
+    return this.protectedKey !== null && entryKey(entry) === this.protectedKey;
+  }
+
   // Deleted or cleared on this device (see DeletedEntries.ets).
   isDeleted(context: common.UIAbilityContext, entry: ClipboardEntry): Promise<boolean> {
     return this.deleted.contains(context, entryKey(entry));
@@ -104,6 +113,9 @@ export class HistoryAccess {
         return false;
       }
       entries.push(entry);
+      // A live item is the newest arrival: what an earlier sync spared is
+      // trimmed by the normal rule from here on.
+      this.protectedKey = null;
       await this.trimToLimit(entries);
       await this.saveHistory(context, entries);
       return true;
@@ -116,8 +128,14 @@ export class HistoryAccess {
   // rules as addToHistory decide which are new - a duplicate, or one deleted
   // here, is not (checked in here too, for the same reason). `added` is only
   // what is new AND still in the history after the trim: an entry stored
-  // just to be evicted again is not one to show or apply.
-  addBatch(context: common.UIAbilityContext, candidates: ClipboardEntry[]): Promise<MergeResult> {
+  // just to be evicted again is not one to show or apply. With `newFront` the
+  // newest of the new entries is the item this sync puts on the clipboard: the
+  // trim spares it, even when it is the oldest of all, until a newer item
+  // arrives (see mergeBatch and protectedKey). `frontOk` is asked once, with that
+  // newest new entry, before the trim: only if it says yes is the entry the
+  // front (the result's `front`) and spared.
+  addBatch(context: common.UIAbilityContext, candidates: ClipboardEntry[], newFront: boolean = false,
+    frontOk: (entry: ClipboardEntry) => boolean = (entry: ClipboardEntry): boolean => true): Promise<MergeResult> {
     return this.serialized(async (): Promise<MergeResult> => {
       const gone: Set<string> = new Set<string>();
       for (const entry of candidates) {
@@ -126,8 +144,10 @@ export class HistoryAccess {
       }
       const entries = await this.getHistory(context);
       const result: MergeResult = mergeBatch(entries, candidates, (a: ClipboardEntry, b: ClipboardEntry) => this.isSameEntry(a, b),
-        (entry: ClipboardEntry) => gone.has(entryKey(entry)), MAX_HISTORY_ITEMS);
+        (entry: ClipboardEntry) => gone.has(entryKey(entry)), MAX_HISTORY_ITEMS, newFront,
+        (entry: ClipboardEntry) => this.isProtected(entry), frontOk);
       if (result.added.length === 0 && result.evicted.length === 0) return result;
+      if (result.front !== null) this.protectedKey = entryKey(result.front);
       await this.saveHistory(context, entries);
       for (const evicted of result.evicted) {
         this.releaseBlobIfUnused(evicted, entries);
@@ -151,17 +171,11 @@ export class HistoryAccess {
 
   // Oldest-first eviction once over the cap - also deletes the backing
   // FileStore blob for evicted file-type entries no remaining entry shares,
-  // same as Windows. Compared
-  // in canonical form, which is fixed-width, so text order is time order.
+  // same as Windows. Compared in canonical form, which is fixed-width, so text
+  // order is time order. The entry a sync spared (protectedKey) is not the one
+  // that goes.
   private async trimToLimit(entries: ClipboardEntry[]): Promise<void> {
-    while (entries.length > MAX_HISTORY_ITEMS) {
-      let oldestIndex = 0;
-      for (let i = 1; i < entries.length; i++) {
-        if (canonicalTimestamp(entries[i].Timestamp) < canonicalTimestamp(entries[oldestIndex].Timestamp)) {
-          oldestIndex = i;
-        }
-      }
-      const oldest = entries.splice(oldestIndex, 1)[0];
+    for (const oldest of trimOldest(entries, MAX_HISTORY_ITEMS, (entry: ClipboardEntry) => this.isProtected(entry))) {
       this.releaseBlobIfUnused(oldest, entries);
     }
   }
@@ -206,18 +220,33 @@ export class HistoryAccess {
   // so a peer that still has it can't send it back. Its file blob goes too
   // unless an entry that stays still points at the same bytes.
   deleteEntry(context: common.UIAbilityContext, key: string): Promise<void> {
+    return this.deleteEntries(context, [key]);
+  }
+
+  // deleteEntry for several keys at once (a peer's delete, or the tombstones in
+  // its history_head): every key is tombstoned, whether this device has the
+  // entry or not, and the entries it has go in one write.
+  deleteEntries(context: common.UIAbilityContext, keys: string[]): Promise<void> {
     return this.serialized(async (): Promise<void> => {
-      await this.deleted.add(context, [key]);
+      await this.deleted.add(context, keys);
+      const gone: Set<string> = new Set<string>(keys);
+      if (this.protectedKey !== null && gone.has(this.protectedKey)) this.protectedKey = null;
       const entries = await this.getHistory(context);
-      const kept = entries.filter(e => entryKey(e) !== key);
+      const kept = entries.filter(e => !gone.has(entryKey(e)));
       if (kept.length === entries.length) return;
       await this.saveHistory(context, kept);
       for (const entry of entries) {
-        if (entryKey(entry) === key) {
+        if (gone.has(entryKey(entry))) {
           this.releaseBlobIfUnused(entry, kept);
         }
       }
     });
+  }
+
+  // The tombstones a v2 history_head lists: the keys of the `limit` most
+  // recent, the most recently deleted first.
+  recentDeleted(context: common.UIAbilityContext, limit: number): Promise<string[]> {
+    return this.deleted.recent(context, limit);
   }
 
   // For bytes that finished arriving after the entry waiting on them was
@@ -261,14 +290,18 @@ export class HistoryAccess {
   // half-written .tmp an in-progress transfer still has open. Every cleared
   // entry is tombstoned first, plus alsoDeletedKeys (entries the caller knows
   // of that aren't in the capped history any more), so peers can't refill it.
-  clearHistory(context: common.UIAbilityContext, alsoDeletedKeys: string[]): Promise<void> {
-    return this.serialized(async (): Promise<void> => {
+  // Returns every key tombstoned, for the delete message v2 peers get.
+  clearHistory(context: common.UIAbilityContext, alsoDeletedKeys: string[]): Promise<string[]> {
+    return this.serialized(async (): Promise<string[]> => {
       const entries = await this.getHistory(context);
-      await this.deleted.add(context, [...entries.map(e => entryKey(e)), ...alsoDeletedKeys]);
+      const keys: string[] = Array.from(new Set<string>([...entries.map(e => entryKey(e)), ...alsoDeletedKeys]));
+      await this.deleted.add(context, keys);
       for (const entry of entries) {
         this.releaseBlob(entry);
       }
+      this.protectedKey = null;
       await this.saveHistory(context, []);
+      return keys;
     });
   }
 }

@@ -284,10 +284,7 @@ fun ConfirmDeleteItemDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
         onDismissRequest = onDismiss,
         title = { Text("Delete this item?") },
         text = {
-            Text(
-                "It's deleted from this phone, and won't come back from your other devices. " +
-                    "They keep their own copies.",
-            )
+            Text(DeleteWording.ITEM_BODY)
         },
         confirmButton = {
             TextButton(onClick = onConfirm) { Text("Delete") }

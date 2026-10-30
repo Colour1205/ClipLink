@@ -1,19 +1,21 @@
 import { describe, it, expect } from '@ohos/hypium';
 import {
   BatchGroupTracker, BatchMember, BatchPlan, StackMotion, StackRow, buildRows, dissolveGroup, dragProgress, hiddenCount, layerCount,
-  placeBatch, revealAnimates, settleGroup, shouldExpand, staggerDelayMs
+  placeBatch, placeQuiet, revealAnimates, settleGroup, shouldExpand, staggerDelayMs
 } from '../main/ets/stack/SyncedRows';
 
 // A list item as grouping sees it. `minute` is its time (later is newer).
 class Item implements BatchMember {
   id: string;
   groupId: string;
+  blockId: string;
   stamp: string;
   expected: number;
 
   constructor(id: string, minute: number, groupId: string = '', expected: number = 0) {
     this.id = id;
     this.groupId = groupId;
+    this.blockId = groupId;
     this.stamp = `2026-01-01T10:${minute < 10 ? '0' : ''}${minute}:00.0000000Z`;
     this.expected = expected;
   }
@@ -21,6 +23,7 @@ class Item implements BatchMember {
 
 function retag(item: Item, groupId: string, expected: number): Item {
   const copy: Item = new Item(item.id, 0, groupId, expected);
+  copy.blockId = item.blockId; // a block outlives its group
   copy.stamp = item.stamp;
   return copy;
 }
@@ -49,20 +52,52 @@ export default function syncedRowsTest() {
       expect(groups.next(3) !== groups.next(3)).assertTrue();
     });
 
-    it('theNewestOfABatchGoesToTheTopAndTheRestKeepTimelineOrder', 0, () => {
+    it('aBatchGoesToTheTopAsOneBlockNewestFirstAndTheRestKeepTheirOrder', 0, () => {
       const list: Item[] = [new Item('p', 50), new Item('q', 40), new Item('r', 10)];
       const fresh: Item[] = [new Item('a', 20, 'g'), new Item('b', 45, 'g'), new Item('c', 30, 'g')];
       const placed: Item[] = placeBatch<Item>(list, fresh, 50);
-      // b (the front of the stack) is on top; c and a sit where the time puts
-      // them, and p, q, r keep their order.
-      expect(ids(placed)).assertEqual('b,p,q,c,a,r');
+      // b (the front of the stack) is on top, c and a directly below it
+      // whatever the time says about p and q, and p, q, r keep their order.
+      expect(ids(placed)).assertEqual('b,c,a,p,q,r');
       expect(rows(placed)).assertEqual('b[+2] p q r');
     });
 
     it('anItemOlderThanWhatIsListedIsNotBuried', 0, () => {
       const list: Item[] = [new Item('local', 90), new Item('older', 50)];
       expect(ids(placeBatch<Item>(list, [new Item('x', 5)], 50))).assertEqual('x,local,older');
-      expect(ids(placeBatch<Item>(list, [new Item('x', 5, 'g'), new Item('y', 6, 'g')], 50))).assertEqual('y,local,older,x');
+      expect(ids(placeBatch<Item>(list, [new Item('x', 5, 'g'), new Item('y', 6, 'g')], 50))).assertEqual('y,x,local,older');
+    });
+
+    it('anOpenedStackKeepsItsItemsTogetherRightBelowTheFrontCard', 0, () => {
+      // The front is older than the live item and the old ones below: it is
+      // still on top, and so are its members once the stack is opened.
+      const list: Item[] = [new Item('live', 90), new Item('old', 50)];
+      const placed: Item[] = placeBatch<Item>(list, [new Item('c', 20, 'g'), new Item('b', 10, 'g'), new Item('a', 15, 'g')], 50);
+      expect(ids(placed)).assertEqual('c,a,b,live,old');
+      const opened: Item[] = dissolveGroup<Item>(placed, 'g', retag);
+      expect(rows(opened)).assertEqual('c a b live old');
+      expect(ids(opened)).assertEqual('c,a,b,live,old');
+    });
+
+    it('aLaterBlockOrLiveItemGoesAboveAnEarlierBlock', 0, () => {
+      let items: Item[] = placeBatch<Item>([new Item('old', 5)], [new Item('b', 20, 'g1'), new Item('a', 10, 'g1')], 50);
+      items = placeBatch<Item>(items, [new Item('d', 3, 'g2'), new Item('c', 2, 'g2')], 50);
+      expect(ids(items)).assertEqual('d,c,b,a,old');
+      // A live item is a block of one: on top, whatever its time.
+      items = placeBatch<Item>(items, [new Item('live', 1)], 50);
+      expect(ids(items)).assertEqual('live,d,c,b,a,old');
+    });
+
+    it('membersThatArriveLaterJoinTheBlockNewestFirstEvenAfterItWasOpened', 0, () => {
+      let items: Item[] = placeBatch<Item>([new Item('old', 5)], [new Item('f', 40, 'g', 4), new Item('d', 30, 'g')], 50);
+      items = placeBatch<Item>(items, [new Item('live', 99)], 50);
+      items = dissolveGroup<Item>(items, 'g', retag);
+      // The rest of the sync comes after the stack was opened: they are not in
+      // the group any more, but they are in the block.
+      const rest: Item[] = [new Item('a', 10), new Item('e', 35), new Item('b', 20)];
+      for (const item of rest) item.blockId = 'g';
+      items = placeBatch<Item>(items, rest, 50);
+      expect(ids(items)).assertEqual('live,f,e,d,b,a,old');
     });
 
     it('theBatchAfterAHeadJoinsItsGroupByTimeBelowTheFront', 0, () => {
@@ -83,7 +118,7 @@ export default function syncedRowsTest() {
 
     it('anItemAlreadyListedIsReplacedNotRepeated', 0, () => {
       const placed: Item[] = placeBatch<Item>([new Item('a', 1), new Item('z', 9)], [new Item('a', 1, 'g'), new Item('b', 2, 'g')], 50);
-      expect(ids(placed)).assertEqual('b,z,a');
+      expect(ids(placed)).assertEqual('b,a,z');
     });
 
     it('theListKeepsAtMostTheCap', 0, () => {
@@ -101,6 +136,26 @@ export default function syncedRowsTest() {
       const withoutFront: Item[] = items.filter((i: Item) => i.id !== 'c');
       expect(rows(withoutFront)).assertEqual('b[+1] z');
       expect(buildRows<Item>(withoutFront)[0].front.id).assertEqual('b');
+    });
+
+    it('aPeersDeleteTakesItemsOutOfAStackLikeALocalOne', 0, () => {
+      const items: Item[] = [new Item('d', 4, 'g'), new Item('c', 3, 'g'), new Item('b', 2, 'g'), new Item('a', 1, 'g'), new Item('z', 0)];
+      const gone: Set<string> = new Set<string>(['d', 'b', 'never-listed']);
+      const rest: Item[] = items.filter((i: Item) => !gone.has(i.id));
+      // The front went: the next newest is the front, and the stack shrank.
+      expect(rows(rest)).assertEqual('c[+1] z');
+      expect(rows(rest.filter((i: Item) => i.id !== 'a'))).assertEqual('c z'); // one left: a card
+    });
+
+    it('anOpenedBlockStaysTogetherWhenMembersAreDeleted', 0, () => {
+      const placed: Item[] = placeBatch<Item>([new Item('old', 1)], [new Item('c', 30, 'g'), new Item('b', 20, 'g'), new Item('a', 10, 'g')], 50);
+      const opened: Item[] = dissolveGroup<Item>(placed, 'g', retag);
+      const rest: Item[] = opened.filter((i: Item) => i.id !== 'b');
+      expect(ids(rest)).assertEqual('c,a,old');
+      // A member that arrives later still joins the block that is left.
+      const later: Item = new Item('x', 25);
+      later.blockId = 'g';
+      expect(ids(placeBatch<Item>(rest, [later], 50))).assertEqual('c,x,a,old');
     });
 
     it('oneMemberLeftBecomesANormalCardAndNoneLeftIsGone', 0, () => {
@@ -226,6 +281,82 @@ export default function syncedRowsTest() {
       expect(g1 !== g2).assertTrue();
       expect(groups.batchArrived('two', 2).groupId).assertEqual(g2);
       expect(groups.batchArrived('one', 2).groupId).assertEqual(g1);
+    });
+
+    it('aSyncFrontMakesAGroupCountingEverythingAskedFor', 0, () => {
+      const groups: BatchGroupTracker = new BatchGroupTracker();
+      const plan: BatchPlan = groups.frontArrived('link', 5, 'c', 1, false);
+      expect(plan.groupId !== '').assertTrue();
+      expect(plan.blockId).assertEqual(plan.groupId);
+      expect(plan.settleId).assertEqual('');
+      const items: Item[] = [new Item('c', 9, plan.groupId, 5), new Item('old', 1)];
+      expect(rows(items)).assertEqual('c[+4] old');
+    });
+
+    it('theNextAnswersJoinTheSyncGroupAndTheLastOneSettlesIt', 0, () => {
+      const groups: BatchGroupTracker = new BatchGroupTracker();
+      const first: BatchPlan = groups.frontArrived('link', 4, 'c', 1, false);
+      const second: BatchPlan = groups.answerArrived('link', 2, false);
+      expect(second.groupId).assertEqual(first.groupId);
+      expect(second.settleId).assertEqual('');
+      const third: BatchPlan = groups.answerArrived('link', 1, true);
+      expect(third.groupId).assertEqual(first.groupId);
+      expect(third.settleId).assertEqual(first.groupId);
+      let items: Item[] = [new Item('c', 9, first.groupId, 4)];
+      items = placeBatch<Item>(items, [new Item('b', 8, second.groupId), new Item('a', 7, second.groupId)], 50);
+      items = placeBatch<Item>(items, [new Item('z', 3, third.groupId)], 50);
+      items = settleGroup<Item>(items, third.settleId, retag);
+      expect(rows(items)).assertEqual('c[+3]');
+      expect(ids(items)).assertEqual('c,b,a,z');
+    });
+
+    it('aSyncWhoseOnlyAnswerIsTheFrontSettlesAtOnceAndOneItemIsACard', 0, () => {
+      const groups: BatchGroupTracker = new BatchGroupTracker();
+      const plan: BatchPlan = groups.frontArrived('link', 3, 'c', 1, true);
+      expect(plan.settleId).assertEqual(plan.groupId);
+      const items: Item[] = settleGroup<Item>([new Item('c', 9, plan.groupId, 3)], plan.settleId, retag);
+      expect(rows(items)).assertEqual('c');
+      expect(groups.headSettled('link')).assertEqual(''); // nothing is left waiting
+    });
+
+    it('aSyncOfOneItemIsJustACard', 0, () => {
+      const groups: BatchGroupTracker = new BatchGroupTracker();
+      const plan: BatchPlan = groups.frontArrived('link', 1, 'c', 1, true);
+      expect(plan.groupId).assertEqual('');
+      expect(plan.blockId).assertEqual('');
+    });
+
+    it('aSyncStopsWaitingWhenItsConnectionIsSettled', 0, () => {
+      const groups: BatchGroupTracker = new BatchGroupTracker();
+      const plan: BatchPlan = groups.frontArrived('link', 4, 'c', 1, false);
+      expect(groups.headSettled('link')).assertEqual(plan.groupId);
+      // The answer that still comes finds no group: a block of its own, if it
+      // is enough for one.
+      expect(groups.answerArrived('link', 1, true).groupId).assertEqual('');
+    });
+
+    it('answersAfterTheGroupWasOpenedStayInItsBlockButNotInTheGroup', 0, () => {
+      const groups: BatchGroupTracker = new BatchGroupTracker();
+      const plan: BatchPlan = groups.frontArrived('link', 4, 'c', 1, false);
+      groups.opened(plan.groupId);
+      const next: BatchPlan = groups.answerArrived('link', 3, true);
+      expect(next.groupId).assertEqual('');
+      expect(next.blockId).assertEqual(plan.blockId);
+      expect(next.settleId).assertEqual('');
+    });
+
+    it('quietItemsGoByTimeBelowTheBlocksAndTheNewerCardsAndMakeNoBlock', 0, () => {
+      // A block (its front is older than the cards below it), then the timeline.
+      const list: Item[] = [new Item('live', 50), new Item('front', 10, 'g1'), new Item('member', 9, 'g1'), new Item('mid', 30), new Item('old', 5)];
+      const placed: Item[] = placeQuiet<Item>(list, [new Item('q-new', 40), new Item('q-mid', 20), new Item('q-old', 1)], 50);
+      expect(ids(placed)).assertEqual('live,front,member,q-new,mid,q-mid,old,q-old');
+      expect(placed.filter((i: Item) => i.id.startsWith('q-') && (i.groupId !== '' || i.blockId !== '')).length).assertEqual(0);
+    });
+
+    it('quietItemsReplaceTheSameIdAndRespectTheCap', 0, () => {
+      const list: Item[] = [new Item('a', 30), new Item('b', 20), new Item('c', 10)];
+      const placed: Item[] = placeQuiet<Item>(list, [new Item('b', 20), new Item('z', 25)], 3);
+      expect(ids(placed)).assertEqual('a,z,b');
     });
 
     it('dragProgressFollowsTheFingerOver120vp', 0, () => {

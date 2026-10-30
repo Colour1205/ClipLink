@@ -523,7 +523,7 @@ struct MeView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Removes every synced item and any files saved for them from this iPhone. Paired devices keep their own copies, but won't send these back.")
+                Text("Removes every synced item and any files saved for them from this iPhone and from your paired devices, and they won't come back. A device with an older ClipLink keeps its copies.")
             }
             .meRow(transparency: transparency)
         } header: {

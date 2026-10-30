@@ -27,6 +27,8 @@ extension SyncEngine {
                 return
             }
             if history.add(verified) {
+                // A newer block than any before it: its own, of one.
+                batchGroups.registerLive(HistoryStore.identity(of: verified))
                 received(verified, apply: true)
             }
             schedulePublish()
@@ -35,6 +37,15 @@ extension SyncEngine {
             // The small first part of a history_batch: for the same reason, a
             // short-lived sender (the Share extension) has no use for it.
             guard !config.sendOnly else { return }
+            if link.speaksV2 {
+                // Keys, times and deletions - a `Newest` in it would be ignored.
+                guard let head = HistoryHeadV2.parse(envelope.payload) else {
+                    log("received invalid message from peer (bad history_head JSON)")
+                    return
+                }
+                handleHistoryHeadV2(head, from: link)
+                return
+            }
             // Every real peer lists at most its 25-entry history.
             guard let head = HistoryHead.parse(envelope.payload), head.keys.count <= 4 * Wire.historyCap else {
                 log("received invalid message from peer (bad history_head JSON)")
@@ -47,16 +58,40 @@ extension SyncEngine {
             guard !config.sendOnly else { return }
             guard let entries = ClipboardEntry.parseList(envelope.payload) else {
                 log("received invalid message from peer (bad history_batch JSON)")
-                finishProvisional(ObjectIdentifier(link))
+                // On version 2 it still answers a request: the next one is waiting.
+                if link.speaksV2 { handleHistoryAnswer([], from: link) } else { finishProvisional(ObjectIdentifier(link)) }
                 return
             }
             // Every real peer sends at most its 25-entry history.
             guard entries.count <= 4 * Wire.historyCap else {
                 log("ignored an oversized history batch (\(entries.count) entries)")
-                finishProvisional(ObjectIdentifier(link))
+                if link.speaksV2 { handleHistoryAnswer([], from: link) } else { finishProvisional(ObjectIdentifier(link)) }
                 return
             }
-            applyHistoryBatch(entries, from: link.peerDeviceId, connection: ObjectIdentifier(link))
+            if link.speaksV2 {
+                handleHistoryAnswer(entries, from: link)
+            } else {
+                applyHistoryBatch(entries, from: link.peerDeviceId, connection: ObjectIdentifier(link))
+            }
+
+        case Wire.MessageType.historyRequest:
+            // Only a version 2 peer asks. Whatever it sent, it gets an answer:
+            // it is waiting for one to every request.
+            guard link.speaksV2 else {
+                log("ignored a history_request on a version 1 connection")
+                return
+            }
+            answerHistoryRequest(KeysMessage.parse(envelope.payload) ?? KeysMessage(keys: []), to: link)
+
+        case Wire.MessageType.delete:
+            // From a trusted device's own session, like everything else here; a
+            // short-lived sender (the Share extension) has no use for it.
+            guard !config.sendOnly, link.speaksV2 else { return }
+            guard let message = KeysMessage.parse(envelope.payload) else {
+                log("received invalid message from peer (bad delete JSON)")
+                return
+            }
+            handleDelete(message)
 
         case Wire.MessageType.fileChunk:
             guard !config.sendOnly else { return }
@@ -152,6 +187,7 @@ extension SyncEngine {
         // A head that follows another one on this connection: the first one's
         // batch is not coming any more.
         let finished = batchGroups.finish(connection: connection)
+        headApplied[connection] = nil
 
         // Counted before the newest entry goes in: the keys that are neither
         // in history nor deleted here. Never more than a history can hold.
@@ -160,12 +196,16 @@ extension SyncEngine {
         let expected = deleted.removingDeletedKeys(head.keys).filter { seen.insert($0).inserted && !have.contains($0) }
         outcome.expectedNew = min(expected.count, Wire.historyCap)
 
-        outcome.newestIsNew = !history.add(contentsOf: [newest]).isEmpty
+        // Its newest entry is C: spared by the trim and put on the clipboard even if
+        // it is older than something we have.
+        let identity = HistoryStore.identity(of: newest)
+        outcome.newestIsNew = !history.add(contentsOf: [newest], protecting: [identity]).isEmpty
         if outcome.newestIsNew {
-            let identity = HistoryStore.identity(of: newest)
             // Remembered in memory only, to stack these items in the Synced list.
             outcome.group = batchGroups.registerProvisional(front: identity, expectedSize: outcome.expectedNew, connection: connection)
-            received(newest, apply: identity == history.newest.map(HistoryStore.identity(of:)))
+            // The batch behind this head has nothing to put on the clipboard.
+            headApplied[connection] = Date()
+            received(newest, apply: true)
         }
         if outcome.newestIsNew || finished { schedulePublish() }
         return outcome
@@ -181,9 +221,10 @@ extension SyncEngine {
     /// here, signature, trusted sender, already known), then all the new ones
     /// go into history in one write and reach the UI in one snapshot. The side
     /// effects (clipboard, notification) happen once per batch, for the newest
-    /// entry only. After a history_head of the same `connection`, the entries it
-    /// added are known and skipped, and the others join its group. Runs on the
-    /// engine queue.
+    /// NEW entry only (C) - even when it is older than something already here.
+    /// After a history_head of the same `connection` that put its newest entry
+    /// there, the batch puts nothing: the entries the head added are known and
+    /// skipped, and the others join its group. Runs on the engine queue.
     @discardableResult
     func applyHistoryBatch(_ entries: [ClipboardEntry], from peerId: String, connection: ObjectIdentifier? = nil) -> HistoryBatchOutcome {
         var outcome = HistoryBatchOutcome()
@@ -194,8 +235,19 @@ extension SyncEngine {
         // A bad entry is skipped on its own; the rest of the batch stands.
         let verified = wanted.compactMap(verifiedAndTrusted)
         outcome.rejected = wanted.count - verified.count
+        // C is the newest new entry - or, when this connection's head already put
+        // its newest entry on the clipboard, that one. Either is spared the trim.
+        var continuing = false
+        if let connection { continuing = headApplied.removeValue(forKey: connection) != nil }
+        let convenience = continuing ? nil : newestNew(in: verified)
+        var protect = Set<String>()
+        if continuing {
+            if let current = batchGroups.convenienceID { protect.insert(current) }
+        } else if let convenience {
+            protect.insert(HistoryStore.identity(of: convenience))
+        }
         // Added in one write, not one full rewrite of history per entry.
-        let added = history.add(contentsOf: verified)
+        let added = history.add(contentsOf: verified, protecting: protect)
         outcome.known = verified.count - added.count
         guard !added.isEmpty else {
             // Nothing more is coming for the stack a head started.
@@ -205,17 +257,25 @@ extension SyncEngine {
 
         outcome.fresh = added.sorted { DotNetTimestamp.isEarlier($1.timestamp, than: $0.timestamp) }
         // Remembered in memory only, to stack these items in the Synced list.
-        outcome.group = batchGroups.registerBatch(outcome.fresh.map(HistoryStore.identity(of:)), connection: connection)
+        let identities = outcome.fresh.map(HistoryStore.identity(of:))
+        if continuing, let connection {
+            // The batch of a head that applied C: its entries join the head's stack
+            // if that still waits, else they stay ordinary cards. Never a new block
+            // (or a new C) for items that did not reach the clipboard.
+            outcome.group = batchGroups.joinSync(identities, connection: connection, last: true)
+        } else {
+            outcome.group = batchGroups.registerBatch(identities, connection: connection)
+        }
 
-        // Apply only the newest new entry, and only if it is the newest
-        // thing we have at all. Every other port applies each new entry in
-        // the sender's order, so the clipboard ends up with whatever came
+        // Apply only the newest new entry (C), even when it is older than
+        // something we have already. The older ports apply each new entry in
+        // the sender's order, so their clipboard ends up with whatever came
         // last - often stale content from hours ago.
-        let newest = history.newest.map(HistoryStore.identity(of:))
+        let applied = convenience.map(HistoryStore.identity(of:))
         // The loop does nothing for text and pictures that are not applied;
         // a file still has to be asked for, so its card can finish.
         for entry in outcome.fresh {
-            received(entry, apply: HistoryStore.identity(of: entry) == newest, quiet: true)
+            received(entry, apply: HistoryStore.identity(of: entry) == applied, quiet: true)
         }
         log("caught up \(outcome.fresh.count) item(s) from \(displayName(for: peerId))")
         schedulePublish()
@@ -654,9 +714,10 @@ extension SyncEngine {
         }
         let json = Envelope(type: Wire.MessageType.entry, payload: entry.jsonString()).jsonString()
         for link in links.values { link.send(json) }
-        // Recorded even with nobody connected: history_batch carries it to
-        // peers the next time they connect.
-        history.add(entry)
+        // Recorded even with nobody connected: a history_batch or head carries it
+        // to peers the next time they connect. Our own copy is a block of one, on
+        // top of the Synced list.
+        if history.add(entry) { batchGroups.registerLive(HistoryStore.identity(of: entry)) }
         log("sent \(type) to \(links.count) peer(s)")
         schedulePublish()
         finish(completion, .sent(type: type, peers: links.count, name: name))

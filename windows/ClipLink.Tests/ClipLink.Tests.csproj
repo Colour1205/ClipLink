@@ -4,7 +4,9 @@
        Windows UI: the updater (ClipLink\Updates) and the engine's beacon codec
        and dial decision (ClipLink\Engine\Networking), and how a history batch is
        applied and shown as a stack (HistoryBatch.cs, BatchGrouping.cs), with the
-       history_head that comes first (HistoryHead.cs, BatchGroups.cs). Run with
+       history_head that comes first (HistoryHead.cs, BatchGroups.cs), and the
+       version 2 sync: handshake, head, requests and where items are placed
+       (HandshakeMessage.cs, KeysMessage.cs, SyncRequests.cs). Run with
        `dotnet test windows\ClipLink.Tests`. ClipLink.csproj is a WinUI exe,
        which a test project can't sensibly reference, so the source files are
        linked in (not copied) instead - which is also why these files must stay
@@ -34,7 +36,10 @@
     <Compile Include="..\ClipLink\Engine\Storage\HistoryBatch.cs" Link="Engine\HistoryBatch.cs" />
     <Compile Include="..\ClipLink\Engine\Storage\HistoryHead.cs" Link="Engine\HistoryHead.cs" />
     <Compile Include="..\ClipLink\Engine\Storage\BatchGroups.cs" Link="Engine\BatchGroups.cs" />
+    <Compile Include="..\ClipLink\Engine\Storage\SyncRequests.cs" Link="Engine\SyncRequests.cs" />
     <Compile Include="..\ClipLink\Engine\Networking\Envelope.cs" Link="Engine\Envelope.cs" />
+    <Compile Include="..\ClipLink\Engine\Networking\HandshakeMessage.cs" Link="Engine\HandshakeMessage.cs" />
+    <Compile Include="..\ClipLink\Engine\Networking\KeysMessage.cs" Link="Engine\KeysMessage.cs" />
     <Compile Include="..\ClipLink\BatchGrouping.cs" Link="BatchGrouping.cs" />
   </ItemGroup>
 

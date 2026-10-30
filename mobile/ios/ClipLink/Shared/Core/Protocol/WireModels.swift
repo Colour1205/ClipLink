@@ -187,6 +187,112 @@ public struct HistoryHead: Equatable {
     }
 }
 
+// MARK: - History head (version 2)
+
+/// The version 2 history_head: `{"Keys": [...], "Times": [...], "Deleted": [...]}`.
+/// `keys` is the key (`DeletedStore.key(of:)`) of every entry of the sender's
+/// history, newest first, at most 25; `times` the same entries' timestamps in
+/// Unix milliseconds, in the same order (it may be missing, or the wrong
+/// length: a receiver then cannot rank the keys by age); `deleted` the sender's
+/// latest tombstone keys, most recently deleted first, at most 500. There is no
+/// `Newest` in it: the peer may already have that entry, and a big one is not
+/// sent twice. Sent on every version 2 connection, even with nothing in it.
+public struct HistoryHeadV2: Equatable {
+    public var keys: [String]
+    public var times: [Int64]
+    public var deleted: [String]
+
+    public init(keys: [String], times: [Int64], deleted: [String]) {
+        self.keys = keys
+        self.times = times
+        self.deleted = deleted
+    }
+
+    /// The head for a history of `newestFirst` (cut to the 25 it holds) and the
+    /// sender's tombstone keys, most recently deleted first.
+    public static func make(newestFirst entries: [ClipboardEntry], deleted: [String]) -> HistoryHeadV2 {
+        let shown = Array(entries.prefix(Wire.historyCap))
+        return HistoryHeadV2(
+            keys: shown.map(DeletedStore.key(of:)),
+            times: shown.map(unixMilliseconds(of:)),
+            deleted: Array(deleted.prefix(Wire.maxHeadDeleted))
+        )
+    }
+
+    /// An entry's timestamp as Unix milliseconds (0 when it does not parse).
+    public static func unixMilliseconds(of entry: ClipboardEntry) -> Int64 {
+        (DotNetTimestamp.epochTicks(entry.timestamp) ?? 0) / 10_000
+    }
+
+    public func jsonString() -> String {
+        let object: [String: Any] = [
+            "Keys": keys,
+            "Times": times.map { NSNumber(value: $0) },
+            "Deleted": deleted,
+        ]
+        return WireJSON.string(object)
+    }
+
+    /// Nil when the payload is not a JSON object. Everything in it is optional,
+    /// and unknown keys (a version 1.5 head's `Newest`) are skipped. A key that
+    /// is not a string, is empty, or is longer than `Wire.maxKeyLength`, is skipped; more
+    /// than 25 keys or 500 deleted ones are cut. `times` is kept only when it was
+    /// as long as `Keys` and held nothing but numbers - otherwise it is empty.
+    public static func parse(_ json: String) -> HistoryHeadV2? {
+        guard let obj = WireJSON.object(json) else { return nil }
+        let rawKeys = (obj["Keys"] as? [Any]) ?? []
+        var rawTimes: [Int64]?
+        if let list = obj["Times"] as? [Any], list.count == rawKeys.count {
+            let numbers = list.compactMap { ($0 as? NSNumber)?.int64Value }
+            if numbers.count == list.count { rawTimes = numbers }
+        }
+        var keys: [String] = []
+        var times: [Int64] = []
+        for (index, raw) in rawKeys.enumerated() {
+            guard keys.count < Wire.historyCap else { break }
+            guard let key = raw as? String, !key.isEmpty, key.count <= Wire.maxKeyLength else { continue }
+            keys.append(key)
+            if let rawTimes { times.append(rawTimes[index]) }
+        }
+        return HistoryHeadV2(keys: keys, times: times, deleted: KeysMessage.validKeys(obj["Deleted"], limit: Wire.maxHeadDeleted))
+    }
+}
+
+/// `{"Keys": [...]}`: the payload of both history_request ("send me these") and
+/// delete ("these were deleted"). At most 100 keys; a sender with more splits
+/// them over several messages.
+public struct KeysMessage: Equatable {
+    public var keys: [String]
+
+    public init(keys: [String]) { self.keys = keys }
+
+    public func jsonString() -> String { WireJSON.string(["Keys": keys]) }
+
+    /// Nil when the payload is not a JSON object. The strings among its keys, the
+    /// first 100 of them; anything else (an empty key, and a key over 2048 characters) is skipped.
+    public static func parse(_ json: String) -> KeysMessage? {
+        guard let obj = WireJSON.object(json) else { return nil }
+        return KeysMessage(keys: validKeys(obj["Keys"], limit: Wire.maxKeysPerMessage))
+    }
+
+    /// `keys` cut into messages of at most 100.
+    public static func messages(for keys: [String]) -> [KeysMessage] {
+        stride(from: 0, to: keys.count, by: Wire.maxKeysPerMessage).map { start in
+            KeysMessage(keys: Array(keys[start..<min(start + Wire.maxKeysPerMessage, keys.count)]))
+        }
+    }
+
+    /// The first `limit` usable keys of a JSON array.
+    static func validKeys(_ raw: Any?, limit: Int) -> [String] {
+        var keys: [String] = []
+        for element in (raw as? [Any]) ?? [] {
+            guard keys.count < limit else { break }
+            if let key = element as? String, !key.isEmpty, key.count <= Wire.maxKeyLength { keys.append(key) }
+        }
+        return keys
+    }
+}
+
 // MARK: - File transfer
 
 /// What `ClipboardEntry.Content` holds when `Type == "file"` - a descriptor,
@@ -288,13 +394,20 @@ public struct HandshakeMessage: Equatable {
     /// The sender's display name (`DeviceName`, optional - older builds
     /// don't send it). Not covered by the signature, like the proof.
     public var deviceName: String?
+    /// The sync version the sender speaks (`Protocol`, optional - builds
+    /// before version 2 don't send it; see `Wire.protocolVersion`). Not signed
+    /// either: a man in the middle who strips it only forces version 1, the
+    /// safe fallback, and one who adds it gets nothing a peer would not
+    /// answer anyway - every message is still encrypted and checked.
+    public var protocolVersion: Int?
 
-    public init(ephemeralPublicKey: String, identityPublicKey: String, signature: String, passphraseProof: String?, deviceName: String? = nil) {
+    public init(ephemeralPublicKey: String, identityPublicKey: String, signature: String, passphraseProof: String?, deviceName: String? = nil, protocolVersion: Int? = nil) {
         self.ephemeralPublicKey = ephemeralPublicKey
         self.identityPublicKey = identityPublicKey
         self.signature = signature
         self.passphraseProof = passphraseProof
         self.deviceName = deviceName
+        self.protocolVersion = protocolVersion
     }
 
     public func jsonString() -> String {
@@ -305,6 +418,7 @@ public struct HandshakeMessage: Equatable {
         ]
         if let passphraseProof { obj["PassphraseProof"] = passphraseProof }
         if let name = DeviceName.clean(deviceName) { obj["DeviceName"] = name }
+        if let protocolVersion { obj["Protocol"] = NSNumber(value: protocolVersion) }
         return WireJSON.string(obj)
     }
 
@@ -320,7 +434,9 @@ public struct HandshakeMessage: Equatable {
             identityPublicKey: identity,
             signature: signature,
             passphraseProof: proof,
-            deviceName: DeviceName.sanitize(WireJSON.str(obj, "DeviceName"))
+            deviceName: DeviceName.sanitize(WireJSON.str(obj, "DeviceName")),
+            // A number, else nothing: absent, null and text all mean version 1.
+            protocolVersion: WireJSON.int64(obj, "Protocol").map { Int(clamping: $0) }
         )
     }
 }

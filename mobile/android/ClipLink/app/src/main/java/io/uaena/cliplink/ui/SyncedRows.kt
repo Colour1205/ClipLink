@@ -4,7 +4,7 @@ import io.uaena.cliplink.engine.GROUP_MIN_ITEMS
 
 /**
  * What the Synced list shows, top to bottom: an ordinary card, or one stack
- * standing for the items a single history_batch added. Plain code with no
+ * standing for the items one sync with a peer added. Plain code with no
  * Compose in it, so the rules can be tested.
  */
 sealed interface SyncedRow {
@@ -16,10 +16,11 @@ sealed interface SyncedRow {
     }
 
     /**
-     * [members] are newest first; the first is the card in front. The row is
-     * keyed by the front item, so when the stack is opened the front card is
-     * the same list item it was, and when the front item is deleted the next
-     * one takes over the row.
+     * [members] are in the order the list has them: the first is the card in
+     * front (the item the sync put on the clipboard), then the others, newest
+     * first. The row is keyed by the front item, so when the stack is opened
+     * the front card is the same list item it was, and when the front item is
+     * deleted the next one takes over the row.
      *
      * [expectedSize] is how many items the stack will have once its batch has
      * arrived, while only its newest is here (see [io.uaena.cliplink.engine.GroupTag.expectedSize]);
@@ -48,12 +49,14 @@ sealed interface SyncedRow {
 internal const val MAX_STACK_LAYERS = 2
 
 /**
- * [items] (newest first, all of them) as rows. A group is one [SyncedRow.Stack]
- * placed where its newest member is; its other members are not rows of their
- * own. Every other item keeps its place, so the order of the rest does not
- * change. A group with fewer than [GROUP_MIN_ITEMS] members here is not a
- * stack, unless it expects that many (its newest is here and the rest is on
- * its way).
+ * [items] (in the order the list shows them: see
+ * [io.uaena.cliplink.engine.arrange]) as rows. A group is one [SyncedRow.Stack]
+ * placed where its front member is, the first of its members in [items]; its
+ * other members are not rows of their own. Every other item keeps its place,
+ * so the order of the rest does not change. A group with fewer than
+ * [GROUP_MIN_ITEMS] members here is not a stack, unless it expects that many
+ * (its front is here and the rest is on its way); one that was opened is not
+ * a stack either - its members are rows, together where the stack was.
  */
 fun buildRows(items: List<KeyedItem>): List<SyncedRow> {
     val members = LinkedHashMap<Long, MutableList<KeyedItem>>()
@@ -66,7 +69,7 @@ fun buildRows(items: List<KeyedItem>): List<SyncedRow> {
     for (keyed in items) {
         val group = keyed.item.group
         val together = group?.let { members[it.id] }
-        if (group == null || together == null || maxOf(together.size, group.expectedSize) < GROUP_MIN_ITEMS) {
+        if (group == null || group.expanded || together == null || maxOf(together.size, group.expectedSize) < GROUP_MIN_ITEMS) {
             rows.add(SyncedRow.Single(keyed))
         } else if (placed.add(group.id)) {
             rows.add(SyncedRow.Stack(group.id, group.createdAtMs, together, group.expectedSize))

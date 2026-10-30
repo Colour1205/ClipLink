@@ -67,6 +67,8 @@ class PeerConnection private constructor(
      * proof verifying - the caller's signal to actually persist trust.
      */
     val newlyTrustedViaPassphrase: Boolean,
+    /** What the peer's handshake says it speaks - see [HandshakeMessage.protocol]. */
+    override val peerProtocol: Int = 1,
 ) : PeerLink {
 
     private val writeLock = Mutex()
@@ -395,6 +397,7 @@ class PeerConnection private constructor(
                     passphraseKeyStore.computeProof(it, myIdentityPublicKey)
                 },
                 deviceName = ownName,
+                protocol = Protocol.VERSION,
             )
             output.write(mine.toJson().toByteArray(Charsets.UTF_8))
             output.write(NEWLINE)
@@ -468,6 +471,7 @@ class PeerConnection private constructor(
                 peerName = theirs.deviceName,
                 wasAlreadyTrusted = effectivelyTrusted,
                 newlyTrustedViaPassphrase = passphraseVerified,
+                peerProtocol = theirs.protocol,
             )
         }
 

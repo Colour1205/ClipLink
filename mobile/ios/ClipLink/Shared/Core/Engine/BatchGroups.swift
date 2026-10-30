@@ -1,138 +1,226 @@
 import Foundation
 
-// Stacking of the items one history_batch brings. Plain values and plain
-// functions, no UI: the engine decides WHICH items belong together, the
-// planner decides WHAT the Synced list shows, and the SwiftUI views only draw
-// the result. Nothing here is saved or sent: after a restart the history
-// shows as ordinary cards, and no peer ever hears about a group.
+// Placement of what peers bring in the Synced list. Plain values and plain
+// functions, no UI: the engine decides WHICH items belong together and in what
+// order they arrived, the planner decides WHAT the list shows, and the SwiftUI
+// views only draw the result. Nothing here is saved or sent: after a restart
+// the history shows as a plain timeline, newest first, and no peer ever hears
+// about a block or a stack.
+//
+// The list is built from two parts. First the SESSION BLOCKS, the one that
+// arrived last on top: a live item (a peer's, or this device's own copy) is a
+// block of one, and everything one reconnect brings is one block - the item that
+// went on the clipboard (the convenience item, "C") in front and, behind it, the
+// rest, collapsed into a stack card until the user opens it. Below them every
+// other item, by timestamp. So what just arrived is on top even when it is older
+// than something further down, and opening a stack keeps its items together
+// right under C instead of scattering them over the timeline.
 
-/// The entries ONE history_batch added, shown as a single stack until the user
-/// opens it. Members are `HistoryStore.identity(of:)` strings.
+/// A session block: the entries that arrived together, shown as a single stack
+/// card until the user opens it. Members are `HistoryStore.identity(of:)` strings.
 public struct BatchGroup: Identifiable, Equatable {
     public let id: String
     public internal(set) var memberIDs: [String]
-    /// Set while the group is provisional: a history_head announced this many
-    /// members (the front card included), but the history_batch with the rest
-    /// has not arrived yet. Nil once it has, or when no head came first.
+    /// Set while the block is provisional: a history_head announced this many
+    /// members (the front card included), but the rest has not arrived yet.
+    /// Nil once it has, or when no head came first.
     public internal(set) var expectedSize: Int?
+    /// The front card: the item the reconnect put on the clipboard (C). Nil for
+    /// a live item, and once C is gone - then the newest member leads.
+    public internal(set) var frontID: String?
+    /// The user opened the stack: its items are ordinary cards from then on (they
+    /// stay together, in this block).
+    public internal(set) var isOpen: Bool
 
-    public init(id: String, memberIDs: [String], expectedSize: Int? = nil) {
+    public init(id: String, memberIDs: [String], expectedSize: Int? = nil, frontID: String? = nil, isOpen: Bool = false) {
         self.id = id
         self.memberIDs = memberIDs
         self.expectedSize = expectedSize
+        self.frontID = frontID
+        self.isOpen = isOpen
     }
 
     public var isProvisional: Bool { expectedSize != nil }
     /// What the badge counts: the members so far, or the announced size while
     /// that is bigger.
     public var size: Int { max(memberIDs.count, expectedSize ?? 0) }
+    /// Drawn as a stack: two or more items, or one with more on the way, and not
+    /// opened. A block of one, or one the user opened, is just cards.
+    public var isStack: Bool { !isOpen && !memberIDs.isEmpty && size >= BatchGroupTracker.minStackItems }
 }
 
-/// The engine's list of live groups.
+/// The engine's list of session blocks.
 public struct BatchGroupTracker: Equatable {
-    /// A batch makes a group only when it adds at least this many new entries
+    /// A batch makes a stack only when it adds at least this many new entries
     /// (GROUP_MIN_ITEMS on the other platforms). One new entry is a normal card.
     public static let groupMinItems = 2
     /// A stack needs a front card and one behind it: with fewer left, the
     /// last member is a normal card again.
     public static let minStackItems = 2
 
-    public private(set) var groups: [BatchGroup] = []
+    /// Every block, in the order it arrived: the newest last.
+    public private(set) var blocks: [BatchGroup] = []
+    /// The blocks drawn as a stack right now.
+    public var groups: [BatchGroup] { blocks.filter(\.isStack) }
+    /// C of the block that arrived last, while no newer block has: the one entry
+    /// history trimming spares (see `HistoryStore.add`). Nil for a live item.
+    public private(set) var convenienceID: String?
     private var serial = 0
-    /// For each connection that sent a history_head, the group that head made
-    /// while its history_batch is on the way (the group may be gone by then:
-    /// opened by the user, or its front card deleted).
+    /// For each connection that sent a history_head or got the first answer of a
+    /// sync, the block that is being filled while the rest is on the way (the
+    /// block may be gone by then: its front card deleted).
     private var provisional: [ObjectIdentifier: String] = [:]
 
     public init() {}
 
-    /// A batch added these new entries (never entries that were already
-    /// known). Returns the new group, or nil when there are too few.
+    private mutating func nextID() -> String {
+        serial += 1
+        return "batch-\(serial)"
+    }
+
+    /// A live item: a block of one, on top of everything that came before. It
+    /// ends the trim protection of the block before it.
+    public mutating func registerLive(_ identity: String) {
+        blocks.append(BatchGroup(id: nextID(), memberIDs: [identity]))
+        convenienceID = nil
+    }
+
+    /// A batch added these new entries, newest first (never entries that were
+    /// already known); the first one is C. Returns the stack, or nil when there
+    /// are too few for one.
     @discardableResult
     public mutating func register(_ identities: [String]) -> BatchGroup? {
         var seen = Set<String>()
         let unique = identities.filter { seen.insert($0).inserted }
-        guard unique.count >= Self.groupMinItems else { return nil }
-        serial += 1
-        let group = BatchGroup(id: "batch-\(serial)", memberIDs: unique)
-        groups.append(group)
-        return group
+        guard let front = unique.first else { return nil }
+        let block = BatchGroup(id: nextID(), memberIDs: unique, frontID: front)
+        blocks.append(block)
+        convenienceID = front
+        return block.isStack ? block : nil
     }
 
-    /// A history_head announced a stack: `front` (its newest entry) is in
+    /// A history_head announced a stack: `front` (its newest entry, C) is in
     /// history already and `expectedSize` entries will be in all, the front one
-    /// included. The group shows at once with just that card; the batch fills
-    /// it in (see `registerBatch`). Nil, and no group, when `expectedSize` is
-    /// under 2. A second head on the same connection finishes the first one's
-    /// group before it starts its own.
+    /// included. The stack shows at once with just that card; the batch fills
+    /// it in (see `registerBatch`). Returns nil, with `front` a block of one,
+    /// when `expectedSize` is under 2. A second head on the same connection
+    /// finishes the first one's block before it starts its own.
     @discardableResult
     public mutating func registerProvisional(front: String, expectedSize: Int, connection: ObjectIdentifier) -> BatchGroup? {
         finish(connection: connection)
-        guard expectedSize >= Self.groupMinItems else { return nil }
-        serial += 1
-        let group = BatchGroup(id: "batch-\(serial)", memberIDs: [front], expectedSize: expectedSize)
-        groups.append(group)
-        provisional[connection] = group.id
-        return group
+        var block = BatchGroup(id: nextID(), memberIDs: [front], frontID: front)
+        if expectedSize >= Self.groupMinItems {
+            block.expectedSize = expectedSize
+            provisional[connection] = block.id
+        }
+        blocks.append(block)
+        convenienceID = front
+        return block.isStack ? block : nil
     }
 
-    /// The history_batch of `connection` added these new entries (never known
-    /// ones). When a head came first, they join the group it made: same group,
-    /// the announced size gives way to the real count, and a group left with
-    /// fewer than 2 members is gone. If that group was opened or removed in
-    /// the meantime they stay ordinary cards. Without a head this is
-    /// `register`. Returns the group the entries are in, if any.
+    /// The history_batch of `connection` added these new entries, newest first
+    /// (never known ones). When a head came first, they join the block it made:
+    /// same block, the announced size gives way to the real count. If the user
+    /// opened that stack in the meantime they join it all the same but it stays
+    /// open; if the block is gone (its front card deleted) they stay ordinary
+    /// cards. Without a head this is `register`. Returns the stack the entries
+    /// are in, if any.
     @discardableResult
     public mutating func registerBatch(_ identities: [String], connection: ObjectIdentifier?) -> BatchGroup? {
         guard let connection, let id = provisional.removeValue(forKey: connection) else { return register(identities) }
-        guard let index = groups.firstIndex(where: { $0.id == id }) else { return nil }
-        var seen = Set(groups[index].memberIDs)
+        guard let index = blocks.firstIndex(where: { $0.id == id }) else { return nil }
+        var seen = Set(blocks[index].memberIDs)
         for identity in identities where seen.insert(identity).inserted {
-            groups[index].memberIDs.append(identity)
+            blocks[index].memberIDs.append(identity)
         }
-        groups[index].expectedSize = nil
-        if groups[index].memberIDs.count < Self.minStackItems {
-            groups.remove(at: index)
-            return nil
-        }
-        return groups[index]
+        blocks[index].expectedSize = nil
+        return blocks[index].isStack ? blocks[index] : nil
     }
 
-    /// The batch a head announced is not coming (the connection closed, it was
-    /// unreadable, or it added nothing), or another head took its place: the
-    /// group counts only the members it has, and is gone with fewer than 2.
-    /// True when a group was changed.
+    /// The first answer of a version 2 sync on `connection` put `front` (C) and
+    /// perhaps `others` in history. They are one new block. `expectedSize` is how
+    /// many items the whole sync asked for (the badge counts it while the other
+    /// answers are on their way); nil when nothing more is coming. `protectFront`
+    /// false: C did not reach the clipboard (another convenience item was just
+    /// there), so it still leads the block but the trim protection stays with the
+    /// item that did.
+    @discardableResult
+    public mutating func registerSync(front: String, others: [String], expectedSize: Int?, connection: ObjectIdentifier, protectFront: Bool = true) -> BatchGroup? {
+        finish(connection: connection)
+        var seen: Set<String> = [front]
+        var members = [front]
+        for identity in others where seen.insert(identity).inserted { members.append(identity) }
+        var block = BatchGroup(id: nextID(), memberIDs: members, frontID: front)
+        if let expectedSize, expectedSize > members.count {
+            block.expectedSize = expectedSize
+            provisional[connection] = block.id
+        }
+        blocks.append(block)
+        if protectFront { convenienceID = front }
+        return block.isStack ? block : nil
+    }
+
+    /// A later answer of the same sync: these entries join the block `connection`
+    /// has been filling. `last` is the final answer: the announced size gives way
+    /// to the real count. With no block waiting (C never came, or its block was
+    /// deleted) they belong to no block and stay where their timestamps put them.
+    @discardableResult
+    public mutating func joinSync(_ identities: [String], connection: ObjectIdentifier, last: Bool) -> BatchGroup? {
+        guard let id = provisional[connection], let index = blocks.firstIndex(where: { $0.id == id }) else {
+            provisional.removeValue(forKey: connection)
+            return nil
+        }
+        var seen = Set(blocks[index].memberIDs)
+        for identity in identities where seen.insert(identity).inserted {
+            blocks[index].memberIDs.append(identity)
+        }
+        if last {
+            blocks[index].expectedSize = nil
+            provisional.removeValue(forKey: connection)
+        }
+        return blocks[index].isStack ? blocks[index] : nil
+    }
+
+    /// What the rest of the block `connection` is filling is not coming (the
+    /// connection closed, it was unreadable, it timed out, it added nothing), or
+    /// another head took its place: the block counts only the members it has, and
+    /// is no stack with fewer than 2. True when a block was changed.
     @discardableResult
     public mutating func finish(connection: ObjectIdentifier) -> Bool {
         guard let id = provisional.removeValue(forKey: connection),
-              let index = groups.firstIndex(where: { $0.id == id })
+              let index = blocks.firstIndex(where: { $0.id == id })
         else { return false }
-        groups[index].expectedSize = nil
-        if groups[index].memberIDs.count < Self.minStackItems { groups.remove(at: index) }
+        blocks[index].expectedSize = nil
         return true
     }
 
     /// Members that left history (deleted, cleared, cut by the 25-item cap)
-    /// leave their group; a group down to one member, or none, is gone. A
-    /// provisional group may hold just its front card.
+    /// leave their block; a block with none left is gone, one down to a single
+    /// member is a normal card (it keeps its place at the top). A provisional
+    /// block may hold just its front card.
     public mutating func prune(keeping alive: Set<String>) {
-        guard !groups.isEmpty else { return }
-        groups = groups.compactMap { group -> BatchGroup? in
-            var group = group
-            group.memberIDs.removeAll { !alive.contains($0) }
-            let enough = group.memberIDs.count >= Self.minStackItems || (group.isProvisional && !group.memberIDs.isEmpty)
-            return enough ? group : nil
+        guard !blocks.isEmpty else { return }
+        blocks = blocks.compactMap { block -> BatchGroup? in
+            var block = block
+            block.memberIDs.removeAll { !alive.contains($0) }
+            guard !block.memberIDs.isEmpty else { return nil }
+            if let front = block.frontID, !alive.contains(front) { block.frontID = nil }
+            return block
         }
+        if let id = convenienceID, !alive.contains(id) { convenienceID = nil }
     }
 
-    /// The user opened the stack: it never closes again.
+    /// The user opened the stack: it never closes again, and its items stay
+    /// together, right under C.
     public mutating func dissolve(id: String) {
-        groups.removeAll { $0.id == id }
+        guard let index = blocks.firstIndex(where: { $0.id == id }) else { return }
+        blocks[index].isOpen = true
     }
 
     public mutating func removeAll() {
-        groups.removeAll()
+        blocks.removeAll()
         provisional.removeAll()
+        convenienceID = nil
     }
 }
 
@@ -156,7 +244,8 @@ public struct SyncedRow: Identifiable, Equatable {
 
 public struct StackInfo: Equatable {
     public let groupID: String
-    /// Every member that is still there, newest (the front card) first.
+    /// Every member that is still there, the front card (C) first, then the
+    /// others newest first.
     public let memberIDs: [String]
     /// Set while the group is provisional (see BatchGroup): more members are on
     /// the way than there are yet.
@@ -175,38 +264,43 @@ public struct StackInfo: Equatable {
 }
 
 public enum StackPlanner {
-    /// The rows of the list, newest first. A stack sits where its newest member
-    /// would be and its other members are not rows of their own; every other
-    /// card keeps its place. `expanded` holds groups the user already opened
-    /// (the engine drops them a moment later, so a snapshot in between cannot
-    /// close one again).
+    /// The rows of the list. First the session blocks, the one that arrived last
+    /// on top (`groups` is every block, oldest arrival first, as the tracker keeps
+    /// them): a block is its front card (C, else its newest member), then its
+    /// other members newest first - collapsed into the front card's stack row,
+    /// or, once opened, as ordinary rows right under it. Then every item that is
+    /// in no block, by timestamp as `items` has them (newest first). So a block
+    /// stays together on top even when its items are older than the rest.
+    /// `expanded` holds groups the user already opened (the engine drops them a
+    /// moment later, so a snapshot in between cannot close one again).
     public static func rows(items: [SyncedItem], groups: [BatchGroup], expanded: Set<String> = []) -> [SyncedRow] {
         guard !groups.isEmpty else { return items.map { SyncedRow(item: $0, stack: nil) } }
-        var groupIndex: [String: Int] = [:]
-        for (index, group) in groups.enumerated() where !expanded.contains(group.id) {
-            for id in group.memberIDs { groupIndex[id] = index }
-        }
-        guard !groupIndex.isEmpty else { return items.map { SyncedRow(item: $0, stack: nil) } }
-        // The members that are in the list, in list order.
-        var present: [Int: [String]] = [:]
-        for item in items {
-            if let index = groupIndex[item.id] { present[index, default: []].append(item.id) }
-        }
         var rows: [SyncedRow] = []
         rows.reserveCapacity(items.count)
-        for item in items {
-            // A provisional group may have only its front card so far.
-            guard let index = groupIndex[item.id], let members = present[index],
-                  max(members.count, groups[index].expectedSize ?? 0) >= BatchGroupTracker.minStackItems
-            else {
-                rows.append(SyncedRow(item: item, stack: nil))
-                continue
+        var placed = Set<String>()
+        for group in groups.reversed() {
+            let memberIDs = Set(group.memberIDs)
+            // The members that are in the list, in list order. An item sits in
+            // the newest block that has it.
+            var members = items.filter { memberIDs.contains($0.id) && !placed.contains($0.id) }
+            guard !members.isEmpty else { continue }
+            for member in members { placed.insert(member.id) }
+            if let front = group.frontID, let index = members.firstIndex(where: { $0.id == front }), index > 0 {
+                let frontItem = members.remove(at: index)
+                members.insert(frontItem, at: 0)
             }
-            // Only the newest member makes a row; the rest are inside it.
-            if members.first == item.id {
-                let stack = StackInfo(groupID: groups[index].id, memberIDs: members, expectedSize: groups[index].expectedSize)
-                rows.append(SyncedRow(item: item, stack: stack))
+            // A provisional block may have only its front card so far.
+            let isStack = !group.isOpen && !expanded.contains(group.id)
+                && max(members.count, group.expectedSize ?? 0) >= BatchGroupTracker.minStackItems
+            if isStack {
+                let stack = StackInfo(groupID: group.id, memberIDs: members.map(\.id), expectedSize: group.expectedSize)
+                rows.append(SyncedRow(item: members[0], stack: stack))
+            } else {
+                rows.append(contentsOf: members.map { SyncedRow(item: $0, stack: nil) })
             }
+        }
+        for item in items where !placed.contains(item.id) {
+            rows.append(SyncedRow(item: item, stack: nil))
         }
         return rows
     }

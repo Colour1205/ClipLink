@@ -216,9 +216,9 @@ final class EngineIntegrationTests: XCTestCase {
         wait("reconnected", timeout: 30) { node.recorder.connectedCount == 1 && other.recorder.connectedCount == 1 }
     }
 
-    /// Delete and Clear are local, but they stick: the peer still has the
-    /// items and resends its whole history on every connect.
-    func testDeletedAndClearedItemsDontComeBackFromHistoryBatches() throws {
+    /// Delete and Clear stick: the items go from a version 2 peer too (it is told),
+    /// and what a later exchange of histories brings never includes them.
+    func testDeletedAndClearedItemsGoFromBothDevicesAndDontComeBack() throws {
         let (a, b) = makePair()
         setPasscode(a, "pw")
         setPasscode(b, "pw")
@@ -233,29 +233,36 @@ final class EngineIntegrationTests: XCTestCase {
         wait("B caught up") { b.recorder.items.count == 2 }
         wait("B applied the newest") { b.recorder.receivedEntries.count == 1 }
 
-        // Delete one on B: gone locally, A untouched, nothing new on B's clipboard.
+        // Delete one on B: gone there, nothing new on B's clipboard - and A, a
+        // version 2 peer, is told to delete it too.
         let doomed = try XCTUnwrap(b.recorder.items.first { $0.entry.content == "delete me" })
         b.engine.deleteItem(id: doomed.id)
         wait("B deleted it") { b.recorder.items.map(\.entry.content) == ["keep"] }
         XCTAssertTrue(DeletedStore(directory: b.dir).contains(doomed.entry), "tombstone persisted")
+        wait("A deleted it too") { a.recorder.items.map(\.entry.content) == ["keep"] }
+        XCTAssertTrue(DeletedStore(directory: a.dir).contains(doomed.entry), "and remembers it")
+        XCTAssertEqual(b.recorder.receivedEntries.count, 1, "no delete ever touches the clipboard")
+        XCTAssertEqual(a.recorder.receivedEntries.count, 0)
 
-        // A resends both in its history_batch; "after delete" follows on the
-        // same link, so once it's here the batch has been handled.
+        // The heads of the next connection list what is left (and the deleted key);
+        // "after delete" follows on the same link, so once it's here the heads
+        // have been handled.
         reconnect(b, to: a)
         a.engine.sendText("after delete")
         wait("B got the new item") { b.recorder.items.contains { $0.entry.content == "after delete" } }
         XCTAssertEqual(b.recorder.items.map(\.entry.content), ["after delete", "keep"], "the deleted item stays deleted")
         XCTAssertFalse(b.recorder.receivedEntries.dropFirst().contains { $0.0.content == "delete me" }, "never re-applied")
-        wait("A kept everything (deleting is local only)") { a.recorder.items.count == 3 }
+        wait("A has the two left") { a.recorder.items.count == 2 }
 
-        // Clear everything on B, then the same again.
+        // Clear everything on B: A clears too. Then the same again.
         b.engine.clearHistory()
         wait("B cleared") { b.recorder.items.isEmpty }
+        wait("A cleared") { a.recorder.items.isEmpty }
         reconnect(b, to: a)
         a.engine.sendText("after clear")
         wait("B got the newest item") { b.recorder.items.contains { $0.entry.content == "after clear" } }
         XCTAssertEqual(b.recorder.items.map(\.entry.content), ["after clear"], "nothing cleared came back")
-        wait("A kept everything") { a.recorder.items.count == 4 }
+        wait("A has only the new one") { a.recorder.items.count == 1 }
     }
 
     func testManualPairingNeedsAcceptOnBothSides() throws {
@@ -514,8 +521,10 @@ final class EngineIntegrationTests: XCTestCase {
 
     /// Completes a handshake with `node` as `peer`, calling itself `name`. This
     /// side of the link stays held - it sends nothing - until it goes live.
-    private func handshake(with node: Node, as peer: SoftwareIdentity, named name: String, passcode: Data) throws -> PeerLink {
-        let context = HandshakeContext(identity: peer, trusted: [node.engine.ownId], passphraseKey: passcode, deviceName: name)
+    /// `protocolVersion`: the sync version it announces (none by default: a build
+    /// from before version 2).
+    private func handshake(with node: Node, as peer: SoftwareIdentity, named name: String, passcode: Data, protocolVersion: Int? = nil) throws -> PeerLink {
+        let context = HandshakeContext(identity: peer, trusted: [node.engine.ownId], passphraseKey: passcode, deviceName: name, protocolVersion: protocolVersion)
         let done = expectation(description: "handshake as \(name)")
         var link: PeerLink?
         PeerLink.dial(host: "127.0.0.1", port: node.engine.config.listenPort, context: context, connectTimeout: 3,
@@ -1456,6 +1465,610 @@ final class EngineIntegrationTests: XCTestCase {
         XCTAssertNil(snap.groups.first?.expectedSize, "the batch arrived: the real count")
         XCTAssertEqual(StackPlanner.rows(items: snap.items, groups: snap.groups).first?.stack?.hiddenCount, 2)
         XCTAssertEqual(b.recorder.receivedEntries.map(\.0.content), ["third"], "applied once")
+    }
+
+    // MARK: - Sync version 2
+
+    /// Everything a node sends a scripted peer, in order.
+    private final class Inbox {
+        private let lock = NSLock()
+        private var all: [Envelope] = []
+        func add(_ envelope: Envelope) { lock.lock(); all.append(envelope); lock.unlock() }
+        var messages: [Envelope] { lock.lock(); defer { lock.unlock() }; return all }
+        var types: [String] { messages.map(\.type) }
+        func messages(ofType type: String) -> [Envelope] { messages.filter { $0.type == type } }
+    }
+
+    /// A peer the test plays itself: a real link to a node, announcing `protocolVersion`.
+    private struct ScriptedPeer {
+        let identity: SoftwareIdentity
+        let link: PeerLink
+        let inbox: Inbox
+
+        func send(_ type: String, _ payload: String) {
+            link.send(Envelope(type: type, payload: payload).jsonString())
+        }
+
+        func sign(_ content: String, at seconds: TimeInterval) throws -> ClipboardEntry {
+            try EntrySigning.sign(content: content, type: Wire.EntryType.text, identity: identity,
+                                  timestamp: DotNetTimestamp.now(Date(timeIntervalSince1970: seconds)))
+        }
+
+        /// `count` entries signed by this peer, one second apart from `start`, oldest first.
+        func batch(_ count: Int, start: TimeInterval = 1_790_000_000, label: String = "item") throws -> [ClipboardEntry] {
+            try (0..<count).map { try sign("\(label) \($0)", at: start + TimeInterval($0)) }
+        }
+    }
+
+    /// A node that is up, with the passcode scripted peers use, ready to be dialled.
+    private func startedNode() -> Node {
+        let (a, _) = makePair()
+        setPasscode(a, "pw")
+        a.engine.enterForeground()
+        wait("A listening") { a.engine.queue.sync { a.engine.status.listening } }
+        return a
+    }
+
+    private func connect(_ node: Node, protocolVersion: Int?) throws -> ScriptedPeer {
+        let identity = SoftwareIdentity()
+        let link = try handshake(with: node, as: identity, named: "Scripted", passcode: PassphraseAuth.deriveKey(passphrase: "pw"), protocolVersion: protocolVersion)
+        let inbox = Inbox()
+        link.onMessage = { _, text in
+            if let envelope = Envelope.parse(text) { inbox.add(envelope) }
+        }
+        link.goLive()
+        return ScriptedPeer(identity: identity, link: link, inbox: inbox)
+    }
+
+    private func waitRegistered(_ node: Node, count: Int = 1) {
+        wait("\(count) peer(s) registered") { node.engine.queue.sync { node.engine.links.count == count } }
+    }
+
+    private func sig(_ entry: ClipboardEntry) -> String { DeletedStore.key(of: entry) }
+
+    func testTheHandshakeSaysWhichSyncVersionEachSideSpeaks() throws {
+        let a = startedNode()
+        let newer = try connect(a, protocolVersion: Wire.protocolVersion)
+        let older = try connect(a, protocolVersion: nil)
+        waitRegistered(a, count: 2)
+        XCTAssertEqual(newer.link.negotiatedProtocol, 2, "both announced 2")
+        XCTAssertEqual(older.link.negotiatedProtocol, 1, "this node announced 2, the peer nothing")
+        XCTAssertEqual(a.engine.queue.sync { a.engine.links[newer.identity.publicKeyBase64]?.speaksV2 }, true)
+        XCTAssertEqual(a.engine.queue.sync { a.engine.links[older.identity.publicKeyBase64]?.speaksV2 }, false)
+    }
+
+    func testAVersion2ConnectionStartsWithAHeadOfKeysAndNoBatch() throws {
+        let a = startedNode()
+        a.engine.sendText("one")
+        Thread.sleep(forTimeInterval: 0.05)
+        a.engine.sendText("two")
+        wait("A has two") { a.recorder.items.count == 2 }
+        let mine = a.recorder.items // newest first
+
+        let peer = try connect(a, protocolVersion: Wire.protocolVersion)
+        wait("A sent its head") { !peer.inbox.messages(ofType: Wire.MessageType.historyHead).isEmpty }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+
+        XCTAssertEqual(peer.inbox.types, [Wire.MessageType.historyHead], "no history_batch: the peer asks for what it lacks")
+        let payload = peer.inbox.messages[0].payload
+        let head = try XCTUnwrap(HistoryHeadV2.parse(payload))
+        XCTAssertEqual(head.keys, mine.map { sig($0.entry) })
+        XCTAssertEqual(head.times, mine.map { HistoryHeadV2.unixMilliseconds(of: $0.entry) })
+        XCTAssertEqual(head.deleted, [])
+        XCTAssertEqual(Set((WireJSON.object(payload) ?? [:]).keys), ["Keys", "Times", "Deleted"])
+    }
+
+    func testAVersion2HeadIsSentEvenWithNothingToSay() throws {
+        let a = startedNode()
+        let peer = try connect(a, protocolVersion: Wire.protocolVersion)
+        wait("A sent its head") { !peer.inbox.messages(ofType: Wire.MessageType.historyHead).isEmpty }
+        let payload = peer.inbox.messages[0].payload
+        XCTAssertEqual(HistoryHeadV2.parse(payload), HistoryHeadV2(keys: [], times: [], deleted: []))
+        XCTAssertEqual(WireJSON.object(payload)?["Keys"] as? [String], [])
+        XCTAssertEqual(WireJSON.object(payload)?["Deleted"] as? [String], [])
+    }
+
+    func testTheHeadListsWhatThisDeviceDeleted() throws {
+        let a = startedNode()
+        a.engine.sendText("keep")
+        Thread.sleep(forTimeInterval: 0.05)
+        a.engine.sendText("drop")
+        wait("A has two") { a.recorder.items.count == 2 }
+        let dropped = try XCTUnwrap(a.recorder.items.first { $0.entry.content == "drop" })
+        a.engine.deleteItem(id: dropped.id)
+        wait("A deleted it") { a.recorder.items.count == 1 }
+
+        let peer = try connect(a, protocolVersion: Wire.protocolVersion)
+        wait("A sent its head") { !peer.inbox.messages(ofType: Wire.MessageType.historyHead).isEmpty }
+        let head = try XCTUnwrap(HistoryHeadV2.parse(peer.inbox.messages[0].payload))
+        XCTAssertEqual(head.keys, [sig(try XCTUnwrap(a.recorder.items.first).entry)])
+        XCTAssertEqual(head.deleted, [sig(dropped.entry)])
+    }
+
+    func testTwoRequestsGoOutBackToBackAndAreAnsweredInOrder() throws {
+        let a = startedNode()
+        let peer = try connect(a, protocolVersion: Wire.protocolVersion)
+        waitRegistered(a)
+        let newestFirst = Array(try peer.batch(4).reversed())
+        let keys = newestFirst.map(sig)
+        peer.send(Wire.MessageType.historyHead, HistoryHeadV2.make(newestFirst: newestFirst, deleted: []).jsonString())
+
+        // Two requests, before any answer: the newest key alone (C), then the rest.
+        wait("two requests") { peer.inbox.messages(ofType: Wire.MessageType.historyRequest).count == 2 }
+        let asked = try peer.inbox.messages(ofType: Wire.MessageType.historyRequest).map { try XCTUnwrap(KeysMessage.parse($0.payload)).keys }
+        XCTAssertEqual(asked, [[keys[0]], Array(keys.dropFirst())])
+
+        // The first answer: C lands on the clipboard, and the stack shows with the full badge.
+        peer.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString([newestFirst[0]]))
+        wait("C is in") { a.recorder.items.count == 1 }
+        wait("C reached the clipboard") { a.recorder.receivedEntries.count == 1 }
+        var snap = a.engine.queue.sync { a.engine.buildSnapshot() }
+        XCTAssertEqual(snap.groups.first?.expectedSize, 4)
+
+        // The second: the rest, and nothing more on the clipboard.
+        peer.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString(Array(newestFirst.dropFirst())))
+        wait("all four are in") { a.recorder.items.count == 4 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertEqual(a.recorder.receivedEntries.map(\.0.content), ["item 3"], "the clipboard heard C only")
+        snap = a.engine.queue.sync { a.engine.buildSnapshot() }
+        XCTAssertEqual(snap.groups.count, 1)
+        XCTAssertEqual(snap.groups.first?.memberIDs.count, 4)
+        XCTAssertNil(snap.groups.first?.expectedSize)
+        XCTAssertTrue(a.engine.queue.sync { a.engine.pendingKeys.isEmpty && a.engine.peerSyncs.values.allSatisfy { $0.requests.isEmpty } })
+        XCTAssertEqual(peer.inbox.messages(ofType: Wire.MessageType.historyRequest).count, 2, "nothing asked twice")
+    }
+
+    func testKeysWeHaveAreNotAskedForAgain() throws {
+        let a = startedNode()
+        let peer = try connect(a, protocolVersion: Wire.protocolVersion)
+        waitRegistered(a)
+        let newestFirst = Array(try peer.batch(3).reversed())
+        a.engine.queue.sync { _ = a.engine.history.add(newestFirst[1]) }
+
+        peer.send(Wire.MessageType.historyHead, HistoryHeadV2.make(newestFirst: newestFirst, deleted: []).jsonString())
+        wait("two requests") { peer.inbox.messages(ofType: Wire.MessageType.historyRequest).count == 2 }
+        let asked = try peer.inbox.messages(ofType: Wire.MessageType.historyRequest).map { try XCTUnwrap(KeysMessage.parse($0.payload)).keys }
+        XCTAssertEqual(asked, [[sig(newestFirst[0])], [sig(newestFirst[2])]])
+    }
+
+    func testABatchNobodyAskedForIsHandledLikeAVersion1Batch() throws {
+        let a = startedNode()
+        let peer = try connect(a, protocolVersion: Wire.protocolVersion)
+        waitRegistered(a)
+        let entries = try peer.batch(3)
+        peer.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString(entries))
+        wait("all three are in") { a.recorder.items.count == 3 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertEqual(a.recorder.receivedEntries.map(\.0.content), ["item 2"], "the newest new item, as in the old exchange")
+        XCTAssertEqual(a.engine.queue.sync { a.engine.buildSnapshot().groups.count }, 1)
+    }
+
+    func testARequestNobodyAnswersIsGivenUpOnAndTheStackStopsWaiting() throws {
+        let a = startedNode()
+        let peer = try connect(a, protocolVersion: Wire.protocolVersion)
+        waitRegistered(a)
+        let newestFirst = Array(try peer.batch(3).reversed())
+        peer.send(Wire.MessageType.historyHead, HistoryHeadV2.make(newestFirst: newestFirst, deleted: []).jsonString())
+        wait("two requests") { peer.inbox.messages(ofType: Wire.MessageType.historyRequest).count == 2 }
+        peer.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString([newestFirst[0]]))
+        wait("C is in") { a.recorder.items.count == 1 }
+        XCTAssertEqual(a.engine.queue.sync { a.engine.buildSnapshot().groups.first?.expectedSize }, 3)
+
+        // Too early: nothing happens.
+        a.engine.queue.sync { a.engine.expireHistoryRequests(now: Date()) }
+        XCTAssertEqual(a.engine.queue.sync { a.engine.pendingKeys.count }, 2)
+
+        // 90 seconds later: the request and its keys are dropped, and the stack stops waiting.
+        // The request stays in the queue as an expired marker: the peer still answers it.
+        a.engine.queue.sync { a.engine.expireHistoryRequests(now: Date().addingTimeInterval(Wire.requestTimeout + 1)) }
+        XCTAssertTrue(a.engine.queue.sync { a.engine.pendingKeys.isEmpty })
+        XCTAssertTrue(a.engine.queue.sync { a.engine.peerSyncs.values.allSatisfy { !$0.hasOpenRequests } }, "a marker is no open request")
+        XCTAssertEqual(a.engine.queue.sync { a.engine.peerSyncs.values.flatMap(\.requests).map(\.expired) }, [true], "the marker waits for its answer")
+        let snap = a.engine.queue.sync { a.engine.buildSnapshot() }
+        XCTAssertNil(snap.blocks.first?.expectedSize)
+        XCTAssertTrue(snap.groups.isEmpty, "C alone is a single card")
+        XCTAssertEqual(peer.inbox.messages(ofType: Wire.MessageType.historyRequest).count, 2, "no retry on the same connection")
+
+        // Markers are not counted again, and do not end anything a second time.
+        a.engine.queue.sync { a.engine.expireHistoryRequests(now: Date().addingTimeInterval(2 * Wire.requestTimeout)) }
+        XCTAssertEqual(a.engine.queue.sync { a.engine.peerSyncs.values.flatMap(\.requests).count }, 1)
+    }
+
+    /// The answer that comes after the 90 seconds is not a version 1 batch: it pops
+    /// its marker and only stores what is new. Nothing reaches the clipboard minutes later.
+    func testALateAnswerToAnExpiredRequestPopsItsMarkerAndTouchesNoClipboard() throws {
+        let a = startedNode()
+        let peer = try connect(a, protocolVersion: Wire.protocolVersion)
+        waitRegistered(a)
+        let newestFirst = Array(try peer.batch(3).reversed())
+        peer.send(Wire.MessageType.historyHead, HistoryHeadV2.make(newestFirst: newestFirst, deleted: []).jsonString())
+        wait("two requests") { peer.inbox.messages(ofType: Wire.MessageType.historyRequest).count == 2 }
+        // Neither request is answered in time.
+        a.engine.queue.sync { a.engine.expireHistoryRequests(now: Date().addingTimeInterval(Wire.requestTimeout + 1)) }
+        XCTAssertEqual(a.engine.queue.sync { a.engine.peerSyncs.values.flatMap(\.requests).count }, 2, "both stay as markers")
+        XCTAssertTrue(a.engine.queue.sync { a.engine.pendingKeys.isEmpty })
+
+        // The late answer to the first (the convenience request): stored, not applied.
+        peer.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString([newestFirst[0]]))
+        wait("it is stored") { a.recorder.items.count == 1 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertTrue(a.recorder.receivedEntries.isEmpty, "nothing on the clipboard, no notification")
+        XCTAssertEqual(a.engine.queue.sync { a.engine.peerSyncs.values.flatMap(\.requests).count }, 1, "its marker is gone, the other one is next")
+        XCTAssertTrue(a.engine.queue.sync { a.engine.buildSnapshot().blocks.isEmpty }, "no block and no stack")
+
+        // The second one's too.
+        peer.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString(Array(newestFirst.dropFirst())))
+        wait("all three are stored") { a.recorder.items.count == 3 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertTrue(a.recorder.receivedEntries.isEmpty)
+        XCTAssertTrue(a.engine.queue.sync { a.engine.peerSyncs.values.allSatisfy { $0.requests.isEmpty } })
+        XCTAssertTrue(a.engine.queue.sync { a.engine.buildSnapshot().blocks.isEmpty })
+    }
+
+    /// The marker leaves the queue with the connection: nothing is asked of anyone else for it.
+    func testAnExpiredMarkerIsDroppedWithItsConnectionAndAsksNobodyElse() throws {
+        let a = startedNode()
+        let first = try connect(a, protocolVersion: Wire.protocolVersion)
+        let second = try connect(a, protocolVersion: Wire.protocolVersion)
+        waitRegistered(a, count: 2)
+        let newestFirst = Array(try first.batch(2).reversed())
+        let head = HistoryHeadV2.make(newestFirst: newestFirst, deleted: []).jsonString()
+        second.send(Wire.MessageType.historyHead, head)
+        wait("the second peer is asked") { second.inbox.messages(ofType: Wire.MessageType.historyRequest).count == 2 }
+        first.send(Wire.MessageType.historyHead, head)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertTrue(first.inbox.messages(ofType: Wire.MessageType.historyRequest).isEmpty, "being asked of the second peer")
+
+        a.engine.queue.sync { a.engine.expireHistoryRequests(now: Date().addingTimeInterval(Wire.requestTimeout + 1)) }
+        second.link.close()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertTrue(first.inbox.messages(ofType: Wire.MessageType.historyRequest).isEmpty, "given up on: not asked of someone else")
+        XCTAssertEqual(a.engine.queue.sync { a.engine.peerSyncs.count }, 1)
+        XCTAssertTrue(a.engine.queue.sync { a.engine.peerSyncs.values.allSatisfy { $0.requests.isEmpty } })
+    }
+
+    func testWhenAConnectionClosesItsKeysAreAskedOfTheOtherPeer() throws {
+        let a = startedNode()
+        let first = try connect(a, protocolVersion: Wire.protocolVersion)
+        let second = try connect(a, protocolVersion: Wire.protocolVersion)
+        waitRegistered(a, count: 2)
+        let newestFirst = Array(try first.batch(3).reversed())
+        let keys = newestFirst.map(sig)
+        let head = HistoryHeadV2.make(newestFirst: newestFirst, deleted: []).jsonString()
+
+        first.send(Wire.MessageType.historyHead, head)
+        wait("the first peer is asked") { first.inbox.messages(ofType: Wire.MessageType.historyRequest).count == 2 }
+        second.send(Wire.MessageType.historyHead, head)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertTrue(second.inbox.messages(ofType: Wire.MessageType.historyRequest).isEmpty, "already asked of the first: not asked twice")
+
+        first.link.close()
+        wait("the other peer is asked") { second.inbox.messages(ofType: Wire.MessageType.historyRequest).count == 2 }
+        let asked = try second.inbox.messages(ofType: Wire.MessageType.historyRequest).flatMap { try XCTUnwrap(KeysMessage.parse($0.payload)).keys }
+        XCTAssertEqual(asked, keys)
+        XCTAssertEqual(a.engine.queue.sync { Set(a.engine.pendingKeys.keys) }, Set(keys))
+        XCTAssertEqual(a.engine.queue.sync { a.engine.peerSyncs.count }, 1, "the closed connection's state is gone")
+    }
+
+    func testARequestIsAnsweredWithOneBatchNewestFirst() throws {
+        let a = startedNode()
+        a.engine.sendText("one")
+        Thread.sleep(forTimeInterval: 0.05)
+        a.engine.sendText("two")
+        Thread.sleep(forTimeInterval: 0.05)
+        a.engine.sendText("three")
+        wait("A has three") { a.recorder.items.count == 3 }
+        let keyOf = Dictionary(uniqueKeysWithValues: a.recorder.items.map { ($0.entry.content, sig($0.entry)) })
+
+        let peer = try connect(a, protocolVersion: Wire.protocolVersion)
+        wait("A sent its head") { !peer.inbox.messages(ofType: Wire.MessageType.historyHead).isEmpty }
+        func answers() -> [Envelope] { peer.inbox.messages(ofType: Wire.MessageType.historyBatch) }
+        func contents(_ envelope: Envelope) -> [String]? { ClipboardEntry.parseList(envelope.payload)?.map(\.content) }
+        func ask(_ keys: [String]) { peer.send(Wire.MessageType.historyRequest, KeysMessage(keys: keys).jsonString()) }
+
+        ask([keyOf["one"] ?? "", "no such key", keyOf["three"] ?? ""])
+        wait("one batch") { answers().count == 1 }
+        XCTAssertEqual(contents(answers()[0]), ["three", "one"], "newest first, the unknown key skipped")
+
+        ask(["no such key"])
+        wait("an empty answer") { answers().count == 2 }
+        XCTAssertEqual(contents(answers()[1]), [], "an empty array, so the asker stops waiting")
+
+        // Two requests in a row come back in the order asked.
+        ask([keyOf["two"] ?? ""])
+        ask([keyOf["one"] ?? "", keyOf["three"] ?? ""])
+        wait("two more") { answers().count == 4 }
+        XCTAssertEqual(contents(answers()[2]), ["two"])
+        XCTAssertEqual(contents(answers()[3]), ["three", "one"])
+
+        // Only the first 100 keys count.
+        ask((0..<100).map { "missing-\($0)" } + [keyOf["two"] ?? ""])
+        wait("a fifth answer") { answers().count == 5 }
+        XCTAssertEqual(contents(answers()[4]), [], "the 101st key is ignored")
+    }
+
+    func testALocalDeleteIsSentToVersion2PeersOnly() throws {
+        let a = startedNode()
+        a.engine.sendText("one")
+        Thread.sleep(forTimeInterval: 0.05)
+        a.engine.sendText("two")
+        wait("A has two") { a.recorder.items.count == 2 }
+        let mine = a.recorder.items // newest first
+
+        let newer = try connect(a, protocolVersion: Wire.protocolVersion)
+        let older = try connect(a, protocolVersion: nil)
+        waitRegistered(a, count: 2)
+        wait("the old exchange reached the older peer") { older.inbox.messages(ofType: Wire.MessageType.historyBatch).count == 1 }
+        XCTAssertEqual(older.inbox.types, [Wire.MessageType.historyHead, Wire.MessageType.historyBatch], "a version 1 peer gets head and the whole batch")
+
+        a.engine.deleteItem(id: mine[0].id)
+        wait("the newer peer is told") { newer.inbox.messages(ofType: Wire.MessageType.delete).count == 1 }
+        XCTAssertEqual(KeysMessage.parse(newer.inbox.messages(ofType: Wire.MessageType.delete)[0].payload)?.keys, [sig(mine[0].entry)])
+
+        a.engine.clearHistory()
+        wait("told again for clear-all") { newer.inbox.messages(ofType: Wire.MessageType.delete).count == 2 }
+        XCTAssertEqual(KeysMessage.parse(newer.inbox.messages(ofType: Wire.MessageType.delete)[1].payload)?.keys, [sig(mine[1].entry)])
+
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertEqual(newer.inbox.types, [Wire.MessageType.historyHead, Wire.MessageType.delete, Wire.MessageType.delete])
+        XCTAssertEqual(older.inbox.types, [Wire.MessageType.historyHead, Wire.MessageType.historyBatch], "an older peer is never sent a delete or a request")
+    }
+
+    func testADeleteAndAHeadsDeletedListFromAPeerRemoveItemsAndLeaveTheClipboardAlone() throws {
+        let a = startedNode()
+        let peer = try connect(a, protocolVersion: Wire.protocolVersion)
+        waitRegistered(a)
+        let entries = try peer.batch(3)
+        peer.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString(entries))
+        wait("all three are in") { a.recorder.items.count == 3 }
+        wait("the newest is on the clipboard") { a.recorder.receivedEntries.count == 1 }
+
+        peer.send(Wire.MessageType.delete, KeysMessage(keys: [sig(entries[1]), "a key we never had"]).jsonString())
+        wait("the item is gone") { a.recorder.items.map(\.entry.content) == ["item 2", "item 0"] }
+        XCTAssertTrue(DeletedStore(directory: a.dir).contains(entries[1]), "remembered, so it cannot come back")
+
+        peer.send(Wire.MessageType.historyHead, HistoryHeadV2(keys: [], times: [], deleted: [sig(entries[2])]).jsonString())
+        wait("the head's deleted key took effect") { a.recorder.items.map(\.entry.content) == ["item 0"] }
+
+        // Offered again, it stays out.
+        peer.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString(entries))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertEqual(a.recorder.items.map(\.entry.content), ["item 0"])
+        XCTAssertEqual(a.recorder.receivedEntries.count, 1, "no delete ever touches the clipboard")
+    }
+
+    func testAVersion1PeerGetsTheOldExchangeAndItsNewestNewItemLandsOnTheClipboardEvenIfOlder() throws {
+        let a = startedNode()
+        a.engine.sendText("mine")
+        wait("A has one") { a.recorder.items.count == 1 }
+        let peer = try connect(a, protocolVersion: nil)
+        waitRegistered(a)
+        // All older than "mine".
+        let entries = try peer.batch(3, start: 1_700_000_000, label: "old")
+        peer.send(Wire.MessageType.historyHead, try XCTUnwrap(HistoryHead.make(newestFirst: Array(entries.reversed()))).jsonString())
+        peer.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString(entries))
+        wait("caught up") { a.recorder.items.count == 4 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+
+        XCTAssertEqual(a.recorder.receivedEntries.map(\.0.content), ["old 2"], "the newest NEW item, though older than 'mine'; once")
+        let snap = a.engine.queue.sync { a.engine.buildSnapshot() }
+        XCTAssertEqual(snap.groups.first?.memberIDs.count, 3)
+        XCTAssertNil(snap.groups.first?.expectedSize)
+        XCTAssertEqual(peer.inbox.types, [Wire.MessageType.historyBatch], "one entry here: the batch alone, and no request or delete")
+
+        // A delete means nothing on a version 1 connection.
+        peer.send(Wire.MessageType.delete, KeysMessage(keys: [sig(entries[0])]).jsonString())
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertEqual(a.recorder.items.count, 4)
+    }
+
+    func testTheNewestEntryOfAnOldStyleHeadIsIgnoredOnAVersion2Connection() throws {
+        let a = startedNode()
+        let peer = try connect(a, protocolVersion: Wire.protocolVersion)
+        waitRegistered(a)
+        let newestFirst = Array(try peer.batch(2).reversed())
+        let oldStyle = try XCTUnwrap(HistoryHead.make(newestFirst: newestFirst))
+        peer.send(Wire.MessageType.historyHead, oldStyle.jsonString())
+
+        // Only its keys count, with no times: both are asked for, newest first.
+        wait("two requests") { peer.inbox.messages(ofType: Wire.MessageType.historyRequest).count == 2 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertTrue(a.recorder.items.isEmpty, "the Newest in it was not taken")
+        XCTAssertTrue(a.recorder.receivedEntries.isEmpty)
+        let asked = try peer.inbox.messages(ofType: Wire.MessageType.historyRequest).map { try XCTUnwrap(KeysMessage.parse($0.payload)).keys }
+        XCTAssertEqual(asked, [[sig(newestFirst[0])], [sig(newestFirst[1])]])
+    }
+
+    /// Two version 2 peers that both have something new, in one reconnect: each is
+    /// asked for its own convenience item, and each answer may come first. The clipboard
+    /// changes once: an item that is not newer than the one just applied only joins the
+    /// history. Here W is older than C.
+    func testTwoPeersAnsweringAtOnceMakeOneClipboardChange() throws {
+        let a = startedNode()
+        let first = try connect(a, protocolVersion: Wire.protocolVersion)
+        let second = try connect(a, protocolVersion: Wire.protocolVersion)
+        waitRegistered(a, count: 2)
+        let newestFirst = Array(try first.batch(3).reversed())
+        let older = try second.sign("older W", at: 1_700_000_000)
+
+        first.send(Wire.MessageType.historyHead, HistoryHeadV2.make(newestFirst: newestFirst, deleted: []).jsonString())
+        wait("the first peer is asked twice") { first.inbox.messages(ofType: Wire.MessageType.historyRequest).count == 2 }
+        // The second peer has the same three, and W which the first lacks.
+        second.send(Wire.MessageType.historyHead, HistoryHeadV2.make(newestFirst: newestFirst + [older], deleted: []).jsonString())
+        wait("the second peer is asked for W") { second.inbox.messages(ofType: Wire.MessageType.historyRequest).count == 1 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        let askedSecond = try second.inbox.messages(ofType: Wire.MessageType.historyRequest).map { try XCTUnwrap(KeysMessage.parse($0.payload)).keys }
+        XCTAssertEqual(askedSecond, [[sig(older)]], "only W: the rest is asked of the first peer")
+        let open = a.engine.queue.sync { a.engine.peerSyncs.values.flatMap(\.requests) }
+        XCTAssertEqual(open.count, 3)
+        XCTAssertEqual(open.filter(\.convenience).count, 2, "each peer's newest missing item is asked as a convenience item")
+
+        // C arrives, then W: the clipboard hears C only.
+        first.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString([newestFirst[0]]))
+        wait("C reached the clipboard") { a.recorder.receivedEntries.count == 1 }
+        second.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString([older]))
+        wait("W is in") { a.recorder.items.count == 2 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertEqual(a.recorder.receivedEntries.map(\.0.content), ["item 2"])
+        XCTAssertEqual(a.engine.queue.sync { a.engine.buildSnapshot().blocks.count }, 2, "W still leads a block of its own")
+        XCTAssertEqual(a.engine.queue.sync { a.engine.batchGroups.convenienceID }, HistoryStore.identity(of: newestFirst[0]), "only C is protected")
+    }
+
+    /// The other order: W (older) answers first and goes to the clipboard, then C
+    /// arrives and is newer, so it goes there too. The newest ends up on it.
+    func testTheNewerOfTwoConvenienceItemsEndsUpOnTheClipboardWhicheverAnswersFirst() throws {
+        let a = startedNode()
+        let first = try connect(a, protocolVersion: Wire.protocolVersion)
+        let second = try connect(a, protocolVersion: Wire.protocolVersion)
+        waitRegistered(a, count: 2)
+        let newestFirst = Array(try first.batch(3).reversed())
+        let older = try second.sign("older W", at: 1_700_000_000)
+
+        first.send(Wire.MessageType.historyHead, HistoryHeadV2.make(newestFirst: newestFirst, deleted: []).jsonString())
+        wait("the first peer is asked twice") { first.inbox.messages(ofType: Wire.MessageType.historyRequest).count == 2 }
+        second.send(Wire.MessageType.historyHead, HistoryHeadV2.make(newestFirst: [older], deleted: []).jsonString())
+        wait("the second peer is asked for W") { second.inbox.messages(ofType: Wire.MessageType.historyRequest).count == 1 }
+
+        second.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString([older]))
+        wait("W reached the clipboard") { a.recorder.receivedEntries.count == 1 }
+        first.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString([newestFirst[0]]))
+        wait("C reached it too") { a.recorder.receivedEntries.count == 2 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertEqual(a.recorder.receivedEntries.map(\.0.content), ["older W", "item 2"], "C is newer than W")
+    }
+
+    /// The first peer is finished long before the second one's head: C reached the
+    /// clipboard moments ago. The second peer is asked for its item all the same,
+    /// as a convenience request, and its older item stays off the clipboard.
+    func testAHeadRightAfterCReachedTheClipboardIsAskedAsConvenienceButAnOlderItemStaysOff() throws {
+        let a = startedNode()
+        let first = try connect(a, protocolVersion: Wire.protocolVersion)
+        let second = try connect(a, protocolVersion: Wire.protocolVersion)
+        waitRegistered(a, count: 2)
+        let newestFirst = Array(try first.batch(2).reversed())
+        let older = try second.sign("older W", at: 1_700_000_000)
+
+        first.send(Wire.MessageType.historyHead, HistoryHeadV2.make(newestFirst: newestFirst, deleted: []).jsonString())
+        wait("two requests") { first.inbox.messages(ofType: Wire.MessageType.historyRequest).count == 2 }
+        first.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString([newestFirst[0]]))
+        first.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString([newestFirst[1]]))
+        wait("both are in") { a.recorder.items.count == 2 }
+        wait("nothing is open") { a.engine.queue.sync { a.engine.peerSyncs.values.allSatisfy { $0.requests.isEmpty } } }
+
+        second.send(Wire.MessageType.historyHead, HistoryHeadV2.make(newestFirst: [older], deleted: []).jsonString())
+        wait("W is asked for") { second.inbox.messages(ofType: Wire.MessageType.historyRequest).count == 1 }
+        XCTAssertEqual(a.engine.queue.sync { a.engine.peerSyncs.values.flatMap(\.requests).filter(\.convenience).count }, 1, "a convenience request: nothing keeps a second one from being sent")
+        second.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString([older]))
+        wait("W is in") { a.recorder.items.count == 3 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertEqual(a.recorder.receivedEntries.map(\.0.content), ["item 1"], "W did not replace C on the clipboard")
+
+        // A later reconnect is a new one: past the 90 seconds an older item goes there again.
+        XCTAssertFalse(a.engine.queue.sync { a.engine.shouldApplyConvenience(older) })
+        XCTAssertTrue(a.engine.queue.sync { a.engine.shouldApplyConvenience(older, now: Date().addingTimeInterval(SyncEngine.convenienceWindow + 1)) })
+    }
+
+    /// The connection that owed C closes: another connection asks for it as a
+    /// convenience item. When the closed one had answered C already, the rest is
+    /// asked in a plain request.
+    func testAClosedConnectionThatHadAnsweredCIsReplacedByAPlainRequest() throws {
+        let a = startedNode()
+        let first = try connect(a, protocolVersion: Wire.protocolVersion)
+        let second = try connect(a, protocolVersion: Wire.protocolVersion)
+        waitRegistered(a, count: 2)
+        let newestFirst = Array(try first.batch(3).reversed())
+        let head = HistoryHeadV2.make(newestFirst: newestFirst, deleted: []).jsonString()
+
+        first.send(Wire.MessageType.historyHead, head)
+        wait("the first peer is asked") { first.inbox.messages(ofType: Wire.MessageType.historyRequest).count == 2 }
+        second.send(Wire.MessageType.historyHead, head)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        // C was answered, the rest is still owed when the first connection dies.
+        first.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString([newestFirst[0]]))
+        wait("C is in") { a.recorder.items.count == 1 }
+        first.link.close()
+        wait("the other peer is asked") { second.inbox.messages(ofType: Wire.MessageType.historyRequest).count == 1 }
+        let open = a.engine.queue.sync { a.engine.peerSyncs.values.flatMap(\.requests) }
+        XCTAssertEqual(open.map(\.convenience), [false], "C is in already: the rest in one plain request")
+        let asked = try XCTUnwrap(KeysMessage.parse(second.inbox.messages(ofType: Wire.MessageType.historyRequest)[0].payload)).keys
+        XCTAssertEqual(asked, [sig(newestFirst[1]), sig(newestFirst[2])])
+    }
+
+    /// A version 1.5 head applied C and its batch never came in time. The batch that
+    /// comes after the 90 seconds is still that head's: it makes no new block, gives
+    /// no new C and puts nothing on the clipboard.
+    func testALateBatchAfterAV15HeadTimedOutStartsNoBlockAndAppliesNothing() throws {
+        let a = startedNode()
+        let peer = try connect(a, protocolVersion: nil)
+        waitRegistered(a)
+        let entries = try peer.batch(3, label: "old")
+        peer.send(Wire.MessageType.historyHead, try XCTUnwrap(HistoryHead.make(newestFirst: Array(entries.reversed()))).jsonString())
+        wait("C reached the clipboard") { a.recorder.receivedEntries.count == 1 }
+        XCTAssertEqual(a.engine.queue.sync { a.engine.buildSnapshot().blocks.first?.expectedSize }, 3)
+
+        a.engine.queue.sync { a.engine.expireHistoryRequests(now: Date().addingTimeInterval(Wire.requestTimeout + 1)) }
+        XCTAssertNil(a.engine.queue.sync { a.engine.buildSnapshot().blocks.first?.expectedSize }, "the stack stopped waiting")
+        let frontID = HistoryStore.identity(of: entries[2])
+        XCTAssertEqual(a.engine.queue.sync { a.engine.batchGroups.convenienceID }, frontID)
+
+        peer.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString(entries))
+        wait("the late batch is in") { a.recorder.items.count == 3 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertEqual(a.recorder.receivedEntries.map(\.0.content), ["old 2"], "the clipboard heard the head's item only")
+        let snap = a.engine.queue.sync { a.engine.buildSnapshot() }
+        XCTAssertEqual(snap.blocks.count, 1, "no new block")
+        XCTAssertEqual(snap.blocks.first?.memberIDs, [frontID])
+        XCTAssertEqual(a.engine.queue.sync { a.engine.batchGroups.convenienceID }, frontID, "C is still the head's")
+    }
+
+    private final class LogBox {
+        private let lock = NSLock()
+        private var all: [String] = []
+        func add(_ line: String) { lock.lock(); all.append(line); lock.unlock() }
+        var lines: [String] { lock.lock(); defer { lock.unlock() }; return all }
+    }
+
+    /// Two real engines, both version 2: the second connection asks for the one
+    /// item that is missing, learns of a deletion made while it was away, and the
+    /// clipboard hears one item per reconnect.
+    func testAVersion2PairAsksOnlyForWhatIsMissingAndLearnsOfDeletionsMadeWhileAway() throws {
+        let box = LogBox()
+        let (a, b) = makePair(configureB: { $0.logSink = { box.add($0) } })
+        setPasscode(a, "pw")
+        setPasscode(b, "pw")
+        a.engine.enterForeground()
+        a.engine.sendText("x")
+        Thread.sleep(forTimeInterval: 0.05)
+        a.engine.sendText("y")
+        Thread.sleep(forTimeInterval: 0.05)
+        a.engine.sendText("z")
+        wait("A has three") { a.recorder.items.count == 3 }
+
+        b.engine.enterForeground()
+        wait("connected") { a.recorder.connectedCount == 1 && b.recorder.connectedCount == 1 }
+        wait("B has all three") { b.recorder.items.count == 3 }
+        func asks() -> [String] { box.lines.filter { $0.hasPrefix("asked ") } }
+        XCTAssertTrue(asks().first?.hasSuffix("for 3 item(s)") == true, "\(asks())")
+        let askedBefore = asks().count
+
+        // B goes away. A gets a new item and deletes x.
+        let down = expectation(description: "B backgrounded")
+        b.engine.enterBackground(grace: 0) { down.fulfill() }
+        wait(for: [down], timeout: 10)
+        wait("A lost B") { a.recorder.connectedCount == 0 }
+        a.engine.sendText("w")
+        wait("A has four") { a.recorder.items.count == 4 }
+        let x = try XCTUnwrap(a.recorder.items.first { $0.entry.content == "x" })
+        a.engine.deleteItem(id: x.id)
+        wait("A has three left") { a.recorder.items.count == 3 }
+
+        b.engine.enterForeground()
+        wait("reconnected", timeout: 30) { a.recorder.connectedCount == 1 && b.recorder.connectedCount == 1 }
+        wait("B has w and lost x") { Set(b.recorder.items.map(\.entry.content)) == ["y", "z", "w"] }
+        wait("B asked again") { asks().count > askedBefore }
+        XCTAssertTrue(asks().dropFirst(askedBefore).allSatisfy { $0.hasSuffix("for 1 item(s)") }, "only w was missing: \(asks())")
+        XCTAssertEqual(b.recorder.receivedEntries.map(\.0.content), ["z", "w"], "one item per reconnect on the clipboard")
+        XCTAssertTrue(DeletedStore(directory: b.dir).contains(x.entry), "the deletion made while away is remembered")
     }
 }
 

@@ -11,8 +11,8 @@ data class Tombstone(val key: String, val deletedAt: Long)
 /**
  * The synced items deleted on this device - one at a time or by clearing the
  * history - remembered so that a peer's next history_batch, or an entry it
- * relays again, can't quietly bring them back. Local only: nothing here goes
- * on the wire, and the peers keep their own copies.
+ * relays again, can't quietly bring them back. A v2 head sends the 500 newest
+ * tombstones, and a delete is broadcast to v2 peers; older peers keep their copy.
  *
  * The same `{Key, DeletedAt}` list as the Windows daemon's deleted.json,
  * capped at [MAX_TOMBSTONES] with the oldest dropped first.
@@ -43,6 +43,13 @@ class DeletedStore(context: Context) {
         prefs.edit().putString(ENTRIES_KEY, updated.toTombstoneJson()).commit()
         cache(updated)
     }
+
+    /**
+     * The newest [limit] deleted keys, most recently deleted first - what a
+     * history_head tells a v2 peer, so it can drop them too.
+     */
+    @Synchronized
+    fun recent(limit: Int): List<String> = load().takeLast(limit).asReversed().map { it.key }
 
     private fun load(): List<Tombstone> =
         tombstones ?: tombstonesFromJson(prefs.getString(ENTRIES_KEY, "[]") ?: "[]").also(::cache)

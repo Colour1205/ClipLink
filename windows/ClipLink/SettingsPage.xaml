@@ -118,7 +118,7 @@
                     <!-- Synced history -->
                     <TextBlock Text="Synced history" Style="{StaticResource SectionHeader}" />
                     <controls:SettingsCard Header="Clear synced history"
-                                           Description="Deletes every synced item from this PC. They won't come back from your other devices, which keep their own copies.">
+                                           Description="Deletes every synced item from this PC and from your other devices. They won't come back. A device with an older ClipLink keeps its own copies.">
                         <controls:SettingsCard.HeaderIcon>
                             <SymbolIcon Symbol="Delete" />
                         </controls:SettingsCard.HeaderIcon>

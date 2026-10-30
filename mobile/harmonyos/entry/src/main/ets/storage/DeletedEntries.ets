@@ -1,7 +1,8 @@
 // Deleting a synced item (or clearing them all) leaves a tombstone here, so
 // a peer's next history_batch - or a relay of the same live entry - can't
-// bring it back. Local only: peers are never told and keep their own copies.
-// Same records as the Windows daemon's deleted{label}.json - {Key,
+// bring it back. A peer that speaks sync v2 is told with a delete message, and
+// hears of the newest tombstones in every history_head (see recent); one that
+// does not keeps its copies. Same records as the Windows daemon's deleted{label}.json - {Key,
 // DeletedAt} - capped at 2000, oldest dropped first. Kept as one JSON string
 // under one preferences key, same tradeoff as HistoryAccess.ets.
 
@@ -75,6 +76,13 @@ export class DeletedEntries {
   async contains(context: common.UIAbilityContext, key: string): Promise<boolean> {
     await this.load(context);
     return this.keys.has(key);
+  }
+
+  // The keys of the `limit` most recent tombstones, the most recently deleted
+  // first (what a v2 history_head lists).
+  async recent(context: common.UIAbilityContext, limit: number): Promise<string[]> {
+    const records = await this.load(context);
+    return records.slice(Math.max(0, records.length - limit)).reverse().map((r: DeletedEntry) => r.Key);
   }
 
   // Records these keys as deleted now. One already recorded keeps its

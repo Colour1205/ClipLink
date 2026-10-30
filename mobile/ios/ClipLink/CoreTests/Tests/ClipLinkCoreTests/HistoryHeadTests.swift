@@ -493,7 +493,7 @@ final class HistoryHeadTests: XCTestCase {
         XCTAssertEqual(recorder.received.map(\.content), ["item 4"], "still the one apply, from the head")
     }
 
-    func testAHeadForAnOlderBatchDoesNotLandOnTheClipboard() throws {
+    func testAHeadsNewestEntryLandsOnTheClipboardEvenWhenSomethingNewerIsHere() throws {
         let (engine, recorder) = makeEngine()
         let peer = trustedPeer(engine)
         // Something newer is here already.
@@ -504,7 +504,11 @@ final class HistoryHeadTests: XCTestCase {
         settle()
 
         XCTAssertTrue(outcome.newestIsNew)
-        XCTAssertTrue(recorder.received.isEmpty, "the same rule as for a batch: only the newest thing we have")
+        XCTAssertEqual(recorder.received.map(\.content), ["item 2"], "the head's newest entry is the one item of a reconnect that lands on the clipboard")
+
+        _ = applyBatch(engine, entries, from: peer, on: connectionOne)
+        settle()
+        XCTAssertEqual(recorder.received.map(\.content), ["item 2"], "and the batch behind it adds nothing there")
     }
 
     func testTheConnectionClosingBeforeTheBatchEndsTheProvisionalGroup() throws {

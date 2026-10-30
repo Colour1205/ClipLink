@@ -28,13 +28,26 @@ public static class HistoryBatch
         // shows even if the batch added nothing.
         public bool HeadApplied { get; init; }
         public bool GroupChanged { get; init; }
+        // Set by BatchGroups.ApplyAnswer: the convenience item of a version 2
+        // sync that goes on the clipboard (null: none, or one was put there
+        // moments ago and this one is not newer, see BatchGroups.ApplyAnswer).
+        public ClipboardEntry? Applied { get; init; }
     }
 
     // Adds every new, not deleted entry of incoming to history, then trims
     // once. Changes history in place. Nothing is notified or saved here: that
     // is one step for the whole batch, done by the caller.
+    //
+    // keep: an entry the trim must not drop (the convenience item, see
+    // BatchGroups): the oldest of the others goes instead. keepNewestAdded: the
+    // newest entry this call adds is kept in that way (it is what the caller
+    // puts on the clipboard, even when it is older than the whole history).
+    // keepIf, when given, is asked about that newest entry first, before the
+    // trim: false and it is not kept (the caller does not put it on the
+    // clipboard after all).
     public static MergeResult Merge(List<ClipboardEntry> history, IEnumerable<ClipboardEntry> incoming,
-        Func<ClipboardEntry, bool> isDeleted, int maxItems)
+        Func<ClipboardEntry, bool> isDeleted, int maxItems, string? keep = null, bool keepNewestAdded = false,
+        Func<ClipboardEntry, bool>? keepIf = null)
     {
         var added = new List<ClipboardEntry>();
         int duplicates = 0, deleted = 0;
@@ -54,7 +67,8 @@ public static class HistoryBatch
                 added.Add(entry);
             }
         }
-        var evicted = TrimOldest(history, maxItems);
+        if (keepNewestAdded && Newest(added) is { } newest && (keepIf == null || keepIf(newest))) keep = newest.Key();
+        var evicted = TrimOldest(history, maxItems, keep);
         if (evicted.Count > 0)
         {
             // A new entry older than the whole history is added and trimmed
@@ -64,13 +78,21 @@ public static class HistoryBatch
         return new MergeResult(added, evicted, duplicates, deleted);
     }
 
+    // The newest of these entries. (The first of equal timestamps wins, so the
+    // result doesn't depend on how the OrderBy happens to break a tie.)
+    public static ClipboardEntry? Newest(IEnumerable<ClipboardEntry> entries) =>
+        entries.OrderByDescending(entry => entry.Timestamp).FirstOrDefault();
+
     // Oldest-first eviction (by timestamp) down to maxItems. Returns what went.
-    public static List<ClipboardEntry> TrimOldest(List<ClipboardEntry> history, int maxItems)
+    // The entry with the key keep is never the one that goes: the oldest of the
+    // others does.
+    public static List<ClipboardEntry> TrimOldest(List<ClipboardEntry> history, int maxItems, string? keep = null)
     {
         var evicted = new List<ClipboardEntry>();
         while (history.Count > maxItems)
         {
-            var oldest = history.OrderBy(e => e.Timestamp).First();
+            var oldest = history.Where(e => keep == null || e.Key() != keep).OrderBy(e => e.Timestamp).FirstOrDefault();
+            if (oldest == null) break; // only the kept one is left
             history.Remove(oldest);
             evicted.Add(oldest);
         }
@@ -83,6 +105,8 @@ public static class HistoryBatch
     {
         // As in MergeResult: the connection's history_head already took the newest entry.
         public bool HeadApplied { get; init; }
+        // As in MergeResult: the convenience item to put on the clipboard.
+        public ClipboardEntry? Applied { get; init; }
     }
 
     // A whole history_batch as one unit: each entry is checked (isAcceptable:
@@ -114,6 +138,6 @@ public static class HistoryBatch
         {
             changed();
         }
-        return new Outcome(merged.Added, rejected, merged.Duplicates, merged.Deleted + deletedEarly) { HeadApplied = merged.HeadApplied };
+        return new Outcome(merged.Added, rejected, merged.Duplicates, merged.Deleted + deletedEarly) { HeadApplied = merged.HeadApplied, Applied = merged.Applied };
     }
 }
