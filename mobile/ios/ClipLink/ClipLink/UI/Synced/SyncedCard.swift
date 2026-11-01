@@ -10,6 +10,8 @@ struct SyncedCard: View {
     let onOpen: () -> Void
     /// Delete, confirmed by the Synced tab (like the detail screen's).
     let onDelete: () -> Void
+    /// Set on a stack's front card: the "+4" at the right end of the footer.
+    var stackBadge: SyncedStackBadge? = nil
 
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
@@ -154,18 +156,34 @@ struct SyncedCard: View {
     }
 
     /// The same on every card, but for the glyph: an image file gets an
-    /// image's, since its picture is already shown above.
+    /// image's, since its picture is already shown above. Glyph, time and
+    /// the sending device on the left, a file's extension and then a stack's
+    /// badge on the right; when the row is short (grid cards) only the
+    /// device's name gives way.
     private var footer: some View {
         HStack(spacing: 6) {
             KindChip(kind: isPictureCard ? .image : item.kind, size: 20)
-            Text(TimeLabel.short(item.date))
-                .lineLimit(1)
-                .layoutPriority(1)
-            Spacer(minLength: 4)
-            if !item.isOwn {
-                Text(item.sourceLabel)
+            HStack(spacing: 0) {
+                Text(TimeLabel.short(item.date))
                     .lineLimit(1)
-                    .truncationMode(.tail)
+                    .fixedSize()
+                if !item.isOwn {
+                    Text(" · \(item.sourceLabel)")
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+            // Ahead of the spacer, so the device's name is cut only once the
+            // spacer is down to its minimum, not when the two share the row.
+            .layoutPriority(1)
+            Spacer(minLength: 4)
+            if let ext = item.fileExtensionLabel {
+                Text(ext)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+            if let badge = stackBadge {
+                badge.transition(.opacity)
             }
         }
         .font(.caption)

@@ -159,8 +159,11 @@
                      room under it for the layers and the handle; the
                      adornment is only there while the card is one. -->
                 <Grid>
+                    <!-- Dragged into another app or a folder, it carries the
+                         item (not the stack's handle: that opens the stack). -->
                     <Border Style="{StaticResource CardBorder}" Padding="16,10,8,14"
                             Margin="{x:Bind StackCardMargin, Mode=OneWay}"
+                            CanDrag="True" DragStarting="Card_DragStarting" DropCompleted="Item_DropCompleted"
                             AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}">
                         <Grid>
                             <Grid.RowDefinitions>
@@ -207,6 +210,7 @@
                 <Grid>
                     <Border Style="{StaticResource CardBorder}" Padding="12,12,6,6"
                             Margin="{x:Bind StackCardMargin, Mode=OneWay}"
+                            CanDrag="True" DragStarting="Card_DragStarting" DropCompleted="Item_DropCompleted"
                             AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}">
                         <Grid>
                             <Grid.RowDefinitions>
@@ -249,7 +253,10 @@
         </DataTemplate>
     </Page.Resources>
 
-    <Grid>
+    <!-- Files, a picture or text dropped anywhere on the page go to your
+         devices (a background, so the empty parts take a drop too). -->
+    <Grid x:Name="PageRoot" Background="Transparent" AllowDrop="True"
+          DragEnter="Page_DragOver" DragOver="Page_DragOver" DragLeave="Page_DragLeave" Drop="Page_Drop">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -385,10 +392,12 @@
                                    Stretch="Uniform"
                                    HorizontalAlignment="Center" MaxHeight="640"
                                    AutomationProperties.Name="Synced image"
+                                   CanDrag="True" DragStarting="Detail_DragStarting" DropCompleted="Item_DropCompleted"
                                    Visibility="Collapsed" />
                             <ContentControl x:Name="DetailFile"
                                             ContentTemplate="{StaticResource FileContent}"
                                             HorizontalContentAlignment="Stretch" IsTabStop="False"
+                                            CanDrag="True" DragStarting="Detail_DragStarting" DropCompleted="Item_DropCompleted"
                                             Visibility="Collapsed" />
                         </Grid>
                     </Border>
@@ -396,5 +405,17 @@
                 </StackPanel>
             </Grid>
         </ScrollViewer>
+
+        <!-- While something is dragged over the page: the cards under
+             Windows' own in-app acrylic, and what letting go does. -->
+        <Grid x:Name="DropHint" Grid.Row="1" Visibility="Collapsed" IsHitTestVisible="False"
+              Background="{ThemeResource AcrylicInAppFillColorDefaultBrush}">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12">
+                <SymbolIcon Symbol="Send" HorizontalAlignment="Center"
+                            Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                <TextBlock Text="Drop to send to your devices" Style="{StaticResource SubtitleTextBlockStyle}"
+                           HorizontalAlignment="Center" />
+            </StackPanel>
+        </Grid>
     </Grid>
 </Page>

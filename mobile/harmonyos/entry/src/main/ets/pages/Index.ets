@@ -18,7 +18,7 @@ import { bundleManager, common, Want, WantAgent, wantConstant, wantAgent } from 
 import { BusinessError } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { isPasteboardReadGranted, requestPasteboardRead } from '../clipboard/PasteboardPermission';
-import { window, promptAction, curves, LengthMetrics } from '@kit.ArkUI';
+import { window, promptAction, curves, LengthMetrics, dragController } from '@kit.ArkUI';
 import { HdsNavigation, HdsNavDestination, HdsNavDestinationTitleMode, HdsNavigationTitleMode, HdsNavigationTitleBarOptions, NavBarWidthRangeOptions,
   HdsNavigationMenuItemOptions, ScrollEffectType, TitleSize, hdsMaterial } from '@kit.UIDesignKit';
 import { scanBarcode } from '@kit.ScanKit';
@@ -57,7 +57,8 @@ import { QUIET_AFTER_IGNORED_MS, QUIET_AFTER_REMOVED_MS, QuietState, RequestQuie
 import { DialFallback } from '../networking/DialFallback';
 import { SyncManager } from '../networking/SyncManager';
 import { BatchApplied, HeadApplied, SyncApplied } from '../networking/HistorySync';
-import { StackedCard } from '../stack/StackedCard';
+import { StackBadge, StackChrome, StackedCard } from '../stack/StackedCard';
+import { fileExtensionLabel } from '../stack/CardFooter';
 import { BatchGroupTracker, BatchMember, BatchPlan, StackMotion, StackRow, buildRows, dissolveGroup, hiddenCount, placeBatch, placeQuiet, revealAnimates, settleGroup, staggerDelayMs, startInsetFraction, startPeekVp } from '../stack/SyncedRows';
 import { connection } from '@kit.NetworkKit';
 import { signEntry, ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
@@ -130,10 +131,14 @@ function tapHaptic(): void {
 // at the same moment.
 const PAIRING_REQUEST_TTL_MS: number = 3 * 60 * 1000;
 const PAIRING_NOTIFICATION_ID: number = 2001;
-// How long a card is held before its menu opens: about half the system's own
-// long-press delay (bindContextMenu with ResponseType.LongPress has no setting
-// for it, so the long press is read here and the menu is shown by it).
-const MENU_LONG_PRESS_MS: number = 250;
+// How long a card or device row is held before its menu opens: under half the
+// system's own long-press delay (bindContextMenu with ResponseType.LongPress
+// has no setting for it, so the long press is read here and the menu is shown
+// by it). A menu shown this way can't hand the touch on to the system's drag,
+// so a synced card starts its own drag (see menuDrag).
+const MENU_LONG_PRESS_MS: number = 210;
+// How far a finger moves, after a card's long press, before the card is dragged.
+const MENU_DRAG_DISTANCE_VP: number = 8;
 // The one notification for items that arrive while the app is out of view
 // (see notifyReceivedItem); each new item replaces it.
 const RECEIVED_NOTIFICATION_ID: number = 2002;
@@ -356,6 +361,8 @@ const SPLIT_PANE_MIN_VP: number = 320;
 // How far a finger may move on a card before it no longer counts as pressing
 // it (see cardTouch).
 const CARD_PRESS_MOVE_SLOP_VP: number = 10;
+// A pressed card's size (clickEffect's MIDDLE level, which cards used before).
+const CARD_PRESS_SCALE: number = 0.95;
 // The Devices split: the device list on the left takes this share, the
 // selected device's detail the rest.
 const DEVICES_LIST_PANE_FRACTION: number = 0.42;
@@ -713,6 +720,13 @@ struct Index {
   // (see cardFillFor); '' when there is none.
   @State pressedCardKey: string = '';
   @State menuCardKey: string = '';
+  // The card whose menu has finished opening, and a drag asked for while it
+  // was still opening (see menuDrag).
+  private menuOpenKey: string = '';
+  // The card whose long press opened its menu during the current touch.
+  private longPressKey: string = '';
+  private menuDragPending: SyncedItem | null = null;
+  private menuDragPointer: number = 0;
   // The card whose menu a long press has just asked for (see MENU_LONG_PRESS_MS).
   @State menuShownKey: string = '';
   private touchStartX: number = 0;
@@ -3398,6 +3412,61 @@ struct Index {
     }
   }
 
+  // A card is dragged out once its long press has opened its menu and the
+  // finger then moves (the gesture in syncedItemCard and the grid cards). A
+  // move while the menu is still opening waits for it to finish: then the
+  // menu closes and the card goes to the finger, as other apps do.
+  private menuDrag(item: SyncedItem, event: GestureEvent): void {
+    const pointerId: number = event.fingerList.length > 0 ? event.fingerList[0].id : 0;
+    if (this.menuOpenKey === item.id) {
+      this.startMenuDrag(item, pointerId);
+    } else {
+      this.menuDragPending = item;
+      this.menuDragPointer = pointerId;
+    }
+  }
+
+  private menuOpened(item: SyncedItem): void {
+    this.menuOpenKey = item.id;
+    const pending: SyncedItem | null = this.menuDragPending;
+    if (pending !== null && pending.id === item.id) {
+      this.menuDragPending = null;
+      this.startMenuDrag(pending, this.menuDragPointer);
+    }
+  }
+
+  // A menu has closed (a card's or a device row's). The card was solid while
+  // it was open (see cardFillFor); it eases back to its see-through fill
+  // rather than changing in the frame the menu's lifted picture goes.
+  private menuClosed(): void {
+    this.menuOpenKey = '';
+    this.menuDragPending = null;
+    this.getUIContext().animateTo({ duration: 250, curve: Curve.EaseOut }, () => {
+      this.menuCardKey = '';
+      // (A finger still down when the menu opened lifted on the menu, not here.)
+      this.pressedCardKey = '';
+    });
+  }
+
+  // The drag itself, for the finger still down (pointerId): a picture of the
+  // card follows it, carrying what dragDataFor makes of the item.
+  private startMenuDrag(item: SyncedItem, pointerId: number): void {
+    let preview: imageKit.PixelMap | undefined = undefined;
+    try {
+      // Taken before the menu goes, while the card is as it looks.
+      preview = this.getUIContext().getComponentSnapshot().getSync(this.rowDomId(item.id));
+    } catch (e) {
+      netLog(`card drag: no picture of the card (${(e as BusinessError).message})`);
+    }
+    this.menuShownKey = '';
+    const data: unifiedDataChannel.UnifiedData | null = this.dragDataFor(item);
+    const dragInfo: dragController.DragInfo = { pointerId: pointerId };
+    if (data !== null) dragInfo.data = data;
+    const dragItem: DragItemInfo = { pixelMap: preview, extraInfo: item.preview };
+    this.getUIContext().getDragController().executeDrag(dragItem, dragInfo)
+      .catch((e: BusinessError) => { netLog(`card drag failed: ${e.code} ${e.message}`); });
+  }
+
   // Builds the UnifiedData payload a card's onDragStart hands to the
   // system so dropping it in another app (or another list position, once
   // reordering exists) carries real content - not just a picture of the
@@ -4013,35 +4082,32 @@ struct Index {
   }
 
   // A card of the list or the grid in its stack wrapper (see StackedCard):
-  // the wrapper adds nothing to an ordinary card.
+  // the wrapper adds nothing to an ordinary card. It hands the card what the
+  // "+N" count at the end of its footer is to show (see StackBadge).
   @Builder
   syncedListRow(item: SyncedItem) {
     StackedCard({
+      front: (chrome: StackChrome): void => { this.syncedItemCard(item, chrome) },
       behind: this.stackBehind(item.id),
       groupId: this.stackGroup(item.id),
       layerFill: this.stackLayerFill(),
-      badgeFill: this.stackBadgeFill(),
       reduceMotion: this.reduceMotion,
       onExpand: (groupId: string, stretch: number): void => { this.expandStack(groupId, stretch); },
       onCollapse: (groupId: string): void => { this.collapseStack(groupId); },
-    }) {
-      this.syncedItemCard(item)
-    }
+    })
   }
 
   @Builder
   syncedGridRow(item: SyncedItem) {
     StackedCard({
+      front: (chrome: StackChrome): void => { this.syncedGridCard(item, chrome) },
       behind: this.stackBehind(item.id),
       groupId: this.stackGroup(item.id),
       layerFill: this.stackLayerFill(),
-      badgeFill: this.stackBadgeFill(),
       reduceMotion: this.reduceMotion,
       onExpand: (groupId: string, stretch: number): void => { this.expandStack(groupId, stretch); },
       onCollapse: (groupId: string): void => { this.collapseStack(groupId); },
-    }) {
-      this.syncedGridCard(item)
-    }
+    })
   }
 
   // The list used to be filled only by live callbacks, so it came up empty
@@ -4082,6 +4148,21 @@ struct Index {
   // HH:MM whatever it is).
   private bylineText(item: SyncedItem): Resource {
     return $r('app.string.synced_byline', item.time, this.sourceLabelFor(item.deviceId));
+  }
+
+  // The time, and the device an item came from when that is another one -
+  // what a Synced card's footer starts with, as on Android and iOS. One Text,
+  // so when a narrow grid card runs out of room the device's name is what the
+  // ellipsis cuts, never the time ahead of it.
+  private cardBylineText(item: SyncedItem): ResourceStr {
+    return item.deviceId === this.ownDeviceId ? item.time : this.bylineText(item);
+  }
+
+  // What a Synced card's footer shows at its far end: a file's extension
+  // ("PDF"), also for a file shown as a picture. '' for anything else. The
+  // preview of a file is its safe name (see previewFor).
+  private cardExtensionText(item: SyncedItem): string {
+    return item.type === 'file' ? fileExtensionLabel(item.preview) : '';
   }
 
   // The preview text, or - for an image, or a file with no usable name,
@@ -4214,6 +4295,37 @@ struct Index {
     return `device:${deviceId}`;
   }
 
+  // A card's or device row's long press opens its menu. The finger lifted
+  // right after it is still a tap to onClick, which would open the item
+  // behind the menu: the press is noted here, and endsLongPress takes that
+  // one click (a new touch clears it, see cardTouch).
+  openMenuByLongPress(key: string): void {
+    this.longPressKey = key;
+    this.menuShownKey = key;
+    // From here the menu has the finger: the card springs back to its size now
+    // (staying solid, see cardFillFor), not when the menu closes.
+    this.menuCardKey = key;
+    this.setPressedCard('');
+  }
+
+  // The press: a little smaller while a finger is on the card, as clickEffect
+  // was, and back to size when it lifts or the card's menu opens.
+  pressScaleFor(key: string): ScaleOptions {
+    const scale: number = this.pressedCardKey === key ? CARD_PRESS_SCALE : 1;
+    return { x: scale, y: scale };
+  }
+
+  private setPressedCard(key: string): void {
+    if (this.pressedCardKey === key) return;
+    this.getUIContext().animateTo({ curve: curves.springMotion(0.25, 0.9) }, () => { this.pressedCardKey = key; });
+  }
+
+  endsLongPress(key: string): boolean {
+    if (this.longPressKey !== key) return false;
+    this.longPressKey = '';
+    return true;
+  }
+
   // Wired to a card's onTouch. Solid on the finger going down; plain again
   // when it lifts, the touch is taken over (a scroll or a drag cancels it) or
   // the finger moves more than a few vp - a scroll that starts on a card
@@ -4221,16 +4333,17 @@ struct Index {
   cardTouch(key: string, event: TouchEvent): void {
     const point: TouchObject = event.changedTouches[0];
     if (event.type === TouchType.Down) {
+      this.longPressKey = '';
       this.touchStartX = point.x;
       this.touchStartY = point.y;
-      this.pressedCardKey = key;
+      this.setPressedCard(key);
     } else if (event.type === TouchType.Move) {
       if (this.pressedCardKey === key &&
         (Math.abs(point.x - this.touchStartX) > CARD_PRESS_MOVE_SLOP_VP || Math.abs(point.y - this.touchStartY) > CARD_PRESS_MOVE_SLOP_VP)) {
-        this.pressedCardKey = '';
+        this.setPressedCard('');
       }
     } else if (this.pressedCardKey === key) {
-      this.pressedCardKey = '';
+      this.setPressedCard('');
     }
   }
 
@@ -4393,11 +4506,13 @@ struct Index {
   }
 
   // The footer every grid card ends in, whatever it holds - text, link, key,
-  // picture or file: the type's glyph and the time in one row. Only the glyph
-  // differs between kinds. The tile fixes the row's height, so a card is the
-  // same size from its first layout whatever kind it is (see syncedGridCard).
+  // picture or file: the type's glyph, the time and the device it came from
+  // (see cardBylineText) on the left, a file's extension on the right, and
+  // a stack's "+N" count after it. Only the glyph and the extension differ
+  // between kinds. The tile fixes the row's height, so a card is the same
+  // size from its first layout whatever kind it is (see syncedGridCard).
   @Builder
-  syncedCardFooter(item: SyncedItem) {
+  syncedCardFooter(item: SyncedItem, chrome: StackChrome) {
     Row({ space: 6 }) {
       // The chip tile, shrunk - not a bare Image. The chip SVGs have white
       // baked in (they normally sit on a saturated tile), and fillColor
@@ -4405,19 +4520,38 @@ struct Index {
       // white card left it invisible. Keeping the tile keeps the type
       // colour legible and matches the list card's language.
       this.typeGlyphTile(item, 18)
-      Text(item.time)
-        .fontSize(10)
-        .fontColor($r('sys.color.font_secondary'))
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
+      this.cardBylineParts(item, 10, chrome)
     }
     .width('100%')
     .alignItems(VerticalAlign.Center)
   }
 
+  // "20:53 · Laptop", then "PDF", then a stack's "+N" at the far right -
+  // what a card's footer row holds after its type icon (the grid card's
+  // tile; the list card's chip is beside the whole card instead), laid into
+  // the caller's Row. The extension and the count have no layoutWeight, so
+  // they are measured first and keep their width: the byline gets what is
+  // left, and pushes them to the end. The count takes no room on a card that
+  // is not a stack's front (see StackBadge).
   @Builder
-  syncedItemCard(item: SyncedItem) {
+  cardBylineParts(item: SyncedItem, fontSize: number, chrome: StackChrome) {
+    Text(this.cardBylineText(item))
+      .fontSize(fontSize)
+      .fontColor($r('sys.color.font_secondary'))
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.Ellipsis })
+      .layoutWeight(1)
+    if (this.cardExtensionText(item).length > 0) {
+      Text(this.cardExtensionText(item))
+        .fontSize(fontSize)
+        .fontColor($r('sys.color.font_secondary'))
+        .maxLines(1)
+    }
+    StackBadge({ chrome: chrome, fill: this.stackBadgeFill() })
+  }
+
+  @Builder
+  syncedItemCard(item: SyncedItem, chrome: StackChrome) {
     Row({ space: 12 }) {
       this.typeChip(item, 44)
 
@@ -4463,17 +4597,14 @@ struct Index {
               .wordBreak(WordBreak.BREAK_WORD)
           }
         }
-        // This builder is ALSO the grid fallback for every non-image item
-        // (see syncedGridCard), where a half-width cell can't fit
-        // "time · source" and truncated it to a meaningless "20:53 · ...".
-        // Drop the source in grid; the list has room for it.
-        Text(this.syncedViewMode === 'list' ? this.bylineText(item) : item.time)
-          .fontSize(11)
-          .fontColor($r('sys.color.font_secondary'))
-          // One line, always - a byline that wraps competes with the
-          // content preview above it for the eye.
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        // The footer without its own icon: the chip beside the card is it.
+        // One line, always - a byline that wraps competes with the content
+        // preview above it for the eye.
+        Row({ space: 6 }) {
+          this.cardBylineParts(item, 11, chrome)
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
@@ -4496,28 +4627,12 @@ struct Index {
     // visually morph into the full-screen view instead of just cutting
     // between them ("一镜到底"). Not in the split layout (see gtId).
     .geometryTransition(this.gtId(item.id), { follow: true })
-    // The "consistent animation for all clicks" - a single universal
-    // attribute rather than a hand-built press-state gesture, so every
-    // tappable surface (including file cards, which don't navigate
-    // anywhere) gets identical feedback.
-    .clickEffect({ level: ClickEffectLevel.MIDDLE })
+    // Pressed, the card shrinks a little, as clickEffect would. Drawn here, not by
+    // clickEffect: a card whose menu opens under the finger never hears it lift,
+    // and clickEffect's press stayed on until the menu closed (see pressScaleFor).
+    .scale(this.pressScaleFor(item.id))
     .onTouch((event: TouchEvent) => { this.cardTouch(item.id, event); })
-    .onClick(() => { tapHaptic(); this.activateItem(item); })
-    // Lets a card be dragged straight out into another app (e.g. dropping
-    // a synced image into a chat) - draggable() + onDragStart() are the
-    // universal attribute pair every draggable component uses (confirmed
-    // against CommonMethod in common.d.ts); the actual payload is built by
-    // dragDataFor() and attached via event.setData(), not the return value
-    // - the return value only controls the drag preview/extra info, not
-    // what gets dropped.
-    .draggable(true)
-    .onDragStart((event: DragEvent) => {
-      const data = this.dragDataFor(item);
-      if (data !== null) {
-        event.setData(data);
-      }
-      return { extraInfo: item.preview };
-    })
+    .onClick(() => { if (this.endsLongPress(item.id)) return; tapHaptic(); this.activateItem(item); })
     // systemMaterial belongs in bindContextMenu's OWN options (third
     // argument), not as an attribute on the Menu() inside the builder -
     // that's the actual mechanism ContextMenuOptions exposes, confirmed
@@ -4528,14 +4643,28 @@ struct Index {
     // a manual vibrator call. Needs ohos.permission.VIBRATE declared in
     // module.json5 (a normal/system_grant permission, unlike
     // READ_PASTEBOARD - safe to just declare, no ACL/AppGallery process).
-    .gesture(LongPressGesture({ duration: MENU_LONG_PRESS_MS }).onAction(() => { this.menuShownKey = item.id; }))
+    // Held for MENU_LONG_PRESS_MS: the menu. Moved after that: the card is
+    // dragged out into another app (see menuDrag) - started here, not by
+    // draggable(): the system's drag needs the finger still for 500 ms.
+    .parallelGesture(GestureGroup(GestureMode.Sequence,
+      LongPressGesture({ duration: MENU_LONG_PRESS_MS }).onAction(() => { this.openMenuByLongPress(item.id); }),
+      PanGesture({ distance: MENU_DRAG_DISTANCE_VP })
+        .onActionStart((event: GestureEvent) => { this.menuDrag(item, event); })
+        .onActionEnd(() => { this.menuDragPending = null; })
+        .onActionCancel(() => { this.menuDragPending = null; })))
     .bindContextMenu(this.menuShownKey === item.id, this.itemActionMenu(item), {
       systemMaterial: this.menuMaterial(),
       hapticFeedbackMode: HapticFeedbackMode.ENABLED,
       aboutToAppear: () => { this.menuCardKey = item.id; },
-      onDisappear: () => { this.menuCardKey = ''; this.menuShownKey = ''; },
+      onDidAppear: () => { this.menuOpened(item); },
+      onDisappear: () => { this.menuShownKey = ''; this.menuClosed(); },
       // See syncedGridCard's identical options for why preview is set.
       preview: MenuPreviewMode.IMAGE,
+      // Lifted from, and put back at, the card's own size. The default starts
+      // at 0.95: right after the system's own long press, which presses the card
+      // down first, but this one opens on a card at full size - closing, the
+      // preview shrank past the card before it went.
+      previewAnimationOptions: { scale: [1.0, 1.1] },
       previewBorderRadius: 18,
       targetSpace: LengthMetrics.vp(12),
     })
@@ -4567,7 +4696,7 @@ struct Index {
   // gets the full width and the type marker shrinks to a small glyph in
   // the bottom-left, beside the timestamp.
   @Builder
-  syncedGridTextCard(item: SyncedItem) {
+  syncedGridTextCard(item: SyncedItem, chrome: StackChrome) {
     Column({ space: 8 }) {
       if (this.looksLikeOpaqueData(item.preview)) {
         Text(item.type === 'file' ? $r('app.string.item_file') : $r('app.string.item_encoded_data'))
@@ -4595,7 +4724,7 @@ struct Index {
           .width('100%')
       }
 
-      this.syncedCardFooter(item)
+      this.syncedCardFooter(item, chrome)
     }
     .width('100%')
     .padding({ left: 12, right: 12, top: 12, bottom: 12 + this.stackHandleRoom(item.id) })
@@ -4605,33 +4734,39 @@ struct Index {
     .clip(true)
     .border(this.cardSelectBorder(item.id))
     .geometryTransition(this.gtId(item.id), { follow: true })
-    .clickEffect({ level: ClickEffectLevel.MIDDLE })
+    .scale(this.pressScaleFor(item.id))
     .onTouch((event: TouchEvent) => { this.cardTouch(item.id, event); })
-    .onClick(() => { tapHaptic(); this.activateItem(item); })
-    .draggable(true)
-    .onDragStart((event: DragEvent) => {
-      const data = this.dragDataFor(item);
-      if (data !== null) {
-        event.setData(data);
-      }
-      return { extraInfo: item.preview };
-    })
-    .gesture(LongPressGesture({ duration: MENU_LONG_PRESS_MS }).onAction(() => { this.menuShownKey = item.id; }))
+    .onClick(() => { if (this.endsLongPress(item.id)) return; tapHaptic(); this.activateItem(item); })
+    // Held for MENU_LONG_PRESS_MS: the menu. Moved after that: the card is
+    // dragged out into another app (see menuDrag) - started here, not by
+    // draggable(): the system's drag needs the finger still for 500 ms.
+    .parallelGesture(GestureGroup(GestureMode.Sequence,
+      LongPressGesture({ duration: MENU_LONG_PRESS_MS }).onAction(() => { this.openMenuByLongPress(item.id); }),
+      PanGesture({ distance: MENU_DRAG_DISTANCE_VP })
+        .onActionStart((event: GestureEvent) => { this.menuDrag(item, event); })
+        .onActionEnd(() => { this.menuDragPending = null; })
+        .onActionCancel(() => { this.menuDragPending = null; })))
     .bindContextMenu(this.menuShownKey === item.id, this.itemActionMenu(item), {
       systemMaterial: this.menuMaterial(),
       hapticFeedbackMode: HapticFeedbackMode.ENABLED,
       aboutToAppear: () => { this.menuCardKey = item.id; },
-      onDisappear: () => { this.menuCardKey = ''; this.menuShownKey = ''; },
+      onDidAppear: () => { this.menuOpened(item); },
+      onDisappear: () => { this.menuShownKey = ''; this.menuClosed(); },
       preview: MenuPreviewMode.IMAGE,
+      // Lifted from, and put back at, the card's own size. The default starts
+      // at 0.95: right after the system's own long press, which presses the card
+      // down first, but this one opens on a card at full size - closing, the
+      // preview shrank past the card before it went.
+      previewAnimationOptions: { scale: [1.0, 1.1] },
       previewBorderRadius: 18,
       targetSpace: LengthMetrics.vp(12),
     })
   }
 
   @Builder
-  syncedGridCard(item: SyncedItem) {
+  syncedGridCard(item: SyncedItem, chrome: StackChrome) {
     if (item.type !== 'image' && this.imagePreviewUri(item) === null) {
-      this.syncedGridTextCard(item)
+      this.syncedGridTextCard(item, chrome)
     } else {
       Column({ space: 8 }) {
         Image(item.type === 'image' ? `data:image/png;base64,${item.content}` : this.imagePreviewUri(item) as string)
@@ -4646,13 +4781,10 @@ struct Index {
           .borderRadius(12)
         // The picture is the content, so no name or caption under it - a file
         // with nothing to preview keeps its name (see syncedGridTextCard).
-        // The standard footer, time only: the full "time · source" byline
-        // does not fit a half-width grid cell and truncated to a meaningless
-        // "· ...". The source is still on the list card and in the detail
-        // view. The 4 of padding on top of the card's 8 puts the glyph where
-        // the text card's 12 does.
+        // The standard footer. The 4 of padding on top of the card's 8 puts
+        // the glyph where the text card's 12 does.
         Row() {
-          this.syncedCardFooter(item)
+          this.syncedCardFooter(item, chrome)
         }
         .width('100%')
         .padding({ left: 4, right: 4, bottom: 4 })
@@ -4671,23 +4803,24 @@ struct Index {
       // mounted for a given item at a time (list XOR grid mode), so
       // reusing item.id here doesn't conflict with the other variant.
       .geometryTransition(this.gtId(item.id), { follow: true })
-      .clickEffect({ level: ClickEffectLevel.MIDDLE })
+      .scale(this.pressScaleFor(item.id))
       .onTouch((event: TouchEvent) => { this.cardTouch(item.id, event); })
-      .onClick(() => { tapHaptic(); this.activateItem(item); })
-      .draggable(true)
-      .onDragStart((event: DragEvent) => {
-        const data = this.dragDataFor(item);
-        if (data !== null) {
-          event.setData(data);
-        }
-        return { extraInfo: item.preview };
-      })
-      .gesture(LongPressGesture({ duration: MENU_LONG_PRESS_MS }).onAction(() => { this.menuShownKey = item.id; }))
+      .onClick(() => { if (this.endsLongPress(item.id)) return; tapHaptic(); this.activateItem(item); })
+      // Held for MENU_LONG_PRESS_MS: the menu. Moved after that: the card is
+      // dragged out into another app (see menuDrag) - started here, not by
+      // draggable(): the system's drag needs the finger still for 500 ms.
+      .parallelGesture(GestureGroup(GestureMode.Sequence,
+        LongPressGesture({ duration: MENU_LONG_PRESS_MS }).onAction(() => { this.openMenuByLongPress(item.id); }),
+        PanGesture({ distance: MENU_DRAG_DISTANCE_VP })
+          .onActionStart((event: GestureEvent) => { this.menuDrag(item, event); })
+          .onActionEnd(() => { this.menuDragPending = null; })
+          .onActionCancel(() => { this.menuDragPending = null; })))
       .bindContextMenu(this.menuShownKey === item.id, this.itemActionMenu(item), {
         systemMaterial: this.menuMaterial(),
         hapticFeedbackMode: HapticFeedbackMode.ENABLED,
         aboutToAppear: () => { this.menuCardKey = item.id; },
-        onDisappear: () => { this.menuCardKey = ''; this.menuShownKey = ''; },
+        onDidAppear: () => { this.menuOpened(item); },
+        onDisappear: () => { this.menuShownKey = ''; this.menuClosed(); },
         // Without preview, THIS overload of bindContextMenu documents the
         // menu as appearing "at the click position" - i.e. anchored to the
         // finger, which is on top of the card, which is why it covered it.
@@ -4697,6 +4830,11 @@ struct Index {
         // matches the card's own 18 so the lifted snapshot doesn't show
         // different corners from the card beneath it.
         preview: MenuPreviewMode.IMAGE,
+        // Lifted from, and put back at, the card's own size. The default starts
+        // at 0.95: right after the system's own long press, which presses the card
+        // down first, but this one opens on a card at full size - closing, the
+        // preview shrank past the card before it went.
+        previewAnimationOptions: { scale: [1.0, 1.1] },
         previewBorderRadius: 18,
         targetSpace: LengthMetrics.vp(12),
       })
@@ -5711,20 +5849,25 @@ struct Index {
     // A blocked device is the one exception: dark gray in either theme.
     .backgroundColor(this.liveRow(deviceId).blocked ? BLOCKED_CARD : this.cardFillFor(this.deviceCardKey(deviceId)))
     .alignItems(VerticalAlign.Center)
-    .clickEffect({ level: ClickEffectLevel.MIDDLE })
+    .scale(this.pressScaleFor(this.deviceCardKey(deviceId)))
     // Anywhere on the card opens the device; its own buttons and menu take their taps first.
     .border(this.deviceSelectBorder(deviceId))
     .onTouch((event: TouchEvent) => { this.cardTouch(this.deviceCardKey(deviceId), event); })
-    .onClick(() => { tapHaptic(); this.openDeviceDetail(deviceId); })
+    .onClick(() => { if (this.endsLongPress(this.deviceCardKey(deviceId))) return; tapHaptic(); this.openDeviceDetail(deviceId); })
     // The three dots' menu, on a long press of the card as well (the same
     // options as a Synced card's menu).
-    .gesture(LongPressGesture({ duration: MENU_LONG_PRESS_MS }).onAction(() => { this.menuShownKey = this.deviceCardKey(deviceId); }))
+    .gesture(LongPressGesture({ duration: MENU_LONG_PRESS_MS }).onAction(() => { this.openMenuByLongPress(this.deviceCardKey(deviceId)); }))
     .bindContextMenu(this.menuShownKey === this.deviceCardKey(deviceId), this.deviceContextMenu(deviceId), {
       systemMaterial: this.menuMaterial(),
       hapticFeedbackMode: HapticFeedbackMode.ENABLED,
       aboutToAppear: () => { this.menuCardKey = this.deviceCardKey(deviceId); },
-      onDisappear: () => { this.menuCardKey = ''; this.menuShownKey = ''; },
+      onDisappear: () => { this.menuShownKey = ''; this.menuClosed(); },
       preview: MenuPreviewMode.IMAGE,
+      // Lifted from, and put back at, the card's own size. The default starts
+      // at 0.95: right after the system's own long press, which presses the card
+      // down first, but this one opens on a card at full size - closing, the
+      // preview shrank past the card before it went.
+      previewAnimationOptions: { scale: [1.0, 1.1] },
       previewBorderRadius: 18,
       targetSpace: LengthMetrics.vp(12),
     })

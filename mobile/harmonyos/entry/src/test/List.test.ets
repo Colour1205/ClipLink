@@ -10,6 +10,7 @@ import historyBatchTest from './HistoryBatch.test';
 import syncedRowsTest from './SyncedRows.test';
 import syncProtocolTest from './SyncProtocol.test';
 import historySyncTest from './HistorySync.test';
+import cardFooterTest from './CardFooter.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -24,4 +25,5 @@ export default function testsuite() {
   syncedRowsTest();
   syncProtocolTest();
   historySyncTest();
+  cardFooterTest();
 }
