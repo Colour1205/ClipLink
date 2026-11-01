@@ -43,10 +43,36 @@ private struct FanOutEffect: ViewModifier {
     }
 }
 
+/// "+4": how many items are behind a stack's front card, at the right end of
+/// that card's footer, where it fades as the stack is pulled open.
+struct SyncedStackBadge: View {
+    let hiddenCount: Int
+    /// How far the stack has been pulled open, 0 to 1.
+    let progress: Double
+
+    @EnvironmentObject private var settings: AppSettings
+
+    var body: some View {
+        Text("+\(hiddenCount)")
+            .font(.caption.weight(.bold).monospacedDigit())
+            .foregroundColor(.white)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 8)
+            // The pill's 3 pt above and below is drawn, not laid out, so the
+            // footer is as tall as any other card's (and the grid's estimate).
+            .background(Capsule().fill(settings.accentTheme.fill).padding(.vertical, -3))
+            .opacity(1 - progress)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
 /// One position in the Synced list: an ordinary card, or the card in front of
 /// a stack (the newest item of one history batch) with the layers, the count
-/// badge and the handle that opens it. The card itself is the same view in
-/// both cases, so opening a stack keeps it in place and only adds the others.
+/// badge in its footer and the handle that opens it. The card itself is the
+/// same view in both cases, so opening a stack keeps it in place and only
+/// adds the others.
 struct SyncedRowView: View {
     let row: SyncedRow
     let compact: Bool
@@ -78,10 +104,10 @@ struct SyncedRowView: View {
     }
 
     var body: some View {
-        SyncedCard(item: row.item, compact: compact, onOpen: { onOpen(row.item) }, onDelete: { onDelete(row.item) })
+        SyncedCard(item: row.item, compact: compact, onOpen: { onOpen(row.item) }, onDelete: { onDelete(row.item) },
+                   stackBadge: row.stack.map { SyncedStackBadge(hiddenCount: $0.hiddenCount, progress: progress) })
             .background(alignment: .bottom) { layers }
             .overlay(alignment: .bottom) { handle }
-            .overlay(alignment: .topTrailing) { badge }
             .padding(.bottom, reservedBottom)
             .transition(arrival)
     }
@@ -141,7 +167,7 @@ struct SyncedRowView: View {
             .opacity(1 - 0.25 * progress)
     }
 
-    // MARK: - Handle and badge
+    // MARK: - Handle
 
     @ViewBuilder
     private var handle: some View {
@@ -170,25 +196,6 @@ struct SyncedRowView: View {
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { expand(stack) }
             .transition(.opacity)
-        }
-    }
-
-    /// "+4": how many items are behind the front card.
-    @ViewBuilder
-    private var badge: some View {
-        if let stack = row.stack {
-            Text("+\(stack.hiddenCount)")
-                .font(.caption.weight(.bold).monospacedDigit())
-                .foregroundColor(.white)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(Capsule().fill(settings.accentTheme.fill))
-                // Half over the card's corner, clear of its text.
-                .offset(x: 6, y: -6)
-                .opacity(1 - progress)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-                .transition(.opacity)
         }
     }
 

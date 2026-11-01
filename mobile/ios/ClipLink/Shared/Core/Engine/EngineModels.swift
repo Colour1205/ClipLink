@@ -108,6 +108,38 @@ public struct SyncedItem: Identifiable, Equatable {
         }
     }
 
+    /// What a file card's footer shows on its right: the file's extension,
+    /// upper-case and without the dot ("PDF"). Nil for anything but a file.
+    public var fileExtensionLabel: String? {
+        guard kind == .file, let name = filePayload?.fileName else { return nil }
+        return Self.extensionLabel(forFileName: name)
+    }
+
+    static let maxExtensionLabel = 8
+
+    /// Nil for no extension, one longer than `maxExtensionLabel`, or one with
+    /// anything but letters and digits ("v1.2 beta") - that is more likely
+    /// part of the name than a kind. Android's rule, as is: counted and
+    /// checked by code point, where a letter is any Unicode letter and a
+    /// digit a decimal one (not "½" or "³", which `isNumber` would allow).
+    static func extensionLabel(forFileName name: String) -> String? {
+        guard let dot = name.lastIndex(of: ".") else { return nil }
+        let ext = name[name.index(after: dot)...]
+        let scalars = ext.unicodeScalars
+        guard !scalars.isEmpty, scalars.count <= maxExtensionLabel,
+              scalars.allSatisfy(isLetterOrDigit) else { return nil }
+        return ext.uppercased()
+    }
+
+    private static func isLetterOrDigit(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.properties.generalCategory {
+        case .uppercaseLetter, .lowercaseLetter, .titlecaseLetter, .modifierLetter, .otherLetter, .decimalNumber:
+            return true
+        default:
+            return false
+        }
+    }
+
     static func kind(for entry: ClipboardEntry) -> Kind {
         switch entry.type {
         case Wire.EntryType.image: return .image

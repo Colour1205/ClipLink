@@ -3,13 +3,17 @@
 // front card of a stack (the newest item of one history batch) it adds what
 // makes it a stack: layers peeking out below the card, a "+N" count, and a
 // handle at the bottom that opens the stack when it is swiped down (or tapped).
-// The rules and numbers are in SyncedRows.ets; the rows are built in Index.
+// The count is drawn at the end of the card's own footer row (see StackBadge),
+// so the row keeps room for it; the wrapper tells it what to show through a
+// StackChrome it hands the card. The rules and numbers are in SyncedRows.ets;
+// the rows are built in Index.
 //
 // Everything that moves while a finger is on the handle (the layers, the
 // handle and the count fading) is driven by `progress`, a number of this
-// component only. A drag therefore redraws this wrapper's few nodes and never
-// the page or the card in front, and nothing here is laid out again: the room
-// the layers peek into is fixed, and they move with translate and opacity.
+// component only. A drag therefore redraws this wrapper's few nodes and the
+// count, never the page or the rest of the card in front, and nothing here is
+// laid out again: the room the layers peek into is fixed, and they move with
+// translate and opacity.
 //
 // The pull has two parts. Up to the commit point the stack stretches against a
 // rubber band's resistance, following the finger. At the commit point (with a
@@ -48,17 +52,49 @@ const LAYER_FADE_MS: number = 120;
 // longer (ms) so the layers can finish fading.
 const HOLD_AFTER_RELEASE_MS: number = 320;
 
+// What the "+N" count in a card's footer shows: how many items it counts (0:
+// no count, and no room kept for it) and how faded it is. Kept in step by the
+// card's StackedCard, so a pull redraws the count alone.
+@Observed
+export class StackChrome {
+  behind: number = 0;
+  opacity: number = 1;
+}
+
+// The "+N" count of a stack's front card, at the end of its footer row: the
+// row lays it out like its other parts, so nothing is drawn under it. Gone
+// (and taking no room) on any other card.
+@Component
+export struct StackBadge {
+  @ObjectLink chrome: StackChrome;
+  // The accent colour, as '#AARRGGBB' (see Index.stackBadgeFill).
+  @Prop fill: string = '#FF5468D4';
+
+  build() {
+    Text($r('app.string.stack_badge', this.chrome.behind))
+      .fontSize(12)
+      .fontWeight(FontWeight.Bold)
+      .fontColor($r('sys.color.font_on_primary'))
+      .maxLines(1)
+      .padding({ left: 8, right: 8, top: 2, bottom: 2 })
+      .borderRadius(12)
+      .backgroundColor(this.fill)
+      .opacity(this.chrome.opacity)
+      .visibility(this.chrome.behind > 0 ? Visibility.Visible : Visibility.None)
+      .hitTestBehavior(HitTestMode.None)
+  }
+}
+
 @Component
 export struct StackedCard {
-  // The card in front.
-  @BuilderParam front: () => void = this.noFront;
+  // The card in front, given what its footer's count is to show.
+  @BuilderParam front: (chrome: StackChrome) => void = this.noFront;
   // Items hidden behind the front card; 0 for an ordinary card.
-  @Prop behind: number = 0;
+  @Prop @Watch('syncChrome') behind: number = 0;
   @Prop groupId: string = '';
-  // The cards' fill with the "Card transparency" setting applied, and the
-  // accent colour, both as '#AARRGGBB' (see Index.stackLayerFill).
+  // The cards' fill with the "Card transparency" setting applied, as
+  // '#AARRGGBB' (see Index.stackLayerFill).
   @Prop layerFill: string = '#FFFFFFFF';
-  @Prop badgeFill: string = '#FF5468D4';
   // The system's "reduce animations" setting: short fades, no springs.
   @Prop reduceMotion: boolean = false;
   // The system language, so the accessibility text follows a change of it.
@@ -72,15 +108,17 @@ export struct StackedCard {
   // 0 (closed) to 1 (open). While the finger is down it is the rubber-band
   // stretch of the drag (it never gets past RUBBER_REACH); once the pull gets
   // to the commit point it springs to 1 by itself.
-  @State progress: number = 0;
+  @State @Watch('syncChrome') progress: number = 0;
   // 0 to 1: how much the layers have faded out, after the pop.
-  @State fade: number = 0;
+  @State @Watch('syncChrome') fade: number = 0;
   // A finger is on the handle, or just left it: the handle (and what is drawn
   // for the stack) stays even when the stack has been opened, because the
   // stack's items, and so `behind`, change under the finger when it pops.
-  @State holding: boolean = false;
+  @State @Watch('syncChrome') holding: boolean = false;
   // What `behind` was when the finger came down.
-  @State heldBehind: number = 0;
+  @State @Watch('syncChrome') heldBehind: number = 0;
+  // The count in the card's footer (see StackBadge).
+  private chrome: StackChrome = new StackChrome();
   // The cards are out (popped by a pull or opened by a tap).
   private opened: boolean = false;
   // They were popped by a pull whose finger is still down, so they can still
@@ -90,7 +128,19 @@ export struct StackedCard {
   private holdTimer: number = -1;
 
   @Builder
-  noFront() {
+  noFront(chrome: StackChrome) {
+  }
+
+  aboutToAppear(): void {
+    this.syncChrome();
+  }
+
+  // The count in the footer follows what this component draws: the frozen
+  // number while a finger holds the stack, and the fade. Called as the state
+  // changes, inside the same animateTo, so it fades with the handle.
+  private syncChrome(): void {
+    this.chrome.behind = this.shownBehind();
+    this.chrome.opacity = this.chromeOpacity();
   }
 
   // Items behind the card as far as this component draws them.
@@ -211,27 +261,9 @@ export struct StackedCard {
         .hitTestBehavior(HitTestMode.None)
       }
 
-      this.front()
+      this.front(this.chrome)
 
       if (this.shownBehind() > 0) {
-        // The count of what is behind the card, bottom right, clear of the
-        // handle and of the card's own text.
-        Row() {
-          Text($r('app.string.stack_badge', this.shownBehind()))
-            .fontSize(12)
-            .fontWeight(FontWeight.Bold)
-            .fontColor($r('sys.color.font_on_primary'))
-            .maxLines(1)
-            .padding({ left: 8, right: 8, top: 2, bottom: 2 })
-            .borderRadius(12)
-            .backgroundColor(this.badgeFill)
-        }
-        .width('100%')
-        .justifyContent(FlexAlign.End)
-        .padding({ right: 12, bottom: 6 })
-        .opacity(this.chromeOpacity())
-        .hitTestBehavior(HitTestMode.None)
-
         // The handle: a short bar, low in a touch target 56 vp tall and 240 wide. A swipe down starting on it opens the stack; one that
         // starts anywhere else is the list's to scroll, and so is a swipe up
         // (the pan only accepts downward moves), so the two never fight.

@@ -369,8 +369,10 @@ internal fun SyncedCard(
     actions: SyncedActions,
     compact: Boolean,
     modifier: Modifier = Modifier,
-    /** Drawn over the bottom of the card, in the room [STACK_HANDLE_ZONE] leaves there: a stack's handle and count. */
+    /** Drawn over the bottom of the card, in the room [STACK_HANDLE_ZONE] leaves there: a stack's handle. */
     stackFooter: (@Composable BoxScope.() -> Unit)? = null,
+    /** The last thing in the footer row, after the file's kind, given its whole width: a stack's count. */
+    footerTrailing: (@Composable () -> Unit)? = null,
 ) {
     val item = keyed.item
     // The picture of an image file (a photo sent from a phone), once its bytes
@@ -438,25 +440,40 @@ internal fun SyncedCard(
                     // In grid view the chip drops its label and sits beside the
                     // timestamp instead of taking a line of its own.
                     TypeChip(style, showLabel = !compact)
-                    Text(
-                        item.timeLabel,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.weight(1f))
-                    if (!item.isOwn) {
-                        // The sender's name (its short id while none is known).
-                        // Grid cards are narrow, so there the name stands alone:
-                        // with "from " in front it was cut to "from ...".
-                        val sender = displayNameOf(item.entry.deviceId, senderName)
+                    // The time, then the sender's name (its short id while none
+                    // is known) for an item from another device - the same
+                    // line on every phone app. Grid cards are narrow: the name
+                    // is the one part that gives way, never the time.
+                    Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            if (compact) sender else "from $sender",
+                            item.timeLabel,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (!item.isOwn) {
+                            Text(
+                                " · ${displayNameOf(item.entry.deviceId, senderName)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                        }
+                    }
+                    // A file's kind at the far end, picture files included.
+                    fileExtensionLabel(item.filePayload?.fileName)?.let { extension ->
+                        Text(
+                            extension,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
                         )
                     }
+                    // Unweighted like the chip and the kind, so it is measured
+                    // first and the name above is what gives way to it.
+                    footerTrailing?.invoke()
                 }
             }
 
@@ -579,6 +596,19 @@ private fun FileRow(item: SyncedItem, style: TypeStyle) {
         }
     }
 }
+
+/**
+ * What a file card's footer shows of [fileName]: its extension, upper-case
+ * and without the dot ("PDF"). Null for no name, no extension, or one longer
+ * than [MAX_EXTENSION_LABEL] or with anything but letters and digits in it
+ * ("v1.2 beta") - that is more likely part of the name than a kind.
+ */
+internal fun fileExtensionLabel(fileName: String?): String? =
+    fileName?.substringAfterLast('.', "")
+        ?.takeIf { it.isNotEmpty() && it.length <= MAX_EXTENSION_LABEL && it.all(Char::isLetterOrDigit) }
+        ?.uppercase()
+
+private const val MAX_EXTENSION_LABEL = 8
 
 fun formatSize(bytes: Long): String = when {
     bytes >= 1_073_741_824 -> "%.1f GB".format(bytes / 1_073_741_824.0)

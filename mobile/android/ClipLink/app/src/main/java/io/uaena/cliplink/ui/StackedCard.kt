@@ -176,6 +176,7 @@ internal fun StackedCard(
                     onTap = { settle(true, 0f) },
                 )
             },
+            footerTrailing = { StackBadge(stack.behindCount) { progress } },
         )
     }
 }
@@ -200,7 +201,25 @@ private fun BoxScope.PeekLayer(layer: Int, peekPx: Float, slidePx: Float, progre
     ) {}
 }
 
-/** The handle, centred at the bottom of the front card, and the count of what is behind it at the end. Both fade out as the stack opens. */
+/**
+ * The count of what is behind the front card, at the end of its footer row,
+ * fading out as the stack opens. Only drawn: a tap on it is a tap on the card.
+ */
+@Composable
+private fun StackBadge(behindCount: Int, progress: () -> Float) {
+    Text(
+        stringResource(R.string.stack_badge, behindCount),
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSecondaryContainer,
+        maxLines = 1,
+        modifier = Modifier
+            .graphicsLayer { alpha = 1f - progress().coerceIn(0f, 1f) }
+            .background(MaterialTheme.colorScheme.secondaryContainer, CircleShape)
+            .padding(horizontal = 10.dp, vertical = 3.dp),
+    )
+}
+
+/** The handle, centred at the bottom of the front card, fading out as the stack opens. */
 @Composable
 private fun BoxScope.StackFooter(
     behindCount: Int,
@@ -222,8 +241,8 @@ private fun BoxScope.StackFooter(
             .height(STACK_HANDLE_ZONE)
             .graphicsLayer { alpha = 1f - progress().coerceIn(0f, 1f) },
     ) {
-        // The touch target: as tall as the zone and up to 128 dp wide (about half the card, so it
-        // stays clear of the count in a narrow grid card), around a bar that is much smaller.
+        // The touch target: as tall as the zone and up to 128 dp wide (about half the card in a
+        // narrow grid card, leaving its sides to the card), around a bar that is much smaller.
         Box(
             Modifier
                 .align(Alignment.Center)
@@ -245,20 +264,6 @@ private fun BoxScope.StackFooter(
                 Modifier
                     .size(width = 36.dp, height = 4.dp)
                     .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f), CircleShape),
-            )
-        }
-        Surface(
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.secondaryContainer,
-            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-            modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .padding(end = 12.dp),
-        ) {
-            Text(
-                stringResource(R.string.stack_badge, behindCount),
-                style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
             )
         }
     }
