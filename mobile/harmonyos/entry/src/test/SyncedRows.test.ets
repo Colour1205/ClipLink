@@ -1,7 +1,7 @@
 import { describe, it, expect } from '@ohos/hypium';
 import {
   BatchGroupTracker, BatchMember, BatchPlan, StackMotion, StackRow, buildRows, dissolveGroup, dragProgress, hiddenCount, layerCount,
-  placeBatch, placeQuiet, revealAnimates, settleGroup, shouldExpand, staggerDelayMs
+  placeBatch, placeQuiet, reachedCommit, revealAnimates, settleGroup, shouldCollapse, shouldExpand, startInsetFraction, startPeekVp, staggerDelayMs
 } from '../main/ets/stack/SyncedRows';
 
 // A list item as grouping sees it. `minute` is its time (later is newer).
@@ -359,20 +359,58 @@ export default function syncedRowsTest() {
       expect(ids(placed)).assertEqual('a,z,b');
     });
 
-    it('dragProgressFollowsTheFingerOver120vp', 0, () => {
+    it('theStretchIsARubberBandThatNeverReachesOpen', 0, () => {
       expect(dragProgress(-20)).assertEqual(0);
       expect(dragProgress(0)).assertEqual(0);
-      expect(dragProgress(60)).assertEqual(0.5);
-      expect(dragProgress(120)).assertEqual(1);
-      expect(dragProgress(500)).assertEqual(1);
+      expect(dragProgress(StackMotion.RUBBER_SOFTNESS_VP)).assertEqual(StackMotion.RUBBER_REACH / 2); // half way at the softness
+      expect(dragProgress(500) < StackMotion.RUBBER_REACH).assertTrue();
+      expect(StackMotion.RUBBER_REACH < 1).assertTrue();
     });
 
-    it('releaseOpensPastAThirdOrOnAFastSwipe', 0, () => {
-      expect(shouldExpand(0.2, 0)).assertFalse();
-      expect(shouldExpand(0.34, 0)).assertTrue();
-      expect(shouldExpand(0.1, 700)).assertTrue(); // a fast swipe down opens it whatever the distance
-      expect(shouldExpand(0.1, 699)).assertFalse();
-      expect(shouldExpand(0.9, -700)).assertFalse(); // a fast swipe back up closes it
+    it('theStretchGivesLessForEveryExtraVpOfPull', 0, () => {
+      let last: number = 0;
+      let lastStep: number = Infinity;
+      for (let t = 10; t <= 200; t += 10) {
+        const now: number = dragProgress(t);
+        const step: number = now - last;
+        expect(step > 0).assertTrue(); // always follows the finger
+        expect(step < lastStep).assertTrue(); // but harder and harder
+        last = now;
+        lastStep = step;
+      }
+    });
+
+    it('theCardsPopOutAtTheCommitPointWithoutLiftingTheFinger', 0, () => {
+      expect(reachedCommit(StackMotion.COMMIT_DRAG_VP - 1)).assertFalse();
+      expect(reachedCommit(StackMotion.COMMIT_DRAG_VP)).assertTrue();
+      expect(reachedCommit(StackMotion.COMMIT_DRAG_VP + 100)).assertTrue();
+    });
+
+    it('popUpCardsGoBackWhenTheFingerComesBackAboveTheReleasePoint', 0, () => {
+      expect(StackMotion.RELEASE_DRAG_VP < StackMotion.COMMIT_DRAG_VP).assertTrue(); // a gap, so it does not flicker
+      expect(shouldCollapse(StackMotion.RELEASE_DRAG_VP)).assertFalse();
+      expect(shouldCollapse(StackMotion.RELEASE_DRAG_VP - 1)).assertTrue();
+      expect(shouldCollapse(StackMotion.COMMIT_DRAG_VP)).assertFalse();
+    });
+
+    it('releaseOpensAtTheCommitPointOrOnAFastSwipe', 0, () => {
+      expect(shouldExpand(StackMotion.COMMIT_DRAG_VP - 1, 0)).assertFalse();
+      expect(shouldExpand(StackMotion.COMMIT_DRAG_VP, 0)).assertTrue();
+      expect(shouldExpand(10, 700)).assertTrue(); // a fast swipe down opens it whatever the distance
+      expect(shouldExpand(10, 699)).assertFalse();
+      expect(shouldExpand(StackMotion.COMMIT_DRAG_VP + 50, -700)).assertFalse(); // a fast swipe back up closes it
+    });
+
+    it('aRevealedCardStartsWhereItsLayerWas', 0, () => {
+      expect(startPeekVp(1, 0)).assertEqual(StackMotion.PEEK_VP);
+      expect(startPeekVp(2, 0)).assertEqual(2 * StackMotion.PEEK_VP);
+      expect(startPeekVp(7, 0)).assertEqual(2 * StackMotion.PEEK_VP); // past the layers drawn: the last layer
+      expect(startPeekVp(1, 0.5)).assertEqual(StackMotion.PEEK_VP + 0.5 * StackMotion.SPREAD_VP); // a stretched stack
+      expect(startPeekVp(1, -1)).assertEqual(StackMotion.PEEK_VP);
+      expect(startInsetFraction(1, 240)).assertEqual(2 * StackMotion.LAYER_INSET_VP / 240);
+      expect(startInsetFraction(3, 240)).assertEqual(startInsetFraction(2, 240));
+      expect(startInsetFraction(2, 10)).assertEqual(0.4); // never shrinks a narrow card away
+      expect(startInsetFraction(1, 0)).assertEqual(0);
     });
 
     it('theRevealStaggersBy30msAndCapsAt400msAndOnlyTenAnimate', 0, () => {

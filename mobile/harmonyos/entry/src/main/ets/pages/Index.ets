@@ -58,7 +58,7 @@ import { DialFallback } from '../networking/DialFallback';
 import { SyncManager } from '../networking/SyncManager';
 import { BatchApplied, HeadApplied, SyncApplied } from '../networking/HistorySync';
 import { StackedCard } from '../stack/StackedCard';
-import { BatchGroupTracker, BatchMember, BatchPlan, StackRow, buildRows, dissolveGroup, hiddenCount, placeBatch, placeQuiet, revealAnimates, settleGroup, staggerDelayMs } from '../stack/SyncedRows';
+import { BatchGroupTracker, BatchMember, BatchPlan, StackMotion, StackRow, buildRows, dissolveGroup, hiddenCount, placeBatch, placeQuiet, revealAnimates, settleGroup, staggerDelayMs, startInsetFraction, startPeekVp } from '../stack/SyncedRows';
 import { connection } from '@kit.NetworkKit';
 import { signEntry, ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
 import { ApplyResult } from '../clipboard/ClipboardApply';
@@ -130,6 +130,10 @@ function tapHaptic(): void {
 // at the same moment.
 const PAIRING_REQUEST_TTL_MS: number = 3 * 60 * 1000;
 const PAIRING_NOTIFICATION_ID: number = 2001;
+// How long a card is held before its menu opens: about half the system's own
+// long-press delay (bindContextMenu with ResponseType.LongPress has no setting
+// for it, so the long press is read here and the menu is shown by it).
+const MENU_LONG_PRESS_MS: number = 250;
 // The one notification for items that arrive while the app is out of view
 // (see notifyReceivedItem); each new item replaces it.
 const RECEIVED_NOTIFICATION_ID: number = 2002;
@@ -607,6 +611,39 @@ struct PdfPreviewPane {
   }
 }
 
+// Where a revealed card of an opened stack is drawn relative to its place: offset
+// by (dx, dy) vp and scaled, at an opacity (see Index.expandStack).
+class RevealMotion {
+  id: string;
+  dx: number;
+  dy: number;
+  scale: number;
+  opacity: number;
+
+  constructor(id: string, dx: number, dy: number, scale: number, opacity: number) {
+    this.id = id;
+    this.dx = dx;
+    this.dy = dy;
+    this.scale = scale;
+    this.opacity = opacity;
+  }
+}
+
+// A component's place on the screen, in vp.
+class RectVp {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+
+  constructor(x: number, y: number, w: number, h: number) {
+    this.x = x;
+    this.y = y;
+    this.w = w;
+    this.h = h;
+  }
+}
+
 @Entry
 @Component
 struct Index {
@@ -626,7 +663,29 @@ struct Index {
   // a stack that just arrived (by its front item's id), and the items an
   // opened stack revealed (by id, to their place behind the front card).
   private freshStacks: Set<string> = new Set<string>();
-  private revealSlots: Map<string, number> = new Map<string, number>();
+  // A stack the user opened: its items are real cards that slide out from where
+  // the stack's layers were (see expandStack). Each is hidden (in
+  // revealMotions) until it has been laid out, and then offset (by dx, dy and a
+  // scale) back to where the layer was, and sliding to its place.
+  @State revealMotions: RevealMotion[] = [];
+  // The front card of that stack: above its items while they slide.
+  @State revealFrontId: string = '';
+  // The ones of them that have faded in (the others are invisible: a card
+  // fades in as it slides out from under the front card).
+  @State revealVisible: string[] = [];
+  private revealPending: Map<string, number> = new Map<string, number>();
+  private revealStarts: Map<string, RevealMotion> = new Map<string, RevealMotion>();
+  private revealStretch: number = 0;
+  private revealPeekRoom: number = 0;
+  private revealTimer: number = -1;
+  private revealSafetyTimer: number = -1;
+  // The stack opened last, and what each of its items was (by id, to the size
+  // it expected), so it can be put back (see collapseStack).
+  private openedStackGroup: string = '';
+  private openedStack: Map<string, number> = new Map<string, number>();
+  // Cards that have just come in, by id: they scale up from small (see
+  // rowTransition) while the cards around them slide into their new places.
+  private freshItems: Set<string> = new Set<string>();
   // buildRows' answer for the list it was last asked about (see syncedRows).
   private rowsSource: SyncedItem[] | null = null;
   private rowsCache: StackRow<SyncedItem>[] = [];
@@ -654,6 +713,8 @@ struct Index {
   // (see cardFillFor); '' when there is none.
   @State pressedCardKey: string = '';
   @State menuCardKey: string = '';
+  // The card whose menu a long press has just asked for (see MENU_LONG_PRESS_MS).
+  @State menuShownKey: string = '';
   private touchStartX: number = 0;
   private touchStartY: number = 0;
   // The Devices list pane's measured width: the add-device button sits at
@@ -962,7 +1023,7 @@ struct Index {
         same[listedAt] = item;
         this.syncedItems = same;
       } else {
-        this.syncedItems = [item, ...this.syncedItems].slice(0, 50);
+        this.showSynced([item, ...this.syncedItems].slice(0, 50), [item.id]);
       }
       // Only what is new to the list: an entry reported a second time (see
       // above) is not news.
@@ -990,7 +1051,7 @@ struct Index {
         const front: SyncedItem | undefined = placed.find((i: SyncedItem) => i.groupId === plan.groupId);
         if (front !== undefined) this.noteFreshStack(front.id);
       }
-      this.syncedItems = placed;
+      this.showSynced(placed, fresh.map((i: SyncedItem) => i.id));
       const newestKey: string = entryKey(batch.newest);
       const newest: SyncedItem | undefined = fresh.find((i: SyncedItem) => i.id === newestKey);
       if (!batch.headDone && newest !== undefined && !this.appVisible) void this.notifyReceivedItem(newest);
@@ -1007,7 +1068,7 @@ struct Index {
         item.expected = head.expectedNew;
         this.noteFreshStack(item.id);
       }
-      this.syncedItems = placeBatch(this.syncedItems, [item], 50);
+      this.showSynced(placeBatch(this.syncedItems, [item], 50), [item.id]);
       if (!this.appVisible) void this.notifyReceivedItem(item);
     });
     // The answer to one of this device's requests (sync v2, see
@@ -1041,7 +1102,7 @@ struct Index {
         const stackFront: SyncedItem | undefined = placed.find((i: SyncedItem) => i.groupId === plan.groupId);
         if (stackFront !== undefined) this.noteFreshStack(stackFront.id);
       }
-      this.syncedItems = placed;
+      this.showSynced(placed, fresh.map((i: SyncedItem) => i.id));
       if (front !== undefined && !sync.superseded && !this.appVisible) void this.notifyReceivedItem(front);
     });
     // The batch a head announced came to nothing new, or its connection closed
@@ -3653,6 +3714,23 @@ struct Index {
     };
   }
 
+  // New cards join the list: the list changes inside one animateTo, so the
+  // cards around them slide into their new places instead of jumping, and the
+  // new ones scale up from small (see rowTransition). Only a card that is
+  // listed on screen animates (a stack member behind its front card has no
+  // row), so ids of hidden members cost nothing.
+  private showSynced(items: SyncedItem[], freshIds: string[]): void {
+    for (const id of freshIds) {
+      this.freshItems.add(id);
+      setTimeout(() => { this.freshItems.delete(id); }, 2500);
+    }
+    if (this.reduceMotion) {
+      this.getUIContext().animateTo({ duration: 120, curve: Curve.EaseInOut }, () => { this.syncedItems = items; });
+    } else {
+      this.getUIContext().animateTo({ curve: curves.springMotion(0.3, 0.85) }, () => { this.syncedItems = items; });
+    }
+  }
+
   // A stack that has just come in animates in (see rowTransition) for a moment.
   private noteFreshStack(frontId: string): void {
     this.freshStacks.add(frontId);
@@ -3682,6 +3760,13 @@ struct Index {
     this.syncedRows();
     const row: StackRow<SyncedItem> | undefined = this.rowsByFront.get(itemId);
     return row === undefined ? 0 : hiddenCount(row);
+  }
+
+  // The room a stack's front card keeps free at its bottom for the handle (0
+  // for any other card), so the handle sits in the middle of its touch area
+  // without covering the card's text.
+  private stackHandleRoom(itemId: string): number {
+    return this.stackBehind(itemId) > 0 ? StackMotion.HANDLE_ROOM_VP : 0;
   }
 
   private stackGroup(itemId: string): string {
@@ -3716,48 +3801,213 @@ struct Index {
     };
   }
 
-  // The user opened a stack: its items become ordinary cards, and it never
-  // stacks again. Done in one animateTo, so the cards below move down smoothly
-  // and the hidden items settle into their places (see rowTransition).
-  private expandStack(groupId: string): void {
+  // The user opened a stack (`stretch`, 0 to 1, is how far its layers had been
+  // pulled apart): its items become ordinary cards, and it never stacks again.
+  // The list changes in one animateTo, so the cards below move down smoothly.
+  // The items are real cards from then on, and each starts exactly where the
+  // layer that stood for it was, behind the front card, and slides out to its
+  // place (see revealRowShown). They are hidden until their row has been laid
+  // out, because only then is it known where the place is.
+  private expandStack(groupId: string, stretch: number): void {
     const row: StackRow<SyncedItem> | undefined = this.syncedRows().find((r: StackRow<SyncedItem>) => r.groupId === groupId);
     if (row === undefined) return;
     tapHaptic();
-    this.revealSlots.clear();
-    // memberIds[0] is the front card, which stays; 1 is the one behind it.
-    for (let i = 1; i < row.memberIds.length; i++) this.revealSlots.set(row.memberIds[i], i);
+    this.clearReveal();
+    // What each member was (group and expected size), in case the finger that
+    // opened the stack comes back before it is lifted (see collapseStack).
+    this.openedStack = new Map<string, number>();
+    for (const item of this.syncedItems) {
+      if (item.groupId === groupId) this.openedStack.set(item.id, item.expected);
+    }
+    this.openedStackGroup = groupId;
     this.batchGroups.opened(groupId);
+    this.revealStretch = stretch;
+    this.revealFrontId = row.front.id;
+    // The room under the front card that the stack's layers took; its row is
+    // that much taller than the card.
+    this.revealPeekRoom = Math.min(StackMotion.MAX_LAYERS, hiddenCount(row)) * StackMotion.PEEK_VP;
+    // memberIds[0] is the front card, which stays; 1 is the one behind it.
+    const hidden: RevealMotion[] = [];
+    for (let i = 1; i < row.memberIds.length; i++) {
+      if (!revealAnimates(i)) continue; // the rest of a large stack just appears in place
+      this.revealPending.set(row.memberIds[i], i);
+      hidden.push(new RevealMotion(row.memberIds[i], 0, 0, 1, 0));
+    }
+    this.revealMotions = hidden;
     const opened: SyncedItem[] = dissolveGroup<SyncedItem>(this.syncedItems, groupId,
       (item: SyncedItem, id: string, expected: number) => this.withGroup(item, id, expected));
     if (this.reduceMotion) {
       this.getUIContext().animateTo({ duration: 150, curve: Curve.EaseInOut }, () => { this.syncedItems = opened; });
     } else {
-      this.getUIContext().animateTo({ curve: curves.springMotion(0.5, 0.82) }, () => { this.syncedItems = opened; });
+      this.getUIContext().animateTo({ curve: curves.springMotion(0.4, 0.85) }, () => { this.syncedItems = opened; });
     }
-    setTimeout(() => { this.revealSlots.clear(); }, 1500);
+    // A row that is never laid out (scrolled far away) must not stay hidden.
+    this.revealSafetyTimer = setTimeout(() => {
+      this.revealSafetyTimer = -1;
+      const stuck: string[] = [];
+      this.revealPending.forEach((index: number, id: string) => { stuck.push(id); });
+      this.revealPending.clear();
+      if (stuck.length > 0) this.revealMotions = this.revealMotions.filter((m: RevealMotion) => stuck.indexOf(m.id) === -1);
+    }, 600);
+    this.revealTimer = setTimeout(() => { this.revealTimer = -1; this.clearReveal(); }, 1800);
   }
 
-  // How a row comes in when it is added to the list: a stack that has just
-  // arrived fades and scales in once, however many items it holds; an item
-  // revealed by an opened stack fans out from behind the front card and settles
-  // with a spring, each 30 ms after the one before (only the first 10 - the
-  // rest just appear in place); anything else comes in as it always did. With
-  // "reduce animations" on, short fades and nothing else.
-  private rowTransition(itemId: string): TransitionEffect {
-    const index: number | undefined = this.revealSlots.get(itemId);
-    if (index !== undefined) {
-      if (this.reduceMotion) return TransitionEffect.OPACITY.animation({ duration: 150, curve: Curve.EaseInOut });
-      if (!revealAnimates(index)) return TransitionEffect.IDENTITY;
-      return TransitionEffect.OPACITY
-        .combine(TransitionEffect.translate({ y: -Math.min(index, 4) * 22 }))
-        .combine(TransitionEffect.scale({ x: 0.94, y: 0.94 }))
-        .animation({ curve: curves.springMotion(0.5, 0.8), delay: staggerDelayMs(index) });
+  // The row of a card that an opened stack revealed has been laid out: now its
+  // place is known, so the card is put where its layer was, behind the front
+  // card, and slides out from there with a spring, each 30 ms after the one
+  // before. Called by every row of the list when it has been laid out.
+  private revealRowShown(itemId: string): void {
+    const index: number | undefined = this.revealPending.get(itemId);
+    if (index === undefined) return;
+    this.revealPending.delete(itemId);
+    if (this.reduceMotion) {
+      this.getUIContext().animateTo({ duration: 150, curve: Curve.EaseInOut }, () => { this.showRevealed(itemId); });
+      return;
     }
-    if (this.freshStacks.has(itemId)) {
+    const front: RectVp | null = this.rectOf(this.revealFrontId);
+    const own: RectVp | null = this.rectOf(itemId);
+    if (front === null || own === null) {
+      this.showRevealed(itemId);
+      return;
+    }
+    // The card starts as the layer that stood for it: as narrow as the layer,
+    // its bottom edge peeking out below the front card where the layer's did.
+    const scale: number = 1 - startInsetFraction(index, own.w);
+    const cardBottom: number = front.y + front.h - this.revealPeekRoom;
+    const dx: number = (front.x + front.w / 2) - (own.x + own.w / 2);
+    const dy: number = (cardBottom + startPeekVp(index, this.revealStretch) - own.h * scale / 2) - (own.y + own.h / 2);
+    // A list draws a row over the ones before it, so the card cannot be hidden
+    // behind the front card; instead it is invisible at first and fades in as it
+    // slides out from under it.
+    const start: RevealMotion = new RevealMotion(itemId, dx, dy, scale, 1);
+    this.revealStarts.set(itemId, start);
+    this.setMotion(start);
+    // One frame at the start, then the slide.
+    setTimeout(() => {
+      const delay: number = staggerDelayMs(index);
+      this.getUIContext().animateTo({ curve: curves.springMotion(0.45, 0.8), delay: delay },
+        () => { this.setMotion(new RevealMotion(itemId, 0, 0, 1, 1)); });
+      this.getUIContext().animateTo({ duration: 160, delay: delay + 90, curve: Curve.EaseOut },
+        () => { this.showRevealed(itemId); });
+    }, 24);
+  }
+
+  // Where a component is, in vp (null when it cannot be found).
+  private rectOf(itemId: string): RectVp | null {
+    try {
+      const ui: UIContext = this.getUIContext();
+      const info = ui.getComponentUtils().getRectangleById(this.rowDomId(itemId));
+      if (info.size.width <= 0 || info.size.height <= 0) return null;
+      return new RectVp(ui.px2vp(info.windowOffset.x), ui.px2vp(info.windowOffset.y), ui.px2vp(info.size.width), ui.px2vp(info.size.height));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // An id for a row's component, to find where it is (see rectOf).
+  private rowDomId(itemId: string): string {
+    let h: number = 0;
+    for (let i = 0; i < itemId.length; i++) h = (h * 31 + itemId.charCodeAt(i)) | 0;
+    return `syncedRow${h}`;
+  }
+
+  private setMotion(next: RevealMotion): void {
+    const rest: RevealMotion[] = this.revealMotions.filter((m: RevealMotion) => m.id !== next.id);
+    rest.push(next);
+    this.revealMotions = rest;
+  }
+
+  private motionFor(itemId: string): RevealMotion | undefined {
+    return this.revealMotions.find((m: RevealMotion) => m.id === itemId);
+  }
+
+  private revealTranslate(itemId: string): TranslateOptions {
+    const m: RevealMotion | undefined = this.motionFor(itemId);
+    return m === undefined ? { x: 0, y: 0 } : { x: m.dx, y: m.dy };
+  }
+
+  private revealScale(itemId: string): ScaleOptions {
+    const m: RevealMotion | undefined = this.motionFor(itemId);
+    return m === undefined ? { x: 1, y: 1 } : { x: m.scale, y: m.scale };
+  }
+
+  private revealOpacity(itemId: string): number {
+    const m: RevealMotion | undefined = this.motionFor(itemId);
+    if (m === undefined) return 1;
+    return this.revealVisible.indexOf(itemId) !== -1 ? 1 : 0;
+  }
+
+  private showRevealed(itemId: string): void {
+    if (this.revealVisible.indexOf(itemId) === -1) this.revealVisible = [...this.revealVisible, itemId];
+  }
+
+  // The reveal is over (or another starts): nothing is hidden or offset any more.
+  private clearReveal(): void {
+    if (this.revealTimer !== -1) clearTimeout(this.revealTimer);
+    if (this.revealSafetyTimer !== -1) clearTimeout(this.revealSafetyTimer);
+    this.revealTimer = -1;
+    this.revealSafetyTimer = -1;
+    this.revealPending.clear();
+    this.revealStarts.clear();
+    if (this.revealMotions.length > 0) this.revealMotions = [];
+    if (this.revealVisible.length > 0) this.revealVisible = [];
+    this.revealFrontId = '';
+  }
+
+  // The finger that opened a stack came back up before it was lifted: the
+  // items go back into their stack, each sliding back behind the front card to
+  // where its layer was (see rowTransition). Only possible for the stack that
+  // was just opened.
+  private collapseStack(groupId: string): void {
+    if (this.openedStackGroup !== groupId || this.openedStack.size === 0) return;
+    tapHaptic();
+    const members: Map<string, number> = this.openedStack;
+    this.openedStack = new Map<string, number>();
+    this.openedStackGroup = '';
+    this.batchGroups.reclosed(groupId);
+    // Cards still waiting to be laid out never moved: they just go.
+    this.revealPending.clear();
+    if (this.revealSafetyTimer !== -1) { clearTimeout(this.revealSafetyTimer); this.revealSafetyTimer = -1; }
+    // Let the remaining cards leave with the slide of rowTransition; the front
+    // card stays above them until they have gone.
+    this.revealMotions = this.revealMotions.filter((m: RevealMotion) => this.revealStarts.has(m.id));
+    const closed: SyncedItem[] = this.syncedItems.map((item: SyncedItem) =>
+      members.has(item.id) ? this.withGroup(item, groupId, members.get(item.id) as number) : item);
+    if (this.reduceMotion) {
+      this.getUIContext().animateTo({ duration: 150, curve: Curve.EaseInOut }, () => { this.syncedItems = closed; });
+    } else {
+      this.getUIContext().animateTo({ curve: curves.springMotion(0.4, 0.85) }, () => { this.syncedItems = closed; });
+    }
+    if (this.revealTimer !== -1) clearTimeout(this.revealTimer);
+    this.revealTimer = setTimeout(() => { this.revealTimer = -1; this.clearReveal(); }, 700);
+  }
+
+  // How a row comes in when it is added to the list, and leaves it: a stack
+  // that has just arrived, or a new card, scales up from small; a card of a
+  // stack that has just been opened leaves (the finger came back) by sliding
+  // back behind the front card to where its layer was; anything else comes in
+  // as it always did. With "reduce animations" on, short fades and nothing else.
+  // A revealed card's way in is not here but in revealRowShown, because where
+  // it starts is only known once it has been laid out.
+  private rowTransition(itemId: string): TransitionEffect {
+    // Read, so this is worked out again when a card's slide has been set up.
+    void this.revealMotions;
+    const start: RevealMotion | undefined = this.revealStarts.get(itemId);
+    if (start !== undefined) {
+      if (this.reduceMotion) {
+        return TransitionEffect.asymmetric(TransitionEffect.IDENTITY,
+          TransitionEffect.OPACITY.animation({ duration: 150, curve: Curve.EaseInOut }));
+      }
+      return TransitionEffect.asymmetric(TransitionEffect.IDENTITY,
+        TransitionEffect.translate({ x: start.dx, y: start.dy })
+          .combine(TransitionEffect.scale({ x: start.scale, y: start.scale }))
+          .animation({ curve: curves.springMotion(0.4, 0.9) }));
+    }
+    if (this.freshStacks.has(itemId) || this.freshItems.has(itemId)) {
       if (this.reduceMotion) return TransitionEffect.OPACITY.animation({ duration: 150, curve: Curve.EaseInOut });
       return TransitionEffect.OPACITY
-        .combine(TransitionEffect.scale({ x: 0.95, y: 0.95 }))
-        .animation({ duration: 320, curve: Curve.EaseOut });
+        .combine(TransitionEffect.scale({ x: 0.6, y: 0.6 }))
+        .animation({ curve: curves.springMotion(0.3, 0.85) });
     }
     return TransitionEffect.IDENTITY;
   }
@@ -3772,7 +4022,8 @@ struct Index {
       layerFill: this.stackLayerFill(),
       badgeFill: this.stackBadgeFill(),
       reduceMotion: this.reduceMotion,
-      onExpand: (groupId: string): void => { this.expandStack(groupId); },
+      onExpand: (groupId: string, stretch: number): void => { this.expandStack(groupId, stretch); },
+      onCollapse: (groupId: string): void => { this.collapseStack(groupId); },
     }) {
       this.syncedItemCard(item)
     }
@@ -3786,7 +4037,8 @@ struct Index {
       layerFill: this.stackLayerFill(),
       badgeFill: this.stackBadgeFill(),
       reduceMotion: this.reduceMotion,
-      onExpand: (groupId: string): void => { this.expandStack(groupId); },
+      onExpand: (groupId: string, stretch: number): void => { this.expandStack(groupId, stretch); },
+      onCollapse: (groupId: string): void => { this.collapseStack(groupId); },
     }) {
       this.syncedGridCard(item)
     }
@@ -4227,7 +4479,7 @@ struct Index {
       .layoutWeight(1)
     }
     .width('100%')
-    .padding(12)
+    .padding({ left: 12, right: 12, top: 12, bottom: 12 + this.stackHandleRoom(item.id) })
     .borderRadius(18)
     .backgroundColor(this.cardFillFor(item.id))
     .alignItems(VerticalAlign.Center)
@@ -4276,11 +4528,12 @@ struct Index {
     // a manual vibrator call. Needs ohos.permission.VIBRATE declared in
     // module.json5 (a normal/system_grant permission, unlike
     // READ_PASTEBOARD - safe to just declare, no ACL/AppGallery process).
-    .bindContextMenu(this.itemActionMenu(item), ResponseType.LongPress, {
+    .gesture(LongPressGesture({ duration: MENU_LONG_PRESS_MS }).onAction(() => { this.menuShownKey = item.id; }))
+    .bindContextMenu(this.menuShownKey === item.id, this.itemActionMenu(item), {
       systemMaterial: this.menuMaterial(),
       hapticFeedbackMode: HapticFeedbackMode.ENABLED,
       aboutToAppear: () => { this.menuCardKey = item.id; },
-      onDisappear: () => { this.menuCardKey = ''; },
+      onDisappear: () => { this.menuCardKey = ''; this.menuShownKey = ''; },
       // See syncedGridCard's identical options for why preview is set.
       preview: MenuPreviewMode.IMAGE,
       previewBorderRadius: 18,
@@ -4345,7 +4598,7 @@ struct Index {
       this.syncedCardFooter(item)
     }
     .width('100%')
-    .padding(12)
+    .padding({ left: 12, right: 12, top: 12, bottom: 12 + this.stackHandleRoom(item.id) })
     .borderRadius(18)
     .backgroundColor(this.cardFillFor(item.id))
     .alignItems(HorizontalAlign.Start)
@@ -4363,11 +4616,12 @@ struct Index {
       }
       return { extraInfo: item.preview };
     })
-    .bindContextMenu(this.itemActionMenu(item), ResponseType.LongPress, {
+    .gesture(LongPressGesture({ duration: MENU_LONG_PRESS_MS }).onAction(() => { this.menuShownKey = item.id; }))
+    .bindContextMenu(this.menuShownKey === item.id, this.itemActionMenu(item), {
       systemMaterial: this.menuMaterial(),
       hapticFeedbackMode: HapticFeedbackMode.ENABLED,
       aboutToAppear: () => { this.menuCardKey = item.id; },
-      onDisappear: () => { this.menuCardKey = ''; },
+      onDisappear: () => { this.menuCardKey = ''; this.menuShownKey = ''; },
       preview: MenuPreviewMode.IMAGE,
       previewBorderRadius: 18,
       targetSpace: LengthMetrics.vp(12),
@@ -4404,7 +4658,7 @@ struct Index {
         .padding({ left: 4, right: 4, bottom: 4 })
       }
       .width('100%')
-      .padding(8)
+      .padding({ left: 8, right: 8, top: 8, bottom: 8 + this.stackHandleRoom(item.id) })
       .borderRadius(18)
       .backgroundColor(this.cardFillFor(item.id))
       .alignItems(HorizontalAlign.Start)
@@ -4428,11 +4682,12 @@ struct Index {
         }
         return { extraInfo: item.preview };
       })
-      .bindContextMenu(this.itemActionMenu(item), ResponseType.LongPress, {
+      .gesture(LongPressGesture({ duration: MENU_LONG_PRESS_MS }).onAction(() => { this.menuShownKey = item.id; }))
+      .bindContextMenu(this.menuShownKey === item.id, this.itemActionMenu(item), {
         systemMaterial: this.menuMaterial(),
         hapticFeedbackMode: HapticFeedbackMode.ENABLED,
         aboutToAppear: () => { this.menuCardKey = item.id; },
-        onDisappear: () => { this.menuCardKey = ''; },
+        onDisappear: () => { this.menuCardKey = ''; this.menuShownKey = ''; },
         // Without preview, THIS overload of bindContextMenu documents the
         // menu as appearing "at the click position" - i.e. anchored to the
         // finger, which is on top of the card, which is why it covered it.
@@ -5190,6 +5445,12 @@ struct Index {
         List({ space: 10, scroller: this.syncedListScroller }) {
           ForEach(this.syncedRows(), (row: StackRow<SyncedItem>) => {
             ListItem() { this.syncedListRow(row.front) }
+              .id(this.rowDomId(row.front.id))
+              .zIndex(this.revealFrontId === row.front.id ? 2 : 0)
+              .translate(this.revealTranslate(row.front.id))
+              .scale(this.revealScale(row.front.id))
+              .opacity(this.revealOpacity(row.front.id))
+              .onAreaChange(() => { this.revealRowShown(row.front.id); })
               .transition(this.rowTransition(row.front.id))
           }, (row: StackRow<SyncedItem>) => this.syncedItemKey(row.front))
         }
@@ -5239,6 +5500,12 @@ struct Index {
             // wider than its column after a reflow (see itemConstraintSize
             // below).
             FlowItem() { this.syncedGridRow(row.front) }.width('100%')
+              .id(this.rowDomId(row.front.id))
+              .zIndex(this.revealFrontId === row.front.id ? 2 : 0)
+              .translate(this.revealTranslate(row.front.id))
+              .scale(this.revealScale(row.front.id))
+              .opacity(this.revealOpacity(row.front.id))
+              .onAreaChange(() => { this.revealRowShown(row.front.id); })
               .transition(this.rowTransition(row.front.id))
           }, (row: StackRow<SyncedItem>) => this.syncedItemKey(row.front))
         }
@@ -5451,11 +5718,12 @@ struct Index {
     .onClick(() => { tapHaptic(); this.openDeviceDetail(deviceId); })
     // The three dots' menu, on a long press of the card as well (the same
     // options as a Synced card's menu).
-    .bindContextMenu(this.deviceContextMenu(deviceId), ResponseType.LongPress, {
+    .gesture(LongPressGesture({ duration: MENU_LONG_PRESS_MS }).onAction(() => { this.menuShownKey = this.deviceCardKey(deviceId); }))
+    .bindContextMenu(this.menuShownKey === this.deviceCardKey(deviceId), this.deviceContextMenu(deviceId), {
       systemMaterial: this.menuMaterial(),
       hapticFeedbackMode: HapticFeedbackMode.ENABLED,
       aboutToAppear: () => { this.menuCardKey = this.deviceCardKey(deviceId); },
-      onDisappear: () => { this.menuCardKey = ''; },
+      onDisappear: () => { this.menuCardKey = ''; this.menuShownKey = ''; },
       preview: MenuPreviewMode.IMAGE,
       previewBorderRadius: 18,
       targetSpace: LengthMetrics.vp(12),
