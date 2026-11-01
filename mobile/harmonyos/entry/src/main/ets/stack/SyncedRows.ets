@@ -141,6 +141,14 @@ export class BatchGroupTracker {
       if (waiting.groupId === groupId) waiting.opened = true;
     });
   }
+
+  // The user put an opened stack back (the finger that opened it came back up
+  // before it was lifted): it is a stack again.
+  reclosed(groupId: string): void {
+    this.provisional.forEach((waiting: ProvisionalGroup) => {
+      if (waiting.groupId === groupId) waiting.opened = false;
+    });
+  }
 }
 
 // `list` with `fresh` (a batch's new items, or a head's newest item) put in.
@@ -278,10 +286,26 @@ export function settleGroup<T extends BatchMember>(items: T[], groupId: string, 
 export class StackMotion {
   // Cards drawn behind the front one.
   static readonly MAX_LAYERS: number = 2;
-  // A drag this long (vp) opens the stack all the way.
-  static readonly FULL_DRAG_VP: number = 120;
-  // Let go past this share of the distance and it opens.
-  static readonly COMPLETE_FRACTION: number = 1 / 3;
+  // How far each layer behind the front card peeks out below it (vp), how much
+  // further out each slides per layer when the stack is fully stretched (at
+  // stretch 1), and how much narrower each is, on each side.
+  static readonly PEEK_VP: number = 8;
+  static readonly SPREAD_VP: number = 40;
+  static readonly LAYER_INSET_VP: number = 12;
+  // Until the finger has moved this far (vp) the stack only stretches, against
+  // a resistance; at this point the cards pop out to their places by
+  // themselves, with the finger still down.
+  static readonly COMMIT_DRAG_VP: number = 220;
+  // Once popped, with the finger still down, the cards go back into the stack
+  // if the finger comes back above this (vp). Lower than the commit point, so
+  // a finger resting near it does not make the cards flicker open and shut.
+  static readonly RELEASE_DRAG_VP: number = 150;
+  // The most the stretch can reach (1 is the stack fully open). The finger
+  // gets there only in the limit, so the further it pulls the harder it gets.
+  static readonly RUBBER_REACH: number = 0.8;
+  // How soft the start is: the finger's travel (vp) at which the stretch is
+  // half of RUBBER_REACH. The larger, the more it resists at first.
+  static readonly RUBBER_SOFTNESS_VP: number = 120;
   // A swipe down at least this fast (vp per second) opens it whatever the distance.
   static readonly FLING_VP_PER_SECOND: number = 700;
   // Each card that fans out starts this much (ms) after the one before.
@@ -290,21 +314,58 @@ export class StackMotion {
   static readonly MAX_STAGGER_MS: number = 400;
   // A very large stack animates only its first cards; the rest appear in place.
   static readonly MAX_ANIMATED_CARDS: number = 10;
-  // The touch target of the handle: at least 44 vp tall.
-  static readonly HANDLE_HEIGHT_VP: number = 44;
+  // The touch target of the handle: well over the 44 vp minimum, so it is easy
+  // to hit. The bar sits low in it, near the card's bottom edge.
+  static readonly HANDLE_HEIGHT_VP: number = 56;
+  // Extra room (vp) at the bottom of a stack's front card, on top of its own
+  // padding (none: the handle sits low in the card's own bottom padding).
+  static readonly HANDLE_ROOM_VP: number = 0;
 }
 
-// 0 (closed) to 1 (open) for a finger that moved `translationVp` down.
+// How far the stack has stretched (0, closed, to RUBBER_REACH) for a finger
+// that moved `translationVp` down: a rubber band, so it follows the finger
+// but gives less and less the further it is pulled.
 export function dragProgress(translationVp: number): number {
-  return Math.min(Math.max(translationVp / StackMotion.FULL_DRAG_VP, 0), 1);
+  if (translationVp <= 0) return 0;
+  return StackMotion.RUBBER_REACH * translationVp / (translationVp + StackMotion.RUBBER_SOFTNESS_VP);
 }
 
-// On release: open when the drag got about a third of the way, or the swipe
-// down was fast; a fast swipe back up closes it.
-export function shouldExpand(progress: number, velocityVpPerSecond: number): boolean {
+// Whether a finger that moved `translationVp` down has pulled far enough for
+// the cards to pop out without waiting for it to be lifted.
+export function reachedCommit(translationVp: number): boolean {
+  return translationVp >= StackMotion.COMMIT_DRAG_VP;
+}
+
+// Whether a finger that is still down, with the cards popped out, has come
+// back far enough for the cards to go back into the stack.
+export function shouldCollapse(translationVp: number): boolean {
+  return translationVp < StackMotion.RELEASE_DRAG_VP;
+}
+
+// On release: open when the pull got to the commit point, or the swipe down
+// was fast; a fast swipe back up closes it.
+export function shouldExpand(translationVp: number, velocityVpPerSecond: number): boolean {
   if (velocityVpPerSecond >= StackMotion.FLING_VP_PER_SECOND) return true;
   if (velocityVpPerSecond <= -StackMotion.FLING_VP_PER_SECOND) return false;
-  return progress >= StackMotion.COMPLETE_FRACTION;
+  return reachedCommit(translationVp);
+}
+
+// Where the hidden card `index` (1 is the one right behind the front card)
+// starts when the stack opens, as the layer that stands for it: how far (vp)
+// its bottom edge peeks out below the front card, for a stack that was
+// stretched by `stretch` (0 to 1) when it opened. Cards past the layers drawn
+// start with the last layer.
+export function startPeekVp(index: number, stretch: number): number {
+  const depth: number = Math.min(Math.max(index, 1), StackMotion.MAX_LAYERS);
+  return depth * (StackMotion.PEEK_VP + Math.max(stretch, 0) * StackMotion.SPREAD_VP);
+}
+
+// How much narrower than the front card (as a share of its width, in total)
+// the hidden card `index` starts: the inset of the layer that stands for it.
+export function startInsetFraction(index: number, widthVp: number): number {
+  const depth: number = Math.min(Math.max(index, 1), StackMotion.MAX_LAYERS);
+  if (widthVp <= 0) return 0;
+  return Math.min(2 * depth * StackMotion.LAYER_INSET_VP / widthVp, 0.4);
 }
 
 // Whether the hidden card `index` (1 is the one right behind the front card)
