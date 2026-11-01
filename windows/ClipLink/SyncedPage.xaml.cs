@@ -9,6 +9,7 @@ using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 
 namespace ClipLink;
 
@@ -68,14 +69,14 @@ public sealed partial class SyncedPage : Page
     private void Back_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         if (detail == null) return;
-        ShowList();
+        ShowList(animate: true);
         args.Handled = true;
     }
 
     private void Page_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (detail == null || !e.GetCurrentPoint(this).Properties.IsXButton1Pressed) return;
-        ShowList();
+        ShowList(animate: true);
         e.Handled = true;
     }
 
@@ -396,6 +397,9 @@ public sealed partial class SyncedPage : Page
 
     private void ShowDetail(HistoryCard card)
     {
+        // The card that is tapped grows into the full view (and back): its
+        // picture is taken now, while the list is still showing.
+        var morph = PrepareMorph(OpenMorphKey, card);
         if (detail != null) detail.PropertyChanged -= Detail_PropertyChanged;
         detail = card;
         card.PropertyChanged += Detail_PropertyChanged;
@@ -408,6 +412,7 @@ public sealed partial class SyncedPage : Page
         EmptyState.Visibility = Visibility.Collapsed;
         DetailTitle.Visibility = DetailOrigin.Visibility = DetailView.Visibility = Visibility.Visible;
         DetailView.ChangeView(null, 0, null, disableAnimation: true);
+        StartMorph(morph, DetailCard);
         // Keyboard users land on the first action.
         DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
             () => (DetailCopy.Visibility == Visibility.Visible ? DetailCopy : DetailDelete).Focus(FocusState.Programmatic));
@@ -439,10 +444,12 @@ public sealed partial class SyncedPage : Page
         }
     }
 
-    // Back to the cards.
-    private void ShowList()
+    // Back to the cards: the full view shrinks back into its card (not when it
+    // is the page being left, or the card that is gone).
+    private void ShowList(bool animate = false)
     {
         if (detail is not { } card) return;
+        var morph = animate && host.History.Contains(card) ? PrepareMorph(CloseMorphKey, card, DetailCard) : null;
         card.PropertyChanged -= Detail_PropertyChanged;
         detail = null;
         DetailText.Text = "";
@@ -452,12 +459,89 @@ public sealed partial class SyncedPage : Page
         DetailTitle.Visibility = DetailOrigin.Visibility = DetailView.Visibility = Visibility.Collapsed;
         ListTitle.Visibility = ListSubtitle.Visibility = ViewSwitch.Visibility = Cards.Visibility = PasscodeTip.Visibility = Visibility.Visible;
         EmptyState.Visibility = host.HistoryIsEmpty ? Visibility.Visible : Visibility.Collapsed;
+        if (morph != null) StartMorphBack(morph, card);
         DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => Cards.Focus(FocusState.Programmatic));
+    }
+
+    // ---- a card growing into the full view, and back --------------------------------
+
+    private const string OpenMorphKey = "cardOpen";
+    private const string CloseMorphKey = "cardClose";
+    private static readonly TimeSpan MorphDuration = TimeSpan.FromMilliseconds(220);
+
+    // The list's element for a card, if it has one on screen (the list only
+    // makes elements for the cards near the view).
+    private FrameworkElement? ElementOf(HistoryCard card)
+    {
+        if (FindRepeater(Cards) is not { } repeater) return null;
+        int index = host.History.IndexOf(card);
+        return index < 0 ? null : repeater.TryGetElement(index) as FrameworkElement;
+    }
+
+    // Takes the picture of what is about to grow or shrink. Null when there
+    // is nothing to animate (animations are off, the card is not on screen).
+    private ConnectedAnimation? PrepareMorph(string key, HistoryCard card, FrameworkElement? source = null)
+    {
+        if (!MotionPreference.Enabled) return null;
+        try
+        {
+            source ??= ElementOf(card);
+            if (source is not { ActualWidth: > 0, ActualHeight: > 0 }) return null;
+            var service = ConnectedAnimationService.GetForCurrentView();
+            // Unhurried, and easing out: quick at first, settling gently.
+            service.DefaultDuration = MorphDuration;
+            service.DefaultEasingFunction = ElementCompositionPreview.GetElementVisual(this).Compositor
+                .CreateCubicBezierEasingFunction(new Vector2(0.2f, 0f), new Vector2(0f, 1f));
+            var animation = service.PrepareToAnimate(key, source);
+            animation.Configuration = new BasicConnectedAnimationConfiguration();
+            return animation;
+        }
+        catch (Exception ex)
+        {
+            // Only the movement is lost.
+            Console.WriteLine($"[app] card morph failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    // The card grows into the full view; the buttons stay where they are.
+    private void StartMorph(ConnectedAnimation? animation, UIElement target)
+    {
+        if (animation == null) return;
+        try
+        {
+            // Laid out now, so the card's place and size are known.
+            DetailView.UpdateLayout();
+            animation.TryStart(target);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[app] card morph failed: {ex.Message}");
+        }
+    }
+
+    // The full view shrinks into the card's place in the list, once the list
+    // has been laid out again.
+    private void StartMorphBack(ConnectedAnimation animation, HistoryCard card)
+    {
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            try
+            {
+                Cards.UpdateLayout();
+                if (ElementOf(card) is { } element) animation.TryStart(element);
+                else animation.Cancel();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[app] card morph failed: {ex.Message}");
+            }
+        });
     }
 
     private void DetailTitle_ItemClicked(BreadcrumbBar sender, BreadcrumbBarItemClickedEventArgs args)
     {
-        if (args.Index == 0) ShowList();
+        if (args.Index == 0) ShowList(animate: true);
     }
 
     // A file's bytes arriving, a device's new name, ...
