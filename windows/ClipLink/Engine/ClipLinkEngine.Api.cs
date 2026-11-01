@@ -631,6 +631,27 @@ public sealed partial class ClipLinkEngine
         }
     }
 
+    // Text dropped on ClipLink's window: sent and kept exactly as if it had
+    // been copied here, but this PC's clipboard isn't touched (as
+    // ShareFilesAsync). Works while Faulted too.
+    public void ShareText(string text)
+    {
+        RequireStores();
+        if (string.IsNullOrEmpty(text)) return;
+        Console.WriteLine($"[share] dropped text ({text.Length} chars) - {connectionsByDeviceId.Count} peer(s) connected");
+        PublishLocal(text, "text", null, "dropped");
+    }
+
+    // A picture dropped on ClipLink's window (PNG bytes), as ShareText: an
+    // "image" entry, as a copied one is.
+    public void ShareImage(byte[] png)
+    {
+        RequireStores();
+        if (png.Length == 0) return;
+        Console.WriteLine($"[share] dropped image ({png.Length} bytes) - {connectionsByDeviceId.Count} peer(s) connected");
+        PublishLocal(Convert.ToBase64String(png), "image", null, "dropped");
+    }
+
     // ---- helpers -----------------------------------------------------
 
     private void RequireStores()

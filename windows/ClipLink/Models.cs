@@ -175,7 +175,7 @@ public sealed class HistoryCard : Observable
     }
 
     // What the card does when it first shows up (SyncedPage.PlayPlannedMotions):
-    // a new stack fades and scales in; an item that comes out of a stack that
+    // a new item or stack grows in from small; an item that comes out of a stack that
     // was opened (index = its place among them) flies out of it. Valid
     // for a short while only, so a card that is made while another page is
     // showing doesn't animate when that page is left much later.

@@ -615,6 +615,36 @@ public class SyncEngineTests
     }
 
     [Fact]
+    public async Task Dropped_text_and_a_dropped_picture_go_to_the_devices_and_into_history_but_not_on_the_clipboard()
+    {
+        using var node = new TestNode("a");
+        node.Start();
+        using var peer = new RawPeer("p");
+        node.Trust(peer.Id);
+        await peer.ConnectAsync(node);
+        await peer.WaitForAsync("history_head", 1);
+        byte[] png = { 0x89, 0x50, 0x4E, 0x47, 1, 2, 3 };
+
+        node.Engine!.ShareText("dropped");
+        node.Engine.ShareImage(png);
+        node.Engine.ShareText("");   // nothing to send
+
+        var sent = (await peer.WaitForAsync("entry", 2))
+            .Select(envelope => JsonSerializer.Deserialize<ClipboardEntry>(envelope.Payload)!).ToList();
+        await Wait.Quiet();
+        Assert.Equal(2, peer.Received("entry").Count);
+        Assert.Equal(new[] { ("dropped", "text"), (Convert.ToBase64String(png), "image") }, sent.Select(entry => (entry.Content, entry.Type)));
+        Assert.All(sent, entry =>
+        {
+            Assert.Equal(node.Id, entry.DeviceId);
+            Assert.False(string.IsNullOrEmpty(entry.Signature));
+        });
+        // (Both made within the same moment: their order in history isn't the point.)
+        Assert.Equal(sent.Select(entry => entry.Key()).Order(), node.Engine.GetHistory().Select(item => item.Key).Order());
+        Assert.Empty(node.Applied);
+    }
+
+    [Fact]
     public async Task When_the_connection_asked_closes_the_items_are_asked_of_another_device()
     {
         using var node = new TestNode("a");

@@ -2,6 +2,9 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Numerics;
+using System.Runtime.InteropServices;
+using ClipboardDaemon.Engine;
+using ClipboardDaemon.Storage;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -10,6 +13,10 @@ using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
+using Windows.ApplicationModel.DataTransfer;
+using Windows.Graphics.Imaging;
+using Windows.Storage;
+using Windows.Storage.Streams;
 
 namespace ClipLink;
 
@@ -46,11 +53,25 @@ public sealed partial class SyncedPage : Page
             motionPending = true;
         };
         Cards.LayoutUpdated += PlayPlannedMotions;
+        // (Handled ones too: the card's container handles the press.)
+        Cards.AddHandler(PointerPressedEvent, new PointerEventHandler(Cards_PointerPressed), true);
+        Cards.AddHandler(PointerMovedEvent, new PointerEventHandler(Cards_PointerMoved), true);
+        Cards.AddHandler(PointerReleasedEvent, new PointerEventHandler((_, _) => pressedCard = null), true);
+        // A drag that ended without a drop or a leave (it happens): the hint
+        // goes once the pointer moves over the page again.
+        AddHandler(PointerMovedEvent, new PointerEventHandler((_, _) => ShowDropHint(false)), true);
+        // Let go before a drag got going (see StartDrag). Once it has, Windows
+        // has the pointer: this page hears nothing more of it.
+        AddHandler(PointerReleasedEvent, new PointerEventHandler((_, _) => releasedWhileStarting = true), true);
         // Items are about to be added to the cards (a stack arriving, or one
         // opened): the ones already there glide to their new places.
         host.CardsWillShift += BeginLayoutGlide;
         // Navigated to another page: back to the cards for next time.
-        Unloaded += (_, _) => ShowList();
+        Unloaded += (_, _) =>
+        {
+            ShowList();
+            ShowDropHint(false);
+        };
         // New items arrive at the top: the view must stay where it is, not
         // follow the card that used to be first (the default anchoring).
         Loaded += (_, _) =>
@@ -145,6 +166,12 @@ public sealed partial class SyncedPage : Page
         if (args.InvokedItem is not HistoryCard card) return;
         DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal, () =>
         {
+            // The release that ended a drag still starting (once: a click after it opens the card).
+            if (dragging && dragReleaseUnseen)
+            {
+                dragReleaseUnseen = false;
+                return;
+            }
             if (actionTick is not long tick || Environment.TickCount64 - tick > 500) ShowDetail(card);
         });
     }
@@ -276,19 +303,20 @@ public sealed partial class SyncedPage : Page
         visual.StartAnimation("Opacity", fade);
     }
 
-    // A new stack: one fade and a small scale-in for the whole card, however
-    // many items are in it.
+    // A new item, or a new stack (one card however many items are in it):
+    // it fades in and grows from small with a spring, as on the phones,
+    // while the cards around it glide aside (BeginLayoutGlide).
     private static void ScaleIn(FrameworkElement element)
     {
         var visual = ElementCompositionPreview.GetElementVisual(element);
         var compositor = visual.Compositor;
         visual.CenterPoint = new Vector3((float)element.ActualWidth / 2, (float)element.ActualHeight / 2, 0);
-        FadeIn(element, 0, 240);
+        FadeIn(element, 0, 200);
         var scale = compositor.CreateSpringVector3Animation();
-        scale.InitialValue = new Vector3(0.95f, 0.95f, 1f);
+        scale.InitialValue = new Vector3(0.6f, 0.6f, 1f);
         scale.FinalValue = Vector3.One;
-        scale.DampingRatio = 0.8f;
-        scale.Period = TimeSpan.FromMilliseconds(50);
+        scale.DampingRatio = 0.85f;
+        scale.Period = TimeSpan.FromMilliseconds(48);
         visual.StartAnimation("Scale", scale);
     }
 
@@ -467,7 +495,7 @@ public sealed partial class SyncedPage : Page
 
     private const string OpenMorphKey = "cardOpen";
     private const string CloseMorphKey = "cardClose";
-    private static readonly TimeSpan MorphDuration = TimeSpan.FromMilliseconds(220);
+    private static readonly TimeSpan MorphDuration = TimeSpan.FromMilliseconds(250);
 
     // The list's element for a card, if it has one on screen (the list only
     // makes elements for the cards near the view).
@@ -488,10 +516,10 @@ public sealed partial class SyncedPage : Page
             source ??= ElementOf(card);
             if (source is not { ActualWidth: > 0, ActualHeight: > 0 }) return null;
             var service = ConnectedAnimationService.GetForCurrentView();
-            // Unhurried, and easing out: quick at first, settling gently.
+            // Strongly easing out: most of the way at once, then a long, gentle settle.
             service.DefaultDuration = MorphDuration;
             service.DefaultEasingFunction = ElementCompositionPreview.GetElementVisual(this).Compositor
-                .CreateCubicBezierEasingFunction(new Vector2(0.2f, 0f), new Vector2(0f, 1f));
+                .CreateCubicBezierEasingFunction(new Vector2(0.05f, 0.7f), new Vector2(0.1f, 1f));
             var animation = service.PrepareToAnimate(key, source);
             animation.Configuration = new BasicConnectedAnimationConfiguration();
             return animation;
@@ -596,6 +624,396 @@ public sealed partial class SyncedPage : Page
     private async void DetailDelete_Click(object sender, RoutedEventArgs e)
     {
         if (detail is { } card) await DeleteAsync(card);
+    }
+
+    // ---- dragging an item out ----------------------------------------------------
+
+    // A card - or the picture or file in the full view - dragged into another
+    // app or a folder carries the item itself, as on the phones: the text, or
+    // the file (the same copy Open opens, marked as from elsewhere).
+    // A press on a card, where it was: moved far enough with the button still
+    // down, the card is dragged. Started here rather than by the card's own
+    // CanDrag alone, which never sees the move: the list's container takes
+    // the pointer when it is pressed.
+    private (FrameworkElement Card, Windows.Foundation.Point At)? pressedCard;
+    private const double DragDistance = 6;
+
+    private void Cards_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        pressedCard = null;
+        var point = e.GetCurrentPoint(Cards);
+        if (!point.Properties.IsLeftButtonPressed) return;
+        // A card's buttons (and the stack's handle, which isn't in the card) don't drag.
+        for (var at = e.OriginalSource as DependencyObject; at != null && at != Cards; at = VisualTreeHelper.GetParent(at))
+        {
+            if (at is ButtonBase) return;
+            if (at is FrameworkElement { CanDrag: true, DataContext: HistoryCard } card)
+            {
+                pressedCard = (card, point.Position);
+                return;
+            }
+        }
+    }
+
+    private async void Cards_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (pressedCard is not var (card, from)) return;
+        // One at a time: an earlier one may still be waiting for its file.
+        if (dragging)
+        {
+            pressedCard = null;
+            return;
+        }
+        var point = e.GetCurrentPoint(Cards);
+        if (!point.Properties.IsLeftButtonPressed)
+        {
+            pressedCard = null;
+            return;
+        }
+        if (Math.Abs(point.Position.X - from.X) < DragDistance && Math.Abs(point.Position.Y - from.Y) < DragDistance) return;
+        pressedCard = null;
+        // Until the drag is over (dropped, or never started): letting go
+        // meanwhile is not a click on the card.
+        dragging = dragReleaseUnseen = true;
+        try
+        {
+            await card.StartDragAsync(e.GetCurrentPoint(card));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[app] couldn't start dragging an item: {ex.Message}");
+        }
+        finally
+        {
+            dragging = dragReleaseUnseen = draggingOut = false;
+            ActionClicked();
+        }
+    }
+
+    private bool dragging, dragReleaseUnseen;
+
+    private void Card_DragStarting(UIElement sender, DragStartingEventArgs args)
+    {
+        pressedCard = null;
+        ActionClicked();
+        StartDrag(CardOf(sender), args);
+    }
+
+    private void Detail_DragStarting(UIElement sender, DragStartingEventArgs args) => StartDrag(detail, args);
+
+    // Let go over another app: that is not a click on the card.
+    private void Item_DropCompleted(UIElement sender, DropCompletedEventArgs args)
+    {
+        draggingOut = false;
+        ActionClicked();
+    }
+
+    // An item of ours is being dragged: let go over this page, it is not
+    // something new to send.
+    private bool draggingOut;
+
+    // The first drag of a big file waits for its copy out of ClipLink's
+    // store: one let go of meanwhile (mouse, pen or finger) isn't dragged -
+    // it would drop wherever the pointer had got to. The copy is kept for
+    // the next drag (see DragCopyAsync).
+    private bool releasedWhileStarting;
+
+    // Copies made for dragging, by item: one still as it was made is dragged
+    // again at once (GetFileToOpen reads a big one through to check it).
+    private readonly Dictionary<string, (string Path, long Length, DateTime Written)> dragCopies = new();
+
+    private async Task<string?> DragCopyAsync(HistoryCard card)
+    {
+        if (dragCopies.TryGetValue(card.Key, out var made))
+        {
+            var info = new FileInfo(made.Path);
+            if (info.Exists && info.Length == made.Length && info.LastWriteTimeUtc == made.Written) return made.Path;
+        }
+        // As for Open: the first time copies the file out of ClipLink's store.
+        string? path = await Task.Run(() =>
+        {
+            string? copy = host.Engine.GetFileToOpen(card.Key);
+            if (copy != null) FileOpener.MarkAsFromElsewhere(copy);
+            return copy;
+        });
+        if (path != null)
+        {
+            var info = new FileInfo(path);
+            dragCopies[card.Key] = (path, info.Length, info.LastWriteTimeUtc);
+        }
+        return path;
+    }
+
+    private async void StartDrag(HistoryCard? card, DragStartingEventArgs args)
+    {
+        // A file that hasn't arrived yet has nothing to carry.
+        if (card == null || !(card.IsText || card.CanOpen))
+        {
+            args.Cancel = true;
+            return;
+        }
+        draggingOut = true;
+        releasedWhileStarting = false;
+        Console.WriteLine($"[app] dragging out an item ({card.KindText})");
+        var data = args.Data;
+        data.RequestedOperation = DataPackageOperation.Copy;
+        if (card.IsText)
+        {
+            // All of it - the card only has the first 1000 characters.
+            string text = host.Engine.GetText(card.Key) ?? card.Text ?? "";
+            data.SetText(text);
+            if (card.IsLink && Uri.TryCreate(text.Trim(), UriKind.Absolute, out var link)) data.SetWebLink(link);
+            return;
+        }
+        var deferral = args.GetDeferral();
+        try
+        {
+            string? path = await DragCopyAsync(card);
+            var file = path == null ? null : await StorageFile.GetFileFromPathAsync(path);
+            if (file == null)
+            {
+                draggingOut = false;
+                args.Cancel = true;
+                return;
+            }
+            // (Nothing is awaited from here on: no release can come in between.)
+            if (releasedWhileStarting)
+            {
+                draggingOut = false;
+                args.Cancel = true;
+                App.MainAppWindow.ToastError("Drag it again", "The file had to be copied out of ClipLink first - it's ready now.");
+                return;
+            }
+            data.SetStorageItems(new[] { file }, true);
+            // A picture also drops into an app that takes pictures, not files.
+            if (card.ShowsPicture) data.SetBitmap(RandomAccessStreamReference.CreateFromFile(file));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[app] couldn't start dragging an item: {ex.Message}");
+            draggingOut = false;
+            args.Cancel = true;
+        }
+        finally
+        {
+            deferral.Complete();
+        }
+    }
+
+    // ---- dropping something in ---------------------------------------------------
+
+    // Files, a picture or text dragged here from another app or a folder go to
+    // your devices, as "Share to ClipLink" does: into Synced and out to every
+    // device, without touching this PC's clipboard.
+    private static bool CanTake(DataPackageView data) =>
+        data.Contains(StandardDataFormats.StorageItems) || data.Contains(StandardDataFormats.Bitmap)
+        || data.Contains(StandardDataFormats.Text) || data.Contains(StandardDataFormats.WebLink);
+
+    private void Page_DragOver(object sender, DragEventArgs e)
+    {
+        dropLeaveTimer?.Stop();
+        if (draggingOut || !CanTake(e.DataView))
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+            ShowDropHint(false);
+            return;
+        }
+        e.AcceptedOperation = DataPackageOperation.Copy;
+        e.DragUIOverride.Caption = "Send to your devices";
+        ShowDropHint(true);
+    }
+
+    // Also raised moving from one element on the page to the next, just
+    // before that one's DragEnter: the hint goes only if none follows.
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? dropLeaveTimer;
+
+    private void Page_DragLeave(object sender, DragEventArgs e)
+    {
+        if (dropLeaveTimer == null)
+        {
+            dropLeaveTimer = DispatcherQueue.CreateTimer();
+            dropLeaveTimer.Interval = TimeSpan.FromMilliseconds(80);
+            dropLeaveTimer.IsRepeating = false;
+            dropLeaveTimer.Tick += (_, _) => ShowDropHint(false);
+        }
+        dropLeaveTimer.Stop();
+        dropLeaveTimer.Start();
+    }
+
+    private async void Page_Drop(object sender, DragEventArgs e)
+    {
+        dropLeaveTimer?.Stop();
+        ShowDropHint(false);
+        if (draggingOut || !CanTake(e.DataView)) return;
+        var data = e.DataView;
+        var deferral = e.GetDeferral();
+        // Files that are only in another app (an attachment, say) are copied
+        // out first, and deleted once they have been shared.
+        string? copies = null;
+        try
+        {
+            var items = data.Contains(StandardDataFormats.StorageItems) ? await data.GetStorageItemsAsync() : null;
+            // A link dragged from a browser also comes as a shortcut file
+            // ("Page title.url") that is only in the browser: it goes as the link.
+            bool linkShortcut = items is { Count: > 0 }
+                && items.All(item => string.IsNullOrEmpty(item.Path) && item.Name.EndsWith(".url", StringComparison.OrdinalIgnoreCase))
+                && (data.Contains(StandardDataFormats.WebLink) || data.Contains(StandardDataFormats.Text));
+            // Files before a picture or text: a file brings its own name.
+            if (items != null && !linkShortcut)
+            {
+                var paths = new List<string>();
+                // (One with a path that can't be shared is the share's to report.)
+                var skipped = new List<SkippedShare>();
+                foreach (var item in items)
+                {
+                    if (!string.IsNullOrEmpty(item.Path)) paths.Add(item.Path);
+                    else if (item is StorageFile file)
+                    {
+                        // Not copied out at all when it couldn't be shared anyway.
+                        if ((long)(await file.GetBasicPropertiesAsync()).Size > LocalFiles.MaxFileBytes)
+                        {
+                            skipped.Add(new SkippedShare(file.Name, FileSkipReason.TooLarge, null));
+                            continue;
+                        }
+                        copies ??= Path.Combine(Path.GetTempPath(), "ClipLink", "dropped", Guid.NewGuid().ToString("N"));
+                        Directory.CreateDirectory(copies);
+                        var folder = await StorageFolder.GetFolderFromPathAsync(copies);
+                        paths.Add((await file.CopyAsync(folder, file.Name, NameCollisionOption.GenerateUniqueName)).Path);
+                    }
+                    // A folder that is only in another app (on a phone, in a zip).
+                    else skipped.Add(new SkippedShare(item.Name, FileSkipReason.Folder, null));
+                }
+                await App.Instance.ShareAsync(paths, skipped);
+            }
+            else if (data.Contains(StandardDataFormats.Bitmap))
+            {
+                var bitmap = await data.GetBitmapAsync();
+                using var stream = await bitmap.OpenReadAsync();
+                byte[] png = await ToPngAsync(stream);
+                await Task.Run(() => host.Engine.ShareImage(png));
+            }
+            else
+            {
+                string text = data.Contains(StandardDataFormats.Text) ? await data.GetTextAsync()
+                    : (await data.GetWebLinkAsync()).ToString();
+                await Task.Run(() => host.Engine.ShareText(text));
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[app] couldn't send what was dropped: {ex}");
+            App.MainAppWindow.ToastError("Couldn't send that", ex.Message);
+        }
+        finally
+        {
+            deferral.Complete();
+            if (copies != null)
+            {
+                try { Directory.Delete(copies, recursive: true); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
+        }
+    }
+
+    // ---- the drop hint ----------------------------------------------------------
+
+    // At once: the cards under acrylic, and the hint's text over it.
+    private bool dropHintShown;
+
+    private void ShowDropHint(bool show)
+    {
+        if (show == dropHintShown) return;
+        dropHintShown = show;
+        if (show)
+        {
+            DropHint.Visibility = Visibility.Visible;
+            WatchDrag();
+        }
+        else
+        {
+            dropWatch?.Stop();
+            DropHint.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    // A drag can leave without the page hearing of it (no DragLeave, and no
+    // pointer events while another app drags): while the hint shows, it
+    // goes as soon as no button is down or the pointer isn't over the page.
+    // (Read as Windows' drag does: the buttons themselves, either one, and
+    // the window under the pointer.)
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? dropWatch;
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int key);
+    private const int VK_LBUTTON = 0x01, VK_RBUTTON = 0x02;
+
+    private static bool IsDown(int key) => (GetAsyncKeyState(key) & 0x8000) != 0;
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out NativePoint point);
+    [DllImport("user32.dll")]
+    private static extern bool ScreenToClient(nint hwnd, ref NativePoint point);
+    [DllImport("user32.dll")]
+    private static extern nint WindowFromPoint(NativePoint point);
+    [DllImport("user32.dll")]
+    private static extern nint GetAncestor(nint hwnd, uint flags);
+    private const uint GA_ROOT = 2;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X, Y;
+    }
+
+    private void WatchDrag()
+    {
+        if (dropWatch == null)
+        {
+            dropWatch = DispatcherQueue.CreateTimer();
+            dropWatch.Interval = TimeSpan.FromMilliseconds(100);
+            dropWatch.IsRepeating = true;
+            dropWatch.Tick += (_, _) =>
+            {
+                if (!(IsDown(VK_LBUTTON) || IsDown(VK_RBUTTON)) || !PointerOverPage()) ShowDropHint(false);
+            };
+        }
+        dropWatch.Start();
+    }
+
+    private bool PointerOverPage()
+    {
+        try
+        {
+            if (XamlRoot is not { } root || !GetCursorPos(out var at)) return false;
+            nint hwnd = WinRT.Interop.WindowNative.GetWindowHandle(App.MainAppWindow);
+            // Another window in front of this one there isn't over the page.
+            if (GetAncestor(WindowFromPoint(at), GA_ROOT) != hwnd) return false;
+            if (!ScreenToClient(hwnd, ref at)) return false;
+            double scale = root.RasterizationScale;
+            var page = PageRoot.TransformToVisual(null).TransformBounds(new Windows.Foundation.Rect(0, 0, PageRoot.ActualWidth, PageRoot.ActualHeight));
+            return page.Contains(new Windows.Foundation.Point(at.X / scale, at.Y / scale));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[app] couldn't tell where the pointer is: {ex.Message}");
+            return false;
+        }
+    }
+
+    // A dropped picture comes in whatever form the app had it (often a
+    // bitmap): stored and sent as PNG, as a copied one is.
+    private static async Task<byte[]> ToPngAsync(IRandomAccessStream source)
+    {
+        var decoder = await BitmapDecoder.CreateAsync(source);
+        using var pixels = await decoder.GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied);
+        using var output = new InMemoryRandomAccessStream();
+        var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, output);
+        encoder.SetSoftwareBitmap(pixels);
+        await encoder.FlushAsync();
+        output.Seek(0);
+        using var bytes = new MemoryStream();
+        await output.AsStreamForRead().CopyToAsync(bytes);
+        return bytes.ToArray();
     }
 
     // ---- the actions ------------------------------------------------------------

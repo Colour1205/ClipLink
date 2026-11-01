@@ -195,10 +195,15 @@ public sealed class EngineHost : Observable
         // A card for every entry: made, updated, or dropped when it's gone.
         var present = new HashSet<string>(items.Select(item => item.Key));
         foreach (string gone in cards.Keys.Where(key => !present.Contains(key)).ToList()) cards.Remove(gone);
+        var made = new HashSet<string>();
         foreach (var item in items)
         {
             if (cards.TryGetValue(item.Key, out var card)) card.Update(item);
-            else cards[item.Key] = new HistoryCard(item);
+            else
+            {
+                cards[item.Key] = new HistoryCard(item);
+                made.Add(item.Key);
+            }
         }
 
         // Which of them are cards on the page, and which are folded in a stack.
@@ -207,19 +212,30 @@ public sealed class EngineHost : Observable
         shownStacks.IntersectWith(items.Where(item => item.BatchId != null).Select(item => item.BatchId!));
         var rows = BatchGrouping.Build(entries, expandedBatches);
         var shown = new List<HistoryItem>(rows.Count);
-        bool newStack = false;
+        bool appears = false;
         var byKey = new Dictionary<string, HistoryItem>();
         foreach (var item in items) byKey.TryAdd(item.Key, item);
         var stacks = new Dictionary<string, BatchGrouping.Row>();
+        int appearing = 0;
         foreach (var row in rows)
         {
             shown.Add(byKey[row.FrontKey]);
-            if (!row.IsStack) continue;
+            if (!row.IsStack)
+            {
+                // A new item - copied here or from another device - grows in
+                // as on the phones (only the first few of many at once).
+                if (animate && made.Contains(row.FrontKey) && appearing++ < MaxFlyingCards)
+                {
+                    cards[row.FrontKey].PlanMotion(HistoryCard.Motion.Appear);
+                    appears = true;
+                }
+                continue;
+            }
             stacks[row.FrontKey] = row;
             if (shownStacks.Add(row.BatchId!) && animate)
             {
                 cards[row.FrontKey].PlanMotion(HistoryCard.Motion.Appear);
-                newStack = true;
+                appears = true;
             }
         }
         // (Each card is set once, so a stack's card isn't unstacked and
@@ -234,7 +250,7 @@ public sealed class EngineHost : Observable
             if (cards.TryGetValue(reveal[i], out var revealed) && i < MaxFlyingCards) revealed.PlanMotion(HistoryCard.Motion.Reveal, i);
         }
 
-        if (newStack || reveal.Count > 0) CardsWillShift?.Invoke();
+        if (appears || reveal.Count > 0) CardsWillShift?.Invoke();
         CollectionSync.ByKey(History, shown, card => card.Key, item => item.Key, item => cards[item.Key], (card, item) => card.Update(item));
         foreach (var card in History)
         {

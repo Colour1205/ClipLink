@@ -223,7 +223,13 @@ public partial class App : Application
         shares?.Add(paths);
     }
 
-    private async void ShareNow(IReadOnlyList<string> paths)
+    private async void ShareNow(IReadOnlyList<string> paths) => await ShareAsync(paths);
+
+    // Also files dropped on the Synced page, with what the page itself
+    // couldn't take (skippedHere): one message for the whole drop, and in the
+    // window, where the drop was, what was skipped is said even when the rest
+    // went.
+    internal async Task ShareAsync(IReadOnlyList<string> paths, IReadOnlyList<SkippedShare>? skippedHere = null)
     {
         if (IsQuitting || host == null) return;
         Console.WriteLine($"[share] sharing {paths.Count} path(s)");
@@ -238,8 +244,11 @@ public partial class App : Application
             Notify(new ShareSummary("Couldn't share", ex.Message, IsError: true));
             return;
         }
+        if (skippedHere is { Count: > 0 }) result = result with { Skipped = result.Skipped.Concat(skippedHere).ToList() };
         if (IsQuitting || result.Shared.Count + result.Skipped.Count == 0) return;
-        Notify(ShareSummary.Of(result, host.ConnectedCount));
+        var summary = ShareSummary.Of(result, host.ConnectedCount);
+        if (skippedHere != null && result.Skipped.Count > 0 && window is { IsInFront: true }) window.ToastError(summary.Title, summary.Message);
+        else Notify(summary);
     }
 
     // In the window if it's the one in front, else from the tray icon (as a
