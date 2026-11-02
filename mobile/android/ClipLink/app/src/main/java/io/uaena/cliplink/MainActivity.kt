@@ -2,9 +2,12 @@ package io.uaena.cliplink
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
 import android.content.ClipData
+import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -34,6 +37,7 @@ import io.uaena.cliplink.ui.SyncedActions
 import io.uaena.cliplink.ui.SyncedLayout
 import io.uaena.cliplink.ui.rememberLocalAddresses
 import io.uaena.cliplink.ui.theme.ClipLinkTheme
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -85,9 +89,40 @@ class MainActivity : ComponentActivity() {
         uri?.let { engine.shareIn(null, listOf(it)) { outcome -> if (outcome.needsAttentionInApp) engine.showToast(outcome.message) } }
     }
 
+    /**
+     * The file a Save from a card's menu copies, while the system asks where
+     * to put it. Kept over a recreation (a rotation while the picker is open),
+     * or the place picked would be left an empty file.
+     */
+    private var pendingSave: File? = null
+
+    private val saveFileLauncher = registerForActivityResult(
+        // The kind of file the name says, not "anything": a picker then offers
+        // the right folders and keeps the name as it is.
+        object : ActivityResultContracts.CreateDocument("*/*") {
+            override fun createIntent(context: Context, input: String): Intent =
+                super.createIntent(context, input).setType(ClipboardBridge.guessMimeType(input))
+        },
+    ) { uri ->
+        val source = pendingSave
+        pendingSave = null
+        if (uri == null || source == null) return@registerForActivityResult
+        lifecycleScope.launch {
+            val saved = withContext(Dispatchers.IO) {
+                try {
+                    contentResolver.openOutputStream(uri)?.use { out -> source.inputStream().use { it.copyTo(out) } } != null
+                } catch (e: Exception) {
+                    false
+                }
+            }
+            engine.showToast(if (saved) "Saved." else "Couldn't save that file.")
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        pendingSave = savedInstanceState?.getString(KEY_PENDING_SAVE)?.let(::File)
 
         engine.start()
         // Only for a fresh launch. A recreation (rotation, dark mode, language)
@@ -168,6 +203,10 @@ class MainActivity : ComponentActivity() {
                             onSyncClipboard = engine::captureAndBroadcast,
                             onPickFile = { pickFileLauncher.launch(arrayOf("*/*")) },
                             onExpandGroup = engine::expandGroup,
+                            onCollapseGroup = engine::collapseGroup,
+                            onOpenFile = ::openFile,
+                            onSaveFile = ::saveFile,
+                            dragClipFor = ::dragClipFor,
                         ),
                         me = MeActions(
                             onSetPassphrase = { passphrase ->
@@ -220,6 +259,11 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        pendingSave?.let { outState.putString(KEY_PENDING_SAVE, it.path) }
     }
 
     /** A pairing link that arrives while ClipLink is already running (launchMode singleTask). */
@@ -333,6 +377,64 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private var openJob: Job? = null
+
+    /** Opens a file in the app the system picks for it (a card's menu: Open). */
+    private fun openFile(item: SyncedItem) {
+        if (openJob?.isActive == true) return
+        openJob = lifecycleScope.launch {
+            // The same human-named copy a share hands out, made off the main thread.
+            val payload = withContext(Dispatchers.IO) { engine.clipboard.prepareShare(item.entry) }
+            if (payload !is ClipboardBridge.SharePayload.Stream) {
+                engine.showToast((payload as? ClipboardBridge.SharePayload.Unavailable)?.message ?: "Couldn't open that file.")
+                return@launch
+            }
+            val view = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(payload.uri, payload.mimeType)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            try {
+                startActivity(view)
+            } catch (e: ActivityNotFoundException) {
+                engine.showToast("No app here can open that file.")
+            } catch (e: Exception) {
+                engine.showToast("Couldn't open that file.")
+            }
+        }
+    }
+
+    /** Asks where to save a file, and copies it there (a card's menu: Save). */
+    private fun saveFile(item: SyncedItem) {
+        val source = item.file
+        if (source == null) {
+            engine.showToast("That file hasn't finished transferring yet.")
+            return
+        }
+        pendingSave = source
+        try {
+            saveFileLauncher.launch(item.filePayload?.fileName ?: "File")
+        } catch (e: ActivityNotFoundException) {
+            pendingSave = null
+            engine.showToast("No app here can save files.")
+        }
+    }
+
+    /**
+     * What a card dragged out of ClipLink carries into the app it is dropped
+     * in: the text, or the picture or file as a content:// URI (the same
+     * human-named copy a share hands out). Null while there is nothing to
+     * give (a file still arriving): the drag then carries nothing. BLOCKING -
+     * a file is copied - so for the IO dispatcher.
+     */
+    private fun dragClipFor(item: SyncedItem): ClipData? =
+        when (val payload = engine.clipboard.prepareShare(item.entry)) {
+            is ClipboardBridge.SharePayload.Text -> ClipData.newPlainText(ClipboardBridge.CLIP_LABEL, payload.text)
+            is ClipboardBridge.SharePayload.Stream -> ClipData(
+                ClipDescription(ClipboardBridge.CLIP_LABEL, arrayOf(payload.mimeType)),
+                ClipData.Item(payload.uri),
+            )
+            is ClipboardBridge.SharePayload.Unavailable -> null
+        }
+
     private fun copyPlainText(text: String) {
         val manager = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         manager.setPrimaryClip(ClipData.newPlainText("ClipLink", text))
@@ -344,5 +446,8 @@ class MainActivity : ComponentActivity() {
 
         /** How long preparing a share takes before the user is told it is. */
         const val SHARE_HINT_DELAY_MS = 700L
+
+        /** [pendingSave] over a recreation. */
+        const val KEY_PENDING_SAVE = "pending_save"
     }
 }

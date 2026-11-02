@@ -34,8 +34,13 @@ data class GroupTag(
  */
 class PlacedBlock(val front: String?, val others: List<String>)
 
-/** What [BatchGroups.place] decided: the stacks, and the blocks most recently arrived first. */
-class Placement(val tags: Map<String, GroupTag>, val blocks: List<PlacedBlock>)
+/**
+ * What [BatchGroups.place] decided: the stacks, the blocks most recently
+ * arrived first, and when each item in a block arrived (ms since the epoch,
+ * by key) - which lets the list tell a card that has just come in from one
+ * that was there before.
+ */
+class Placement(val tags: Map<String, GroupTag>, val blocks: List<PlacedBlock>, val arrivals: Map<String, Long> = emptyMap())
 
 /**
  * The session blocks of this device: what arrived together, and in what
@@ -212,6 +217,18 @@ class BatchGroups(private val maxGroups: Int = MAX_GROUPS) {
         return true
     }
 
+    /**
+     * A stack that was just opened was put back (the finger that opened it
+     * came back up before it was lifted): it is a stack again. Returns whether
+     * there was an opened stack by that id.
+     */
+    @Synchronized
+    fun reclose(id: Long): Boolean {
+        val block = blocks.firstOrNull { it.id == id && it.grouped && it.expanded } ?: return false
+        replace(block.with(stamp = ++clock, expanded = false))
+        return true
+    }
+
     @Synchronized
     fun clear() {
         blocks = emptyList()
@@ -242,6 +259,7 @@ class BatchGroups(private val maxGroups: Int = MAX_GROUPS) {
     fun place(present: Set<String>, horizon: Long): Placement {
         val tags = HashMap<String, GroupTag>()
         val placed = ArrayList<PlacedBlock>()
+        val arrivals = HashMap<String, Long>()
         val kept = ArrayList<Block>(blocks.size)
         for (block in blocks) {
             val here = block.members.filter { it in present }
@@ -260,6 +278,7 @@ class BatchGroups(private val maxGroups: Int = MAX_GROUPS) {
                 continue
             }
             kept.add(current)
+            here.forEach { arrivals[it] = current.createdAtMs }
             if (current.grouped) {
                 val tag = GroupTag(current.id, current.createdAtMs, current.expectedSize, current.expanded)
                 here.forEach { tags[it] = tag }
@@ -268,7 +287,7 @@ class BatchGroups(private val maxGroups: Int = MAX_GROUPS) {
             placed.add(PlacedBlock(front.takeIf { it in here }, here.filter { it != front }))
         }
         if (kept.size != blocks.size || kept.indices.any { kept[it] !== blocks[it] }) blocks = kept
-        return Placement(tags, placed.asReversed())
+        return Placement(tags, placed.asReversed(), arrivals)
     }
 
     private companion object {

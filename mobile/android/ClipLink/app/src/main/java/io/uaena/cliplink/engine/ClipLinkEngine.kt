@@ -1515,10 +1515,22 @@ class ClipLinkEngine(context: Context) {
      * now on, together right below the one that was in front.
      */
     fun expandGroup(groupId: Long) {
+        // Marked here, in the order the user did it: a stack opened and put
+        // back at once must not end up opened by two refreshes racing.
+        if (!batchGroups.expand(groupId)) return
         scope.launch(Dispatchers.IO) {
-            step("opening a stack") {
-                if (batchGroups.expand(groupId)) refreshItems()
-            }
+            step("opening a stack") { refreshItems() }
+        }
+    }
+
+    /**
+     * A stack that was just opened was put back on the Synced tab (the finger
+     * that opened it came back up before it was lifted): it is a stack again.
+     */
+    fun collapseGroup(groupId: Long) {
+        if (!batchGroups.reclose(groupId)) return
+        scope.launch(Dispatchers.IO) {
+            step("closing a stack") { refreshItems() }
         }
     }
 
@@ -1582,6 +1594,7 @@ class ClipLinkEngine(context: Context) {
                     file = file,
                     uniqueKey = keys[index],
                     group = groups[entry.deletionKey],
+                    arrivedAtMs = placement.arrivals[entry.deletionKey] ?: 0L,
                 )
             }
         }

@@ -2,6 +2,7 @@ package io.uaena.cliplink.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -29,6 +30,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -237,15 +239,24 @@ fun ClipLinkApp(
             val enterFade = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
             val exitFade = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
 
+            // A card opening into its full view (and the view closing back into
+            // the card) is the card itself changing shape, not a page coming
+            // in: see cardMorph. The two screens only cross-fade around it.
+            SharedTransitionLayout {
             AnimatedContent(
                 targetState = Screen.of(scanning, detail != null, deviceDetail != null, pairing, tab),
                 transitionSpec = {
-                    (fadeIn(enterFade) + scaleIn(enterScale, initialScale = 0.96f)) togetherWith
-                        (fadeOut(exitFade) + scaleOut(exitFade, targetScale = 1.02f)) using
-                        SizeTransform(clip = false)
+                    if (setOf(initialState, targetState) == setOf(Screen.Synced, Screen.Detail)) {
+                        fadeIn(enterFade) togetherWith fadeOut(exitFade) using SizeTransform(clip = false)
+                    } else {
+                        (fadeIn(enterFade) + scaleIn(enterScale, initialScale = 0.96f)) togetherWith
+                            (fadeOut(exitFade) + scaleOut(exitFade, targetScale = 1.02f)) using
+                            SizeTransform(clip = false)
+                    }
                 },
                 label = "screen",
             ) { screen ->
+                CompositionLocalProvider(LocalCardMorph provides CardMorph(this@SharedTransitionLayout, this@AnimatedContent)) {
                 saveableStateHolder.SaveableStateProvider(screen.name) {
                     when (screen) {
                         Screen.Detail -> detail?.let { opened ->
@@ -348,6 +359,8 @@ fun ClipLinkApp(
                         )
                     }
                 }
+                }
+            }
             }
 
         }
