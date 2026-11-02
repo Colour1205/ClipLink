@@ -309,14 +309,43 @@ public enum StackPlanner {
 // MARK: - Motion numbers
 
 /// The numbers behind the stack's gestures and animations, apart from the
-/// views so they can be tested.
+/// views so they can be tested. The same as HarmonyOS' StackMotion (points
+/// here, vp there).
+///
+/// The pull has two parts. Up to the commit point the stack stretches against
+/// a rubber band's resistance, following the finger. At the commit point the
+/// items become real cards that start where the layers were and slide out to
+/// their places by themselves - the finger still down - and stay tied to the
+/// finger: bring it back above the release point and they slide back into the
+/// stack, take it down again and they pop out again. Lifting it makes it final.
 public enum StackMotion {
     /// Cards drawn behind the front one.
     public static let maxLayers = 2
-    /// A drag this long (points) opens the stack all the way.
-    public static let fullDragDistance: Double = 120
-    /// Let go past this share of the distance and it opens.
-    public static let completeFraction: Double = 1.0 / 3.0
+    /// How far each layer behind the front card peeks out below it.
+    public static let peek: Double = 8
+    /// How much further out each layer slides, per layer, when the stack is
+    /// fully stretched (at stretch 1).
+    public static let spread: Double = 40
+    /// How much narrower each layer is, on each side, per step back.
+    public static let layerInset: Double = 12
+    /// Until the finger has moved this far down the stack only stretches; here
+    /// the cards pop out, the finger still down.
+    public static let commitDrag: Double = 220
+    /// Once popped, with the finger still down, the cards go back into the
+    /// stack if it comes back above this. Lower than the commit point, so a
+    /// finger resting near it does not make them flicker open and shut.
+    public static let releaseDrag: Double = 150
+    /// The most the stretch can reach (1 is fully open): the finger gets there
+    /// only in the limit, so the further it pulls the harder it gets.
+    public static let rubberReach: Double = 0.8
+    /// The finger's travel at which the stretch is half of `rubberReach`.
+    public static let rubberSoftness: Double = 120
+    /// A swipe down at least this fast (points per second) opens it whatever
+    /// the distance; one up as fast keeps it shut.
+    public static let flingVelocity: Double = 700
+    /// After a finger lets go with the cards out, the handle and the count stay
+    /// this long (seconds), so the layers can finish fading.
+    public static let holdAfterRelease: Double = 0.32
     /// Each card that fans out starts this much (seconds) after the one before.
     public static let staggerStep: Double = 0.03
     /// However many items there are, the last one starts by then.
@@ -324,15 +353,77 @@ public enum StackMotion {
     /// A very large stack animates only its first cards; the rest appear in place.
     public static let maxAnimatedCards = 10
 
-    /// 0 (closed) to 1 (open) for a finger that moved `translation` points down.
+    /// How far the stack has stretched (0, closed, up to `rubberReach`) for a
+    /// finger that moved `translation` points down: a rubber band, so it
+    /// follows the finger but gives less and less the further it is pulled.
     public static func progress(forDrag translation: Double) -> Double {
-        min(max(translation / fullDragDistance, 0), 1)
+        guard translation > 0 else { return 0 }
+        return rubberReach * translation / (translation + rubberSoftness)
     }
 
-    /// On release: open when it went far enough, or the swipe was fast
-    /// (`projectedEnd` is where the drag would have come to rest).
-    public static func shouldExpand(progress: Double, projectedEnd: Double) -> Bool {
-        progress >= completeFraction || projectedEnd >= fullDragDistance
+    /// The finger pulled far enough for the cards to pop out without waiting
+    /// for it to be lifted.
+    public static func reachedCommit(_ translation: Double) -> Bool {
+        translation >= commitDrag
+    }
+
+    /// With the cards popped out and the finger still down: it came back far
+    /// enough for them to go back into the stack.
+    public static func shouldCollapse(_ translation: Double) -> Bool {
+        translation < releaseDrag
+    }
+
+    /// On release: open when the pull got to the commit point, or the swipe
+    /// down was fast; a fast swipe back up keeps it shut.
+    public static func shouldExpand(translation: Double, velocity: Double) -> Bool {
+        if velocity >= flingVelocity { return true }
+        if velocity <= -flingVelocity { return false }
+        return reachedCommit(translation)
+    }
+
+    /// The count and the handle fade as the stack stretches, and are gone once
+    /// it has popped (`fade` 1).
+    public static func chromeOpacity(progress: Double, fade: Double) -> Double {
+        (1 - min(1, progress * 1.5)) * (1 - fade)
+    }
+
+    /// How far below the front card the bottom edge of the layer `depth` (1 is
+    /// the nearest) is, at a stretch of `stretch`.
+    public static func layerShift(depth: Int, stretch: Double) -> Double {
+        Double(depth) * (peek + stretch * spread)
+    }
+
+    /// A little dimmer for each step back, and faded out after the pop.
+    public static func layerOpacity(depth: Int, fade: Double) -> Double {
+        (1 - 0.22 * Double(depth - 1)) * (1 - fade)
+    }
+
+    /// Where the hidden card `index` (1 is the one right behind the front card)
+    /// starts when the stack opens, as the layer that stood for it: how far its
+    /// bottom edge peeks out below the front card, for a stack stretched by
+    /// `stretch`. Cards past the layers drawn start with the last layer.
+    public static func startPeek(index: Int, stretch: Double) -> Double {
+        layerShift(depth: min(max(index, 1), maxLayers), stretch: max(stretch, 0))
+    }
+
+    /// How much narrower than its own width (as a share of it, in total) the
+    /// hidden card `index` starts: the inset of the layer that stands for it.
+    public static func startInsetFraction(index: Int, width: Double) -> Double {
+        guard width > 0 else { return 0 }
+        let depth = min(max(index, 1), maxLayers)
+        return min(2 * Double(depth) * layerInset / width, 0.4)
+    }
+
+    /// Where the hidden card `index` is drawn when it starts, relative to its
+    /// own place (the middle `ownMidX`, `ownMidY` of a card `ownWidth` by
+    /// `ownHeight`): as narrow as its layer, centred under the front card, its
+    /// bottom edge where the layer's was below `frontBottom` (the front card's
+    /// bottom edge, not counting the room its layers take).
+    public static func revealStart(index: Int, stretch: Double, frontMidX: Double, frontBottom: Double,
+                                   ownMidX: Double, ownMidY: Double, ownWidth: Double, ownHeight: Double) -> RevealStart {
+        let scale = 1 - startInsetFraction(index: index, width: ownWidth)
+        let bottom = frontBottom + startPeek(index: index, stretch: stretch)
+        return RevealStart(dx: frontMidX - ownMidX, dy: bottom - ownHeight * scale / 2 - ownMidY, scale: scale)
     }
 
     /// `index` counts the hidden items from 1, newest first.
@@ -342,5 +433,77 @@ public enum StackMotion {
 
     public static func staggerDelay(forIndex index: Int) -> Double {
         min(Double(max(index, 0)) * staggerStep, maxStagger)
+    }
+}
+
+/// See `StackMotion.revealStart`: an offset, and a scale about the card's middle.
+public struct RevealStart: Equatable {
+    public let dx: Double
+    public let dy: Double
+    public let scale: Double
+}
+
+/// How fast a finger moves, from its last few positions: SwiftUI's
+/// DragGesture has no velocity before iOS 17.
+public struct DragVelocity {
+    /// Only the moves of this last stretch of time count.
+    public static let window: TimeInterval = 0.1
+
+    private var samples: [(time: TimeInterval, position: Double)] = []
+
+    public init() {}
+
+    public mutating func reset() {
+        samples.removeAll()
+    }
+
+    /// The finger is at `position` at `time` (seconds). A finger that rested
+    /// before it let go is reported again where it rested, so it comes out
+    /// still, not as fast as it last moved.
+    public mutating func add(_ position: Double, at time: TimeInterval) {
+        samples.append((time: time, position: position))
+        while samples.count > 2, let first = samples.first, time - first.time > Self.window {
+            samples.removeFirst()
+        }
+    }
+
+    /// Points per second, positive downward; 0 until two moves apart in time.
+    public var velocity: Double {
+        guard let first = samples.first, let last = samples.last, last.time > first.time else { return 0 }
+        return (last.position - first.position) / (last.time - first.time)
+    }
+}
+
+/// Which cards just came in, so the list can grow them in (HarmonyOS'
+/// freshItems): an item is fresh for `window` seconds after it first shows up
+/// in a session block - a live item, this device's own copy, or what a
+/// reconnect brought. Items already listed when the list was first drawn, and
+/// ones in no block (history loaded at start, a late answer placed by time),
+/// are not.
+public struct FreshArrivals {
+    public static let window: TimeInterval = 2.5
+
+    private var known: Set<String> = []
+    private var primed = false
+    private var since: [String: TimeInterval] = [:]
+
+    public init() {}
+
+    /// The list now holds `items`; `blockMembers` are the ids that are in a
+    /// session block.
+    public mutating func note(items: [String], blockMembers: Set<String>, now: TimeInterval) {
+        if primed {
+            for id in items where !known.contains(id) && blockMembers.contains(id) {
+                since[id] = now
+            }
+        }
+        primed = true
+        known = Set(items)
+        since = since.filter { now - $0.value < Self.window && known.contains($0.key) }
+    }
+
+    public func isFresh(_ id: String, now: TimeInterval) -> Bool {
+        guard let first = since[id] else { return false }
+        return now - first < Self.window
     }
 }

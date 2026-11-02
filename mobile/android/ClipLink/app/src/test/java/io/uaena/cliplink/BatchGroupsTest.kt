@@ -4,6 +4,7 @@ import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.engine.BatchGroups
 import io.uaena.cliplink.engine.GROUP_MIN_ITEMS
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -201,5 +202,32 @@ class BatchGroupsTest {
         groups.complete(id, listOf("c", "b"))
         groups.resolve(setOf("d"), horizon)
         assertEquals(setOf("b", "c", "d"), groups.resolve(setOf("b", "c", "d"), groups.horizon()).keys)
+    }
+
+    @Test
+    fun `a stack put back by the finger that opened it is a stack again`() {
+        val groups = BatchGroups()
+        val id = checkNotNull(groups.record(listOf("c", "b", "a"), 0))
+        val present = setOf("a", "b", "c")
+        assertFalse(groups.reclose(id)) // not opened: nothing to put back
+        assertTrue(groups.expand(id))
+        assertTrue(groups.resolve(present, groups.horizon()).values.all { it.expanded })
+        assertTrue(groups.reclose(id))
+        val tags = groups.resolve(present, groups.horizon())
+        assertEquals(setOf("a", "b", "c"), tags.keys)
+        assertTrue(tags.values.none { it.expanded })
+        assertEquals(id, tags.getValue("a").id)
+        // And it can be opened again.
+        assertTrue(groups.expand(id))
+        assertFalse(groups.reclose(99))
+    }
+
+    @Test
+    fun `every item of a block knows when it arrived, and nothing else does`() {
+        val groups = BatchGroups()
+        groups.record(listOf("b", "a"), 1_000)
+        groups.noteLive("c", 2_000)
+        val placement = groups.place(setOf("a", "b", "c", "old"), groups.horizon())
+        assertEquals(mapOf("a" to 1_000L, "b" to 1_000L, "c" to 2_000L), placement.arrivals)
     }
 }

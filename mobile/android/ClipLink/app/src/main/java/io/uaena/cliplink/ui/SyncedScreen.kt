@@ -1,17 +1,19 @@
 package io.uaena.cliplink.ui
 
+import android.content.ClipData
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.EaseInOut
+import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -32,16 +34,16 @@ import androidx.compose.foundation.lazy.staggeredgrid.items
 import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.Inbox
 import androidx.compose.material.icons.outlined.OpenInNew
+import androidx.compose.material.icons.outlined.SaveAlt
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.ViewAgenda
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalFloatingToolbar
@@ -57,23 +59,50 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshots.SnapshotStateMap
-import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.layout.positionOnScreen
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.onLongClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.toSize
+import androidx.compose.ui.zIndex
 import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.engine.SyncedItem
 import io.uaena.cliplink.engine.displayNameOf
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 enum class SyncedLayout { List, Grid }
 
@@ -85,6 +114,18 @@ data class SyncedActions(
     val onPickFile: () -> Unit,
     /** A stack was opened: its group ends and its items become ordinary cards. */
     val onExpandGroup: (Long) -> Unit,
+    /** A stack that was just opened was put back by the finger that opened it: it is a stack again. */
+    val onCollapseGroup: (Long) -> Unit,
+    /** Opens a file in the app the system picks for it. */
+    val onOpenFile: (SyncedItem) -> Unit,
+    /** Saves a copy of a file where the user picks. */
+    val onSaveFile: (SyncedItem) -> Unit,
+    /**
+     * What a card dragged out of the app carries: its text, or its picture or
+     * file. Null while there is nothing to give. BLOCKING (a file is copied):
+     * called off the main thread.
+     */
+    val dragClipFor: (SyncedItem) -> ClipData?,
 )
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -146,50 +187,116 @@ fun SyncedScreen(
             val exitFade = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
 
             // A history batch is one stack, not a card per item (see SyncedRow).
-            val rows = remember(items) { buildRows(items) }
+            // What the user did to a stack last counts at once, before the
+            // engine's own list says so.
+            val opened = remember { mutableStateMapOf<Long, Boolean>() }
+            val openedNow = opened.toMap()
+            val rows = remember(items, openedNow) { buildRows(items, openedNow) }
             val reduceMotion = rememberReduceMotion()
-            // The cards of stacks that were just opened, flying out of them -
-            // by key, until they have settled.
-            val reveal = remember { mutableStateMapOf<String, RevealSlot>() }
-            LaunchedEffect(reveal.size) {
-                // Whatever never got composed (scrolled away) is not kept for ever.
-                if (reveal.isNotEmpty()) {
-                    delay(REVEAL_KEEP_MS)
-                    reveal.clear()
-                }
+            val haptics = LocalHapticFeedback.current
+            // The stack opened last, while its cards slide out of it (or back in).
+            val reveal = remember { StackReveal() }
+            val revealScene = reveal.scene
+            LaunchedEffect(revealScene, revealScene?.collapsing, revealScene?.held) {
+                val scene = revealScene ?: return@LaunchedEffect
+                // Kept while the finger that popped it is down: it can still put the cards back.
+                if (scene.held && !scene.collapsing) return@LaunchedEffect
+                // Long enough for the last card to have settled (or to have gone back).
+                delay(if (scene.collapsing) REVEAL_COLLAPSE_KEEP_MS else REVEAL_KEEP_MS)
+                if (reveal.scene === scene) reveal.scene = null
             }
-            // Cards below an opened stack, and below a deleted card, glide to
-            // their new places rather than jumping.
-            val glide = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
-            val placement = if (reduceMotion) snap<IntOffset>() else glide
+            // The cards move to their new places with a spring: the one a
+            // stack opens and closes with while it does, the one new cards
+            // come in with otherwise. With reduced motion, short and plain.
+            val placement: FiniteAnimationSpec<IntOffset> = when {
+                reduceMotion -> tween(if (revealScene != null) 150 else 120, easing = EaseInOut)
+                revealScene != null -> springMotion(0.4f, 0.85f, IntOffset.VisibilityThreshold)
+                else -> springMotion(0.3f, 0.85f, IntOffset.VisibilityThreshold)
+            }
             val listState = rememberLazyListState()
             val gridState = rememberLazyStaggeredGridState()
-            // A stack that arrives on top while the list is at the very top is
-            // brought into view. The lazy list holds on to the card that was
-            // first (by its key), which would leave the new stack above the
-            // screen, unseen; if it did not, there is nothing to do here.
+            // A card or a stack that arrives on top while the list is at the
+            // very top is shown there, growing in, with the rest moving down
+            // under it. The lazy list holds on to the card that was first (by
+            // its key), which would leave the new one above the screen, unseen:
+            // so it is asked, before it measures the change, to stay at the top.
             val topRow = remember { arrayOfNulls<String>(1) }
-            LaunchedEffect(rows) {
-                val before = topRow[0]
-                topRow[0] = rows.firstOrNull()?.key
-                if (before == null || before == topRow[0]) return@LaunchedEffect
-                val added = rows.indexOfFirst { it.key == before }
-                if (added <= 0 || rows.take(added).none { it is SyncedRow.Stack }) return@LaunchedEffect
-                // The list measures the change on the next frames, not yet.
-                withFrameNanos { }
-                withFrameNanos { }
-                if (layout == SyncedLayout.List) {
-                    if (listState.firstVisibleItemIndex == added && listState.firstVisibleItemScrollOffset == 0) {
-                        listState.animateScrollToItem(0)
+            val before = topRow[0]
+            topRow[0] = rows.firstOrNull()?.key
+            if (before != null && before != topRow[0] && rows.indexOfFirst { it.key == before } > 0) {
+                Snapshot.withoutReadObservation {
+                    if (layout == SyncedLayout.List) {
+                        if (listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0) {
+                            listState.requestScrollToItem(0)
+                        }
+                    } else if (gridState.firstVisibleItemIndex == 0 && gridState.firstVisibleItemScrollOffset == 0) {
+                        gridState.requestScrollToItem(0)
                     }
-                } else if (gridState.firstVisibleItemIndex == added && gridState.firstVisibleItemScrollOffset == 0) {
-                    gridState.animateScrollToItem(0)
                 }
             }
-            val onExpand = { stack: SyncedRow.Stack ->
-                reveal.putAll(revealSlots(stack, columns = if (layout == SyncedLayout.Grid) 2 else 1))
-                actions.onExpandGroup(stack.groupId)
+            val generation = remember { intArrayOf(0) }
+            val scope = rememberCoroutineScope()
+            val closing = remember { arrayOfNulls<Job>(1) }
+            val callbacks = remember(actions, haptics, reduceMotion) {
+                StackCallbacks(
+                    // The user opened a stack: its items become ordinary cards
+                    // that start where its layers were and slide out to their
+                    // places, and it never stacks again (unless the finger that
+                    // opened it puts it back).
+                    onExpand = expand@{ stack, stretch, cardBottom, centerX, held ->
+                        haptics.performHapticFeedback(TAP_HAPTIC)
+                        // Popped out again before the cards put back were one
+                        // stack again: they stay rows, and slide out again
+                        // from wherever they had got to.
+                        val current = reveal.scene
+                        if (current != null && current.collapsing && current.groupId == stack.groupId && closing[0]?.isActive == true) {
+                            closing[0]?.cancel()
+                            current.collapsing = false
+                            current.held = held
+                            return@expand
+                        }
+                        reveal.scene = RevealScene(
+                            generation = ++generation[0],
+                            groupId = stack.groupId,
+                            frontKey = stack.key,
+                            stretch = stretch,
+                            cardBottom = cardBottom,
+                            frontCenterX = centerX,
+                            slots = revealSlots(stack),
+                            members = stack.members.mapTo(HashSet()) { it.key },
+                            startedAtMs = System.currentTimeMillis(),
+                        ).also { it.held = held }
+                        opened[stack.groupId] = true
+                        actions.onExpandGroup(stack.groupId)
+                    },
+                    // The finger that opened it came back up before it was
+                    // lifted: the cards go back in, each sliding back to where
+                    // its layer was, and then they are one stack again (the
+                    // cards below moving up into the room they took). A row
+                    // a lazy list has let go of runs no animation, so the
+                    // cards stay rows until they are back. Only for the stack
+                    // just opened.
+                    onCollapse = { groupId ->
+                        val scene = reveal.scene
+                        if (scene != null && scene.groupId == groupId && !scene.collapsing) {
+                            haptics.performHapticFeedback(TAP_HAPTIC)
+                            scene.collapsing = true
+                            closing[0] = scope.launch {
+                                delay(if (reduceMotion) COLLAPSE_FADE_MS else COLLAPSE_SLIDE_MS)
+                                opened[groupId] = false
+                                actions.onCollapseGroup(groupId)
+                            }
+                        }
+                    },
+                    onLetGo = { groupId ->
+                        reveal.scene?.takeIf { it.groupId == groupId }?.held = false
+                    },
+                )
             }
+            // The front card of an opening stack is drawn above the cards
+            // coming out from under it (and going back in).
+            fun rowModifier(row: SyncedRow, scene: RevealScene?): Modifier =
+                Modifier.zIndex(if (scene?.frontKey == row.key) 1f else 0f)
 
             AnimatedContent(
                 targetState = layout,
@@ -212,8 +319,12 @@ fun SyncedScreen(
                                 compact = false,
                                 reveal = reveal,
                                 reduceMotion = reduceMotion,
-                                onExpand = onExpand,
-                                modifier = Modifier.animateItem(fadeInSpec = null, placementSpec = placement, fadeOutSpec = null),
+                                callbacks = callbacks,
+                                modifier = rowModifier(row, revealScene).animateItem(
+                                    fadeInSpec = null,
+                                    placementSpec = placement,
+                                    fadeOutSpec = null,
+                                ),
                             )
                         }
                     }
@@ -235,8 +346,12 @@ fun SyncedScreen(
                                 compact = true,
                                 reveal = reveal,
                                 reduceMotion = reduceMotion,
-                                onExpand = onExpand,
-                                modifier = Modifier.animateItem(fadeInSpec = null, placementSpec = placement, fadeOutSpec = null),
+                                callbacks = callbacks,
+                                modifier = rowModifier(row, revealScene).animateItem(
+                                    fadeInSpec = null,
+                                    placementSpec = placement,
+                                    fadeOutSpec = null,
+                                ),
                             )
                         }
                     }
@@ -321,10 +436,26 @@ private fun SyncedHeader(
     }
 }
 
-/** How long the fly-out of an opened stack's cards is remembered, whether or not they were all on screen. */
-private const val REVEAL_KEEP_MS = 3_000L
+/** How long the slide of an opened stack's cards is remembered, whether or not they were all on screen. */
+private const val REVEAL_KEEP_MS = 1_800L
 
-/** One row of the list or grid: a card, or a stack standing for a history batch. */
+/** How long it is remembered once the cards went back into the stack: until they are gone. */
+private const val REVEAL_COLLAPSE_KEEP_MS = 700L
+
+/** How long the cards of a stack put back take to slide back to their layers (springMotion(0.4, 0.9) is about there)... */
+private const val COLLAPSE_SLIDE_MS = 380L
+
+/** ...or to fade out, with reduced motion. */
+private const val COLLAPSE_FADE_MS = 150L
+
+/** The tick a tap gives - a card, a menu item, a stack opening or closing. */
+internal val TAP_HAPTIC = HapticFeedbackType.ContextClick
+
+/**
+ * One row of the list or grid: a card, or a stack standing for a history
+ * batch - both in the stack's wrapper, so a row stays the same composition
+ * when its stack opens under the finger.
+ */
 @Composable
 private fun SyncedRowContent(
     row: SyncedRow,
@@ -332,35 +463,29 @@ private fun SyncedRowContent(
     onOpen: (KeyedItem) -> Unit,
     actions: SyncedActions,
     compact: Boolean,
-    reveal: SnapshotStateMap<String, RevealSlot>,
+    reveal: StackReveal,
     reduceMotion: Boolean,
-    onExpand: (SyncedRow.Stack) -> Unit,
+    callbacks: StackCallbacks,
     modifier: Modifier = Modifier,
 ) {
-    when (row) {
-        is SyncedRow.Single -> SyncedCard(
-            keyed = row.keyed,
-            senderName = deviceNames[row.keyed.item.entry.deviceId],
-            onOpen = onOpen,
-            actions = actions,
-            compact = compact,
-            modifier = modifier.revealIn(reveal[row.key], reduceMotion) { reveal.remove(row.key) },
-        )
-
-        is SyncedRow.Stack -> StackedCard(
-            stack = row,
-            senderName = deviceNames[row.front.item.entry.deviceId],
-            onOpen = onOpen,
-            actions = actions,
-            compact = compact,
-            reduceMotion = reduceMotion,
-            onExpand = onExpand,
-            modifier = modifier,
-        )
+    val front = when (row) {
+        is SyncedRow.Single -> row.keyed
+        is SyncedRow.Stack -> row.front
     }
+    StackedCard(
+        front = front,
+        stack = row as? SyncedRow.Stack,
+        senderName = deviceNames[front.item.entry.deviceId],
+        onOpen = onOpen,
+        actions = actions,
+        compact = compact,
+        reduceMotion = reduceMotion,
+        reveal = reveal,
+        callbacks = callbacks,
+        modifier = modifier,
+    )
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun SyncedCard(
     keyed: KeyedItem,
@@ -369,8 +494,6 @@ internal fun SyncedCard(
     actions: SyncedActions,
     compact: Boolean,
     modifier: Modifier = Modifier,
-    /** Drawn over the bottom of the card, in the room [STACK_HANDLE_ZONE] leaves there: a stack's handle. */
-    stackFooter: (@Composable BoxScope.() -> Unit)? = null,
     /** The last thing in the footer row, after the file's kind, given its whole width: a stack's count. */
     footerTrailing: (@Composable () -> Unit)? = null,
 ) {
@@ -384,29 +507,123 @@ internal fun SyncedCard(
         null
     }
     val style = typeStyleOf(item, showsPicture = thumbnail != null)
-    var menuOpen by remember { mutableStateOf(false) }
     var confirmingDelete by remember { mutableStateOf(false) }
 
+    val haptics = LocalHapticFeedback.current
+    val view = LocalView.current
+    val scope = rememberCoroutineScope()
+    val currentItem by rememberUpdatedState(item)
+    val currentKeyed by rememberUpdatedState(keyed)
+    val currentOnOpen by rememberUpdatedState(onOpen)
+    val currentActions by rememberUpdatedState(actions)
+
+    // The press: a little smaller while a finger is on the card, back to size
+    // when it lifts, moves away or the card's menu opens. Not changed by
+    // reduced motion.
+    var pressed by remember { mutableStateOf(false) }
+    val pressScale by animateFloatAsState(
+        if (pressed) CARD_PRESS_SCALE else 1f,
+        springMotion(0.25f, 0.9f),
+        label = "cardPress",
+    )
+    // The card as it looks, for the lifted picture of its menu and the one a
+    // drag out of the app carries.
+    val picture = rememberGraphicsLayer()
+    val placed = remember { arrayOfNulls<LayoutCoordinates>(1) }
+    // The menu: open, or closing (its picture going back down) once `open` is false.
+    var menu by remember { mutableStateOf<OpenMenu?>(null) }
+    // What a drag out of the app would carry, got ready when the menu opens.
+    val dragClip = remember { arrayOfNulls<Deferred<ClipData?>>(1) }
+    // Counts long presses and drags out: a menu whose picture is ready only
+    // after the card was dragged away does not open over the drag.
+    val menuTurn = remember { intArrayOf(0) }
+
+    fun tap() {
+        haptics.performHapticFeedback(TAP_HAPTIC)
+        currentOnOpen(currentKeyed)
+    }
+
+    fun openMenu() {
+        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        val target = currentItem
+        dragClip[0] = scope.async(Dispatchers.IO) {
+            try {
+                currentActions.dragClipFor(target)
+            } catch (e: Exception) {
+                null
+            } catch (e: OutOfMemoryError) {
+                null
+            }
+        }
+        val turn = ++menuTurn[0]
+        scope.launch {
+            val coords = placed[0]?.takeIf { it.isAttached } ?: return@launch
+            val bounds = Rect(coords.positionOnScreen(), coords.size.toSize())
+            val snapshot = try {
+                picture.toImageBitmap()
+            } catch (e: Exception) {
+                return@launch
+            }
+            if (turn == menuTurn[0]) menu = OpenMenu(snapshot, bounds)
+        }
+    }
+
+    fun dragOut(at: Offset) {
+        // The menu goes and the card goes to the finger, carrying the item.
+        menuTurn[0]++
+        val shown = menu
+        menu = null
+        val pending = dragClip[0]
+        scope.launch {
+            val snapshot = shown?.snapshot ?: try {
+                picture.toImageBitmap()
+            } catch (e: Exception) {
+                return@launch
+            }
+            val clip = pending?.let { withTimeoutOrNull(DRAG_CLIP_WAIT_MS) { it.await() } }
+            startCardDrag(view, snapshot, at, clip)
+        }
+    }
+
     Surface(
-        shape = RoundedCornerShape(26.dp),
+        shape = RoundedCornerShape(CARD_RADIUS),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            // Tapped, the card grows into the item's full view.
+            .cardMorph(keyed.key)
+            .onPlaced { placed[0] = it }
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            }
+            .pointerInput(Unit) {
+                detectCardPress(
+                    onPress = { pressed = it },
+                    onTap = ::tap,
+                    onLongPress = ::openMenu,
+                    onDragOut = ::dragOut,
+                )
+            }
+            // One node, as a clickable card was: what it shows is read with it.
+            .semantics(mergeDescendants = true) {
+                role = Role.Button
+                onClick(label = "Open") {
+                    tap()
+                    true
+                }
+                onLongClick(label = "Actions") {
+                    openMenu()
+                    true
+                }
+            }
+            .drawWithContent {
+                picture.record { this@drawWithContent.drawContent() }
+                drawLayer(picture)
+            },
     ) {
         Box {
-            Column(
-                Modifier
-                    .combinedClickable(
-                        onClick = { onOpen(keyed) },
-                        onLongClick = { menuOpen = true },
-                    )
-                    .padding(
-                        start = 16.dp,
-                        top = 16.dp,
-                        end = 16.dp,
-                        // The handle of a stack sits in its own room below.
-                        bottom = if (stackFooter != null) STACK_HANDLE_ZONE else 16.dp,
-                    ),
-            ) {
+            Column(Modifier.padding(16.dp)) {
                 when {
                     item.type == ClipboardEntry.TYPE_IMAGE -> ImagePreview(keyed.key, item, compact)
                     // The picture alone: its name is no part of the card, as an
@@ -477,35 +694,33 @@ internal fun SyncedCard(
                 }
             }
 
-            stackFooter?.invoke(this)
-
-            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                DropdownMenuItem(
-                    text = { Text("Copy") },
-                    leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
-                    onClick = {
-                        menuOpen = false
-                        actions.onCopy(item)
-                    },
-                )
-                DropdownMenuItem(
-                    text = { Text("Share") },
-                    leadingIcon = { Icon(Icons.Outlined.Share, null) },
-                    onClick = {
-                        menuOpen = false
-                        actions.onShare(item)
-                    },
-                )
-                DropdownMenuItem(
-                    text = { Text("Delete") },
-                    leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
-                    onClick = {
-                        menuOpen = false
-                        confirmingDelete = true
-                    },
-                )
-            }
         }
+    }
+
+    menu?.let { shown ->
+        // Copy for text; Share for everything; Open and Save for a file; Delete last.
+        fun act(action: () -> Unit): () -> Unit = {
+            haptics.performHapticFeedback(TAP_HAPTIC)
+            menu = shown.copy(open = false)
+            action()
+        }
+        val items = buildList {
+            if (item.type == ClipboardEntry.TYPE_TEXT) add(CardMenuItem("Copy", Icons.Outlined.ContentCopy, act { actions.onCopy(item) }))
+            add(CardMenuItem("Share", Icons.Outlined.Share, act { actions.onShare(item) }))
+            if (item.type == ClipboardEntry.TYPE_FILE) {
+                add(CardMenuItem("Open", Icons.AutoMirrored.Outlined.OpenInNew, act { actions.onOpenFile(item) }))
+                add(CardMenuItem("Save", Icons.Outlined.SaveAlt, act { actions.onSaveFile(item) }))
+            }
+            add(CardMenuItem("Delete", Icons.Outlined.DeleteOutline, act { confirmingDelete = true }))
+        }
+        CardMenu(
+            snapshot = shown.snapshot,
+            cardBounds = shown.bounds,
+            items = items,
+            open = shown.open,
+            onClosed = { if (menu === shown || menu?.open == false) menu = null },
+            onDismissRequest = { menu = menu?.copy(open = false) },
+        )
     }
 
     if (confirmingDelete) {
@@ -518,6 +733,12 @@ internal fun SyncedCard(
         )
     }
 }
+
+/** A card's menu while it is shown: the picture it lifts, where the card is on the screen, and whether it is opening or closing. */
+private data class OpenMenu(val snapshot: ImageBitmap, val bounds: Rect, val open: Boolean = true)
+
+/** How long a drag out of the app waits for what it carries to be ready (a file being copied); after that it carries nothing. */
+private const val DRAG_CLIP_WAIT_MS = 300L
 
 @Composable
 private fun ImagePreview(key: String, item: SyncedItem, compact: Boolean) {

@@ -102,6 +102,12 @@ enum Theme {
             ? UIColor.systemGreen.resolvedColor(with: trait)
             : UIColor(hex: 0x1E7F36)
     })
+
+    /// How opaque a card's fill is for the "Card transparency" setting (at
+    /// most 95% see-through).
+    static func cardFillOpacity(transparency: Double) -> Double {
+        1 - min(max(transparency, 0), 95) / 100
+    }
 }
 
 extension View {
@@ -110,7 +116,7 @@ extension View {
     func cardBackground(transparency: Double, radius: CGFloat = Theme.cardRadius) -> some View {
         background(
             RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .fill(Color(Theme.card).opacity(1 - min(max(transparency, 0), 95) / 100))
+                .fill(Color(Theme.card).opacity(Theme.cardFillOpacity(transparency: transparency)))
         )
     }
 

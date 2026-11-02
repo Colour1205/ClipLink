@@ -125,15 +125,107 @@ final class BatchGroupTests: XCTestCase {
 
     // MARK: - Motion numbers
 
-    func testDragProgressAndWhenItOpens() {
+    func testDragStretchesLikeARubberBand() {
         XCTAssertEqual(StackMotion.progress(forDrag: -30), 0)
-        XCTAssertEqual(StackMotion.progress(forDrag: 60), 0.5, accuracy: 0.0001)
-        XCTAssertEqual(StackMotion.progress(forDrag: 500), 1)
-        // About a third of the way.
-        XCTAssertTrue(StackMotion.shouldExpand(progress: 0.34, projectedEnd: 0))
-        XCTAssertFalse(StackMotion.shouldExpand(progress: 0.2, projectedEnd: 30))
-        // A fast swipe that would carry on far enough.
-        XCTAssertTrue(StackMotion.shouldExpand(progress: 0.1, projectedEnd: 200))
+        XCTAssertEqual(StackMotion.progress(forDrag: 0), 0)
+        // Half of the reach at the softness distance.
+        XCTAssertEqual(StackMotion.progress(forDrag: 120), 0.4, accuracy: 0.0001)
+        // About half way open at the commit point, and never all the way.
+        XCTAssertEqual(StackMotion.progress(forDrag: 220), 0.8 * 220 / 340, accuracy: 0.0001)
+        XCTAssertLessThan(StackMotion.progress(forDrag: 100_000), StackMotion.rubberReach)
+        XCTAssertGreaterThan(StackMotion.progress(forDrag: 100_000), 0.79)
+        XCTAssertGreaterThan(StackMotion.progress(forDrag: 61), StackMotion.progress(forDrag: 60))
+    }
+
+    func testCardsPopAtTheCommitPointAndGoBackAboveTheReleasePoint() {
+        XCTAssertFalse(StackMotion.reachedCommit(219))
+        XCTAssertTrue(StackMotion.reachedCommit(220))
+        XCTAssertTrue(StackMotion.shouldCollapse(149))
+        XCTAssertFalse(StackMotion.shouldCollapse(150))
+        XCTAssertFalse(StackMotion.shouldCollapse(200), "between the two points nothing changes, so it does not flicker")
+    }
+
+    func testWhenALetGoOpensTheStack() {
+        XCTAssertTrue(StackMotion.shouldExpand(translation: 220, velocity: 0))
+        XCTAssertFalse(StackMotion.shouldExpand(translation: 219, velocity: 0))
+        // A fast swipe down opens it however short; one up as fast keeps it shut.
+        XCTAssertTrue(StackMotion.shouldExpand(translation: 20, velocity: 700))
+        XCTAssertFalse(StackMotion.shouldExpand(translation: 300, velocity: -700))
+        XCTAssertFalse(StackMotion.shouldExpand(translation: 100, velocity: 699))
+    }
+
+    func testTheCountAndHandleFadeAndTheLayersSpread() {
+        XCTAssertEqual(StackMotion.chromeOpacity(progress: 0, fade: 0), 1)
+        XCTAssertEqual(StackMotion.chromeOpacity(progress: 0.5, fade: 0), 0.25, accuracy: 0.0001)
+        XCTAssertEqual(StackMotion.chromeOpacity(progress: 0.8, fade: 0), 0)
+        XCTAssertEqual(StackMotion.chromeOpacity(progress: 0, fade: 1), 0)
+        XCTAssertEqual(StackMotion.layerShift(depth: 1, stretch: 0), 8)
+        XCTAssertEqual(StackMotion.layerShift(depth: 2, stretch: 0.5), 56, accuracy: 0.0001)
+        XCTAssertEqual(StackMotion.layerOpacity(depth: 1, fade: 0), 1)
+        XCTAssertEqual(StackMotion.layerOpacity(depth: 2, fade: 0), 0.78, accuracy: 0.0001)
+        XCTAssertEqual(StackMotion.layerOpacity(depth: 1, fade: 1), 0)
+    }
+
+    func testRevealedCardsStartWhereTheirLayersWere() {
+        XCTAssertEqual(StackMotion.startPeek(index: 1, stretch: 0), 8)
+        XCTAssertEqual(StackMotion.startPeek(index: 2, stretch: 0.5), 56, accuracy: 0.0001)
+        XCTAssertEqual(StackMotion.startPeek(index: 7, stretch: 1), 96, accuracy: 0.0001, "past the layers drawn, with the last one")
+        XCTAssertEqual(StackMotion.startInsetFraction(index: 1, width: 240), 0.1, accuracy: 0.0001)
+        XCTAssertEqual(StackMotion.startInsetFraction(index: 2, width: 40), 0.4, accuracy: 0.0001, "capped")
+        XCTAssertEqual(StackMotion.startInsetFraction(index: 1, width: 0), 0)
+        // A 240 x 100 card 100 below the front card's bottom edge, in the same column.
+        let start = StackMotion.revealStart(index: 1, stretch: 0, frontMidX: 120, frontBottom: 200,
+                                            ownMidX: 120, ownMidY: 300, ownWidth: 240, ownHeight: 100)
+        XCTAssertEqual(start.scale, 0.9, accuracy: 0.0001)
+        XCTAssertEqual(start.dx, 0, accuracy: 0.0001)
+        // Its scaled bottom edge (300 - 137 + 45) is 8 below the front card's.
+        XCTAssertEqual(start.dy, -137, accuracy: 0.0001)
+        // In the other column of the grid it comes across too.
+        let across = StackMotion.revealStart(index: 2, stretch: 0.5, frontMidX: 90, frontBottom: 200,
+                                             ownMidX: 270, ownMidY: 120, ownWidth: 160, ownHeight: 80)
+        XCTAssertEqual(across.dx, -180, accuracy: 0.0001)
+        XCTAssertEqual(across.scale, 0.7, accuracy: 0.0001)
+        XCTAssertEqual(across.dy, 200 + 56 - 28 - 120, accuracy: 0.0001)
+    }
+
+    func testDragVelocityFollowsTheLastMoves() {
+        var tracker = DragVelocity()
+        XCTAssertEqual(tracker.velocity, 0)
+        tracker.add(0, at: 10)
+        XCTAssertEqual(tracker.velocity, 0, "one point is no speed")
+        tracker.add(10, at: 10.01)
+        tracker.add(30, at: 10.05)
+        XCTAssertEqual(tracker.velocity, 600, accuracy: 0.001)
+        // The finger rests, then lets go where it rested: it is still.
+        tracker.add(30, at: 10.5)
+        XCTAssertEqual(tracker.velocity, 0, accuracy: 0.001)
+        // Only the last tenth of a second counts.
+        tracker.add(130, at: 10.55)
+        tracker.add(230, at: 10.6)
+        XCTAssertEqual(tracker.velocity, 2000, accuracy: 0.001)
+        tracker.reset()
+        XCTAssertEqual(tracker.velocity, 0)
+    }
+
+    func testOnlyWhatJustArrivedInABlockIsFresh() {
+        var fresh = FreshArrivals()
+        // What the list first shows is not news.
+        fresh.note(items: ["a", "b"], blockMembers: ["a"], now: 100)
+        XCTAssertFalse(fresh.isFresh("a", now: 100))
+        // A live item or a batch: in a block.
+        fresh.note(items: ["c", "d", "a", "b"], blockMembers: ["a", "c", "d"], now: 101)
+        XCTAssertTrue(fresh.isFresh("c", now: 101))
+        XCTAssertTrue(fresh.isFresh("d", now: 103.4))
+        XCTAssertFalse(fresh.isFresh("c", now: 103.5), "2.5 s later it is an ordinary card")
+        XCTAssertFalse(fresh.isFresh("a", now: 101))
+        // A late answer, placed by time: in no block.
+        fresh.note(items: ["c", "d", "a", "late", "b"], blockMembers: ["a", "c", "d"], now: 102)
+        XCTAssertFalse(fresh.isFresh("late", now: 102))
+        XCTAssertTrue(fresh.isFresh("c", now: 102), "still fresh while the list changes around it")
+        // Gone and back again is news again.
+        fresh.note(items: ["a", "b"], blockMembers: ["a"], now: 110)
+        fresh.note(items: ["c", "a", "b"], blockMembers: ["a", "c"], now: 111)
+        XCTAssertTrue(fresh.isFresh("c", now: 111))
     }
 
     func testStaggerIsCappedAndBigStacksAnimateOnlyTheFirstCards() {

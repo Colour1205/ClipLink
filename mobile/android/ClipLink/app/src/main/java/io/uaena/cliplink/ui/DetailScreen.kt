@@ -86,6 +86,9 @@ fun DetailScreen(
     Column(
         modifier
             .fillMaxSize()
+            // The card it was opened from grows into this, and this shrinks back into it.
+            .cardMorph(key)
+            .background(MaterialTheme.colorScheme.background)
             .padding(
                 top = contentPadding.calculateTopPadding(),
                 bottom = contentPadding.calculateBottomPadding(),

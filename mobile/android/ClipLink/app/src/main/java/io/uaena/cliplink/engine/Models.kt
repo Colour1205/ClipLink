@@ -31,6 +31,13 @@ data class SyncedItem(
      * only: it is never saved, and the list is what turns it into a stack.
      */
     val group: GroupTag? = null,
+    /**
+     * When this item arrived in this session (ms since the epoch): the time
+     * its block was made - a copy, a live item or a sync. 0 for an item that
+     * was already in the history, or came with a late answer, and so does not
+     * animate in. Memory only, like [group].
+     */
+    val arrivedAtMs: Long = 0L,
 ) {
     /** [uniqueKey] - what every list and cache here keys an item by. */
     val id: String get() = uniqueKey

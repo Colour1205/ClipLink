@@ -12,6 +12,8 @@ struct SyncedCard: View {
     let onDelete: () -> Void
     /// Set on a stack's front card: the "+4" at the right end of the footer.
     var stackBadge: SyncedStackBadge? = nil
+    /// The Synced tab's namespace for the card's zoom into its screen.
+    var zoom: Namespace.ID? = nil
 
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
@@ -57,6 +59,7 @@ struct SyncedCard: View {
         .contentShape(.contextMenuPreview, shape)
         .contextMenu { SyncedItemMenuItems(item: item, actions: actions, onDelete: onDelete) }
         .onDrag { actions.dragProvider(for: item) }
+        .modifier(SyncedZoomSource(id: item.id, namespace: zoom))
         .accessibilityLabel(SyncedItemActions.accessibilitySummary(item, transfers: model.snapshot.transfers))
         .accessibilityHint("Shows details.")
         .accessibilityAction(named: "Copy") { actions.copy(item) }
@@ -227,12 +230,46 @@ struct SyncedFileTile: View {
     }
 }
 
-/// A gentle press-down for cards.
+/// A card shrinks a little under the finger and comes back on the same spring
+/// (HarmonyOS' 0.95). A scroll or the context menu taking over ends the press,
+/// so a card held until its menu opens is not left small. Not changed by
+/// Reduce Motion, as on HarmonyOS.
 struct SyncedCardButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.97 : 1)
-            .opacity(configuration.isPressed ? 0.92 : 1)
-            .animation(.spring(response: 0.28, dampingFraction: 0.75), value: configuration.isPressed)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.9), value: configuration.isPressed)
+    }
+}
+
+/// iOS 18's zoom: the card grows into the item's screen and shrinks back into
+/// it when that closes (HarmonyOS' card-to-detail morph). Earlier systems, or
+/// an SDK without it, keep the push.
+struct SyncedZoomSource: ViewModifier {
+    let id: String
+    let namespace: Namespace.ID?
+
+    func body(content: Content) -> some View {
+        #if compiler(>=6.0)
+        if #available(iOS 18.0, *), let namespace {
+            return AnyView(content.matchedTransitionSource(id: id, in: namespace))
+        }
+        #endif
+        return AnyView(content)
+    }
+}
+
+/// The item's screen, as the end of the card's zoom (see SyncedZoomSource).
+struct SyncedZoomDestination: ViewModifier {
+    let id: String
+    let namespace: Namespace.ID
+
+    func body(content: Content) -> some View {
+        #if compiler(>=6.0)
+        if #available(iOS 18.0, *) {
+            return AnyView(content.navigationTransition(.zoom(sourceID: id, in: namespace)))
+        }
+        #endif
+        return AnyView(content)
     }
 }

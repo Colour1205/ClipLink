@@ -57,8 +57,10 @@ internal const val MAX_STACK_LAYERS = 2
  * [GROUP_MIN_ITEMS] members here is not a stack, unless it expects that many
  * (its front is here and the rest is on its way); one that was opened is not
  * a stack either - its members are rows, together where the stack was.
+ * [opened] says, by group id, what the user did last to a stack that the
+ * items may not show yet: opened it (true), or put it back (false).
  */
-fun buildRows(items: List<KeyedItem>): List<SyncedRow> {
+fun buildRows(items: List<KeyedItem>, opened: Map<Long, Boolean> = emptyMap()): List<SyncedRow> {
     val members = LinkedHashMap<Long, MutableList<KeyedItem>>()
     for (keyed in items) {
         val group = keyed.item.group ?: continue
@@ -69,7 +71,7 @@ fun buildRows(items: List<KeyedItem>): List<SyncedRow> {
     for (keyed in items) {
         val group = keyed.item.group
         val together = group?.let { members[it.id] }
-        if (group == null || group.expanded || together == null || maxOf(together.size, group.expectedSize) < GROUP_MIN_ITEMS) {
+        if (group == null || (opened[group.id] ?: group.expanded) || together == null || maxOf(together.size, group.expectedSize) < GROUP_MIN_ITEMS) {
             rows.add(SyncedRow.Single(keyed))
         } else if (placed.add(group.id)) {
             rows.add(SyncedRow.Stack(group.id, group.createdAtMs, together, group.expectedSize))
@@ -79,61 +81,160 @@ fun buildRows(items: List<KeyedItem>): List<SyncedRow> {
 }
 
 // ---- the motion rules -----------------------------------------------------------
+// The same numbers on every platform (StackMotion in the HarmonyOS app's
+// SyncedRows.ets), apart from the UI so they can be tested.
 
-/** How far down a finger has to drag the handle for the stack to be fully open, in dp. */
-internal const val EXPAND_DISTANCE_DP = 120f
+/** How far each layer behind the front card peeks out below it, in dp. */
+internal const val STACK_PEEK_DP = 8f
+
+/** How much further out each layer slides, per layer, when the stack is fully stretched (at stretch 1), in dp. */
+internal const val STACK_SPREAD_DP = 40f
+
+/** How much narrower each layer is than the card in front, on each side, per step back, in dp. */
+internal const val STACK_LAYER_INSET_DP = 12f
+
+/**
+ * Until the finger has moved this far down (dp) the stack only stretches,
+ * against a resistance; at this point the cards pop out to their places by
+ * themselves, with the finger still down.
+ */
+internal const val COMMIT_DRAG_DP = 220f
+
+/**
+ * Once popped, with the finger still down, the cards go back into the stack
+ * if the finger comes back above this (dp). Lower than the commit point, so a
+ * finger resting near it does not make the cards flicker open and shut.
+ */
+internal const val RELEASE_DRAG_DP = 150f
+
+/** The most the stretch can reach (1 is the stack fully open): the finger only gets there in the limit. */
+internal const val RUBBER_REACH = 0.8f
+
+/** The finger's travel (dp) at which the stretch is half of [RUBBER_REACH]. The larger, the more it resists at first. */
+internal const val RUBBER_SOFTNESS_DP = 120f
 
 /** A swipe down at least this fast opens the stack whatever the distance, in dp per second. */
 internal const val EXPAND_FLING_DP_PER_SECOND = 700f
 
-/** A drag that got this far (of 0 to 1) opens the stack when let go. */
-internal const val EXPAND_COMPLETE_FRACTION = 1f / 3f
-
-/**
- * Whether letting go of the handle opens the stack: it got about a third of
- * the way, or the swipe down was fast. A fast swipe back up closes it.
- */
-internal fun expansionCompletes(progress: Float, velocityDpPerSecond: Float): Boolean = when {
-    velocityDpPerSecond >= EXPAND_FLING_DP_PER_SECOND -> true
-    velocityDpPerSecond <= -EXPAND_FLING_DP_PER_SECOND -> false
-    else -> progress >= EXPAND_COMPLETE_FRACTION
-}
-
-/** Hidden cards that fly out of an opened stack. A group of hundreds only animates its first screenful; the rest just appear. */
+/** Hidden cards that slide out of an opened stack. A group of hundreds only animates its first screenful; the rest just appear. */
 internal const val MAX_ANIMATED_REVEAL = 10
 
+/** Each card that slides out starts this much (ms) after the one before... */
 internal const val STAGGER_STEP_MS = 30
-internal const val STAGGER_TOTAL_CAP_MS = 400
+
+/** ...but however many there are, the last one starts by then. */
+internal const val MAX_STAGGER_MS = 400
 
 /**
- * How long card number [index] (0 is the first to move) waits before it moves,
- * out of [count] cards: 30 ms apart, but never more than about 400 ms for the
- * whole group however many there are.
+ * How far the stack has stretched (0, closed, to [RUBBER_REACH]) for a finger
+ * that moved [translationDp] down: a rubber band, so it follows the finger
+ * but gives less and less the further it is pulled.
  */
-internal fun staggerDelayMs(index: Int, count: Int): Int {
-    if (count <= 1 || index <= 0) return 0
-    val step = minOf(STAGGER_STEP_MS, STAGGER_TOTAL_CAP_MS / count)
-    return index * step
+internal fun dragProgress(translationDp: Float): Float {
+    if (translationDp <= 0f) return 0f
+    return RUBBER_REACH * translationDp / (translationDp + RUBBER_SOFTNESS_DP)
 }
 
-/**
- * How one card of an opened stack flies out: it starts [stepsAbove] card
- * heights above its place (behind the front card) and waits [delayMs].
- */
-data class RevealSlot(val stepsAbove: Int, val delayMs: Int)
+/** Whether a finger that moved [translationDp] down has pulled far enough for the cards to pop out before it is lifted. */
+internal fun reachedCommit(translationDp: Float): Boolean = translationDp >= COMMIT_DRAG_DP
+
+/** Whether a finger still down, with the cards popped out, has come back far enough for them to go back into the stack. */
+internal fun shouldCollapse(translationDp: Float): Boolean = translationDp < RELEASE_DRAG_DP
 
 /**
- * The cards of an opened stack that animate, by key: its members behind the
- * front one, newest first, up to [MAX_ANIMATED_REVEAL] of them. [columns] is
- * 1 for the list and 2 for the grid, where two cards share a row.
+ * Whether letting go of the handle opens the stack: the pull got to the
+ * commit point, or the swipe down was fast. A fast swipe back up closes it.
  */
-internal fun revealSlots(stack: SyncedRow.Stack, columns: Int): Map<String, RevealSlot> {
-    val behind = stack.members.drop(1).take(MAX_ANIMATED_REVEAL)
-    val slots = LinkedHashMap<String, RevealSlot>()
-    behind.forEachIndexed { index, keyed ->
-        val position = index + 1 // how many cards after the front one
-        val rowsBelow = (position + columns - 1) / columns
-        slots[keyed.key] = RevealSlot(rowsBelow, staggerDelayMs(index, behind.size))
-    }
+internal fun shouldExpand(translationDp: Float, velocityDpPerSecond: Float): Boolean = when {
+    velocityDpPerSecond >= EXPAND_FLING_DP_PER_SECOND -> true
+    velocityDpPerSecond <= -EXPAND_FLING_DP_PER_SECOND -> false
+    else -> reachedCommit(translationDp)
+}
+
+/** How opaque the count and the handle are: fading as the stack stretches, and gone once it has popped open ([fade] 1). */
+internal fun stackChromeAlpha(progress: Float, fade: Float): Float =
+    (1f - minOf(1f, progress * 1.5f)) * (1f - fade)
+
+/** How opaque layer [depth] (1 is right behind the front card) is: a little dimmer for each step back, and faded out after the pop. */
+internal fun stackLayerAlpha(depth: Int, fade: Float): Float = (1f - 0.22f * (depth - 1)) * (1f - fade)
+
+/**
+ * Where the hidden card [index] (1 is the one right behind the front card)
+ * starts when the stack opens, as the layer that stands for it: how far (dp)
+ * its bottom edge peeks out below the front card, for a stack that was
+ * stretched by [stretch] (0 to 1) when it opened. Cards past the layers drawn
+ * start with the last layer.
+ */
+internal fun startPeekDp(index: Int, stretch: Float): Float {
+    val depth = index.coerceIn(1, MAX_STACK_LAYERS)
+    return depth * (STACK_PEEK_DP + maxOf(stretch, 0f) * STACK_SPREAD_DP)
+}
+
+/** How much narrower than its own width (a share of it, in all) the hidden card [index] starts: the inset of its layer. */
+internal fun startInsetFraction(index: Int, widthDp: Float): Float {
+    val depth = index.coerceIn(1, MAX_STACK_LAYERS)
+    if (widthDp <= 0f) return 0f
+    return minOf(2f * depth * STACK_LAYER_INSET_DP / widthDp, 0.4f)
+}
+
+/** Whether the hidden card [index] (1 is the one right behind the front card) animates when the stack opens. */
+internal fun revealAnimates(index: Int): Boolean = index in 1..MAX_ANIMATED_REVEAL
+
+/** How long (ms) the hidden card [index] waits before it moves: 30 ms after the one before, the last by 400 ms. */
+internal fun staggerDelayMs(index: Int): Int = minOf(maxOf(index, 0) * STAGGER_STEP_MS, MAX_STAGGER_MS)
+
+/**
+ * The cards of an opened stack that slide out, by key, to their index (1 is
+ * the one right behind the front card): its members behind the front one,
+ * newest first, up to [MAX_ANIMATED_REVEAL] of them. The rest just appear.
+ */
+internal fun revealSlots(stack: SyncedRow.Stack): Map<String, Int> {
+    val slots = LinkedHashMap<String, Int>()
+    stack.members.forEachIndexed { index, keyed -> if (revealAnimates(index)) slots[keyed.key] = index }
     return slots
+}
+
+/** Where a card that slides out of a stack starts, relative to its place: moved by ([dx], [dy]) and scaled by [scale] about its centre. */
+data class RevealStart(val dx: Float, val dy: Float, val scale: Float)
+
+/**
+ * Where the hidden card [index] starts, in the units of the positions given
+ * (px): as the layer that stood for it - as narrow as the layer, centred
+ * under the front card, its bottom edge peeking out below the front card's
+ * bottom ([cardBottom]) where the layer's did. [density] turns the dp rules
+ * into those units; [stretch] is how far the stack had been pulled apart.
+ */
+internal fun revealStart(
+    index: Int,
+    stretch: Float,
+    frontCenterX: Float,
+    cardBottom: Float,
+    ownLeft: Float,
+    ownTop: Float,
+    ownWidth: Float,
+    ownHeight: Float,
+    density: Float,
+): RevealStart {
+    val scale = 1f - startInsetFraction(index, ownWidth / density)
+    val dx = frontCenterX - (ownLeft + ownWidth / 2f)
+    val dy = (cardBottom + startPeekDp(index, stretch) * density - ownHeight * scale / 2f) - (ownTop + ownHeight / 2f)
+    return RevealStart(dx, dy, scale)
+}
+
+/** A card that arrived less than this long ago (ms) has just arrived, and comes in growing from small. */
+internal const val ARRIVAL_WINDOW_MS = 2_500L
+
+/** Whether a card that arrived at [arrivedAtMs] (0: not in this session, or not with a sync or a copy) still animates in at [nowMs]. */
+internal fun arrivesFresh(arrivedAtMs: Long, nowMs: Long): Boolean =
+    arrivedAtMs > 0L && nowMs - arrivedAtMs in 0 until ARRIVAL_WINDOW_MS
+
+/**
+ * The stiffness of a spring that settles in about [responseSeconds], as the
+ * HarmonyOS app's springMotion(response, dampingFraction) curves are given:
+ * (2 pi / response) squared, for a mass of 1. Its damping fraction is
+ * Compose's damping ratio as it is.
+ */
+internal fun springStiffness(responseSeconds: Float): Float {
+    val omega = 2.0 * Math.PI / responseSeconds
+    return (omega * omega).toFloat()
 }
