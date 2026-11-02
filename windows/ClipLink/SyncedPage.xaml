@@ -380,7 +380,7 @@
 
                     <!-- The card a tapped one grows into (see SyncedPage.ShowDetail). -->
                     <Border x:Name="DetailCard" Style="{StaticResource CardBorder}" Margin="0,12,0,0">
-                        <Grid>
+                        <Grid x:Name="DetailContent">
                             <!-- Plain read-only text: select some of it, or Copy for all. -->
                             <TextBlock x:Name="DetailText"
                                        Style="{StaticResource BodyTextBlockStyle}"
