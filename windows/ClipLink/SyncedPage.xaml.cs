@@ -425,9 +425,9 @@ public sealed partial class SyncedPage : Page
 
     private void ShowDetail(HistoryCard card)
     {
-        // The card that is tapped grows into the full view (and back): its
-        // picture is taken now, while the list is still showing.
-        var morph = PrepareMorph(OpenMorphKey, card);
+        // The card that is tapped grows into the full view (and back): where it
+        // is, is taken now, while the list is still showing.
+        var morph = MorphSourceOf(card);
         if (detail != null) detail.PropertyChanged -= Detail_PropertyChanged;
         detail = card;
         card.PropertyChanged += Detail_PropertyChanged;
@@ -440,7 +440,7 @@ public sealed partial class SyncedPage : Page
         EmptyState.Visibility = Visibility.Collapsed;
         DetailTitle.Visibility = DetailOrigin.Visibility = DetailView.Visibility = Visibility.Visible;
         DetailView.ChangeView(null, 0, null, disableAnimation: true);
-        StartMorph(morph, DetailCard);
+        GrowIntoDetail(morph);
         // Keyboard users land on the first action.
         DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
             () => (DetailCopy.Visibility == Visibility.Visible ? DetailCopy : DetailDelete).Focus(FocusState.Programmatic));
@@ -493,7 +493,6 @@ public sealed partial class SyncedPage : Page
 
     // ---- a card growing into the full view, and back --------------------------------
 
-    private const string OpenMorphKey = "cardOpen";
     private const string CloseMorphKey = "cardClose";
     private static readonly TimeSpan MorphDuration = TimeSpan.FromMilliseconds(250);
 
@@ -532,15 +531,70 @@ public sealed partial class SyncedPage : Page
         }
     }
 
-    // The card grows into the full view; the buttons stay where they are.
-    private void StartMorph(ConnectedAnimation? animation, UIElement target)
+    // Where the tapped card is in the window, taken while the list still shows
+    // it. Null when there is nothing to animate (animations are off, the card
+    // is not on screen).
+    private Windows.Foundation.Rect? MorphSourceOf(HistoryCard card)
     {
-        if (animation == null) return;
+        if (!MotionPreference.Enabled || ElementOf(card) is not { ActualWidth: > 0, ActualHeight: > 0 } element) return null;
+        try
+        {
+            return element.TransformToVisual(null).TransformBounds(new Windows.Foundation.Rect(0, 0, element.ActualWidth, element.ActualHeight));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[app] card morph failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    // The card grows into the full view: the full view's card starts at the
+    // tapped card's place and size and opens out to its own, its content fading
+    // in at its real size. Not a picture of it stretched from one shape to the
+    // other (a connected animation): a long text, tall in a narrow card and
+    // wide in the full view, came out squashed and smeared that way. The
+    // buttons stay where they are.
+    private void GrowIntoDetail(Windows.Foundation.Rect? from)
+    {
+        if (from is not { } source) return;
         try
         {
             // Laid out now, so the card's place and size are known.
             DetailView.UpdateLayout();
-            animation.TryStart(target);
+            if (DetailCard is not { ActualWidth: > 0, ActualHeight: > 0 }) return;
+            var to = DetailCard.TransformToVisual(null).TransformBounds(new Windows.Foundation.Rect(0, 0, DetailCard.ActualWidth, DetailCard.ActualHeight));
+            var visual = ElementCompositionPreview.GetElementVisual(DetailCard);
+            var compositor = visual.Compositor;
+            // Strongly easing out: most of the way at once, then a long, gentle settle.
+            var ease = compositor.CreateCubicBezierEasingFunction(new Vector2(0.05f, 0.7f), new Vector2(0.1f, 1f));
+
+            // Its outline, rounded as a card is: from the tapped card's size to its own...
+            var outline = compositor.CreateRoundedRectangleGeometry();
+            float radius = (float)DetailCard.CornerRadius.TopLeft;
+            outline.CornerRadius = new Vector2(radius, radius);
+            outline.Size = new Vector2((float)to.Width, (float)to.Height);
+            visual.Clip = compositor.CreateGeometricClip(outline);
+            var grow = compositor.CreateVector2KeyFrameAnimation();
+            grow.InsertKeyFrame(0f, new Vector2((float)source.Width, (float)source.Height));
+            grow.InsertKeyFrame(1f, new Vector2((float)to.Width, (float)to.Height), ease);
+            grow.Duration = MorphDuration;
+
+            // ...and from the tapped card's place to its own.
+            ElementCompositionPreview.SetIsTranslationEnabled(DetailCard, true);
+            var move = compositor.CreateVector3KeyFrameAnimation();
+            move.InsertKeyFrame(0f, new Vector3((float)(source.X - to.X), (float)(source.Y - to.Y), 0));
+            move.InsertKeyFrame(1f, Vector3.Zero, ease);
+            move.Duration = MorphDuration;
+
+            var batch = compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
+            outline.StartAnimation("Size", grow);
+            visual.StartAnimation("Translation", move);
+            FadeIn(DetailContent, 40, 180);
+            FadeIn(DetailFacts, 80, 170);
+            batch.End();
+            // Unclipped once there: a picture that loads in later must not be
+            // cut to the size the card had when it opened.
+            batch.Completed += (_, _) => visual.Clip = null;
         }
         catch (Exception ex)
         {
