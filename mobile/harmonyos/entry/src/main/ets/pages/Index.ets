@@ -5751,6 +5751,17 @@ struct Index {
   @Builder
   zoomFrame(key: string, item: SyncedItem | null, deviceId: string, fill: ResourceColor) {
     Stack({ alignContent: Alignment.TopStart }) {
+      // The page is see-through (a DIALOG destination, so the list stays on
+      // screen behind it), and so are its touches: a long press on the
+      // preview's text reached the card under it and dragged that, so text
+      // could not be selected. Under everything it shows, this stops them
+      // while it is open - the preview's own content is above it and still
+      // gets them - and lets them through while it closes (see
+      // ZoomMorph.closing).
+      Column()
+        .width('100%')
+        .height('100%')
+        .hitTestBehavior(this.zoomOf(key).closing ? HitTestMode.None : HitTestMode.Block)
       Stack({ alignContent: Alignment.TopStart }) {
         Stack() {
           if (item !== null) {
@@ -5769,7 +5780,7 @@ struct Index {
         // that picture has no background, and without this the card would
         // take the page's colour the moment it is tapped (black in dark mode,
         // solid with card transparency on).
-        if (item !== null && this.zoomOf(key).active && this.isPictureItem(item)) {
+        if (item !== null && this.zoomOf(key).moving && this.isPictureItem(item)) {
           Column()
             .position({ x: 0, y: 0 })
             .width(this.zoomOf(key).card.w / startScale(this.zoomOf(key)))
@@ -5778,7 +5789,10 @@ struct Index {
             .opacity(this.zoomOf(key).cover)
             .hitTestBehavior(HitTestMode.Transparent)
         }
-        if (this.zoomOf(key).active && this.zoomOf(key).snapVersion > 0 && this.zoomShots.has(key)) {
+        // Only while it moves: at rest the view's own content is all there is,
+        // and a see-through picture left over it kept its text from being
+        // selected.
+        if (this.zoomOf(key).moving && this.zoomOf(key).snapVersion > 0 && this.zoomShots.has(key)) {
           Image(this.zoomShots.get(key) as imageKit.PixelMap)
             .objectFit(ImageFit.Fill)
             .position({ x: this.zoomOf(key).part.x / startScale(this.zoomOf(key)), y: this.zoomOf(key).part.y / startScale(this.zoomOf(key)) })
@@ -5796,9 +5810,11 @@ struct Index {
       .scale({ x: zoomScale(this.zoomOf(key)), y: zoomScale(this.zoomOf(key)), centerX: 0, centerY: 0 })
       .offset({ x: lerp(this.zoomOf(key).card.x, 0, this.zoomOf(key).p), y: lerp(this.zoomOf(key).card.y, 0, this.zoomOf(key).p) })
       .opacity(this.zoomOf(key).vanish ? this.zoomOf(key).p : 1)
-      // Kept while the zoom is active, shown only while it flies: the picture
-      // is decoded once, at the open, and is ready again for the close.
-      if (item !== null && this.zoomOf(key).active && this.isPictureItem(item)) {
+      // Only while the zoom moves, like the card's picture of itself: nothing
+      // may be left over the preview at rest, where it would take its touches
+      // (pinch, pan). Its first frames on the way back show the card's
+      // picture of its picture (under it) while it decodes again.
+      if (item !== null && this.zoomOf(key).moving && this.isPictureItem(item)) {
         Stack() {
           // The card's picture as it was on screen, under the decoded one,
           // for the frames before that is ready.
@@ -6285,6 +6301,8 @@ struct Index {
       // the moment it closes, as the page stops taking touches (see
       // ZoomMorph.closing).
       .hideTitleBar(this.itemZoom.closing, false)
+      // Closing, the page lets touches through to the list (open, zoomFrame's
+      // bottom layer stops them).
       .hitTestBehavior(this.itemZoom.closing ? HitTestMode.None : HitTestMode.Default)
       .titleMode(HdsNavDestinationTitleMode.MINI)
       .bindToScrollable([this.detailScroller])
@@ -7076,6 +7094,8 @@ struct Index {
       }
       .titleBar(this.hdsTitleBar('', false, []))
       .hideTitleBar(this.deviceZoom.closing, false)
+      // Closing, the page lets touches through to the list (open, zoomFrame's
+      // bottom layer stops them).
       .hitTestBehavior(this.deviceZoom.closing ? HitTestMode.None : HitTestMode.Default)
       .titleMode(HdsNavDestinationTitleMode.MINI)
       .bindToScrollable([this.deviceDetailScroller])
