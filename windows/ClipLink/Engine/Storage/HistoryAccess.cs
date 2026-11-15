@@ -26,6 +26,21 @@ public class HistoryAccess
     // answer of a version 2 sync). In memory only (nothing about it is saved
     // or sent), so after a restart the history is plain cards by time.
     private readonly BatchGroups groups = new();
+    // Each entry's print (ContentPrint.Key), by Key(): a picture's means
+    // decoding and hashing megabytes, and the Synced page lists the history
+    // on every change. Entries that left history are dropped from it.
+    private readonly Dictionary<string, string?> printOf = new();
+    // Entries the Synced page hid as twins of a card above them (see
+    // GetHistoryWithBatches), so one that shows again later - its visible twin
+    // was deleted or trimmed - isn't announced as if it had just arrived.
+    private readonly HashSet<string> everHidden = new();
+    // The history file is written off the lock, by one writer at a time (see
+    // saveHistory): the newest snapshot waiting to be written, and whether a
+    // writer is running. Under saveGate.
+    private readonly object saveGate = new();
+    private List<ClipboardEntry>? unsaved;
+    private bool writing;
+    private Task saving = Task.CompletedTask;
 
     public HistoryAccess(string label, FileStore fileStore, DeletedEntries deletedEntries)
     {
@@ -35,23 +50,14 @@ public class HistoryAccess
         string app_data_dir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         history_path = Path.Combine(app_data_dir, "ClipboardDaemon", $"history{label}.json");
         Directory.CreateDirectory(Path.Combine(app_data_dir, "ClipboardDaemon"));
-        if (File.Exists(history_path))
-        {
-            try
-            {
-                string json = File.ReadAllText(history_path);
-                inMemoryHistory = System.Text.Json.JsonSerializer.Deserialize<List<ClipboardEntry>>(json) ?? new List<ClipboardEntry>();
-            }
-            catch (System.Text.Json.JsonException ex)
-            {
-                Console.WriteLine($"Could not load history ({ex.Message}) — starting with empty history.");
-                inMemoryHistory = new List<ClipboardEntry>();
-            }
-        }
-        else
-        {
-            inMemoryHistory = new List<ClipboardEntry>();
-        }
+        // (Also from its backup when the file is corrupt - see SafeFile. One
+        // that can't be opened stops the start, as it always did: started
+        // empty, the next save would write over the whole history.)
+        // Parsed from the file's stream: with pictures inline it can be tens
+        // of MB, which as one string was as much again, twice over (UTF-16).
+        inMemoryHistory = SafeFile.ReadStream(history_path,
+            stream => System.Text.Json.JsonSerializer.Deserialize<List<ClipboardEntry>>(stream) ?? new List<ClipboardEntry>(),
+            "history", throwIfUnreadable: true) ?? new List<ClipboardEntry>();
     }
     // A snapshot - safe to serialize or enumerate while other threads add.
     public List<ClipboardEntry> GetHistory()
@@ -66,13 +72,83 @@ public class HistoryAccess
     public sealed record HistoryView(List<ClipboardEntry> Entries, Dictionary<string, string> BatchOf,
         Dictionary<string, int> Expected, HashSet<string> Quiet);
 
+    //
+    // One card per content: an entry whose content a card above it already has
+    // is left out (ContentPrint.Fold) - the topmost, so what just arrived
+    // wins - and so are its stack and quiet marks; a stack left with fewer
+    // than two cards (and nothing more on its way) is plain cards. The history
+    // itself keeps every twin.
     public HistoryView GetHistoryWithBatches()
     {
         lock (gate)
         {
             var (batchOf, expected) = groups.Snapshot();
-            return new HistoryView(groups.Order(inMemoryHistory), batchOf, expected, groups.QuietKeys());
+            var quiet = groups.QuietKeys();
+            var (visible, hidden) = ContentPrint.Fold(groups.Order(inMemoryHistory), PrintOf);
+            if (hidden.Count > 0)
+            {
+                everHidden.UnionWith(hidden);
+                ContentPrint.DropFolded(batchOf, expected, hidden);
+                quiet.ExceptWith(hidden);
+            }
+            quiet.UnionWith(visible.Select(entry => entry.Key()).Where(everHidden.Contains));
+            return new HistoryView(visible, batchOf, expected, quiet);
         }
+    }
+
+    // The keys of every entry with the same content as the entry with this
+    // key - itself included - which is one card on the Synced page. Just the
+    // key when it isn't in history, or its content has no print.
+    public List<string> TwinKeys(string key)
+    {
+        lock (gate)
+        {
+            var entry = inMemoryHistory.FirstOrDefault(e => e.Key() == key);
+            string? print = entry != null ? PrintOf(entry) : null;
+            if (print == null) return new List<string> { key };
+            return inMemoryHistory.Where(e => PrintOf(e) == print).Select(e => e.Key()).Distinct().ToList();
+        }
+    }
+
+    // Whether one of the n newest entries (see ContentPrint.Newest) has one of
+    // these prints: the content is what the devices already have on top.
+    public bool NewestHas(IEnumerable<string> prints, int n) => prints.Any(NewestPrints(n).Contains);
+
+    // The prints of the n newest entries.
+    public HashSet<string> NewestPrints(int n)
+    {
+        lock (gate)
+        {
+            return ContentPrint.Newest(inMemoryHistory, n).Select(PrintOf).OfType<string>().ToHashSet();
+        }
+    }
+
+    // An entry that arrived is not announced (it's listed all the same): what
+    // ClipLink put on the clipboard last already is that content.
+    public void MarkQuiet(string key)
+    {
+        lock (gate) { groups.MarkQuiet(key); }
+    }
+
+    // Under the lock.
+    private string? PrintOf(ClipboardEntry entry)
+    {
+        string key = entry.Key();
+        if (!printOf.TryGetValue(key, out string? print))
+        {
+            print = ContentPrint.Key(entry);
+            printOf[key] = print;
+        }
+        return print;
+    }
+
+    // Under the lock, after entries left history.
+    private void ForgetPrints()
+    {
+        if (printOf.Count <= inMemoryHistory.Count && everHidden.Count == 0) return;
+        var present = inMemoryHistory.Select(e => e.Key()).ToHashSet();
+        foreach (string key in printOf.Keys.Where(key => !present.Contains(key)).ToList()) printOf.Remove(key);
+        everHidden.IntersectWith(present);
     }
 
     // The head this device sends a version 2 peer on connect: the keys and times
@@ -104,10 +180,19 @@ public class HistoryAccess
             {
                 return false;
             }
+            // Older than everything a full history keeps: the trim would drop
+            // it at once (a live item ends the protection of the convenience
+            // item, so nothing is spared for it), so it never is in history -
+            // not listed, and not applied either (the engine adds first).
+            if (HistoryBatch.TrimmedAtOnce(inMemoryHistory, entry, MaxHistoryItems))
+            {
+                return false;
+            }
             inMemoryHistory.Add(entry);
             groups.Arrived(entry.Key());
             TrimToLimit();
             groups.Forget(inMemoryHistory);
+            ForgetPrints();
             saveHistory();
             return true;
         }
@@ -131,6 +216,7 @@ public class HistoryAccess
             {
                 DeleteBlobIfUnused(evicted);
             }
+            ForgetPrints();
             saveHistory();
             return merged;
         }
@@ -152,6 +238,7 @@ public class HistoryAccess
             {
                 DeleteBlobIfUnused(evicted);
             }
+            ForgetPrints();
             saveHistory();
             return merged;
         }
@@ -172,6 +259,7 @@ public class HistoryAccess
             {
                 DeleteBlobIfUnused(evicted);
             }
+            ForgetPrints();
             saveHistory();
             return merged;
         }
@@ -212,6 +300,7 @@ public class HistoryAccess
                 {
                     DeleteBlobIfUnused(evicted);
                 }
+                ForgetPrints();
                 saveHistory();
             }
             return result;
@@ -263,6 +352,7 @@ public class HistoryAccess
                 DeleteBlobIfUnused(entry);
             }
             groups.Forget(inMemoryHistory);
+            ForgetPrints();
             saveHistory();
             return removed;
         }
@@ -337,13 +427,78 @@ public class HistoryAccess
         }
     }
 
+    // Written whole and swapped in (see SafeFile): a crash or a full disk
+    // midway used to leave a cut-off file, and the next start an empty history.
+    //
+    // Only a snapshot of the list is taken here, under the lock; the file is
+    // written by a background writer, serialized straight into it (Wire's
+    // JSON, see Wire.Json - the same entries, as any build reads them). The
+    // whole history, pictures and all, used to be made into one string and
+    // written with the lock held - and the UI thread takes that lock to list
+    // the history, so the window froze for as long as a write took. One
+    // writer at a time, and it always writes the newest snapshot: an older
+    // one waiting is skipped, never written over a newer one. Flush waits
+    // for it.
     public Boolean saveHistory()
     {
         lock (gate)
         {
-            string json = System.Text.Json.JsonSerializer.Serialize(inMemoryHistory);
-            File.WriteAllText(history_path, json);
+            var snapshot = inMemoryHistory.ToList();
+            lock (saveGate)
+            {
+                unsaved = snapshot;
+                if (!writing)
+                {
+                    writing = true;
+                    saving = Task.Run(WriteUnsaved);
+                }
+            }
             return true;
+        }
+    }
+
+    private void WriteUnsaved()
+    {
+        while (true)
+        {
+            List<ClipboardEntry>? snapshot;
+            lock (saveGate)
+            {
+                snapshot = unsaved;
+                unsaved = null;
+                if (snapshot == null)
+                {
+                    writing = false;
+                    return;
+                }
+            }
+            try
+            {
+                SafeFile.Write(history_path, stream => System.Text.Json.JsonSerializer.Serialize(stream, snapshot, Networking.Wire.Json));
+            }
+            catch (Exception ex)
+            {
+                // The next change writes it all again.
+                Console.WriteLine($"Could not save history ({ex.Message}).");
+            }
+        }
+    }
+
+    // Waits (up to timeout) until every change so far is on disk - the engine
+    // stopping, before the process exits.
+    public void Flush(TimeSpan? timeout = null)
+    {
+        var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(10));
+        while (true)
+        {
+            Task running;
+            lock (saveGate)
+            {
+                if (!writing) return;
+                running = saving;
+            }
+            var left = deadline - DateTime.UtcNow;
+            if (left <= TimeSpan.Zero || !running.Wait(left)) return;
         }
     }
     // "Clear synced history": every current entry is recorded as deleted
@@ -361,6 +516,7 @@ public class HistoryAccess
                 DeleteBlobIfUnused(entry);
             }
             groups.Clear();
+            ForgetPrints();
             saveHistory();
             return removed;
         }

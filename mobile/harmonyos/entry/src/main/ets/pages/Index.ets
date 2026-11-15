@@ -45,10 +45,15 @@ import { DeviceSettings } from '../identity/DeviceSettings';
 import { deviceFingerprint, effectiveDeviceName, getLocalDeviceName, normalizeDeviceName, shortDeviceId } from '../identity/DeviceName';
 import { FileStore } from '../storage/FileStore';
 import { FilePayload } from '../storage/FilePayload';
+import {
+  CaptureMode, CaptureVerdict, LastWrite, classifyOwnWrite, classifyRead, contentKey, filePrint, historyKeys, newestKeys, parseLastWrite,
+  primeContentKeys, textPrint
+} from '../storage/ContentPrint';
+import { MAX_HISTORY_ITEMS } from '../storage/HistoryAccess';
 import { safeFileName } from '../storage/FileNames';
 import { SHARED_IN_EVENT, SharedIn, enqueueShares, intakePicked, removeQuietly, takePendingShares } from '../share/ShareIntake';
 import { entryKey } from '../storage/DeletedEntries';
-import { Discovery, PeerBeacon } from '../networking/Discovery';
+import { Discovery, PeerBeacon, sameBeacon } from '../networking/Discovery';
 import { TcpServer, connectTcp } from '../networking/TcpTransport';
 import { HandshakeReport, PeerConnection, PeerVerdict, TcpSocketAdapter, TcpSocketConnectionAdapter, sameIdentityKey } from '../networking/PeerConnection';
 import { PAIRING_ACTION_EVENT, PAIRING_ACTION_OPEN, PAIRING_ACTION_PARAM, PAIRING_ACTION_TRUST, PAIRING_ACTION_IGNORE, PAIRING_DEVICE_PARAM } from '../networking/PairingActions';
@@ -56,10 +61,11 @@ import { PAIRING_LINK_EVENT, takePendingPairingLink, unwrapPairingLink, wrapPair
 import { QUIET_AFTER_IGNORED_MS, QUIET_AFTER_REMOVED_MS, QuietState, RequestQuiet } from '../networking/RequestQuiet';
 import { DialFallback } from '../networking/DialFallback';
 import { SyncManager } from '../networking/SyncManager';
+import { unixMillis } from '../networking/SyncProtocol';
 import { BatchApplied, HeadApplied, SyncApplied } from '../networking/HistorySync';
 import { StackBadge, StackChrome, StackedCard } from '../stack/StackedCard';
 import { fileExtensionLabel, fileGlyphKind } from '../stack/CardFooter';
-import { BatchGroupTracker, BatchMember, BatchPlan, StackMotion, StackRow, buildRows, dissolveGroup, hiddenCount, placeBatch, placeQuiet, revealAnimates, settleGroup, staggerDelayMs, startInsetFraction, startPeekVp } from '../stack/SyncedRows';
+import { BatchGroupTracker, BatchMember, BatchPlan, StackMotion, StackRow, buildRows, dissolveGroup, foldTwins, hiddenCount, placeBatch, placeQuiet, revealAnimates, settleGroup, staggerDelayMs, startInsetFraction, startPeekVp, twinIds } from '../stack/SyncedRows';
 import { connection } from '@kit.NetworkKit';
 import { signEntry, ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
 import { ApplyResult } from '../clipboard/ClipboardApply';
@@ -246,6 +252,28 @@ interface SyncedItem extends BatchMember {
   // Set on the members of a group a peer's history_head made, until the batch
   // behind it has come: the size the group will have (0 otherwise).
   expected: number;
+  // What its content is (storage/ContentPrint.ets's contentKey), null for
+  // none: the list shows one card per content (see SyncedRows.foldTwins).
+  contentKey: string | null;
+}
+
+// A card's content key, for foldTwins and twinIds.
+function syncedItemKey(item: SyncedItem): string | null {
+  return item.contentKey;
+}
+
+function twoDigits(n: number): string {
+  return n < 10 ? `0${n}` : `${n}`;
+}
+
+// An entry's time (UTC, .NET round-trip text) as HH:mm in this device's own
+// time zone, as every other platform shows it. It used to be the UTC text's
+// own HH:mm, so a copy at 14:30 in UTC+8 showed 06:30.
+function localTimeLabel(timestamp: string): string {
+  const millis: number = unixMillis(canonicalTimestamp(timestamp));
+  if (millis === 0) return timestamp.slice(11, 16);
+  const at: Date = new Date(millis);
+  return `${twoDigits(at.getHours())}:${twoDigits(at.getMinutes())}`;
 }
 
 // Wire shape for QR/pasted pairing exchange - matches windows/ClipLink/Engine/
@@ -781,6 +809,9 @@ struct Index {
   @State autoCapture: boolean = false;
   private autoCaptureWanted: boolean = true;
   private captureBusy: boolean = false;
+  // The on-open capture's read failed (the window not in front yet, say) and
+  // was tried again once since the app last came forward.
+  private captureRetried: boolean = false;
   // DeviceSettings.getNoticeNewCopies - see onPageShow.
   @State noticeOnOpen: boolean = true;
   // DeviceSettings.getAccentThemeSync - a key from THEMES, see accent().
@@ -979,6 +1010,7 @@ struct Index {
       this.cardTransparency = this.deviceSettings.getCardTransparencySync(ctx);
       this.syncedViewMode = this.deviceSettings.getSyncedViewModeSync(ctx);
       this.watcher.restoreSeen(this.deviceSettings.getLastSeenClipCountSync(ctx));
+      this.watcher.restoreLastWrite(parseLastWrite(this.deviceSettings.getLastWriteSync(ctx)));
       this.deviceNameOverride = this.deviceSettings.getDeviceNameSync(ctx);
     } catch (e) {
       // unreadable prefs - keep the defaults
@@ -1028,12 +1060,19 @@ struct Index {
     const fileStore = new FileStore(context);
     this.fileStore = fileStore;
     // Copies of files under their real names (see FileStore.namedCopy) are only
-    // needed while something reads them: those from the last run go.
-    fileStore.clearNamedCopies();
+    // needed while something reads them: those from the last run go, except
+    // the one a received file put on the clipboard is still pointing at.
+    fileStore.clearNamedCopies(this.watcher.ownFileOnClipboard());
     const syncManager = new SyncManager(fileStore, this.trustStore, context);
+    // Every write of a received item to the clipboard goes through these, one
+    // at a time with a capture (see SyncManager.withClipboard).
+    syncManager.setClipboardHooks({
+      holds: (entry: ClipboardEntry) => this.watcher.holds(contentKey(entry)),
+      wrote: (entry: ClipboardEntry, prints: string[]) => { this.noteOwnClipboardWrite(prints); },
+      beforeWrite: () => this.captureBeforeApply(),
+    });
     syncManager.onEntryApplied((entry: ClipboardEntry, result: ApplyResult, fromPeer: boolean) => {
       netLog(`entry received: type=${entry.Type} result=${result} fromPeer=${fromPeer} visible=${this.appVisible}`);
-      if (result === 'applied') this.noteOwnClipboardWrite();
       // An entry can be reported again - sent twice, or a file listed from
       // history before its bytes arrived - so any copy already listed goes
       // first: a repeated ForEach key breaks the list.
@@ -1050,11 +1089,15 @@ struct Index {
         same[listedAt] = item;
         this.syncedItems = same;
       } else {
-        this.showSynced([item, ...this.syncedItems].slice(0, 50), [item.id]);
+        this.showSynced([item, ...this.syncedItems].slice(0, MAX_HISTORY_ITEMS), [item.id]);
       }
       // Only what is new to the list: an entry reported a second time (see
-      // above) is not news.
-      if (fromPeer && !alreadyListed && !this.appVisible) void this.notifyReceivedItem(item);
+      // above) is not news, and neither is what the clipboard holds already
+      // (an older peer echoing back what this device sent), or a file that
+      // came too late to go on the clipboard.
+      if (fromPeer && !alreadyListed && !this.appVisible && result !== 'already' && result !== 'held') {
+        void this.notifyReceivedItem(item);
+      }
     });
     // A peer's history_batch, as one unit (see SyncManager.onBatchApplied):
     // all of its new items join the list in ONE assignment, so the cards show
@@ -1063,13 +1106,12 @@ struct Index {
     // the others right below it (see placeBatch).
     syncManager.onBatchApplied((batch: BatchApplied) => {
       netLog(`history batch: ${batch.added.length} new, headDone=${batch.headDone} visible=${this.appVisible}`);
-      if (batch.applied === 'applied') this.noteOwnClipboardWrite();
       // After a head, the batch joins the group the head started (same card);
       // without one it makes its own group if it has two or more items.
       const plan: BatchPlan = this.batchGroups.batchArrived(batch.from, batch.added.length);
       const fresh: SyncedItem[] = batch.added.map((entry: ClipboardEntry) =>
         this.syncedItemFor(entry, entry.DeviceId !== this.ownDeviceId, plan.groupId, plan.blockId));
-      let placed: SyncedItem[] = placeBatch(this.syncedItems, fresh, 50);
+      let placed: SyncedItem[] = placeBatch(this.syncedItems, fresh, MAX_HISTORY_ITEMS);
       if (plan.settleId !== '') {
         placed = settleGroup<SyncedItem>(placed, plan.settleId, (item: SyncedItem, id: string, expected: number) => this.withGroup(item, id, expected));
       } else if (plan.groupId !== '') {
@@ -1081,22 +1123,23 @@ struct Index {
       this.showSynced(placed, fresh.map((i: SyncedItem) => i.id));
       const newestKey: string = entryKey(batch.newest);
       const newest: SyncedItem | undefined = fresh.find((i: SyncedItem) => i.id === newestKey);
-      if (!batch.headDone && newest !== undefined && !this.appVisible) void this.notifyReceivedItem(newest);
+      if (!batch.headDone && newest !== undefined && !this.appVisible && batch.applied !== 'already') {
+        void this.notifyReceivedItem(newest);
+      }
     });
     // The newest item of a peer's batch, ahead of the batch (see
     // SyncManager.onHeadApplied): it is listed at once, and when more are
     // coming it is already the front card of their stack, counting them.
     syncManager.onHeadApplied((head: HeadApplied) => {
       netLog(`history head: ${head.expectedNew} to come, visible=${this.appVisible}`);
-      if (head.applied === 'applied') this.noteOwnClipboardWrite();
       const groupId: string = this.batchGroups.headArrived(head.from, head.expectedNew, entryKey(head.newest));
       const item: SyncedItem = this.syncedItemFor(head.newest, head.newest.DeviceId !== this.ownDeviceId, groupId);
       if (groupId !== '') {
         item.expected = head.expectedNew;
         this.noteFreshStack(item.id);
       }
-      this.showSynced(placeBatch(this.syncedItems, [item], 50), [item.id]);
-      if (!this.appVisible) void this.notifyReceivedItem(item);
+      this.showSynced(placeBatch(this.syncedItems, [item], MAX_HISTORY_ITEMS), [item.id]);
+      if (!this.appVisible && head.applied !== 'already') void this.notifyReceivedItem(item);
     });
     // The answer to one of this device's requests (sync v2, see
     // SyncManager.onSyncApplied). The first one holds the item that went on the
@@ -1109,10 +1152,9 @@ struct Index {
       if (sync.quiet) {
         // The late answer to a request given up on: listed by time, in no stack.
         this.syncedItems = placeQuiet(this.syncedItems,
-          sync.added.map((entry: ClipboardEntry) => this.syncedItemFor(entry, entry.DeviceId !== this.ownDeviceId)), 50);
+          sync.added.map((entry: ClipboardEntry) => this.syncedItemFor(entry, entry.DeviceId !== this.ownDeviceId)), MAX_HISTORY_ITEMS);
         return;
       }
-      if (sync.applied === 'applied') this.noteOwnClipboardWrite();
       const frontKey: string = sync.front !== null ? entryKey(sync.front) : '';
       const plan: BatchPlan = sync.front !== null
         ? this.batchGroups.frontArrived(sync.from, sync.expectedTotal, frontKey, sync.added.length, sync.last)
@@ -1121,7 +1163,7 @@ struct Index {
         this.syncedItemFor(entry, entry.DeviceId !== this.ownDeviceId, plan.groupId, plan.blockId));
       const front: SyncedItem | undefined = fresh.find((i: SyncedItem) => i.id === frontKey);
       if (front !== undefined && plan.groupId !== '' && plan.settleId === '') front.expected = sync.expectedTotal;
-      let placed: SyncedItem[] = placeBatch(this.syncedItems, fresh, 50);
+      let placed: SyncedItem[] = placeBatch(this.syncedItems, fresh, MAX_HISTORY_ITEMS);
       if (plan.settleId !== '') {
         placed = settleGroup<SyncedItem>(placed, plan.settleId, (item: SyncedItem, id: string, expected: number) => this.withGroup(item, id, expected));
       }
@@ -1130,7 +1172,9 @@ struct Index {
         if (stackFront !== undefined) this.noteFreshStack(stackFront.id);
       }
       this.showSynced(placed, fresh.map((i: SyncedItem) => i.id));
-      if (front !== undefined && !sync.superseded && !this.appVisible) void this.notifyReceivedItem(front);
+      if (front !== undefined && !sync.superseded && !this.appVisible && sync.applied !== 'already') {
+        void this.notifyReceivedItem(front);
+      }
     });
     // The batch a head announced came to nothing new, or its connection closed
     // before it came, or a v2 sync has nothing more to wait for: the stack
@@ -1144,6 +1188,12 @@ struct Index {
     // A peer deleted items: they leave the list (a stack that loses its front
     // card gets a new one, one that is left with a single item is a normal card).
     syncManager.onEntriesDeleted((keys: string[]) => {
+      this.forgetItems(keys);
+    });
+    // The history's cap pushed items out: their cards go too, so the list
+    // never shows more than the history holds (a card past it had lost its
+    // file, and nothing would fetch it again).
+    syncManager.onEntriesEvicted((keys: string[]) => {
       this.forgetItems(keys);
     });
     // An older item's bytes, fetched again (see SyncManager.onFileStored):
@@ -1222,15 +1272,25 @@ struct Index {
     });
 
     this.discovery.onPeerDiscovered((beacon: PeerBeacon) => {
+      // This device's own broadcast loops back: nothing here is for it (the
+      // device list leaves it out, and it is never trusted or dialled).
+      if (beacon.deviceId === this.ownDeviceId) return;
       const existingIndex = this.receivedBeacons.findIndex(b => b.deviceId === beacon.deviceId);
       if (existingIndex === -1) {
         this.receivedBeacons = [beacon, ...this.receivedBeacons].slice(0, 30);
       } else {
         // A known name is never forgotten over a beacon that lacks one.
-        if (beacon.name === null) beacon.name = this.receivedBeacons[existingIndex].name;
-        const updated = this.receivedBeacons.slice();
-        updated[existingIndex] = beacon;
-        this.receivedBeacons = updated;
+        const known: PeerBeacon = this.receivedBeacons[existingIndex];
+        if (beacon.name === null) beacon.name = known.name;
+        // Each device beacons every 2 s, nearly always the same: the state is
+        // only replaced when something in it changed, or every beacon re-ran
+        // the device list's build for each card that reads it. Nothing reads
+        // how fresh a beacon is.
+        if (!sameBeacon(known, beacon)) {
+          const updated = this.receivedBeacons.slice();
+          updated[existingIndex] = beacon;
+          this.receivedBeacons = updated;
+        }
       }
       // The beacon's name stays here, in memory: beacons are unsigned, so
       // it's never written to the trust store (see TrustedDevice.name).
@@ -1329,6 +1389,7 @@ struct Index {
     this.autoCapture = this.autoCaptureWanted && isPasteboardReadGranted();
     // A moment for the window to take focus: the system lets only the app in
     // front read the clipboard.
+    this.captureRetried = false;
     setTimeout(() => { void this.captureOnOpen(); }, 300);
     // HarmonyOS's closest equivalent of Android's "send my clipboard when I
     // open ClipLink": reading the clipboard needs READ_PASTEBOARD (an ACL-only
@@ -1728,7 +1789,16 @@ struct Index {
           // bug - it always passed null), instead of leaving it permanently
           // stuck with no address to reconnect off-LAN with.
           const context = getContext(this) as common.UIAbilityContext;
-          void this.trustStore.trust(context, peerConn.peerDeviceId, address).then(() => { void this.refreshTrustedDevices(); });
+          // Only ever an update: a device removed while this handshake was
+          // under way is not trusted again by it (trust() would write its
+          // record back), and its connection goes.
+          void this.trustStore.updateAddress(context, peerConn.peerDeviceId, address).then((stillTrusted: boolean) => {
+            if (!stillTrusted) {
+              this.syncManager?.disconnect(peerConn.peerDeviceId);
+              return;
+            }
+            void this.refreshTrustedDevices();
+          });
         }
         this.log(`connected: ${shortDeviceId(peerConn.peerDeviceId)}`);
       }
@@ -1841,6 +1911,15 @@ struct Index {
     // kept, and the connection is already closed.
     if (this.pendingPairingConn !== conn || conn.isClosed) return;
     this.clearPendingPairing();
+    if (conn.overflowed) {
+      // It sent more while it waited than a request may hold, and that was
+      // dropped (see PeerConnection.overflowed): trusted, but this link is
+      // missing lines. Closed, so the next beacon or redial brings up a clean
+      // one that syncs everything.
+      conn.close();
+      this.log(`paired: ${shortDeviceId(conn.peerDeviceId)} - reconnecting`);
+      return;
+    }
     if (address !== undefined) this.connectionAddresses.set(conn.peerDeviceId, address);
     this.syncManager?.registerConnection(conn);
     this.rememberNameOnceProven(conn);
@@ -2059,6 +2138,15 @@ struct Index {
         this.log(`connect failed: ${shortDeviceId(beacon.deviceId)}`);
         return;
       }
+      // Beacons are unsigned: anyone on the LAN can send one naming a trusted
+      // device with an address of its own. What answered must be the device
+      // that was dialled - anything else is dropped, never turned into a
+      // pairing prompt that looks as if this phone had asked for it.
+      if (!sameIdentityKey(conn.peerDeviceId, beacon.deviceId)) {
+        netLog(`dial ${beacon.senderIp}:${beacon.tcpPort}: answered by ${deviceFingerprint(conn.peerDeviceId)}, not ${deviceFingerprint(beacon.deviceId)} - dropped`);
+        conn.close();
+        return;
+      }
       this.handleNewConnection(conn, beacon.senderIp);
     } catch (e) {
       const be = e as BusinessError;
@@ -2112,7 +2200,7 @@ struct Index {
       netLog(`  ${shortId}: dialing ${device.address}:${TCP_PORT}`);
       this.connectingTo.add(device.publicKey);
       try {
-        const outcome = await this.connectToAddress(device.address, TCP_PORT);
+        const outcome = await this.connectToAddress(device.address, TCP_PORT, false, device.publicKey);
         netLog(`  ${shortId}: dial ${outcome}`);
       } finally {
         this.connectingTo.delete(device.publicKey);
@@ -2128,7 +2216,11 @@ struct Index {
   // success here, and the Pairing screen raised an Accept prompt for a
   // connection that was already closed - accepting it wrote trust on this
   // side only.
-  private async connectToAddress(address: string, port: number, forPairing: boolean = false): Promise<DialOutcome> {
+  // `expected`: the device this dial is for (the off-LAN redial of a trusted
+  // one) - whatever else answers at its old address is dropped, as for a
+  // beacon's dial (see connectToBeacon).
+  private async connectToAddress(address: string, port: number, forPairing: boolean = false,
+    expected: string | null = null): Promise<DialOutcome> {
     let client: TcpSocketAdapter;
     try {
       client = await connectTcp(address, port);
@@ -2145,6 +2237,11 @@ struct Index {
         netLog(`connectToAddress ${address}:${port}: TCP connected but no usable handshake (${report.timedOut ? 'no answer' : 'peer closed, or refused locally'})`);
         client.close().catch(() => { /* already closed - fine */ });
         return report.timedOut ? 'silent' : 'refused';
+      }
+      if (expected !== null && !sameIdentityKey(conn.peerDeviceId, expected)) {
+        netLog(`connectToAddress ${address}:${port}: answered by ${deviceFingerprint(conn.peerDeviceId)}, not the device dialled - dropped`);
+        conn.close();
+        return 'refused';
       }
       let verdict: PeerVerdict | null = null;
       if (forPairing) {
@@ -2274,7 +2371,7 @@ struct Index {
     try {
       const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, deviceId);
       await pasteboard.getSystemPasteboard().setData(data);
-      this.noteOwnClipboardWrite();
+      this.noteOwnClipboardWrite([textPrint(deviceId)]);
     } catch (e) {
       promptAction.showToast({ message: $r('app.string.toast_copy_failed') });
     }
@@ -2358,12 +2455,32 @@ struct Index {
     if (this.syncManager === null || this.ownDeviceId.length === 0) return;
     if (!isPasteboardReadGranted() || !this.watcher.hasUnseenChange()) return;
     this.captureBusy = true;
+    let read: boolean = true;
     try {
       netLog('auto-capture: reading the clipboard');
-      await this.syncClipboard();
+      read = await this.syncClipboard('auto');
     } finally {
       this.captureBusy = false;
     }
+    // A read that failed left the change unseen (and its hint up): tried once
+    // more a moment later, rather than the copy being lost until a Paste tap.
+    if (!read && !this.captureRetried) {
+      this.captureRetried = true;
+      setTimeout(() => { void this.captureOnOpen(); }, 1000);
+    }
+  }
+
+  // Before a received item is written to the clipboard (SyncManager's
+  // ClipboardHooks.beforeWrite, inside its clipboard lock): a copy made here
+  // and not dealt with yet goes out first, so the write does not bury it
+  // unsent. Only when ClipLink may read the clipboard by itself (in front, the
+  // setting on, the permission granted); otherwise the write goes ahead as
+  // before.
+  private async captureBeforeApply(): Promise<void> {
+    if (!this.appVisible || !this.autoCaptureWanted || this.ownDeviceId.length === 0) return;
+    if (!isPasteboardReadGranted() || !this.watcher.hasUnseenChange()) return;
+    netLog('auto-capture: reading the clipboard before a received item replaces it');
+    await this.captureNow('auto');
   }
 
   private async setNotifyReceived(value: boolean): Promise<void> {
@@ -2480,10 +2597,18 @@ struct Index {
     });
   }
 
-  // Never the clipboard. Peers that speak sync v2 delete the item too.
+  // Never the clipboard. Peers that speak sync v2 delete the item too. A card
+  // stands for every item with its content (see foldTwins), so all of them
+  // go: a hidden twin left behind would show up as the deleted item coming
+  // back.
   private async deleteItem(item: SyncedItem): Promise<void> {
-    await this.syncManager?.deleteEntry(item.id);
-    this.forgetItems([item.id]);
+    const keys: Set<string> = new Set<string>(twinIds<SyncedItem>(this.syncedItems, item.id, syncedItemKey));
+    const syncManager: SyncManager | null = this.syncManager;
+    if (syncManager !== null) {
+      for (const key of await syncManager.twinKeys(item.id)) keys.add(key);
+      await syncManager.deleteEntries(Array.from(keys));
+    }
+    this.forgetItems(Array.from(keys));
   }
 
   // Takes these items (by id) out of the list, here or at a peer's request.
@@ -2576,7 +2701,7 @@ struct Index {
     }
     // PassphraseKeyStore.setPassphrase runs PBKDF2 at 210,000 iterations
     // (fixed to match the Windows side - see PassphraseKeyStore.ets) via
-    // cryptoFramework, awaited per round - this can take several seconds
+    // cryptoFramework, in a TaskPool worker - this can take several seconds
     // on-device. Without this pending state the button looked broken:
     // nothing visibly happened until it finally resolved.
     this.settingPassphrase = true;
@@ -2800,9 +2925,10 @@ struct Index {
   // permission (unlike getData/PasteButton), so this can run from a plain
   // onClick with no security-component dance.
   async copyPairingPayload(): Promise<void> {
-    const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.myPairingPayload);
+    const payload: string = this.myPairingPayload;
+    const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, payload);
     await pasteboard.getSystemPasteboard().setData(data);
-    this.noteOwnClipboardWrite();
+    this.noteOwnClipboardWrite([textPrint(payload)]);
   }
 
   async copyDeviceId(): Promise<void> {
@@ -2810,7 +2936,7 @@ struct Index {
     try {
       const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.ownDeviceId);
       await pasteboard.getSystemPasteboard().setData(data);
-      this.noteOwnClipboardWrite();
+      this.noteOwnClipboardWrite([textPrint(this.ownDeviceId)]);
     } catch (e) {
       promptAction.showToast({ message: $r('app.string.toast_copy_failed') });
     }
@@ -2818,10 +2944,23 @@ struct Index {
 
   // After this app writes to the clipboard, the clipboard holds OUR data -
   // so it must not be flagged as a new copy to send, and any earlier "new
-  // copy" hint now points at content that's been overwritten.
-  private noteOwnClipboardWrite(): void {
-    this.markClipboardSeen();
+  // copy" hint now points at content that's been overwritten. `prints`: what
+  // was written (storage/ContentPrint.ets), so a Paste tap or the next
+  // capture knows it for ClipLink's own - it used to come back as a new copy
+  // of this device's, and every device then showed it twice.
+  private noteOwnClipboardWrite(prints: string[]): void {
+    const lastWrite: LastWrite = this.watcher.noteOwnWrite(prints);
+    const context = getContext(this) as common.UIAbilityContext;
+    if (lastWrite.count >= 0) void this.deviceSettings.setLastSeenClipCount(context, lastWrite.count);
+    void this.deviceSettings.setLastWrite(context, JSON.stringify(lastWrite));
     this.pendingChange = false;
+  }
+
+  // A capture was dealt with - sent, or found to be what everyone has already:
+  // its content is what ClipLink believes is on the clipboard now.
+  private noteCapture(prints: string[]): void {
+    const lastWrite: LastWrite = this.watcher.noteCapture(prints);
+    void this.deviceSettings.setLastWrite(getContext(this) as common.UIAbilityContext, JSON.stringify(lastWrite));
   }
 
   private markClipboardSeen(): void {
@@ -2855,25 +2994,62 @@ struct Index {
     if (result !== PasteButtonOnClickResult.SUCCESS) {
       return; // the system did not grant the read: nothing was read, so nothing to say
     }
-    await this.syncClipboard();
+    await this.syncClipboard('manual');
   }
 
-  // Reads the clipboard and syncs it: the PasteButton's tap, or - with
-  // READ_PASTEBOARD - ClipLink coming forward (captureOnOpen).
-  private async syncClipboard(): Promise<void> {
+  // Reads the clipboard and syncs it: the PasteButton's tap ('manual'), or -
+  // with READ_PASTEBOARD - ClipLink coming forward ('auto', captureOnOpen).
+  // With the clipboard to itself: no received item is written to it from the
+  // read until what was read is recorded (see SyncManager.withClipboard).
+  // False when the clipboard could not be read at all.
+  private syncClipboard(mode: CaptureMode): Promise<boolean> {
+    const syncManager: SyncManager | null = this.syncManager;
+    if (syncManager === null) return this.captureNow(mode);
+    return syncManager.withClipboard(() => this.captureNow(mode));
+  }
+
+  // syncClipboard's work, for a caller that holds the clipboard already. What
+  // is news follows design/sync-dedupe-spec.md rule 1 (ContentPrint's
+  // classifyOwnWrite and classifyRead): ClipLink's own write, what it last
+  // wrote or sent, and what the newest item holds already are not sent again
+  // - nothing is said, and nothing moves in the list. A deliberate re-copy of
+  // an older item does go out.
+  private async captureNow(mode: CaptureMode): Promise<boolean> {
     const context = getContext(this) as common.UIAbilityContext;
+    // Before anything is read: still ClipLink's own write, by the change count.
+    if (this.watcher.holdsOwnWrite()) {
+      const held: ClipboardEntry[] = (await this.syncManager?.getHistory()) ?? [];
+      // Compared by content: the pictures' keys off the UI thread first.
+      await primeContentKeys(held);
+      if (classifyOwnWrite(mode, this.watcher.getLastWrite(), historyKeys(held)) === 'already') {
+        this.markClipboardSeen();
+        this.pendingChange = false;
+        return true;
+      }
+    }
     const change = await this.watcher.readCurrentClipboard(context);
+    if (change.failed === true) {
+      // Not read at all: left unseen, so it can be read again.
+      this.log(`paste not synced: ${change.detail}`);
+      return false;
+    }
     this.markClipboardSeen();
     this.pendingChange = false;
-    if (change === null) {
-      // Unchanged since the last sync: nothing new to show, and nothing to say.
-      return;
-    }
     if (change.type === 'unsupported') {
       // Not something ClipLink syncs (or a file it refused): no toast, the
       // Activity log has why.
       this.log(`paste not synced: ${change.refused !== undefined ? change.refused : change.detail}`);
-      return;
+      return true;
+    }
+    // Read after the clipboard: an item may have arrived during the read.
+    const history: ClipboardEntry[] = (await this.syncManager?.getHistory()) ?? [];
+    await primeContentKeys(history);
+    const verdict: CaptureVerdict = classifyRead(mode, change.prints, change.hash, this.watcher.getLastWrite(),
+      historyKeys(history), newestKeys(history, 1));
+    if (verdict === 'already') {
+      if (change.path !== undefined) removeQuietly(change.path);
+      this.noteCapture(change.prints);
+      return true;
     }
 
     // "file" is different from text/image: the signed entry only ever
@@ -2887,37 +3063,31 @@ struct Index {
       const path: string = change.path ?? '';
       if (fileStore === null) {
         removeQuietly(path);
-        this.pasteFailed();
-        return;
+        return true;
       }
       // The watcher's cache copy moves in, already hashed (an empty file's
       // too: its hash is the known constant - see sha256File).
       if (!fileStore.adopt(path, change.hash)) {
         this.log('could not store the pasted file');
-        this.pasteFailed();
-        return;
+        return true;
       }
       const payload: FilePayload = { FileName: safeFileName(change.fileName, 'file'), FileHash: change.hash, FileSize: change.size ?? 0 };
       entryContent = JSON.stringify(payload);
     }
 
+    // A paste that was read but couldn't be synced is logged (no toast), and
+    // not recorded as dealt with: the next tap tries again.
     try {
       await this.recordLocalEntry(change.type, entryContent);
     } catch (e) {
       this.log(`could not sync the paste (${e})`);
-      this.pasteFailed();
-      return;
+      return true;
     }
+    this.noteCapture(change.prints);
 
     // No toast: the new card at the top of Synced is the answer (and the
     // Devices tab says whether anything is connected).
-  }
-
-  // A paste that was read but couldn't be synced (logged by the caller, no
-  // toast): the watcher forgets the read, so the next tap tries again rather
-  // than finding the clipboard "unchanged since last sync".
-  private pasteFailed(): void {
-    this.watcher.forget();
+    return true;
   }
 
   // Something this device originated - a PasteButton read, or something
@@ -2928,6 +3098,7 @@ struct Index {
     const myDeviceId = await identity.getPublicKeyBase64();
     const entry = await signEntry(identity, content, type, myDeviceId);
     await this.syncManager?.broadcastEntry(entry);
+    await primeContentKeys([entry]);
 
     // broadcastEntry only sends to peers and records history - it never
     // touches syncedItems, which is what onEntryApplied (received-entry
@@ -2937,7 +3108,7 @@ struct Index {
     // first: a share synced while loadHistoryIntoList runs can already be
     // in the list, and a repeated ForEach key breaks the list.
     const item: SyncedItem = this.syncedItemFor(entry, false);
-    this.syncedItems = [item, ...this.syncedItems.filter((i: SyncedItem) => i.id !== item.id)].slice(0, 50);
+    this.syncedItems = [item, ...this.syncedItems.filter((i: SyncedItem) => i.id !== item.id)].slice(0, MAX_HISTORY_ITEMS);
   }
 
   // "Share to ClipLink": syncs what EntryAbility queued from the system
@@ -2966,6 +3137,14 @@ struct Index {
   private async syncShared(batch: SharedIn[]): Promise<void> {
     const fileStore = this.fileStore;
     if (fileStore === null) return;
+    // An item the newest entries hold already (as many as this share has
+    // items, from the history before it starts) is not signed again, and is
+    // counted as shared: it is on the user's devices, which is what the share
+    // was for. The same text copied and then shared went out twice. Twice in
+    // one share goes out once.
+    const sharing: number = batch.filter((s: SharedIn) => s.kind === 'text' || s.kind === 'file').length;
+    const newest: Set<string> = newestKeys((await this.syncManager?.getHistory()) ?? [], sharing);
+    const sent: Set<string> = new Set<string>();
     let files = 0;
     let texts = 0;
     let tooLarge = 0;
@@ -2975,7 +3154,11 @@ struct Index {
     for (const shared of batch) {
       try {
         if (shared.kind === 'text' && shared.text !== undefined) {
-          await this.recordLocalEntry('text', shared.text);
+          const print: string = textPrint(shared.text);
+          if (!newest.has(print) && !sent.has(print)) {
+            await this.recordLocalEntry('text', shared.text);
+            sent.add(print);
+          }
           texts++;
         } else if (shared.kind === 'file' && shared.path !== undefined) {
           // The cache copy moves into FileStore (hashed in chunks, never
@@ -2983,8 +3166,12 @@ struct Index {
           // stream in broadcastEntry find it.
           const size: number = fs.statSync(shared.path).size;
           const hash: string = await fileStore.importFile(shared.path);
-          const payload: FilePayload = { FileName: shared.fileName ?? 'file', FileHash: hash, FileSize: size };
-          await this.recordLocalEntry('file', JSON.stringify(payload));
+          const print: string | null = filePrint(hash);
+          if (print === null || (!newest.has(print) && !sent.has(print))) {
+            const payload: FilePayload = { FileName: shared.fileName ?? 'file', FileHash: hash, FileSize: size };
+            await this.recordLocalEntry('file', JSON.stringify(payload));
+            if (print !== null) sent.add(print);
+          }
           files++;
         } else if (shared.reason === 'too-large') {
           tooLarge++;
@@ -3046,7 +3233,7 @@ struct Index {
   copyItemContent(item: SyncedItem): void {
     const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, item.content);
     pasteboard.getSystemPasteboard().setData(data)
-      .then(() => { this.noteOwnClipboardWrite(); })
+      .then(() => { this.noteOwnClipboardWrite([textPrint(item.content)]); })
       .catch(() => { promptAction.showToast({ message: $r('app.string.toast_copy_failed') }); });
   }
 
@@ -3818,12 +4005,13 @@ struct Index {
       preview: previewFor(entry),
       content: entry.Content,
       deviceId: entry.DeviceId,
-      time: entry.Timestamp.slice(11, 16),
+      time: localTimeLabel(entry.Timestamp),
       fromPeer,
       groupId,
       blockId,
       stamp: canonicalTimestamp(entry.Timestamp),
       expected: 0,
+      contentKey: contentKey(entry),
     };
   }
 
@@ -3859,7 +4047,8 @@ struct Index {
     const items: SyncedItem[] = this.syncedItems;
     if (items !== this.rowsSource) {
       this.rowsSource = items;
-      this.rowsCache = buildRows<SyncedItem>(items);
+      // One card per content: a twin of a card above it is not drawn.
+      this.rowsCache = buildRows<SyncedItem>(foldTwins<SyncedItem>(items, syncedItemKey));
       this.rowsByFront = new Map<string, StackRow<SyncedItem>>();
       for (const row of this.rowsCache) this.rowsByFront.set(row.front.id, row);
     }
@@ -3911,6 +4100,7 @@ struct Index {
       blockId: item.blockId,
       stamp: item.stamp,
       expected,
+      contentKey: item.contentKey,
     };
   }
 
@@ -4160,6 +4350,8 @@ struct Index {
   // this device's own entries from peers'.
   private async loadHistoryIntoList(): Promise<void> {
     const saved: ClipboardEntry[] = (await this.syncManager?.getHistory()) ?? [];
+    // The pictures' keys off the UI thread, before the cards ask for them.
+    await primeContentKeys(saved);
     // Timestamps are .NET round-trip ISO strings, which sort as text once
     // canonicalised (a relay may have trimmed their fraction).
     const restored: SyncedItem[] = saved
@@ -4172,7 +4364,7 @@ struct Index {
       .map((entry: ClipboardEntry) => this.syncedItemFor(entry, entry.DeviceId !== this.ownDeviceId));
     // Anything that arrived live while this was loading stays on top.
     const liveIds: Set<string> = new Set(this.syncedItems.map((i: SyncedItem) => i.id));
-    this.syncedItems = [...this.syncedItems, ...restored.filter((i: SyncedItem) => !liveIds.has(i.id))].slice(0, 50);
+    this.syncedItems = [...this.syncedItems, ...restored.filter((i: SyncedItem) => !liveIds.has(i.id))].slice(0, MAX_HISTORY_ITEMS);
   }
 
   // Human-readable label for whichever device an item came from: this

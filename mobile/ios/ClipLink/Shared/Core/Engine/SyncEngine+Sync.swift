@@ -10,7 +10,12 @@ extension SyncEngine {
     // MARK: - Inbound messages
 
     func handleMessage(_ text: String, from link: PeerLink) {
-        guard let envelope = Envelope.parse(text) else {
+        handleMessage(Data(text.utf8), from: link)
+    }
+
+    /// A message as its decrypted bytes (see PeerLink.onMessageData).
+    func handleMessage(_ data: Data, from link: PeerLink) {
+        guard let envelope = Envelope.parse(data: data) else {
             log("received invalid message from peer (bad JSON)")
             return
         }
@@ -152,12 +157,16 @@ extension SyncEngine {
         /// After a history_head it is the group the head started, which also
         /// holds the head's newest entry.
         var group: BatchGroup?
+        /// A convenience answer brought nothing newer than what is here: it was
+        /// stored quietly, and so is the rest of its sync (see `applyAnswer`).
+        var quiet = false
     }
 
     /// What one history_head did here.
     struct HistoryHeadOutcome: Equatable {
-        /// False when the head was ignored (deleted here, bad signature or an
-        /// untrusted signer): the batch behind it then works as before.
+        /// False when the head was ignored (deleted here, bad signature, an
+        /// untrusted signer, or a newest entry no newer than everything here):
+        /// the batch behind it then works on its own.
         var accepted = false
         /// Its newest entry was new and is in history now.
         var newestIsNew = false
@@ -173,7 +182,9 @@ extension SyncEngine {
     /// with its side effects (clipboard, notification) now, so the batch finds
     /// it known and does not repeat them. When 2 or more entries are new, a
     /// provisional group shows the stack straight away, with the badge for the
-    /// size the keys announce; the batch fills it in. Runs on the engine queue.
+    /// size the keys announce; the batch fills it in. A head whose newest entry
+    /// is not newer than everything here is ignored, as if it had failed its
+    /// checks: the batch then works on its own. Runs on the engine queue.
     @discardableResult
     func applyHistoryHead(_ head: HistoryHead, from peerId: String, connection: ObjectIdentifier) -> HistoryHeadOutcome {
         var outcome = HistoryHeadOutcome()
@@ -183,6 +194,9 @@ extension SyncEngine {
             log("dropped a history head from \(displayName(for: peerId)) - failed signature/trust check")
             return outcome
         }
+        // Nothing newer than what is here: no early item, no stack, nothing on
+        // the clipboard. Known already, trimmed here, or a partly paired peer's.
+        guard isFresh(newest) else { return outcome }
         outcome.accepted = true
         // A head that follows another one on this connection: the first one's
         // batch is not coming any more.
@@ -196,8 +210,7 @@ extension SyncEngine {
         let expected = deleted.removingDeletedKeys(head.keys).filter { seen.insert($0).inserted && !have.contains($0) }
         outcome.expectedNew = min(expected.count, Wire.historyCap)
 
-        // Its newest entry is C: spared by the trim and put on the clipboard even if
-        // it is older than something we have.
+        // Its newest entry is C: spared by the trim and put on the clipboard.
         let identity = HistoryStore.identity(of: newest)
         outcome.newestIsNew = !history.add(contentsOf: [newest], protecting: [identity]).isEmpty
         if outcome.newestIsNew {
@@ -221,9 +234,11 @@ extension SyncEngine {
     /// here, signature, trusted sender, already known), then all the new ones
     /// go into history in one write and reach the UI in one snapshot. The side
     /// effects (clipboard, notification) happen once per batch, for the newest
-    /// NEW entry only (C) - even when it is older than something already here.
-    /// After a history_head of the same `connection` that put its newest entry
-    /// there, the batch puts nothing: the entries the head added are known and
+    /// NEW entry only (C) - and only when it is newer than everything already
+    /// here: otherwise the whole batch is stored quietly, by time, with no stack
+    /// (an item trimmed here would come back on every reconnect). After a
+    /// history_head of the same `connection` that put its newest entry there,
+    /// the batch puts nothing: the entries the head added are known and
     /// skipped, and the others join its group. Runs on the engine queue.
     @discardableResult
     func applyHistoryBatch(_ entries: [ClipboardEntry], from peerId: String, connection: ObjectIdentifier? = nil) -> HistoryBatchOutcome {
@@ -232,23 +247,30 @@ extension SyncEngine {
         // resends everything it still has on every connect.
         let wanted = deleted.removingDeleted(entries)
         outcome.deleted = entries.count - wanted.count
+        // What is in history already is skipped before its signature is
+        // checked: an older peer resends its whole history on every connect,
+        // pictures and all, and the check copies and hashes each entry whole.
+        // It would be dropped as known anyway; new entries are checked as ever.
+        let known = Set(history.entries.map(HistoryStore.identity(of:)))
+        let unknown = wanted.filter { !known.contains(HistoryStore.identity(of: $0)) }
+        outcome.known = wanted.count - unknown.count
         // A bad entry is skipped on its own; the rest of the batch stands.
-        let verified = wanted.compactMap(verifiedAndTrusted)
-        outcome.rejected = wanted.count - verified.count
+        let verified = unknown.compactMap(verifiedAndTrusted)
+        outcome.rejected = unknown.count - verified.count
         // C is the newest new entry - or, when this connection's head already put
         // its newest entry on the clipboard, that one. Either is spared the trim.
         var continuing = false
         if let connection { continuing = headApplied.removeValue(forKey: connection) != nil }
-        let convenience = continuing ? nil : newestNew(in: verified)
+        let convenience = continuing ? nil : newestNew(in: verified).flatMap { isFresh($0) ? $0 : nil }
         var protect = Set<String>()
-        if continuing {
-            if let current = batchGroups.convenienceID { protect.insert(current) }
-        } else if let convenience {
+        if let convenience {
             protect.insert(HistoryStore.identity(of: convenience))
+        } else if let current = batchGroups.convenienceID {
+            protect.insert(current)
         }
         // Added in one write, not one full rewrite of history per entry.
         let added = history.add(contentsOf: verified, protecting: protect)
-        outcome.known = verified.count - added.count
+        outcome.known += verified.count - added.count
         guard !added.isEmpty else {
             // Nothing more is coming for the stack a head started.
             if let connection { finishProvisional(connection) }
@@ -263,14 +285,14 @@ extension SyncEngine {
             // if that still waits, else they stay ordinary cards. Never a new block
             // (or a new C) for items that did not reach the clipboard.
             outcome.group = batchGroups.joinSync(identities, connection: connection, last: true)
-        } else {
+        } else if convenience != nil {
             outcome.group = batchGroups.registerBatch(identities, connection: connection)
         }
+        // Otherwise nothing in it is newer than what is here: ordinary cards by time.
 
-        // Apply only the newest new entry (C), even when it is older than
-        // something we have already. The older ports apply each new entry in
-        // the sender's order, so their clipboard ends up with whatever came
-        // last - often stale content from hours ago.
+        // Apply only the newest new entry (C). The older ports apply each new
+        // entry in the sender's order, so their clipboard ends up with whatever
+        // came last - often stale content from hours ago.
         let applied = convenience.map(HistoryStore.identity(of:))
         // The loop does nothing for text and pictures that are not applied;
         // a file still has to be asked for, so its card can finish.
@@ -286,6 +308,9 @@ extension SyncEngine {
     /// (a history batch writes one line for all its entries).
     func received(_ entry: ClipboardEntry, apply: Bool, quiet: Bool = false) {
         if !quiet { log("received \(entry.type) from \(displayName(for: entry.deviceId))") }
+        // Every entry meant for the clipboard counts, in the order they came:
+        // a file waiting for its bytes then knows whether a newer one came after.
+        if apply { lastApplySerial += 1 }
         guard entry.type == Wire.EntryType.file else {
             if apply { deliverToApp(entry, fileURL: nil) }
             return
@@ -299,7 +324,18 @@ extension SyncEngine {
             if apply { deliverToApp(entry, fileURL: files.url(for: key)) }
             return
         }
-        pendingFiles[key] = PendingFile(entry: entry, apply: apply || (pendingFiles[key]?.apply ?? false))
+        var pending = PendingFile(entry: entry, apply: false)
+        if let earlier = pendingFiles[key], earlier.apply {
+            pending = earlier
+            pending.entry = entry
+        }
+        if apply {
+            pending.apply = true
+            pending.armedAt = Date()
+            pending.armedGeneration = clipboardGeneration
+            pending.armedSerial = lastApplySerial
+        }
+        pendingFiles[key] = pending
         requestFile(payload.fileHash, from: Array(links.values))
     }
 
@@ -327,8 +363,22 @@ extension SyncEngine {
 
     // MARK: - History batch
 
+    /// What a version 1 peer gets as this device's history, newest first, with
+    /// every picture inline (those kept in files of their own read back in).
+    /// A short-lived sender (the Share extension) sends only what it stored
+    /// itself: the whole history, pictures and all, built and sealed once per
+    /// peer, can be more memory than it has. Still a valid batch - every port
+    /// merges by dedup and infers nothing from what is missing, and "[]" is
+    /// still the first bytes HarmonyOS waits for - and the app sends
+    /// everything on its next connection.
+    func historyBatchEntries() -> [ClipboardEntry] {
+        var entries = history.newestFirst
+        if config.sendOnly { entries = entries.filter { storedHere.contains(HistoryStore.identity(of: $0)) } }
+        return history.withContent(entries)
+    }
+
     func sendHistoryBatch(to link: PeerLink) {
-        let newestFirst = history.newestFirst
+        let newestFirst = historyBatchEntries()
         // With 2 or more entries, the newest one and every key go first in a
         // small line, so the peer can show the stack while the big batch is
         // still on its way. The batch itself is the same as ever, and a peer
@@ -352,13 +402,58 @@ extension SyncEngine {
         // fetches what's missing on its own next connection.
         guard !config.sendOnly else { return }
         let key = FileStore.key(wireHash)
+        // Not of a peer whose copy keeps failing the hash check.
+        let failed = badCopies[key] ?? [:]
+        let targets = targets.filter { failed[$0.peerDeviceId, default: 0] < Self.maxBadCopies }
         guard incoming[key] == nil, !verifying.contains(key), !targets.isEmpty else { return }
         if let last = requestedAt[key], Date().timeIntervalSince(last) < 10 { return }
+        // Bytes that can't be stored would only be streamed for nothing.
+        guard hasRoom(for: key) else {
+            noteNeedsSpace(key)
+            return
+        }
         requestedAt[key] = Date()
         // A fresh request: a stream skipped before it no longer counts.
         skippedStreams[key] = nil
         let json = Envelope(type: Wire.MessageType.fileRequest, payload: FileRequestMessage(fileHash: wireHash).jsonString()).jsonString()
         targets.forEach { $0.send(json) }
+    }
+
+    /// Free space a download leaves at the least.
+    static let spaceMargin: Int64 = 32 * 1024 * 1024
+    /// A peer whose copy of a file failed the hash check this often isn't
+    /// asked for that file again until it connects anew.
+    static let maxBadCopies = 2
+
+    /// Whether the file we're waiting on under `key` fits in the free space,
+    /// with `spaceMargin` to spare. True when the free space can't be told (a
+    /// volume that reports nothing says 0): a write that fails still stops it.
+    func hasRoom(for key: String) -> Bool {
+        guard let free = capacityOverride ?? files.availableCapacity(), free > 0 else { return true }
+        let size = pendingFiles[key].flatMap { FilePayload.parse($0.entry.content)?.fileSize } ?? 0
+        return free >= max(0, size) + Self.spaceMargin
+    }
+
+    /// A file that can't be stored here now: not asked for, and its stream
+    /// goes by, until `retryFilesThatNeededSpace` or a new link.
+    func noteNeedsSpace(_ key: String) {
+        guard needsSpace.insert(key).inserted else { return }
+        log("not enough storage for a file - it is fetched once there is room")
+        schedulePublish()
+    }
+
+    /// Back in the foreground (space may have been freed): every file that
+    /// needed room is asked for again on the next tick, its free space
+    /// checked first.
+    func retryFilesThatNeededSpace() {
+        guard !needsSpace.isEmpty else { return }
+        for key in needsSpace {
+            requestedAt[key] = nil
+            unansweredRetries[key] = nil
+            skippedStreams[key] = nil
+        }
+        needsSpace.removeAll()
+        schedulePublish()
     }
 
     /// How long a request may go unanswered before it is sent again: every
@@ -384,8 +479,16 @@ extension SyncEngine {
     /// a share of more than `maxConcurrentIncoming` files stalls until the
     /// next link.
     func retryStalledFiles() {
+        // Waiting on bytes for an entry that has left the history (trimmed by
+        // the 25-item cap): nothing wants them any more.
+        if !pendingFiles.isEmpty {
+            let referenced = referencedFileKeys()
+            pendingFiles = pendingFiles.filter { referenced.contains($0.key) }
+        }
         skippedStreams = skippedStreams.filter { pendingFiles[$0.key] != nil }
         unansweredRetries = unansweredRetries.filter { pendingFiles[$0.key] != nil }
+        if !needsSpace.isEmpty { needsSpace = needsSpace.filter { pendingFiles[$0] != nil } }
+        if !badCopies.isEmpty { badCopies = badCopies.filter { pendingFiles[$0.key] != nil } }
         guard !config.sendOnly, !links.isEmpty, !pendingFiles.isEmpty else { return }
         var free = Self.maxConcurrentIncoming - incoming.count
         let now = Date()
@@ -393,7 +496,9 @@ extension SyncEngine {
             guard free > 0 else { return }
             guard let payload = FilePayload.parse(entry.content) else { continue }
             let key = FileStore.key(payload.fileHash)
-            guard pendingFiles[key] != nil, incoming[key] == nil, !verifying.contains(key), !files.exists(key) else { continue }
+            // One waiting for room is asked for again on the next foreground or link.
+            guard pendingFiles[key] != nil, incoming[key] == nil, !verifying.contains(key), !files.exists(key),
+                  !needsSpace.contains(key) else { continue }
             if let retryAt = skippedStreams[key] {
                 // Still going past us: its sender would ignore the request.
                 guard now >= retryAt else { continue }
@@ -412,6 +517,15 @@ extension SyncEngine {
     /// never arrived (a failed or interrupted transfer). No other platform
     /// ever re-requests, so without this a lost file stays lost.
     func requestMissingBlobs(from link: PeerLink) {
+        // Connected anew, a peer's copy gets another chance (see badCopies),
+        // and a file that needed room is asked for again - asking checks the
+        // free space first.
+        let peer = link.peerDeviceId
+        for key in Array(badCopies.keys) {
+            badCopies[key]?[peer] = nil
+            if badCopies[key]?.isEmpty == true { badCopies[key] = nil }
+        }
+        needsSpace.removeAll()
         for entry in history.entries where entry.type == Wire.EntryType.file {
             guard let payload = FilePayload.parse(entry.content), !files.exists(payload.fileHash),
                   !materialiseEmptyFile(payload) else { continue }
@@ -442,6 +556,8 @@ extension SyncEngine {
             requestedAt[key] = nil
             skippedStreams[key] = nil
             unansweredRetries[key] = nil
+            needsSpace.remove(key)
+            badCopies[key] = nil
         }
         for (key, transfer) in incoming where !referenced.contains(key) {
             transfer.abort()
@@ -464,6 +580,9 @@ extension SyncEngine {
             // waiting on them): nothing to do. The last guard stops a peer
             // filling the disk with unreferenced blobs.
             guard !files.exists(key), !verifying.contains(key), pendingFiles[key] != nil else { return }
+            // Waiting for room: its stream goes by, and is not asked for again
+            // (see needsSpace).
+            guard !needsSpace.contains(key) else { return }
             guard chunk.chunkIndex == 0, incoming.count < Self.maxConcurrentIncoming else {
                 // A file we're waiting on, going past unreceived: no free slot
                 // for it, or a stream we didn't see start (or gave up on).
@@ -474,15 +593,24 @@ extension SyncEngine {
                 unansweredRetries[key] = nil
                 return
             }
+            // Space may have run out since it was asked for.
+            guard hasRoom(for: key) else {
+                noteNeedsSpace(key)
+                return
+            }
             let pendingPayload = pendingFiles[key].flatMap { FilePayload.parse($0.entry.content) }
             guard let transfer = IncomingTransfer(
                 wireHash: chunk.fileHash,
                 fileName: pendingPayload?.fileName ?? "file",
                 total: pendingPayload?.fileSize ?? 0,
                 owner: owner,
+                peerId: link.peerDeviceId,
                 url: files.incomingURL(for: key)
             ) else {
                 log("failed writing file chunk (could not create file) - abandoning this transfer")
+                // Asked for again it would fail the same way: the rest of this
+                // stream, and the next, went by unreceived for ever.
+                noteNeedsSpace(key)
                 return
             }
             incoming[key] = transfer
@@ -516,6 +644,9 @@ extension SyncEngine {
             log("failed writing file chunk (\(error)) - abandoning this transfer")
             transfer.abort()
             incoming[key] = nil
+            // Most likely the disk is full: not asked for again, nor taken
+            // from the rest of this stream, until there may be room.
+            noteNeedsSpace(key)
             return
         }
         transfer.nextIndex += 1
@@ -549,8 +680,17 @@ extension SyncEngine {
                     self.log("file transfer failed hash verification - discarding")
                     try? FileManager.default.removeItem(at: url)
                     self.requestedAt[key] = nil
-                    // Ask again - maybe another peer's copy is intact.
-                    if self.pendingFiles[key] != nil { self.requestFile(transfer.wireHash, from: Array(self.links.values)) }
+                    // Ask again - maybe another peer's copy is intact. One
+                    // whose copy failed `maxBadCopies` times is not asked any
+                    // more (until it connects anew): its file is corrupt, and
+                    // was downloaded again and again.
+                    if self.pendingFiles[key] != nil {
+                        self.badCopies[key, default: [:]][transfer.peerId, default: 0] += 1
+                        if self.badCopies[key]?[transfer.peerId] == SyncEngine.maxBadCopies {
+                            self.log("\(self.displayName(for: transfer.peerId))'s copy of a file is corrupt - not asking it again")
+                        }
+                        self.requestFile(transfer.wireHash, from: Array(self.links.values))
+                    }
                     self.schedulePublish()
                     return
                 }
@@ -574,13 +714,17 @@ extension SyncEngine {
     }
 
     /// A blob can arrive by stream or by this device sending the same file
-    /// itself; either way an entry waiting on it can now be applied.
+    /// itself; either way an entry waiting on it can now be applied - unless
+    /// that would replace something newer (see `PendingFile.mayApply`).
     func fulfillPendingFile(_ key: String) {
         guard let pending = pendingFiles.removeValue(forKey: key) else { return }
         requestedAt[key] = nil
         skippedStreams[key] = nil
         unansweredRetries[key] = nil
-        if pending.apply, history.contains(pending.entry) {
+        needsSpace.remove(key)
+        badCopies[key] = nil
+        if pending.mayApply(now: Date(), generation: clipboardGeneration, serial: lastApplySerial),
+           history.contains(pending.entry), !deleted.contains(pending.entry) {
             deliverToApp(pending.entry, fileURL: files.url(for: key))
         }
     }
@@ -657,18 +801,22 @@ extension SyncEngine {
 
     // MARK: - Local capture → peers
 
-    /// Signs and sends text from this device.
-    public func sendText(_ text: String, completion: ((SendResult) -> Void)? = nil) {
+    /// Signs and sends text from this device. With a `filter` (a share or a
+    /// drop, see makeSendFilter), text every device already has is not signed
+    /// again.
+    public func sendText(_ text: String, filter: SendFilter? = nil, completion: ((SendResult) -> Void)? = nil) {
         queue.async { [self] in
-            broadcast(content: text, type: Wire.EntryType.text, name: nil, completion: completion)
+            broadcast(content: text, type: Wire.EntryType.text, name: nil,
+                      print: filter == nil ? nil : ContentPrint.text(text), filter: filter, completion: completion)
         }
     }
 
     /// Images travel inline as base64 PNG - never through the file path.
     /// Callers must pass PNG bytes (Windows' System.Drawing can't decode HEIC).
-    public func sendImage(png: Data, completion: ((SendResult) -> Void)? = nil) {
+    public func sendImage(png: Data, filter: SendFilter? = nil, completion: ((SendResult) -> Void)? = nil) {
         queue.async { [self] in
-            broadcast(content: png.base64EncodedString(), type: Wire.EntryType.image, name: nil, completion: completion)
+            broadcast(content: png.base64EncodedString(), type: Wire.EntryType.image, name: nil,
+                      print: filter == nil ? nil : ContentPrint.image(png), filter: filter, completion: completion)
         }
     }
 
@@ -677,7 +825,7 @@ extension SyncEngine {
     /// an applied file by comparing uppercase hashes, so a lowercase one makes
     /// it re-broadcast our file back to everyone. An empty file goes like any
     /// other (size 0, the hash of nothing): receivers write it themselves.
-    public func sendFile(at url: URL, name: String, moveIntoStore: Bool, completion: ((SendResult) -> Void)? = nil) {
+    public func sendFile(at url: URL, name: String, moveIntoStore: Bool, filter: SendFilter? = nil, completion: ((SendResult) -> Void)? = nil) {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? -1
             guard size >= 0 else {
@@ -698,29 +846,46 @@ extension SyncEngine {
                 // Bytes are in the store BEFORE the entry goes out: receivers
                 // send file_request the instant they see the entry.
                 let payload = FilePayload(fileName: Self.windowsSafeName(name), fileHash: hash.uppercased(), fileSize: size)
-                broadcast(content: payload.jsonString(), type: Wire.EntryType.file, name: name, completion: completion)
-                for link in links.values { streamFile(hash: payload.fileHash, to: link) }
+                let signed = broadcast(content: payload.jsonString(), type: Wire.EntryType.file, name: name,
+                                       print: ContentPrint.file(hash: hash), filter: filter, completion: completion)
+                if signed {
+                    for link in links.values { streamFile(hash: payload.fileHash, to: link) }
+                }
+                // Its bytes are here now either way.
                 fulfillPendingFile(FileStore.key(hash))
             }
         }
     }
 
-    func broadcast(content: String, type: String, name: String?, completion: ((SendResult) -> Void)?) {
+    /// False when nothing was signed: it failed, or `filter` says every device
+    /// has this content already - which is still reported as sent, since what
+    /// the user wanted, the content on their devices, is done.
+    @discardableResult
+    func broadcast(content: String, type: String, name: String?, print: String? = nil, filter: SendFilter? = nil, completion: ((SendResult) -> Void)?) -> Bool {
+        if let filter, let print, !filter.prints.insert(print).inserted {
+            finish(completion, .sent(type: type, peers: links.count, name: name))
+            return false
+        }
         let entry: ClipboardEntry
         do {
             entry = try EntrySigning.sign(content: content, type: type, identity: identity)
         } catch {
-            return finish(completion, .failed("Couldn't sign that item."))
+            finish(completion, .failed("Couldn't sign that item."))
+            return false
         }
         let json = Envelope(type: Wire.MessageType.entry, payload: entry.jsonString()).jsonString()
         for link in links.values { link.send(json) }
         // Recorded even with nobody connected: a history_batch or head carries it
         // to peers the next time they connect. Our own copy is a block of one, on
         // top of the Synced list.
-        if history.add(entry) { batchGroups.registerLive(HistoryStore.identity(of: entry)) }
+        if history.add(entry) {
+            batchGroups.registerLive(HistoryStore.identity(of: entry))
+            if config.sendOnly { storedHere.insert(HistoryStore.identity(of: entry)) }
+        }
         log("sent \(type) to \(links.count) peer(s)")
         schedulePublish()
         finish(completion, .sent(type: type, peers: links.count, name: name))
+        return true
     }
 
     /// Older Windows builds apply a received file by copying it to

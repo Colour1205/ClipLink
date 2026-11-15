@@ -195,10 +195,11 @@ export function answerFor(history: ClipboardEntry[], keys: string[], keyOf: (ent
 // a key listed twice counts once. With the head's `times`, only the missing
 // keys that would stay in a history of `cap` items are wanted: the `cap`
 // newest by time of the local entries (`localTimes`) and the missing ones
-// together. The first missing key is wanted whatever its time: it is the item
-// that goes on the clipboard. Without times every missing key is wanted, up to
-// `cap`. Never more than `cap` keys come back, even when the times are not in
-// the order of the keys and the first key is not one of the `cap` newest.
+// together. That goes for the first missing key too: it used to be wanted
+// whatever its time, as the item for the clipboard, so an item this device
+// had trimmed came back on top and onto the clipboard at every reconnect
+// (design/sync-dedupe-spec.md rule 3). Without times every missing key is
+// wanted, up to `cap`. Never more than `cap` keys come back.
 export function wantedKeys(keys: string[], times: number[] | null, known: (key: string) => boolean,
   pending: (key: string) => boolean, localTimes: number[], cap: number): string[] {
   const missing: string[] = [];
@@ -230,7 +231,7 @@ export function wantedKeys(keys: string[], times: number[] | null, known: (key: 
   const kept: Set<number> = new Set<number>(rank.slice(0, cap));
   const wanted: string[] = [];
   for (let i = 0; i < missing.length; i++) {
-    if (i === 0 || kept.has(localTimes.length + i)) wanted.push(missing[i]);
+    if (kept.has(localTimes.length + i)) wanted.push(missing[i]);
   }
   return wanted.slice(0, cap);
 }
@@ -271,12 +272,15 @@ export class ConvenienceMemory {
 // connection keeps these in a queue (SyncLink.queue). convenience: the one for
 // the item that goes on the clipboard. groupSize: how many items the whole
 // sync asked for, which the stack counts from (only the convenience request
-// carries it, see HistorySync).
+// carries it, see HistorySync). quiet: the answer is stored by time, with no
+// clipboard, stack or notice - the request belongs to a sync that has no
+// convenience request (asked again after another connection closed).
 export class SentRequest {
   keys: string[];
   convenience: boolean;
   sentAt: number;
   groupSize: number;
+  quiet: boolean = false;
 
   constructor(keys: string[], convenience: boolean, sentAt: number, groupSize: number) {
     this.keys = keys;

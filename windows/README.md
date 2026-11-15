@@ -24,7 +24,7 @@ with the always-on P2P node running inside it.
   (git-ignored).
 - `ClipLink.ico` — the app icon.
 
-Stack: .NET 10 (C#) — WinUI 3, Win32 clipboard access through WinForms, plain
+Stack: .NET 10 (C#) — WinUI 3, the Win32 clipboard used directly, plain
 sockets.
 
 The pairing QR code is a link to the website, `https://cliplink.uaena.io/pair/#<pairing info>`

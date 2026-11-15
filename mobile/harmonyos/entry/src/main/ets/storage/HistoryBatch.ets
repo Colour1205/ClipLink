@@ -30,8 +30,27 @@ function neverKept(entry: ClipboardEntry): boolean {
   return false;
 }
 
-function alwaysOk(entry: ClipboardEntry): boolean {
+function alwaysOk(entry: ClipboardEntry, localNewest: string | null): boolean {
   return true;
+}
+
+// The latest timestamp of `history` in canonical form, or null when it is
+// empty: what "fresh" is measured against (design/sync-dedupe-spec.md rule 3).
+export function newestStamp(history: ClipboardEntry[]): string | null {
+  let newest: string | null = null;
+  for (const entry of history) {
+    const stamp: string = canonicalTimestamp(entry.Timestamp);
+    if (newest === null || stamp > newest) newest = stamp;
+  }
+  return newest;
+}
+
+// Whether an entry is later than everything held (`localNewest`, see
+// newestStamp): only such an entry goes on the clipboard and on top of the
+// list when a sync brings it. An older one is an item this device trimmed, or
+// one a peer still holds, and is stored by time, quietly.
+export function isFresh(entry: ClipboardEntry, localNewest: string | null): boolean {
+  return localNewest === null || canonicalTimestamp(entry.Timestamp) > localNewest;
 }
 
 // Oldest-first eviction (by timestamp, in canonical form, which is
@@ -65,11 +84,14 @@ export function trimOldest(history: ClipboardEntry[], maxItems: number, isKept: 
 // `newFront` the newest of the entries this call adds (the result's `front`),
 // else the entry `isKept` says yes to (the one an earlier call spared).
 // `frontOk` is asked once, with the newest entry really added, before the trim:
-// with `newFront`, that entry is the front (and spared) only if it says yes.
+// with `newFront`, that entry is the front (and spared) only if it says yes. It
+// is also given the newest timestamp the history held before this merge (see
+// newestStamp), to tell whether that entry is fresh.
 export function mergeBatch(history: ClipboardEntry[], incoming: ClipboardEntry[],
   isSame: (a: ClipboardEntry, b: ClipboardEntry) => boolean, isDeleted: (entry: ClipboardEntry) => boolean,
   maxItems: number, newFront: boolean = false, isKept: (entry: ClipboardEntry) => boolean = neverKept,
-  frontOk: (entry: ClipboardEntry) => boolean = alwaysOk): MergeResult {
+  frontOk: (entry: ClipboardEntry, localNewest: string | null) => boolean = alwaysOk): MergeResult {
+  const localNewest: string | null = newFront ? newestStamp(history) : null;
   let added: ClipboardEntry[] = [];
   let duplicates = 0;
   let deleted = 0;
@@ -84,7 +106,7 @@ export function mergeBatch(history: ClipboardEntry[], incoming: ClipboardEntry[]
     }
   }
   const newest: ClipboardEntry | null = newFront ? newestOf(added) : null;
-  const front: ClipboardEntry | null = newest !== null && frontOk(newest) ? newest : null;
+  const front: ClipboardEntry | null = newest !== null && frontOk(newest, localNewest) ? newest : null;
   const evicted: ClipboardEntry[] = trimOldest(history, maxItems,
     front !== null ? (entry: ClipboardEntry): boolean => entry === front : isKept);
   if (evicted.length > 0) {

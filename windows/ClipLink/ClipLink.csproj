@@ -30,7 +30,26 @@
     <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
     <DebugType>embedded</DebugType>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- Published precompiled (ReadyToRun), so a start - every sign-in - JITs
+         less: ClipLink.dll, the WinRT runtime, the toolkits, the tray icon's
+         and the notifications' libraries. Measured on a test copy: the engine
+         is up about 14% sooner, with about 13% less CPU, for about 1.4 MB more
+         installer. Not the big projections and libraries listed below: most
+         of their code never runs, and precompiled they'd be about twice the
+         size (all of them too: some 2.3 MB more installer to start about
+         25 ms sooner). -->
+    <PublishReadyToRun>true</PublishReadyToRun>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PublishReadyToRunExclude Include="Microsoft.Windows.SDK.NET.dll" />
+    <PublishReadyToRunExclude Include="Microsoft.WinUI.dll" />
+    <PublishReadyToRunExclude Include="Microsoft.InteractiveExperiences.Projection.dll" />
+    <PublishReadyToRunExclude Include="Microsoft.Web.WebView2.Core.Projection.dll" />
+    <PublishReadyToRunExclude Include="Microsoft.Windows.Management.Deployment.Projection.dll" />
+    <PublishReadyToRunExclude Include="System.Numerics.Tensors.dll" />
+    <PublishReadyToRunExclude Include="QRCoder.dll" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
@@ -51,6 +70,14 @@
     <PackageReference Include="CommunityToolkit.WinUI.Controls.Primitives" Version="8.2.251219" />
     <PackageReference Include="CommunityToolkit.WinUI.Controls.Segmented" Version="8.2.251219" />
     <PackageReference Include="QRCoder" Version="1.6.0" />
+    <!-- What ClipLink used from the Windows desktop framework besides
+         WinForms (see below), as the same assemblies from NuGet: the tray
+         icon (System.Drawing, which H.NotifyIcon also needs) and the
+         clipboard watcher's picture decoding, signing out
+         (SystemEvents.SessionEnding) and DPAPI for the keys at rest. -->
+    <PackageReference Include="System.Drawing.Common" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Win32.SystemEvents" Version="10.0.12" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.12" />
   </ItemGroup>
 
   <ItemGroup>
@@ -61,11 +88,9 @@
     </Content>
   </ItemGroup>
 
-  <ItemGroup>
-    <!-- The engine's clipboard watcher is WinForms (an STA message loop and
-         DataObject). Referenced as a framework, not with UseWindowsForms:
-         that also pulls in WPF's XAML compiler, which fights WinUI's. -->
-    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
-  </ItemGroup>
+  <!-- No WinForms: the clipboard watcher uses the Win32 clipboard directly
+       (Engine\Clipboard\Win32Clipboard.cs). The WindowsForms framework
+       reference it had put about 30 MB of WinForms assemblies (some 8 MB of
+       the installer) in every install for that one class. -->
 
 </Project>

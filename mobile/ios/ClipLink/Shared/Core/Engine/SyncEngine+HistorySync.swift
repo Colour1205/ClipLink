@@ -6,10 +6,11 @@ import Foundation
 //  1. Each sends a history_head: the keys of its history (newest first, with
 //     their times) and the keys it deleted - no entries.
 //  2. Each applies the other's deletions, works out which keys it is missing and
-//     is worth keeping, and sends TWO history_requests back to back: the newest
+//     is worth keeping, and sends history_requests back to back: the newest
 //     missing key alone (the "convenience" item C, the one thing that lands on
-//     the clipboard), then the rest. Each request is answered with ONE
-//     history_batch, in the order asked.
+//     the clipboard - when it is newer than everything here), then the rest, a
+//     few keys to a request (see `keysPerRequest`). Each request is answered
+//     with ONE history_batch, in the order asked.
 //  3. A delete on one device is sent to every connected version 2 peer as a
 //     `delete`, and the deleted keys ride in every later head, so a device that
 //     was offline learns of them too.
@@ -30,6 +31,10 @@ struct HistoryRequest: Equatable {
     /// the queue with its answer or with the connection, and counts as no open
     /// request meanwhile.
     var expired = false
+    /// Its sync brings nothing newer than what is here (see `applyAnswer`), or
+    /// it is a plain request with no C before it: its answer is stored quietly,
+    /// like a late one.
+    var quiet = false
 }
 
 /// What C did to the clipboard last, for `shouldApplyConvenience`.
@@ -103,8 +108,10 @@ extension SyncEngine {
     /// - the keys we do not have, did not delete and are not already asking
     ///   another connection for (`missing`);
     /// - of those, the ones among the 25 newest by time of our history and the
-    ///   missing together - what the history would keep - plus the first one
-    ///   whatever its age (C: it goes on the clipboard and is spared the trim);
+    ///   missing together - what the history would keep. Nothing older, not
+    ///   even the first one: an item this device trimmed (or one a partly
+    ///   paired peer still holds) was asked for again on every reconnect, put
+    ///   on the clipboard, and trimmed again by the next new item;
     /// - all of `missing` (up to 25) when the head has no usable times.
     /// `local` is the key and Unix-millisecond time of every entry we have.
     static func wantedKeys(head: HistoryHeadV2, local: [(key: String, time: Int64)], isGone: (String) -> Bool, isPending: (String) -> Bool) -> [String] {
@@ -130,10 +137,7 @@ extension SyncEngine {
             .sorted { $0.element.time != $1.element.time ? $0.element.time > $1.element.time : $0.offset < $1.offset }
             .prefix(Wire.historyCap)
         let kept = Set(newest.filter { $0.element.isMissing }.map { $0.element.key })
-        // The first one (C) plus the kept ones can be 26 when the times are out of
-        // order: never more than the history holds.
-        let result = missing.enumerated().filter { $0.offset == 0 || kept.contains($0.element.key) }.map { $0.element.key }
-        return Array(result.prefix(Wire.historyCap))
+        return missing.filter { kept.contains($0.key) }.map { $0.key }
     }
 
     /// Two convenience items closer than this are one reconnect to the clipboard.
@@ -153,11 +157,34 @@ extension SyncEngine {
         DotNetTimestamp.epochTicks(entry.timestamp) ?? Int64.min
     }
 
-    /// Asks `link` for what its head lists and we are missing: TWO requests back
-    /// to back - the newest key alone (C), then the rest. With `asConvenience`
-    /// false (a connection closed that no longer owed C, see `historySyncLinkClosed`)
-    /// everything goes in one plain request: the items still arrive, nothing goes
-    /// on the clipboard.
+    /// Newer than everything in the history right now (anything is, when it is
+    /// empty). Only such an entry may go on the clipboard or on top of the list
+    /// as what a reconnect brought: anything older is stored by time, quietly.
+    func isFresh(_ entry: ClipboardEntry) -> Bool {
+        guard let newest = history.newest else { return true }
+        return Self.ticks(of: entry) > Self.ticks(of: newest)
+    }
+
+    /// Keys in one request after the first: each request is answered with ONE
+    /// history_batch line, which with pictures in it runs to tens of megabytes
+    /// apiece - all of a catch-up in one line could pass 150 MB, and take
+    /// several times that to decrypt and parse. Peers answer each request in
+    /// turn whatever its size, every version 2 build alike.
+    static let keysPerRequest = 4
+
+    /// `keys` in requests of at most `keysPerRequest`, in order.
+    static func restRequests(_ keys: [String], sentAt: Date, quiet: Bool) -> [HistoryRequest] {
+        stride(from: 0, to: keys.count, by: keysPerRequest).map { start in
+            HistoryRequest(keys: Array(keys[start..<min(start + keysPerRequest, keys.count)]), convenience: false, sentAt: sentAt, quiet: quiet)
+        }
+    }
+
+    /// Asks `link` for what its head lists and we are missing, back to back:
+    /// the newest key alone (C), then the rest (a few keys to a request, see
+    /// `keysPerRequest`). With `asConvenience` false (a connection closed that
+    /// no longer owed C, see `historySyncLinkClosed`) everything goes in plain
+    /// requests, answered quietly: the items still arrive, nothing goes on the
+    /// clipboard or on top of the list.
     func requestMissing(using head: HistoryHeadV2, on link: PeerLink, asConvenience: Bool = true) {
         let connection = ObjectIdentifier(link)
         guard var sync = peerSyncs[connection] else { return }
@@ -170,9 +197,9 @@ extension SyncEngine {
         var requests: [HistoryRequest] = []
         if asConvenience {
             requests.append(HistoryRequest(keys: [wanted[0]], convenience: true, sentAt: now))
-            if wanted.count > 1 { requests.append(HistoryRequest(keys: Array(wanted.dropFirst()), convenience: false, sentAt: now)) }
+            requests += Self.restRequests(Array(wanted.dropFirst()), sentAt: now, quiet: false)
         } else {
-            requests.append(HistoryRequest(keys: wanted, convenience: false, sentAt: now))
+            requests += Self.restRequests(wanted, sentAt: now, quiet: true)
         }
         sync.syncSize = wanted.count
         for request in requests {
@@ -203,16 +230,12 @@ extension SyncEngine {
         return true
     }
 
-    /// Takes entries out of history, one write: their file blobs unless another
-    /// entry uses the bytes, their waiting or running transfers, and their place in
-    /// a stack. The tombstones are the caller's.
+    /// Takes entries out of history, one write: their file blobs (and the blobs'
+    /// exported copies) unless another entry uses the bytes, their waiting or
+    /// running transfers, and their place in a stack. The tombstones are the
+    /// caller's.
     func removeFromHistory(_ entries: [ClipboardEntry]) {
         history.remove(identities: Set(entries.map(HistoryStore.identity(of:))))
-        for entry in entries where entry.type == Wire.EntryType.file {
-            if let payload = FilePayload.parse(entry.content), !files.exists(payload.fileHash) {
-                files.removeExport(payload.fileHash)
-            }
-        }
         dropUnreferencedFiles()
         batchGroups.prune(keeping: Set(history.entries.map(HistoryStore.identity(of:))))
     }
@@ -229,7 +252,8 @@ extension SyncEngine {
     /// requests came in: the link's queue keeps call order.
     func answerHistoryRequest(_ message: KeysMessage, to link: PeerLink) {
         let wanted = Set(message.keys)
-        let entries = history.newestFirst.filter { wanted.contains(DeletedStore.key(of: $0)) }
+        // Pictures kept in files of their own go inline, as ever.
+        let entries = history.withContent(history.newestFirst.filter { wanted.contains(DeletedStore.key(of: $0)) })
         link.send(Envelope(type: Wire.MessageType.historyBatch, payload: ClipboardEntry.listJSONString(entries)).jsonString())
     }
 
@@ -251,7 +275,24 @@ extension SyncEngine {
         if !request.expired {
             for key in request.keys where pendingKeys[key] == connection { pendingKeys[key] = nil }
         }
-        applyAnswer(entries, to: request, last: !sync.hasOpenRequests, expectedSize: sync.syncSize, from: link.peerDeviceId, connection: connection)
+        let outcome = applyAnswer(entries, to: request, last: !sync.hasOpenRequests, expectedSize: sync.syncSize, from: link.peerDeviceId, connection: connection)
+        // C was not newer than what is here: the rest of its sync is quiet too.
+        if outcome.quiet, var current = peerSyncs[connection] {
+            current.requests = Self.quietingRestOfSync(current.requests)
+            peerSyncs[connection] = current
+        }
+    }
+
+    /// The requests still waiting after a convenience answer that was not fresh:
+    /// the ones of the same sync - up to the next convenience request, which
+    /// starts another - are answered quietly.
+    static func quietingRestOfSync(_ requests: [HistoryRequest]) -> [HistoryRequest] {
+        var result = requests
+        for index in result.indices {
+            if result[index].convenience { break }
+            result[index].quiet = true
+        }
+        return result
     }
 
     /// An answer as ONE unit, like a version 1 batch: every entry is checked
@@ -263,13 +304,16 @@ extension SyncEngine {
     /// join that stack and put nothing on the clipboard, though a file still
     /// has its bytes asked for. `last`: no more answers are waiting.
     ///
-    /// Two exceptions. The answer to an expired request (a late one) only stores
-    /// what is valid and new: nothing on the clipboard, no stack, no change to
-    /// the stack the connection may be filling. And C itself stays off the
-    /// clipboard when another convenience item went there less than 90 seconds
-    /// ago and C is not newer (see `shouldApplyConvenience`): it is added, and
-    /// still leads its stack, but only the item that reached the clipboard is
-    /// spared by the trim.
+    /// The exceptions are stored quietly - only what is valid and new, by time:
+    /// nothing on the clipboard, no stack, nothing joins the stack the connection
+    /// may be filling, none of it spared by the trim. That is the answer to an
+    /// expired request (a late one), a quiet request's, and a convenience answer
+    /// whose C is not newer than everything here (or that added nothing) - then
+    /// `outcome.quiet` says the rest of its sync is quiet as well. And C itself
+    /// stays off the clipboard when another convenience item went there less
+    /// than 90 seconds ago and C is not newer (see `shouldApplyConvenience`): it
+    /// is added, and still leads its stack, but only the item that reached the
+    /// clipboard is spared by the trim.
     @discardableResult
     func applyAnswer(_ entries: [ClipboardEntry], to request: HistoryRequest, last: Bool, expectedSize: Int, from peerId: String, connection: ObjectIdentifier, now: Date = Date()) -> HistoryBatchOutcome {
         var outcome = HistoryBatchOutcome()
@@ -279,7 +323,14 @@ extension SyncEngine {
         outcome.rejected = wanted.count - verified.count
 
         let late = request.expired
-        let convenience = (request.convenience && !late) ? newestNew(in: verified) : nil
+        var convenience: ClipboardEntry?
+        if request.convenience, !late, !request.quiet {
+            // Asked before it was known how old it is: whether a reconnect has
+            // anything new for the clipboard is only known now.
+            convenience = newestNew(in: verified).flatMap { isFresh($0) ? $0 : nil }
+            outcome.quiet = convenience == nil
+        }
+        let quiet = late || request.quiet || outcome.quiet
         let toClipboard = convenience.map { shouldApplyConvenience($0, now: now) } ?? false
         // The trim spares the item that went to the clipboard, even when it is the
         // oldest thing: this answer's C, or the one the stack's earlier answer
@@ -301,8 +352,10 @@ extension SyncEngine {
         outcome.fresh = added.sorted { DotNetTimestamp.isEarlier($1.timestamp, than: $0.timestamp) }
         let identities = outcome.fresh.map(HistoryStore.identity(of:))
         let frontID = convenience.map(HistoryStore.identity(of:))
-        if late {
-            // No stack for a late answer: its items are ordinary cards by timestamp.
+        if quiet {
+            // No stack: its items are ordinary cards by timestamp. A block this
+            // connection may still be filling stops waiting with the last answer.
+            if !late, last { batchGroups.finish(connection: connection) }
         } else if let convenience, let frontID, identities.contains(frontID) {
             if toClipboard { lastConvenience = AppliedConvenience(time: Self.ticks(of: convenience), appliedAt: now) }
             // The badge counts everything the sync asked for until the rest is here.
@@ -333,7 +386,7 @@ extension SyncEngine {
     /// be asked of someone else - every other version 2 connection re-runs the
     /// head it last sent. C is asked for again (as a convenience request) only
     /// when the closed link still owed it; if its C was answered already, the rest
-    /// is asked in one plain request. Expired markers owe nothing: their keys were
+    /// is asked in plain requests. Expired markers owe nothing: their keys were
     /// given up on and are not asked again. Closing the connection drops its
     /// markers with the rest.
     func historySyncLinkClosed(_ link: PeerLink) {

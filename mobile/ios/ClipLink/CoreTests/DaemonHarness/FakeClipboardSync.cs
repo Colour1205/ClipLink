@@ -16,6 +16,16 @@ public class ClipboardSync
     private string? _lastKnownHash;
 
     public event Action<(string content, string type, string? sourceFilePath)>? ClipboardChanged;
+    // (The real watcher's file selections; a copied file here goes through ClipboardChanged.)
+#pragma warning disable CS0067
+    public event Action<IReadOnlyList<(string content, string path)>>? FilesCopied;
+#pragma warning restore CS0067
+
+    // The real watcher's sequence number and what-ClipLink-wrote check: nothing
+    // is ever written behind the engine's back here, and the echo rules are
+    // the ones above, so a received item is always applied.
+    public uint Sequence => 0;
+    public bool Holds(string? print) => false;
 
     public ClipboardSync(FileStore fileStore, string label)
     {
@@ -86,7 +96,7 @@ public class ClipboardSync
     // The engine stopping. Watch() ends with stdin; the test kills the process.
     public void Stop() { }
 
-    public void addToQueue(string content, string type = "text") => setContent(content, type);
+    public void addToQueue(string content, string type = "text", bool fromElsewhere = false) => setContent(content, type);
 
     // No image is ever saved as a file here, so none is on the clipboard.
     public string? ImageFileOnClipboard() => null;

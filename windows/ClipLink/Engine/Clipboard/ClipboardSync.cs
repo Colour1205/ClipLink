@@ -1,11 +1,14 @@
-// STEP 2 & 3:
-// - Step 2: read the current Windows clipboard content and print it.
-// - Step 3: detect when the clipboard CHANGES (event-driven, not polling),
-//   and fire your own event/callback with the new content.
+// The clipboard watcher: reads what is copied on this PC and raises it
+// (ClipboardChanged, FilesCopied), and writes what the engine queues
+// (addToQueue). Event-driven: Windows tells it each time the clipboard
+// changes (WM_CLIPBOARDUPDATE, see MessageWindow) - it used to poll every
+// 500 ms, two wake-ups a second for the app's whole life, and every copy
+// waited up to half a second either way.
 
 namespace ClipboardDaemon.Clipboard;
 
 using System.Collections.Concurrent;
+using System.Threading.Channels;
 using ClipboardDaemon.Storage;
 
 public class ClipboardSync
@@ -13,10 +16,53 @@ public class ClipboardSync
     private readonly FileStore fileStore;
     private readonly string label; // whose received images these are - see ReceivedFiles
     private const int MaxApplyAttempts = 5;
+    // A copy whose read fails (the app that copied it still holds the
+    // clipboard, rendering) is read again RetryMs later, this many times in
+    // all, before it is given up on.
+    private const int MaxReadAttempts = 3;
+    // How long a busy clipboard is left before a read or write is tried
+    // again - what the polling interval used to be.
+    private const uint RetryMs = 500;
+    // At most this many files of one copied selection are sent - what history
+    // keeps; the rest would be hashed, cached and streamed to every device
+    // only to be trimmed at once.
+    private const int MaxFilesPerCopy = HistoryAccess.MaxHistoryItems;
 
-    BlockingCollection<(string content, string type, int attempts)> _pendingSets = new BlockingCollection<(string content, string type, int attempts)>();
-    private string? _lastKnownHash;
+    private sealed record PendingSet(string Content, string Type, bool FromElsewhere, int Attempts);
+
+    // A write goes through two queues. Prepare - everything slow about it:
+    // saving a received picture, copying a received file (up to 1 GB) into
+    // place, reading it back - runs on a worker, one write at a time in
+    // order; then the write itself is queued for the watcher's thread, which
+    // only touches the clipboard. Prepared there, a big file held up every
+    // copy made here and every other item waiting to be applied.
+    private readonly Channel<PendingSet> _toPrepare = Channel.CreateUnbounded<PendingSet>(new UnboundedChannelOptions { SingleReader = true });
+    private sealed record ReadyWrite(PendingSet Pending, Write Write);
+    private readonly ConcurrentQueue<ReadyWrite> _ready = new();
     private volatile bool _stopRequested;
+
+    // The watcher thread's window (see Watch); null until it runs.
+    private volatile MessageWindow? _window;
+    private const uint WM_WORK = MessageWindow.WM_APP + 1; // a write is ready
+    private const uint WM_STOP = MessageWindow.WM_APP + 2;
+    private const nint RetryTimer = 1;
+
+    // What ClipLink last wrote to the clipboard, or last saw copied here (see
+    // LastWrite and design/sync-dedupe-spec.md): a copy of that is not sent
+    // (an echo), and a received item with that content isn't written again.
+    private readonly LastWrite _lastWrite = new();
+
+    // The watcher thread's own: the sequence number of the last change it
+    // dealt with (read, or ClipLink's own write), and how often reading the
+    // one after it has failed so far.
+    private uint _seenSequence;
+    private uint _failedSequence;
+    private int _readFailures;
+
+    // Copied file selections are hashed off the watcher thread - up to
+    // MaxFilesPerCopy files of up to 1 GB each, which held up every peer item
+    // waiting to be applied for minutes - one selection at a time, in order.
+    private readonly SemaphoreSlim _filesGate = new(1, 1);
 
     // The received image's file (ReceivedFiles) this last put on the
     // clipboard with the picture, and the clipboard's sequence number right
@@ -24,10 +70,15 @@ public class ClipboardSync
     private sealed record ImageFileWrite(string Path, uint Sequence);
     private volatile ImageFileWrite? _imageFileWrite;
 
-    // sourceFilePath is only ever set for type == "file" — it's the local path
-    // to read the actual bytes from when streaming to peers. ClipLinkEngine uses
-    // it; nothing else in this class needs it once the event has fired.
+    // Text or a picture copied here that ClipLink hasn't written or seen
+    // already. (Whether it is just the newest history item again is the
+    // engine's to say.) Raised on the watcher thread.
     public event Action<(string content, string type, string? sourceFilePath)>? ClipboardChanged;
+
+    // Files copied here (Explorer), the same way: each one's FilePayload as
+    // JSON, and its path to read the bytes from when streaming to peers. At
+    // most MaxFilesPerCopy, the same file once. Raised off the watcher thread.
+    public event Action<IReadOnlyList<(string content, string path)>>? FilesCopied;
 
     public ClipboardSync(FileStore fileStore, string label)
     {
@@ -35,132 +86,235 @@ public class ClipboardSync
         this.label = label;
     }
 
-    [System.Runtime.InteropServices.DllImport("user32.dll")]
-    static extern uint GetClipboardSequenceNumber();
+    // The clipboard's sequence number: changes with every write to it, by
+    // ClipLink or anything else. Any thread.
+    public uint Sequence => Win32Clipboard.Sequence;
 
+    // Whether what ClipLink last wrote to the clipboard, or last saw copied
+    // here, has this print (see ContentPrint): the clipboard already holds
+    // that content, as far as ClipLink knows. Any thread.
+    public bool Holds(string? print) => _lastWrite.Holds(print);
+
+    // Runs the watcher on the calling thread until Stop: a message-only
+    // window listening for clipboard changes, and that thread's message loop.
     public void Watch()
     {
-        long last_sequence_num = GetClipboardSequenceNumber();
-
-        var timer = new System.Windows.Forms.Timer();
-        timer.Interval = 500;
-        timer.Tick += (s, e) =>
+        try
         {
-            if (_stopRequested)
-            {
-                // Only this thread's message loop - never Application.Exit(),
-                // which ends every thread's (the app's UI thread's too, if it
-                // runs one).
-                timer.Stop();
-                timer.Dispose();
-                System.Windows.Forms.Application.ExitThread();
-                return;
-            }
-                        long curr_sequence_num = GetClipboardSequenceNumber();
-            if (curr_sequence_num != last_sequence_num)
-            {
-                try{
-                    bool is_img = System.Windows.Forms.Clipboard.ContainsImage();
-                    bool is_text = System.Windows.Forms.Clipboard.ContainsText();
-                    bool is_aud = System.Windows.Forms.Clipboard.ContainsAudio();
-                    bool is_drop_lst = System.Windows.Forms.Clipboard.ContainsFileDropList();
+            _seenSequence = Win32Clipboard.Sequence;
+            using var window = new MessageWindow(OnMessage);
+            window.Listen();
+            _window = window;
+            if (_stopRequested) return;
+            _ = Task.Run(PrepareWrites);
+            window.Run();
+        }
+        catch (Exception ex)
+        {
+            // On its own thread: escaping, this would end the app.
+            Console.WriteLine($"[clip] the clipboard watcher stopped: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            _window = null;
+        }
+    }
 
-                    last_sequence_num = curr_sequence_num;
+    // The watcher thread's messages. True: dealt with.
+    private bool OnMessage(uint message, nint wParam)
+    {
+        switch (message)
+        {
+            case MessageWindow.WM_CLIPBOARDUPDATE:
+                CaptureIfChanged();
+                return true;
+            case WM_WORK:
+                ApplyReady();
+                return true;
+            case MessageWindow.WM_TIMER when wParam == RetryTimer:
+                _window?.StopTimer(RetryTimer);
+                CaptureIfChanged();
+                ApplyReady();
+                return true;
+            case WM_STOP:
+                // Only this thread's message loop.
+                MessageWindow.Quit();
+                return true;
+            default:
+                return false;
+        }
+    }
 
-                    // check image before text: a copied bitmap is the thing the
-                    // user actually wants synced, even if Windows also exposes
-                    // some auto-generated text representation alongside it
-                    if (is_img)
-                    {
-                        using var image = System.Windows.Forms.Clipboard.GetImage();
-                        if (image != null)
-                        {
-                            using var ms = new MemoryStream();
-                            image.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
-                            byte[] imageBytes = ms.ToArray();
-                            string hash = ComputeHash(imageBytes);
-                            if (hash != _lastKnownHash)
-                            {
-                                _lastKnownHash = hash;
-                                ClipboardChanged?.Invoke((Convert.ToBase64String(imageBytes), "image", null));
-                            }
-                        }
-                    }
-                    else if (is_text)
-                    {
-                        string text = System.Windows.Forms.Clipboard.GetText();
-                        string hash = ComputeHash(System.Text.Encoding.UTF8.GetBytes(text));
-                        if (hash != _lastKnownHash)
-                        {
-                            _lastKnownHash = hash;
-                            ClipboardChanged?.Invoke((System.Windows.Forms.Clipboard.GetText(), "text", null));
-                        }
-                    }
-                    else if (is_drop_lst)
-                    {
-                        HandleFileDropList();
-                    }
-                    else
-                    {
-                        // Audio has no meaningful cross-device representation the same
-                        // way files/images do — skip rather than half-implement it.
-                        Console.WriteLine($"unsupported clipboard change: audio={is_aud}");
-                    }
-                } catch (Exception)
-                {
-                    Console.WriteLine($"clipboard busy, will retry next poll");
-                }
-            }
-            // push content from the queue to the clipboard
-            if (_pendingSets.TryTake(out var pendingSet))
+    // A busy clipboard: everything is tried again in RetryMs.
+    private void RetrySoon() => _window?.SetTimer(RetryTimer, RetryMs);
+
+    // Reads what was copied here since the last change this dealt with, if
+    // anything was. The sequence number counts as dealt with only once the
+    // read worked (or gave up after MaxReadAttempts): it used to be taken
+    // before reading, so a copy whose read failed was never tried again.
+    private void CaptureIfChanged()
+    {
+        uint current = Win32Clipboard.Sequence;
+        if (current == _seenSequence) return;
+        // Still ClipLink's own write: nothing to read.
+        if (_lastWrite.IsOwnWrite(current))
+        {
+            _seenSequence = current;
+            return;
+        }
+        if (current != _failedSequence)
+        {
+            _failedSequence = current;
+            _readFailures = 0;
+        }
+        bool read;
+        try
+        {
+            read = Capture();
+        }
+        catch (Exception)
+        {
+            read = false;
+        }
+        if (read || ++_readFailures >= MaxReadAttempts)
+        {
+            if (!read) Console.WriteLine($"clipboard busy, giving up on this copy after {MaxReadAttempts} attempts");
+            _seenSequence = current;
+            _readFailures = 0;
+        }
+        else
+        {
+            Console.WriteLine("clipboard busy, will retry shortly");
+            RetrySoon();
+        }
+    }
+
+    // One read of the clipboard. False if it couldn't be read (try again).
+    private bool Capture()
+    {
+        // What kind of copy it is, and what it holds, in one opening of the
+        // clipboard; a picture is encoded once it's closed again, so the app
+        // that copied it isn't kept waiting meanwhile.
+        System.Drawing.Image? image = null;
+        string? text = null;
+        List<string>? paths = null;
+        bool audio = false;
+        using (Win32Clipboard.Open(_window!.Handle))
+        {
+            // check image before text: a copied bitmap is the thing the
+            // user actually wants synced, even if Windows also exposes
+            // some auto-generated text representation alongside it
+            if (Win32Clipboard.Has(Win32Clipboard.CF_BITMAP))
             {
-                try
-                {
-                    setContent(pendingSet.content, pendingSet.type);
-                    // Our own write bumps the sequence number too - take it as
-                    // already seen, or the next tick reads it back as a fresh
-                    // local copy and sends it straight back out. The hash
-                    // check alone misses that for images: the bitmap re-reads
-                    // and re-encodes to different PNG bytes than were written.
-                    last_sequence_num = GetClipboardSequenceNumber();
-                }
-                catch (Exception)
-                {
-                    // TryTake already removed it — if we don't put it back, a
-                    // transient failure (e.g. clipboard contention) silently
-                    // loses this peer update forever instead of just retrying
-                    // once the contention clears, the way local detection already does.
-                    int nextAttempt = pendingSet.attempts + 1;
-                    if (nextAttempt < MaxApplyAttempts)
-                    {
-                        Console.WriteLine($"clipboard busy, will retry this peer update (attempt {nextAttempt}/{MaxApplyAttempts})");
-                        _pendingSets.Add((pendingSet.content, pendingSet.type, nextAttempt));
-                    }
-                    else
-                    {
-                        Console.WriteLine($"clipboard busy, giving up on this peer update after {MaxApplyAttempts} attempts");
-                    }
-                }
+                image = ReadBitmap();
+                if (image == null) return false;
             }
-        };
+            else if (Win32Clipboard.Has(Win32Clipboard.CF_UNICODETEXT))
+            {
+                text = Win32Clipboard.GetText();
+                if (text == null) return false;
+            }
+            else if (Win32Clipboard.Has(Win32Clipboard.CF_HDROP))
+            {
+                paths = Win32Clipboard.GetFiles();
+                if (paths == null) return false;
+            }
+            else
+            {
+                audio = Win32Clipboard.Has(Win32Clipboard.CF_WAVE);
+            }
+        }
 
-        timer.Start();
-        System.Windows.Forms.Application.Run();
+        if (image != null)
+        {
+            byte[] imageBytes;
+            using (image) imageBytes = PngOf(image).ToArray();
+            if (IsNew(new[] { ContentPrint.Image(imageBytes) }))
+            {
+                ClipboardChanged?.Invoke((Convert.ToBase64String(imageBytes), "image", null));
+            }
+        }
+        else if (text != null)
+        {
+            // Read once: what is sent is exactly what was compared. (A second
+            // read could get a newer copy, sent now and then again next time.)
+            if (IsNew(new[] { ContentPrint.Text(text) }))
+            {
+                ClipboardChanged?.Invoke((text, "text", null));
+            }
+        }
+        else if (paths != null)
+        {
+            HandleFileDropList(paths);
+        }
+        else
+        {
+            // Audio has no meaningful cross-device representation the same
+            // way files/images do — skip rather than half-implement it.
+            Console.WriteLine($"unsupported clipboard change: audio={audio}");
+        }
+        return true;
+    }
+
+    // The clipboard's bitmap (clipboard open), as a copy here is read - the
+    // same GDI+ copy of CF_BITMAP WinForms' Clipboard.GetImage made - or null
+    // if there is none.
+    private static System.Drawing.Image? ReadBitmap()
+    {
+        nint bitmap = Win32Clipboard.GetBitmap();
+        return bitmap == 0 ? null : System.Drawing.Image.FromHbitmap(bitmap);
+    }
+
+    // Whether a copy is new, as far as the clipboard goes (the spec's 1.3,
+    // automatic: no history here - the engine checks the newest item), and
+    // remembering it either way: it's what the clipboard holds now.
+    private bool IsNew(IReadOnlyCollection<string> prints, bool every = false)
+    {
+        bool already = LastWrite.IsAlready(manual: false, ownWrite: false, _lastWrite.Prints, prints, _ => false, _ => false, every);
+        _lastWrite.Classified(prints);
+        return !already;
     }
 
     // Multiple files can be selected and copied together in Explorer — sync
     // every one of them, not just the first, each as its own history entry.
     // (The per-file checks and payload are LocalFiles.Describe, which "Share
-    // to ClipLink" uses too.)
-    private void HandleFileDropList()
+    // to ClipLink" uses too.) Only the list is read here; the hashing is done
+    // off the watcher thread (see _filesGate).
+    private void HandleFileDropList(List<string> paths)
     {
-        var files = System.Windows.Forms.Clipboard.GetFileDropList();
-        var fileHashes = new List<string>();
-        var readableFiles = new List<(string path, FilePayload payload)>();
-
-        foreach (string? path in files)
+        if (paths.Count == 0) return;
+        long since = _lastWrite.Generation;
+        _ = Task.Run(async () =>
         {
-            if (path == null) continue;
+            await _filesGate.WaitAsync();
+            try
+            {
+                DescribeAndPublish(paths, since);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"couldn't read the copied files: {ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                _filesGate.Release();
+            }
+        });
+    }
+
+    // since: LastWrite's generation when the files were copied - if ClipLink
+    // wrote the clipboard while they were hashed, the record keeps saying that.
+    private void DescribeAndPublish(IReadOnlyList<string> paths, long since)
+    {
+        var readableFiles = new List<(string path, FilePayload payload)>();
+        for (int i = 0; i < paths.Count; i++)
+        {
+            if (readableFiles.Count == MaxFilesPerCopy)
+            {
+                Console.WriteLine($"copied {paths.Count} items: only the first {MaxFilesPerCopy} files are synced (what history keeps)");
+                break;
+            }
+            string path = paths[i];
             var payload = LocalFiles.Describe(path, out var skip, out string? error);
             if (payload == null)
             {
@@ -169,59 +323,186 @@ public class ClipboardSync
                     : $"skipping file drop, not a readable file ({skip}{(error != null ? ": " + error : "")}): {path}");
                 continue;
             }
-            fileHashes.Add(payload.FileHash);
             readableFiles.Add((path, payload));
         }
-
         if (readableFiles.Count == 0) return;
 
-        // echo-suppression covers the WHOLE selection (all files together),
-        // not each file individually — a combined discriminator from the
-        // sorted set of hashes, so selection order doesn't matter
-        string combinedHash = ComputeHash(System.Text.Encoding.UTF8.GetBytes(string.Join(",", fileHashes.OrderBy(h => h))));
-        if (combinedHash == _lastKnownHash) return;
-        _lastKnownHash = combinedHash;
+        // A file's print is its hash in lowercase (ContentPrint.File): this
+        // PC hashes in uppercase and the phones in lowercase, so a file
+        // received from Android or HarmonyOS and copied again in Explorer
+        // never matched and went out as a new copy. The whole selection is an
+        // echo only when every file in it is.
+        var prints = readableFiles.Select(file => ContentPrint.File(file.payload.FileHash)).ToList();
+        bool already = LastWrite.IsAlready(manual: false, ownWrite: false, _lastWrite.Prints, prints, _ => false, _ => false, every: true);
+        _lastWrite.ClassifiedIfUnchanged(prints, since);
+        if (already) return;
 
-        foreach (var (path, payload) in readableFiles)
-        {
-            ClipboardChanged?.Invoke((System.Text.Json.JsonSerializer.Serialize(payload), "file", path));
-        }
+        // The same file twice in one selection goes out once.
+        var seen = new HashSet<string>();
+        var files = readableFiles.Where((_, index) => seen.Add(prints[index]))
+            .Select(file => (System.Text.Json.JsonSerializer.Serialize(file.payload), file.path))
+            .ToList();
+        FilesCopied?.Invoke(files);
     }
 
-    // Ends Watch() (from any thread): its loop exits on the next tick, and
-    // nothing queued after that is applied. The engine stopping.
+    // Ends Watch() (from any thread): its loop exits, and nothing queued
+    // after that is applied. The engine stopping.
     public void Stop()
     {
         _stopRequested = true;
+        _toPrepare.Writer.TryComplete();
+        _window?.Post(WM_STOP);
     }
 
-    public void addToQueue(string content, string type = "text")
+    // Puts content on the clipboard, on the watcher's thread. fromElsewhere:
+    // another device's - a file then gets the Mark of the Web (see
+    // ReceivedFiles.SaveFile).
+    public void addToQueue(string content, string type = "text", bool fromElsewhere = false)
     {
-        _pendingSets.Add((content, type, 0));
+        _toPrepare.Writer.TryWrite(new PendingSet(content, type, fromElsewhere, 0));
     }
 
     // The received image's file the clipboard refers to right now - the one
-    // this put there with the picture (see setContent), while nothing else
+    // this put there with the picture (see Apply), while nothing else
     // has been copied since - or null. Any thread. "Clear synced history"
     // keeps that one (ReceivedFiles.DeleteImages): a clear never touches the
     // clipboard, and pasting the picture into a folder needs its file.
     public string? ImageFileOnClipboard()
     {
         var written = _imageFileWrite;
-        return written != null && GetClipboardSequenceNumber() == written.Sequence ? written.Path : null;
+        return written != null && Win32Clipboard.Sequence == written.Sequence ? written.Path : null;
     }
 
-    public void setContent(String content, string type = "text")
+    // The prepare worker (see _toPrepare): one write at a time, in order. One
+    // that fails (a file still locked) is tried again later, like a write.
+    private async Task PrepareWrites()
     {
-        if (type == "text")
+        await foreach (var pending in _toPrepare.Reader.ReadAllAsync())
         {
-            _lastKnownHash = ComputeHash(System.Text.Encoding.UTF8.GetBytes(content));
-            System.Windows.Forms.Clipboard.SetText(content);
+            if (_stopRequested) return;
+            Write? write;
+            try
+            {
+                write = Prepare(pending);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"couldn't get a peer update ready for the clipboard: {ex.GetType().Name}: {ex.Message}");
+                RetryLater(pending, () => _ = Task.Delay((int)RetryMs).ContinueWith(_ => _toPrepare.Writer.TryWrite(pending with { Attempts = pending.Attempts + 1 })));
+                continue;
+            }
+            if (write == null) continue;
+            _ready.Enqueue(new ReadyWrite(pending, write));
+            _window?.Post(WM_WORK);
         }
-        else if (type == "image")
+    }
+
+    // Writes what's ready, in order, on the watcher's thread - until one
+    // can't be written (the clipboard stays busy): it goes to the back, and
+    // the rest wait for the retry.
+    private void ApplyReady()
+    {
+        while (!_stopRequested && _ready.TryDequeue(out var ready))
+        {
+            if (!Apply(ready.Write))
+            {
+                RetryLater(ready.Pending, () => _ready.Enqueue(ready with { Pending = ready.Pending with { Attempts = ready.Pending.Attempts + 1 } }));
+                RetrySoon();
+                return;
+            }
+        }
+    }
+
+    // Queues a failed write again, unless it has failed MaxApplyAttempts
+    // times. A transient failure (e.g. clipboard contention) used to lose
+    // the peer update forever instead of just retrying once the contention
+    // clears, the way local detection already does.
+    private static void RetryLater(PendingSet pending, Action again)
+    {
+        int nextAttempt = pending.Attempts + 1;
+        if (nextAttempt < MaxApplyAttempts)
+        {
+            Console.WriteLine($"clipboard busy, will retry this peer update (attempt {nextAttempt}/{MaxApplyAttempts})");
+            again();
+        }
+        else
+        {
+            Console.WriteLine($"clipboard busy, giving up on this peer update after {MaxApplyAttempts} attempts");
+        }
+    }
+
+    // One write, on the watcher's thread. A copy made here since the last
+    // read - or while a big received file was being copied into place - is
+    // read and sent first: the write replaces it on this PC, and it used to
+    // be lost for good. False if the clipboard couldn't be written.
+    private bool Apply(Write write)
+    {
+        bool writing = false;
+        uint before = 0;
+        try
+        {
+            CaptureIfChanged();
+            before = Win32Clipboard.Sequence;
+            writing = true;
+            bool bitmap = write.Put();
+            uint after = Win32Clipboard.Sequence;
+            if (write.ImageFile != null) _imageFileWrite = new ImageFileWrite(write.ImageFile, after);
+            // Our own write bumps the sequence number too - take it as already
+            // seen, or WM_CLIPBOARDUPDATE has it read back as a fresh local
+            // copy and sent straight back out. And what it wrote is remembered,
+            // with - for a picture - the print of the PNG a read-back of the
+            // bitmap makes (GDI+ re-encodes it, so it never matched the bytes
+            // received): something else announcing the clipboard again (a
+            // clipboard manager, RDP, Win+V) is then no new copy either.
+            var prints = write.Prints.ToList();
+            if (bitmap && ReadBackPrint() is string readBack) prints.Add(readBack);
+            _lastWrite.Wrote(prints, after);
+            _seenSequence = after;
+            return true;
+        }
+        catch (Exception)
+        {
+            uint now = Win32Clipboard.Sequence;
+            if (writing && now != before)
+            {
+                // A write that fails partway can still have changed the
+                // clipboard: that's ClipLink's own half-done write, not a copy
+                // (a picture read back from it matches no print). The retry
+                // writes it again. (One that never got the clipboard changed
+                // nothing: a copy still waiting to be read - busy too, say -
+                // stays unseen, or it would be lost.)
+                _seenSequence = now;
+            }
+            return false;
+        }
+    }
+
+    // A write, ready to go: Put writes the clipboard (true if a bitmap went
+    // on), Prints are of the content written (ContentPrint.Of, as for its
+    // entry), ImageFile the received image's file it puts on with it.
+    private sealed record Write(Func<bool> Put, IReadOnlyList<string> Prints, string? ImageFile = null);
+
+    // Everything slow about a write - saving a received picture, copying a
+    // received file into place - before the clipboard is touched. Null:
+    // nothing to write. On the prepare worker.
+    private Write? Prepare(PendingSet pending)
+    {
+        string content = pending.Content;
+        if (pending.Type == "text")
+        {
+            return new Write(() =>
+            {
+                using (Win32Clipboard.Open(_window!.Handle))
+                {
+                    Win32Clipboard.Empty();
+                    Win32Clipboard.SetText(content);
+                }
+                return false;
+            }, new[] { ContentPrint.Text(content) });
+        }
+        if (pending.Type == "image")
         {
             byte[] imageBytes = Convert.FromBase64String(content);
-            _lastKnownHash = ComputeHash(imageBytes);
             // Saved as a real file too, and put on the clipboard both ways (see
             // SetImageAndFile) - a bitmap alone pasted into Word or Paint but
             // not into an Explorer folder, which only accepts files. Named by
@@ -229,26 +510,31 @@ public class ClipboardSync
             // ReceivedFiles.SaveImage). If it can't be saved, the picture
             // still goes on, without the file.
             string? imageFile = ReceivedFiles.SaveImage(imageBytes, label);
-            SetImageAndFile(imageBytes, imageFile);
-            if (imageFile != null) _imageFileWrite = new ImageFileWrite(imageFile, GetClipboardSequenceNumber());
+            var prints = new List<string> { ContentPrint.Image(imageBytes) };
+            // Copied again in Explorer, that file is these same bytes.
+            if (imageFile != null) prints.Add(ContentPrint.File(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(imageBytes))));
+            var picture = DecodePicture(imageBytes);
+            if (picture == null && imageFile == null)
+            {
+                Console.WriteLine("image format not decodable here, and it couldn't be saved as a file - nothing to put on the clipboard");
+                return null;
+            }
+            return new Write(() => SetImageAndFile(picture, imageFile), prints, imageFile);
         }
-        else if (type == "file")
+        if (pending.Type == "file")
         {
             var payload = System.Text.Json.JsonSerializer.Deserialize<FilePayload>(content);
-            if (payload == null) return;
+            if (payload == null) return null;
             if (!fileStore.Exists(payload.FileHash))
             {
                 // we don't have the bytes yet (chunks still arriving, or this
                 // came from history reconciliation rather than a live transfer)
                 Console.WriteLine($"can't apply file '{payload.FileName}' yet — content not available locally");
-                return;
+                return null;
             }
 
-            // The sender's name for it, but only as a name: joined on as it
-            // came, a rooted or "..\" one put the file anywhere.
-            string destPath = GetNonCollidingPath(ReceivedFiles.Folder(), FileNames.Safe(payload.FileName, "file"));
-            File.Copy(fileStore.GetPath(payload.FileHash), destPath);
-            _lastKnownHash = ComputeHash(System.Text.Encoding.UTF8.GetBytes(payload.FileHash)); // suppress our own echo of this apply
+            string destPath = ReceivedFiles.SaveFile(fileStore.GetPath(payload.FileHash), payload.FileName, payload.FileHash, pending.FromElsewhere);
+            var filePrints = new[] { ContentPrint.File(payload.FileHash) };
 
             // The same merge the other way round: a received image FILE also
             // goes on as a picture, so it pastes into documents as well as
@@ -256,67 +542,112 @@ public class ClipboardSync
             var info = new FileInfo(destPath);
             if (ImageFiles.BitmapExtensions.Contains(info.Extension) && info.Length <= ImageFiles.MaxDecodeBytes)
             {
-                SetImageAndFile(File.ReadAllBytes(destPath), destPath);
-                return;
+                var picture = DecodePicture(File.ReadAllBytes(destPath));
+                return new Write(() => SetImageAndFile(picture, destPath), filePrints);
             }
-
-            var fileList = new System.Collections.Specialized.StringCollection();
-            fileList.Add(destPath);
-            System.Windows.Forms.Clipboard.SetFileDropList(fileList);
+            return new Write(() =>
+            {
+                using (Win32Clipboard.Open(_window!.Handle))
+                {
+                    Win32Clipboard.Empty();
+                    Win32Clipboard.SetFiles(new[] { destPath });
+                }
+                return false;
+            }, filePrints);
         }
-        else
+        throw new NotImplementedException($"Clipboard type '{pending.Type}' is not supported yet.");
+    }
+
+    // The print of the clipboard's bitmap read back the way a copy here is
+    // read (ReadBitmap, PngOf); null if it can't be read.
+    private string? ReadBackPrint()
+    {
+        try
         {
-            throw new NotImplementedException($"Clipboard type '{type}' is not supported yet.");
+            System.Drawing.Image? image;
+            using (Win32Clipboard.Open(_window!.Handle)) image = ReadBitmap();
+            if (image == null) return null;
+            using (image) return ContentPrint.Image(PngOf(image).ToArray());
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"couldn't read back the picture just written: {ex.Message}");
+            return null;
         }
     }
 
-    private string ComputeHash(byte[] data)
-{
-    return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data));
-}
+    // A received picture made ready for the clipboard (on the prepare
+    // worker): decoded, turned upright, and - for a PNG - the bytes for the
+    // "PNG" format. Null if GDI+ can't decode it (e.g. WebP or HEIC from a
+    // phone): the file alone then pastes.
+    private sealed record Picture(System.Drawing.Bitmap Bitmap, byte[]? Png);
 
-    // One clipboard item carrying the picture AND the file it's saved as:
-    // apps that paste images (Word, Paint, chat apps) take the bitmap - or
-    // the "PNG" format, which keeps transparency, for the ones that look for
-    // it - while Explorer takes the file. If the bytes aren't an image GDI+
-    // can decode (e.g. WebP or HEIC from a phone), the file alone still pastes.
-    // No filePath (it couldn't be saved): the picture alone.
-    private static void SetImageAndFile(byte[] imageBytes, string? filePath)
+    private static Picture? DecodePicture(byte[] imageBytes)
     {
-        var data = new System.Windows.Forms.DataObject();
-        if (filePath != null)
-        {
-            data.SetFileDropList(new System.Collections.Specialized.StringCollection { filePath });
-        }
         System.Drawing.Image? image = null;
         try
         {
             image = System.Drawing.Image.FromStream(new MemoryStream(imageBytes));
             bool turned = TurnUpright(image);
-            data.SetImage(image);
-            if (ImageFiles.Extension(imageBytes) == ".png")
-            {
-                data.SetData("PNG", turned ? PngOf(image) : new MemoryStream(imageBytes));
-            }
+            byte[]? png = ImageFiles.Extension(imageBytes) == ".png" ? (turned ? PngOf(image).ToArray() : imageBytes) : null;
+            var bitmap = image as System.Drawing.Bitmap ?? new System.Drawing.Bitmap(image);
+            if (!ReferenceEquals(bitmap, image)) image.Dispose();
+            return new Picture(bitmap, png);
         }
         catch (ArgumentException)
         {
-            if (filePath == null)
-            {
-                image?.Dispose();
-                Console.WriteLine("image format not decodable here, and it couldn't be saved as a file - nothing to put on the clipboard");
-                return;
-            }
-            Console.WriteLine($"image format not decodable here, putting it on the clipboard as a file only: {filePath}");
+            image?.Dispose();
+            return null;
         }
+    }
+
+    // One clipboard item carrying the picture AND the file it's saved as:
+    // apps that paste images (Word, Paint, chat apps) take the bitmap - or
+    // the "PNG" format, which keeps transparency, for the ones that look for
+    // it - while Explorer takes the file. No picture (not decodable here):
+    // the file alone. No filePath (it couldn't be saved): the picture alone.
+    // True if the bitmap went on. On the watcher's thread.
+    private bool SetImageAndFile(Picture? picture, string? filePath)
+    {
+        if (picture == null) Console.WriteLine($"image format not decodable here, putting it on the clipboard as a file only: {filePath}");
+        nint bitmap = 0;
         try
         {
-            // copy: true renders every format now, so the data outlives this call.
-            System.Windows.Forms.Clipboard.SetDataObject(data, true);
+            if (picture != null)
+            {
+                // A screen-compatible bitmap from GDI+'s, as WinForms made
+                // for CF_BITMAP (transparent pixels on light grey there; the
+                // PNG format keeps them).
+                nint gdiBitmap = picture.Bitmap.GetHbitmap();
+                try
+                {
+                    bitmap = Win32Clipboard.ScreenCompatibleCopy(gdiBitmap, picture.Bitmap.Width, picture.Bitmap.Height);
+                }
+                finally
+                {
+                    Win32Clipboard.DeleteBitmap(gdiBitmap);
+                }
+            }
+            using (Win32Clipboard.Open(_window!.Handle))
+            {
+                Win32Clipboard.Empty();
+                if (filePath != null) Win32Clipboard.SetFiles(new[] { filePath });
+                if (bitmap != 0)
+                {
+                    nint giving = bitmap;
+                    bitmap = 0; // the clipboard's now, on or not
+                    Win32Clipboard.SetBitmap(giving);
+                }
+                if (picture?.Png != null) Win32Clipboard.SetBytes(Win32Clipboard.PngFormat, picture.Png);
+            }
+            // Written: no retry will need it. (A write that failed keeps it
+            // for the next attempt.)
+            picture?.Bitmap.Dispose();
+            return picture != null;
         }
         finally
         {
-            image?.Dispose();
+            if (bitmap != 0) Win32Clipboard.DeleteBitmap(bitmap);
         }
     }
 
@@ -357,31 +688,13 @@ public class ClipboardSync
         return turned;
     }
 
-    // The turned bitmap as PNG, for the "PNG" format - the received bytes
-    // would paste it unturned.
+    // The bitmap as PNG: how a copy here is sent, and the "PNG" format of a
+    // turned picture (the received bytes would paste it unturned).
     private static MemoryStream PngOf(System.Drawing.Image image)
     {
         var png = new MemoryStream();
         image.Save(png, System.Drawing.Imaging.ImageFormat.Png);
         png.Position = 0;
         return png;
-    }
-
-    // If "photo.jpg" already exists, try "photo (1).jpg", "photo (2).jpg", etc.
-    private string GetNonCollidingPath(string dir, string fileName)
-    {
-        string candidate = Path.Combine(dir, fileName);
-        if (!File.Exists(candidate)) return candidate;
-
-        string nameOnly = Path.GetFileNameWithoutExtension(fileName);
-        string ext = Path.GetExtension(fileName);
-        int counter = 1;
-        do
-        {
-            candidate = Path.Combine(dir, $"{nameOnly} ({counter}){ext}");
-            counter++;
-        } while (File.Exists(candidate));
-
-        return candidate;
     }
 }

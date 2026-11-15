@@ -97,9 +97,37 @@ class FileStoreTest {
         }
         val store = store(base)
 
-        assertEquals(3, store.sweepUnreferenced(setOf(referenced, other)))
-        // "AAA…" isn't "aaa…": a blob is named exactly as its entry spells it.
-        assertEquals(setOf(referenced, "notes.txt"), base.list()!!.toSet())
+        assertEquals(2, store.sweepUnreferenced(setOf(referenced, other)))
+        // "AAA…" is "aaa…": the same bytes, named by a device that spells hashes in uppercase.
+        assertEquals(setOf(referenced, other.uppercase(), "notes.txt"), base.list()!!.toSet())
+    }
+
+    @Test
+    fun `a blob is found by its hash in either case, and a new one is named as given`() {
+        val base = temp.newFolder("cliplink_files")
+        val fromWindows = "f".repeat(64).uppercase()
+        File(base, fromWindows).writeText("x")
+        val store = store(base)
+
+        // The same file copied here hashes to lowercase: it finds the blob Windows sent.
+        // (On this test's machine the file system may ignore case anyway; on a phone it does not.)
+        assertTrue(store.exists(fromWindows.lowercase()))
+        assertEquals("x", store.path(fromWindows.lowercase()).readText())
+        // Nothing is stored under the other spelling: a new blob keeps the name it was given.
+        val fresh = "1".repeat(63) + "a"
+        assertEquals(fresh, store.path(fresh).name)
+        assertEquals(fresh.uppercase(), store.path(fresh.uppercase()).name)
+        assertFalse(store.exists(fresh))
+    }
+
+    @Test
+    fun `the sweep keeps a blob an entry spells in the other case`() {
+        val base = temp.newFolder("cliplink_files")
+        val blob = "9".repeat(63) + "b"
+        File(base, blob).writeText("x")
+
+        assertEquals(0, store(base).sweepUnreferenced(setOf(blob.uppercase())))
+        assertEquals(setOf(blob), base.list()!!.toSet())
     }
 
     @Test

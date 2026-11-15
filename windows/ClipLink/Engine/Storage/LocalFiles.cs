@@ -21,7 +21,7 @@ public enum FileSkipReason
 // A file on this PC going out to the other devices - copied in Explorer
 // (ClipboardSync) or handed to "Share to ClipLink" (ClipLinkEngine.
 // ShareFilesAsync): the same checks and the same payload either way. (Kept
-// out of ClipboardSync, which is WinForms, so the engine can use it without
+// out of ClipboardSync, which is Win32 and GDI+, so the engine can use it without
 // the clipboard - the iOS interop harness swaps ClipboardSync for a fake.)
 public static class LocalFiles
 {

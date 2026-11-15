@@ -22,18 +22,27 @@ final class AppModel: ObservableObject {
     let clipboard = ClipboardService()
     private(set) var engine: SyncEngine?
 
+    /// Assigned only when it changed. The Synced tab, its cards, the dock and
+    /// the toast window watch the small stores below instead (see MeState.swift).
     @Published private(set) var snapshot = EngineSnapshot() {
-        didSet {
-            me.update(from: snapshot)
-            logCount.update(snapshot.log.count)
-        }
+        didSet { updateStores() }
     }
     /// What the Me tab watches instead of `snapshot` (see MeState.swift).
     let me = MeStore()
     let logCount = LogCountStore()
-    @Published var toast: Toast?
+    /// What the Synced tab watches, and the transfers its file cards show.
+    let synced = SyncedStore()
+    let transfers = TransfersStore()
+    /// What the Devices tab watches.
+    let devices = DevicesStore()
+    let hint = ClipboardHintStore()
+    let toasts = ToastStore()
+    var toast: Toast? {
+        get { toasts.toast }
+        set { toasts.toast = newValue }
+    }
     /// The pasteboard changed since we last looked ("New item" hint).
-    @Published private(set) var hasNewClipboardItem = false
+    var hasNewClipboardItem: Bool { hint.visible }
     @Published private(set) var startupError: String?
     @Published private(set) var identityIsHardwareBacked = false {
         didSet { me.setHardwareBacked(identityIsHardwareBacked) }
@@ -84,6 +93,21 @@ final class AppModel: ObservableObject {
     /// else in the meantime.
     private var heldForForeground: (ClipboardEntry, URL?)?
     private var lastSentImage: (ImageFingerprint, Date)?
+    /// Reads of the clipboard in flight. A received item waits for them
+    /// (`applyAfterCapture`, the latest wins): written meanwhile it would
+    /// replace the copy being read, which then never goes out.
+    private var capturesInFlight = 0
+    private var applyAfterCapture: (ClipboardEntry, URL?)?
+    /// How often the user changed the clipboard themselves (copied in another
+    /// app, or tapped Copy here), for the engine: a file that lands later must
+    /// not replace what they chose meanwhile (see SyncEngine.clipboardGeneration).
+    private var userClipboardGeneration = 0
+    /// Items received so far: a picture still being checked off the main
+    /// thread gives way to one that came after it (see `received`).
+    private var receivedCount = 0
+    /// Writes to the clipboard asked for so far: a picture still being decoded
+    /// gives way to a later one (see `applyPicture`).
+    private var clipboardRequests = 0
     /// Requests the prompt has already been raised (or notified) for.
     private var knownRequestIds: Set<String> = []
     /// The OS-level modal for a pairing request - over whatever is on screen.
@@ -110,15 +134,20 @@ final class AppModel: ObservableObject {
         if UserDefaults.standard.string(forKey: "ClipLinkDebugFixtures") != nil {
             usingFixtures = true
             snapshot = DebugFixtures.snapshot(UserDefaults.standard.string(forKey: "ClipLinkDebugFixtures") ?? "")
-            me.update(from: snapshot)
-            logCount.update(snapshot.log.count)
+            updateStores()
         }
         #endif
         clipboard.onOwnWriteSettled = { [weak self] in self?.refreshClipboardHint() }
         pasteboardObserver = NotificationCenter.default.addObserver(
             forName: UIPasteboard.changedNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.refreshClipboardHint() }
+            Task { @MainActor in
+                guard let self else { return }
+                // Not ClipLink's own write: the user copied something (split
+                // view, or Universal Clipboard while ClipLink is open).
+                if !self.clipboard.holdsOwnWrite { self.noteUserClipboardChange() }
+                self.refreshClipboardHint()
+            }
         }
         // A launch before the first unlock finds the Keychain locked: start
         // as soon as it opens rather than only on the next launch.
@@ -177,6 +206,15 @@ final class AppModel: ObservableObject {
         SharedContainer.storageDirectory(migrateLegacy: true)
     }
 
+    /// Each store republishes only when its own part changed.
+    private func updateStores() {
+        me.update(from: snapshot)
+        logCount.update(snapshot.log.count)
+        synced.update(from: snapshot)
+        transfers.update(snapshot.transfers)
+        devices.update(from: snapshot)
+    }
+
     var ownDeviceId: String { snapshot.ownDeviceId }
 
     func name(for deviceId: String) -> String { snapshot.name(for: deviceId) }
@@ -217,12 +255,14 @@ final class AppModel: ObservableObject {
         }
         #endif
         clipboard.discardStaleCounts()
+        // A received item that arrived while we were away lands now, unless
+        // the user copied something else in the meantime.
+        var held: (ClipboardEntry, URL?)?
         if let (entry, url) = heldForForeground {
             heldForForeground = nil
-            if settings.autoApply, clipboard.changeCount == changeCountAtBackground {
-                autoApply(entry, fileURL: url)
-            }
+            if settings.autoApply, clipboard.changeCount == changeCountAtBackground { held = (entry, url) }
         }
+        if let before = changeCountAtBackground, before != clipboard.changeCount { noteUserClipboardChange() }
         changeCountAtBackground = nil
         refreshClipboardHint()
 
@@ -232,10 +272,16 @@ final class AppModel: ObservableObject {
             // Paste?" before they've seen the app. Paste still sends it.
             clipboard.markSeen()
             refreshClipboardHint()
+            if let (entry, url) = held { autoApply(entry, fileURL: url) }
         } else if settings.autoCapture, clipboard.hasUnseenChange {
             // The one moment iOS lets an app pick up the clipboard on its own
             // (on iOS 16+ this asks first, unless paste is allowed in Settings).
-            Task { await captureAndSend(quiet: true) }
+            // A copy made before the user left, never sent, goes out before
+            // the held item replaces it.
+            if let held { applyAfterCapture = held }
+            captureFirst()
+        } else if let (entry, url) = held {
+            autoApply(entry, fileURL: url)
         }
     }
 
@@ -260,8 +306,13 @@ final class AppModel: ObservableObject {
         var task = UIBackgroundTaskIdentifier.invalid
         task = UIApplication.shared.beginBackgroundTask(withName: "ClipLink sync") { [weak self] in
             guard let self, self.backgroundTask == task else { return }
-            self.engine?.enterBackground(grace: 0)
-            self.endBackgroundTask(task)
+            guard let engine = self.engine else { return self.endBackgroundTask(task) }
+            // Ended once the engine's queue is through what it was doing: a
+            // store write holds a lock on a file in the shared container, and
+            // iOS kills an app that is suspended holding one (0xdead10cc).
+            // The backstop keeps a busy queue within the expiry window.
+            engine.enterBackground(grace: 0) { [weak self] in self?.endBackgroundTask(task) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.endBackgroundTask(task) }
         }
         backgroundTask = task
         engine?.enterBackground(grace: 25) { [weak self] in self?.endBackgroundTask(task) }
@@ -278,8 +329,10 @@ final class AppModel: ObservableObject {
 
     /// A Background App Refresh round ended.
     func backgroundSyncFinished(received: [ClipboardEntry]) {
-        guard !received.isEmpty, !isActive, settings.notifyBackgroundItems else { return }
-        Notifier.notify(received) { [weak self] in self?.name(for: $0) ?? DeviceLabel.short($0) }
+        // What the clipboard already holds is no news (see `received`).
+        let news = received.filter { !holdsAlready($0) }
+        guard !news.isEmpty, !isActive, settings.notifyBackgroundItems else { return }
+        Notifier.notify(news) { [weak self] in self?.name(for: $0) ?? DeviceLabel.short($0) }
     }
 
     func setBackgroundRefresh(_ enabled: Bool) {
@@ -301,7 +354,7 @@ final class AppModel: ObservableObject {
     // MARK: - Clipboard → peers
 
     func refreshClipboardHint() {
-        hasNewClipboardItem = settings.noticeNewCopies && clipboard.hasUnseenChange
+        hint.set(settings.noticeNewCopies && clipboard.hasUnseenChange)
     }
 
     func dismissClipboardHint() {
@@ -309,87 +362,182 @@ final class AppModel: ObservableObject {
         refreshClipboardHint()
     }
 
+    /// The prints of everything in the history, and of its newest entry (every
+    /// one, if several share its time), from the engine itself: the snapshot
+    /// can be a moment behind. Items the Share extension stored come in with
+    /// the reload as the app comes back, just as the on-open capture runs, and
+    /// an item sent a moment ago is in the history before it is in the list.
+    private func historyPrints() async -> (all: Set<String>, newest: Set<String>) {
+        guard let engine else { return (all: [], newest: []) }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<(all: Set<String>, newest: Set<String>), Never>) in
+            engine.contentPrints(newest: 1) { all, newest in continuation.resume(returning: (all: all, newest: newest)) }
+        }
+    }
+
+    /// Step 1 of sync-dedupe-spec 1.3, before reading: the clipboard still
+    /// holds what ClipLink put there, so there is nothing to read (and no paste
+    /// prompt) - in manual mode only while that is still in the history, since
+    /// a Paste after a delete is a deliberate re-send.
+    private func holdsOwnSyncedWrite(_ mode: CaptureMode) async -> Bool {
+        guard clipboard.holdsOwnWrite else { return false }
+        var historyKeys: Set<String> = []
+        if mode == .manual { historyKeys = await historyPrints().all }
+        return CaptureCheck.ownWrite(mode: mode, lastWrite: clipboard.lastWrite, historyKeys: historyKeys) == .already
+    }
+
     /// Reads this device's clipboard and syncs it. `quiet` is the automatic
     /// on-open capture: silence instead of "nothing to sync".
     func captureAndSend(quiet: Bool) async {
         guard engine != nil else { return }
-        if clipboard.holdsOwnWrite {
+        let mode: CaptureMode = quiet ? .auto : .manual
+        beginCapture()
+        defer { endCapture() }
+        if await holdsOwnSyncedWrite(mode) {
             clipboard.markSeen()
             refreshClipboardHint()
-            if !quiet { showToast("Already synced.") }
-            return
+            return alreadySynced(quiet: quiet)
         }
+        let serial = clipboard.writeSerial
         let capture = await clipboard.capture()
         refreshClipboardHint()
         guard let capture else {
             if !quiet { showToast(clipboard.lastCaptureDeclined ? "Paste wasn't allowed." : "Nothing on the clipboard to sync.") }
             return
         }
-        send(capture, quiet: quiet, skipRepeat: true)
+        let source = clipboard.lastCaptureSourceHash.map { Set(["f:" + $0]) } ?? []
+        await classifyAndSend(capture, mode: mode, writeSerial: serial, alternates: source)
     }
 
-    /// From the system Paste button (iOS 16+), drag & drop, or share-in.
-    func sendProviders(_ providers: [NSItemProvider]) async {
-        guard let capture = await clipboard.capture(from: providers) else {
-            showToast("Nothing ClipLink can sync there.")
-            return
+    /// From the system Paste control (iOS 16+, `fromPasteboard`: a manual
+    /// capture of the clipboard), or a drop or share-in (content that is not
+    /// from the clipboard: only what every device already has is held back).
+    func sendProviders(_ providers: [NSItemProvider], fromPasteboard: Bool) async {
+        guard engine != nil else { return }
+        guard fromPasteboard else {
+            guard let capture = await clipboard.capture(from: providers) else { return showToast("Nothing ClipLink can sync there.") }
+            return share(capture)
         }
+        beginCapture()
+        defer { endCapture() }
+        // Before reading, as for the Paste button: a received picture FILE
+        // would come back as a re-encoded PNG, a new item next to its own card.
+        if await holdsOwnSyncedWrite(.manual) {
+            clipboard.markSeen()
+            refreshClipboardHint()
+            return alreadySynced(quiet: false)
+        }
+        let serial = clipboard.writeSerial
+        guard let capture = await clipboard.capture(from: providers) else { return showToast("Nothing ClipLink can sync there.") }
         clipboard.markSeen()
         refreshClipboardHint()
-        send(capture, quiet: false, skipRepeat: true)
+        await classifyAndSend(capture, mode: .manual, writeSerial: serial)
     }
 
-    /// `skipRepeat` (the paste paths, and every automatic capture): content
-    /// identical to the last thing this device sent or applied is not sent
-    /// again - pasting the same clipboard twice is one item, not two.
-    func send(_ capture: Capture, quiet: Bool, skipRepeat: Bool = false) {
-        guard let engine else { return }
-        let skipsRepeat = quiet || skipRepeat
+    private func beginCapture() {
+        capturesInFlight += 1
+    }
+
+    /// The automatic capture, counted in flight from now on: an item that
+    /// arrives before the task starts waits for it too.
+    private func captureFirst() {
+        beginCapture()
+        Task {
+            await captureAndSend(quiet: true)
+            endCapture()
+        }
+    }
+
+    /// The last read in flight is done: an item that arrived meanwhile lands now.
+    private func endCapture() {
+        capturesInFlight -= 1
+        guard capturesInFlight == 0, let (entry, url) = applyAfterCapture else { return }
+        applyAfterCapture = nil
+        autoApply(entry, fileURL: url)
+    }
+
+    /// Steps 2 to 5 of sync-dedupe-spec 1.3, once the clipboard has been read
+    /// (`writeSerial` as it was before the read): what ClipLink last wrote or
+    /// classified, and what the newest entry already is, is not sent again -
+    /// pasting the same clipboard twice is one item, and so is copying what
+    /// just arrived from a peer. Re-copying an older item goes out: that is how
+    /// it gets back onto the other devices.
+    private func classifyAndSend(_ capture: Capture, mode: CaptureMode, writeSerial: Int, alternates: Set<String> = []) async {
+        let quiet = mode == .auto
+        // Hashing (and fingerprinting) reads the whole thing: off the main actor.
+        let (read, fingerprint) = await Self.prints(of: capture)
+        let known = await historyPrints()
+        // ClipLink wrote the clipboard while it was being read: what was read
+        // may be what that write replaced. Its own write is synced already.
+        guard clipboard.writeSerial == writeSerial else {
+            ItemLoader.discard(capture)
+            return
+        }
+        // A file that can't be hashed can't be compared either: the engine
+        // says why it can't be sent.
+        guard var print = read else { return transmit(capture, filter: nil, fingerprint: fingerprint) }
+        print.alternates.formUnion(alternates)
+        let verdict = CaptureCheck.classify(print, mode: mode, lastWrite: clipboard.lastWrite,
+                                            historyKeys: known.all, newestKeys: known.newest)
+        clipboard.noteLastWrite(print.all)
+        guard verdict == .new else {
+            ItemLoader.discard(capture)
+            return alreadySynced(quiet: quiet)
+        }
+        transmit(capture, filter: nil, fingerprint: fingerprint)
+    }
+
+    /// A capture's print, and a picture's fingerprint (see `received`). Nil
+    /// print for a file that can't be read.
+    nonisolated private static func prints(of capture: Capture) async -> (CapturePrint?, ImageFingerprint?) {
+        await Task.detached(priority: .userInitiated) { () -> (CapturePrint?, ImageFingerprint?) in
+            switch capture {
+            case .text(let text):
+                return (CapturePrint.text(text), nil)
+            case .image(let png):
+                return (CapturePrint.image(png), ImageFingerprint(imageData: png))
+            case .file(let url, _):
+                return ((try? ContentHash.sha256Hex(fileAt: url)).map { CapturePrint.file(hash: $0) }, nil)
+            }
+        }.value
+    }
+
+    /// A share, a drop or a picked file: not from the clipboard, so neither the
+    /// own-write nor the last-write check applies - only content every device
+    /// already has (the newest entry) is not signed again (sync-dedupe-spec 1.4).
+    private func share(_ capture: Capture) {
+        guard let engine else { return ItemLoader.discard(capture) }
+        engine.makeSendFilter(newest: 1) { [weak self] filter in
+            Task {
+                var fingerprint: ImageFingerprint?
+                if case .image(let png) = capture {
+                    fingerprint = await Task.detached(priority: .userInitiated) { ImageFingerprint(imageData: png) }.value
+                }
+                self?.transmit(capture, filter: filter, fingerprint: fingerprint)
+            }
+        }
+    }
+
+    /// Signs and sends. A picture bigger than `maxInlineImageBytes` as PNG goes
+    /// as a file instead.
+    private func transmit(_ capture: Capture, filter: SendFilter?, fingerprint: ImageFingerprint?) {
+        guard let engine else { return ItemLoader.discard(capture) }
         switch capture {
         case .text(let text):
-            let hash = ContentHash.sha256Hex(Data(text.utf8))
-            guard !(skipsRepeat && hash == clipboard.lastKnownHash) else { return alreadySynced(quiet: quiet) }
-            clipboard.noteSent(hash: hash)
-            engine.sendText(text) { [weak self] in self?.report($0) }
+            engine.sendText(text, filter: filter) { [weak self] in self?.report($0) }
         case .image(let png):
-            Task {
-                // Hashing and fingerprinting read (and partly decode) the
-                // whole PNG: off the main actor.
-                let (hash, fingerprint) = await Task.detached(priority: .userInitiated) {
-                    (ContentHash.sha256Hex(png), ImageFingerprint(imageData: png))
-                }.value
-                guard !(skipsRepeat && hash == clipboard.lastKnownHash) else { return alreadySynced(quiet: quiet) }
-                clipboard.noteSent(hash: hash)
-                if let fingerprint { lastSentImage = (fingerprint, Date()) }
-                guard png.count > Self.maxInlineImageBytes else {
-                    engine.sendImage(png: png) { [weak self] in self?.report($0) }
-                    return
-                }
-                let url = ItemLoader.tempURL(named: "Image.png")
-                let written = await Task.detached(priority: .userInitiated) { (try? png.write(to: url)) != nil }.value
-                guard written else { return showToast("Couldn't store that image.") }
-                engine.sendFile(at: url, name: "Image.png", moveIntoStore: true) { [weak self] in self?.report($0) }
-            }
-        case .file(let url, let name):
-            guard skipsRepeat else {
-                engine.sendFile(at: url, name: name, moveIntoStore: true) { [weak self] in self?.report($0) }
+            if let fingerprint { lastSentImage = (fingerprint, Date()) }
+            guard png.count > Self.maxInlineImageBytes else {
+                engine.sendImage(png: png, filter: filter) { [weak self] in self?.report($0) }
                 return
             }
             Task {
-                // The engine hashes a file too, but only to store it: whether
-                // it is the same file as last time has to be known first.
-                let hash = await Task.detached(priority: .userInitiated) {
-                    (try? ContentHash.sha256Hex(fileAt: url))?.lowercased()
-                }.value
-                if let hash {
-                    if hash == clipboard.lastKnownHash?.lowercased() {
-                        try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
-                        return alreadySynced(quiet: quiet)
-                    }
-                    clipboard.noteSent(hash: hash)
-                }
-                engine.sendFile(at: url, name: name, moveIntoStore: true) { [weak self] in self?.report($0) }
+                let url = ItemLoader.tempURL(named: "Image.png")
+                let written = await Task.detached(priority: .userInitiated) { (try? png.write(to: url)) != nil }.value
+                guard written else { return showToast("Couldn't store that image.") }
+                engine.sendFile(at: url, name: "Image.png", moveIntoStore: true, filter: filter) { [weak self] in self?.report($0) }
             }
+        case .file(let url, let name):
+            engine.sendFile(at: url, name: name, moveIntoStore: true, filter: filter) { [weak self] in self?.report($0) }
         }
     }
 
@@ -425,7 +573,7 @@ final class AppModel: ObservableObject {
         Task {
             let temp = await Task.detached(priority: .userInitiated) { Self.coordinatedCopy(of: url) }.value
             guard let temp else { return showToast("Couldn't read that file.") }
-            send(.file(temp, name: name), quiet: false)
+            share(.file(temp, name: name))
         }
     }
 
@@ -453,14 +601,14 @@ final class AppModel: ObservableObject {
     /// every other file, go as the file itself.
     private func sendCopiedFile(_ temp: URL, name: String) {
         guard let type = UTType(filenameExtension: temp.pathExtension), type.conforms(to: .image) else {
-            return send(.file(temp, name: name), quiet: false)
+            return share(.file(temp, name: name))
         }
         Task {
             let limit = Self.maxInlineImageBytes
             let png = await Task.detached(priority: .userInitiated) { ItemLoader.inlinePNG(forImageFileAt: temp, maxBytes: limit) }.value
-            guard let png else { return send(.file(temp, name: name), quiet: false) }
+            guard let png else { return share(.file(temp, name: name)) }
             try? FileManager.default.removeItem(at: temp.deletingLastPathComponent())
-            send(.image(png: png), quiet: false)
+            share(.image(png: png))
         }
     }
 
@@ -470,7 +618,7 @@ final class AppModel: ObservableObject {
         Task {
             let png = await Task.detached(priority: .userInitiated) { ItemLoader.pngData(fromImageData: data) }.value
             guard let png else { return showToast("Couldn't read that image.") }
-            send(.image(png: png), quiet: false)
+            share(.image(png: png))
         }
     }
 
@@ -488,18 +636,80 @@ final class AppModel: ObservableObject {
     // MARK: - Peers → clipboard
 
     fileprivate func received(_ entry: ClipboardEntry, fileURL: URL?) {
-        if entry.type == Wire.EntryType.image, let (sent, when) = lastSentImage, Date().timeIntervalSince(when) < 30,
-           let data = Data(base64Encoded: entry.content), let fingerprint = ImageFingerprint(imageData: data),
-           fingerprint.looksLike(sent) {
-            // Windows re-encoding our own image and sending it back.
-            return
+        receivedCount += 1
+        // A picture compared with what was just sent, or with a picture
+        // ClipLink last put on the clipboard, is decoded for it: megabytes,
+        // off the main thread - the card's arrival is animating meanwhile.
+        let sent = lastSentImage.flatMap { Date().timeIntervalSince($0.1) < 30 ? $0.0 : nil }
+        let wantsPrint = clipboard.lastWrite.prints.contains { $0.hasPrefix("i:") }
+        guard entry.type == Wire.EntryType.image, sent != nil || wantsPrint else {
+            return handleReceived(entry, fileURL: fileURL, picturePrint: nil)
         }
+        let order = receivedCount
+        let content = entry.content
+        Task {
+            let (echo, print) = await Self.checkPicture(content, sentRecently: sent, wantsPrint: wantsPrint)
+            // A newer item came meanwhile: it is the one the clipboard gets.
+            guard order == receivedCount else { return }
+            // Windows re-encoding our own image and sending it back.
+            if echo { return }
+            handleReceived(entry, fileURL: fileURL, picturePrint: print)
+        }
+    }
+
+    /// Whether a received picture looks like the one just sent (`sentRecently`),
+    /// and its print when `wantsPrint`.
+    nonisolated private static func checkPicture(_ content: String, sentRecently: ImageFingerprint?, wantsPrint: Bool) async -> (echo: Bool, print: String?) {
+        await Task.detached(priority: .userInitiated) { () -> (echo: Bool, print: String?) in
+            guard let data = Data(base64Encoded: content) else { return (false, nil) }
+            let echo = sentRecently.map { sent in ImageFingerprint(imageData: data)?.looksLike(sent) ?? false } ?? false
+            return (echo, wantsPrint ? ContentPrint.image(data) : nil)
+        }.value
+    }
+
+    /// A received item, once a picture has been checked (`picturePrint`, see
+    /// `received`).
+    private func handleReceived(_ entry: ClipboardEntry, fileURL: URL?, picturePrint: String?) {
+        // What the clipboard already holds, as far as ClipLink knows - an older
+        // peer echoing back what it was given, say: it is in Synced (as one card
+        // with its twin), and is neither written there again nor announced.
+        guard !holdsAlready(entry, picturePrint: picturePrint) else { return }
         guard settings.autoApply else { return }
         guard isActive else {
             heldForForeground = (entry, fileURL)
             return
         }
-        autoApply(entry, fileURL: fileURL)
+        // Wait for a read in flight; and a copy the user made while ClipLink is
+        // open (split view, Universal Clipboard) that it has not looked at yet
+        // goes out first - written over, it would never be synced.
+        if capturesInFlight > 0 {
+            applyAfterCapture = (entry, fileURL)
+        } else if settings.autoCapture, clipboard.hasUnseenChange {
+            applyAfterCapture = (entry, fileURL)
+            captureFirst()
+        } else {
+            autoApply(entry, fileURL: fileURL)
+        }
+    }
+
+    /// The entry's content is what ClipLink last wrote to the clipboard or last
+    /// read off it (see LastWrite). Decodes a picture only when the last write
+    /// was one, and not at all when its print is given (`picturePrint`).
+    private func holdsAlready(_ entry: ClipboardEntry, picturePrint: String? = nil) -> Bool {
+        // Something else was copied since: the record no longer says what is there.
+        guard !clipboard.hasUnseenChange else { return false }
+        let prints = clipboard.lastWrite.prints
+        let kind: String
+        switch entry.type {
+        case Wire.EntryType.text: kind = "t:"
+        case Wire.EntryType.image: kind = "i:"
+        case Wire.EntryType.file: kind = "f:"
+        default: return false
+        }
+        guard prints.contains(where: { $0.hasPrefix(kind) }) else { return false }
+        let given = entry.type == Wire.EntryType.image ? picturePrint : nil
+        guard let key = given ?? ContentPrint.key(of: entry) else { return false }
+        return prints.contains(key)
     }
 
     /// "Copy received items automatically", minus big files (see
@@ -507,13 +717,44 @@ final class AppModel: ObservableObject {
     /// has already appeared in the list, and a toast on every arrival is
     /// noise.
     private func autoApply(_ entry: ClipboardEntry, fileURL: URL?) {
-        if entry.type == Wire.EntryType.file, let payload = FilePayload.parse(entry.content),
-           payload.fileSize > ClipboardService.maxAutoApplyFileBytes {
+        if entry.type == Wire.EntryType.image {
+            return applyPicture(content: entry.content, inlineURL: nil) { [weak self] _ in self?.refreshClipboardHint() }
+        }
+        // The bytes that are here, not the size the sender declared.
+        if entry.type == Wire.EntryType.file, let fileURL,
+           (ClipboardService.fileSize(at: fileURL) ?? Int64.max) > ClipboardService.maxAutoApplyFileBytes {
             return
         }
+        // A picture still being decoded must not land over this one.
+        clipboardRequests += 1
         if clipboard.apply(entry, fileURL: fileURL) {
             refreshClipboardHint()
         }
+    }
+
+    /// Puts a picture on the clipboard once it is decoded off the main thread
+    /// (see ClipboardService.decodePicture) - unless something newer was meant
+    /// for the clipboard meanwhile, or the user put something there: the
+    /// latest wins, as when every write was immediate. `then` is told whether
+    /// it went there; not at all when it gave way.
+    private func applyPicture(content: String, inlineURL: URL?, then: @escaping (Bool) -> Void) {
+        clipboardRequests += 1
+        let request = clipboardRequests
+        let generation = userClipboardGeneration
+        Task {
+            let picture = await ClipboardService.decodePicture(content: content, inlineURL: inlineURL)
+            guard request == clipboardRequests, generation == userClipboardGeneration else { return }
+            guard let picture else { return then(false) }
+            clipboard.apply(picture)
+            then(true)
+        }
+    }
+
+    /// The user put something on the clipboard: tell the engine, so a file
+    /// still on its way does not replace it when it lands.
+    private func noteUserClipboardChange() {
+        userClipboardGeneration += 1
+        engine?.noteClipboardGeneration(userClipboardGeneration)
     }
 
     // MARK: - Items
@@ -524,11 +765,23 @@ final class AppModel: ObservableObject {
             showToast("That file hasn't finished transferring yet.")
             return
         }
-        if let size = item.filePayload?.fileSize, size > ClipboardService.maxPasteboardFileBytes {
+        if item.kind == .file, let url, (ClipboardService.fileSize(at: url) ?? 0) > ClipboardService.maxPasteboardFileBytes {
             showToast("That file is too big for the clipboard — use Share or Save instead.")
             return
         }
+        if item.kind == .image {
+            applyPicture(content: item.entry.content, inlineURL: item.inlineURL) { [weak self] copied in
+                guard let self else { return }
+                guard copied else { return self.showToast("Couldn't copy that item.") }
+                self.noteUserClipboardChange()
+                self.refreshClipboardHint()
+                self.showToast("Copied.")
+            }
+            return
+        }
+        clipboardRequests += 1
         if clipboard.apply(item.entry, fileURL: url) {
+            noteUserClipboardChange()
             refreshClipboardHint()
             showToast("Copied.")
         } else {
@@ -536,8 +789,18 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Text the user selected and copied in an item's text (the system Copy):
+    /// written like ClipLink's own Copy, so it is not read back and sent as a
+    /// new item, and stays off Universal Clipboard (ClipLink syncs it).
+    func copySelection(_ text: String) {
+        clipboard.copyText(text)
+        noteUserClipboardChange()
+        refreshClipboardHint()
+    }
+
+    /// Deleting leaves the clipboard record alone: Paste after a delete sends
+    /// the item again (CaptureCheck), while opening the app does not.
     func delete(_ item: SyncedItem) {
-        clipboard.forgetLastHash()
         engine?.deleteItem(id: item.id)
     }
 
@@ -549,40 +812,45 @@ final class AppModel: ObservableObject {
 
     func clearHistory() {
         // No toast: the list visibly empties, after a confirmation.
-        clipboard.forgetLastHash()
         engine?.clearHistory()
     }
 
-    /// A shareable file for an item: the file itself under its real name, or
-    /// an image written out as a PNG. Nil for text, or while transferring.
+    /// A shareable file for a file item: the file itself under its real name.
+    /// Nil for anything else, or while transferring. (A picture: see
+    /// `pictureShareURL`.)
     func shareURL(for item: SyncedItem) -> URL? {
-        switch item.kind {
-        case .file:
-            guard let payload = item.filePayload else { return nil }
-            return engine?.exportURL(for: payload)
-        case .image:
-            guard let data = imageData(for: item) else { return nil }
-            let ext = (CGImageSourceCreateWithData(data as CFData, nil).flatMap(CGImageSourceGetType) as String?)
-                .flatMap { UTType($0)?.preferredFilenameExtension } ?? "png"
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent("ClipLink Image \(item.id.hashValue & 0xFFFF).\(ext)")
-            try? data.write(to: url, options: .atomic)
-            return url
-        default:
-            return nil
-        }
+        guard item.kind == .file, let payload = item.filePayload else { return nil }
+        return engine?.exportURL(for: payload)
     }
 
+    /// A picture written out as a file of its own type, for the share sheet:
+    /// decoded and written off the main thread. Named for its content, so two
+    /// pictures never share a name and sharing one again reuses its file.
+    func pictureShareURL(for item: SyncedItem) async -> URL? {
+        guard item.kind == .image else { return nil }
+        let content = item.entry.content
+        let inlineURL = item.inlineURL
+        let name = "ClipLink Image " + String((item.contentKey ?? ContentHash.sha256Hex(Data(item.id.utf8))).suffix(12))
+        guard let picture = await ClipboardService.decodePicture(content: content, inlineURL: inlineURL) else { return nil }
+        return await Task.detached(priority: .userInitiated) { () -> URL? in
+            let ext = UTType(picture.type)?.preferredFilenameExtension ?? "png"
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).\(ext)")
+            return (try? picture.data.write(to: url, options: .atomic)) != nil ? url : nil
+        }.value
+    }
+
+    /// A file item's picture, memory-mapped. Nil for anything else.
     func imageData(for item: SyncedItem) -> Data? {
-        switch item.kind {
-        case .image:
-            return Data(base64Encoded: item.entry.content)
-        case .file:
-            guard let payload = item.filePayload, Self.isImageFileName(payload.fileName),
-                  let url = engine?.blobURL(forHash: payload.fileHash) else { return nil }
-            return try? Data(contentsOf: url, options: .mappedIfSafe)
-        default:
-            return nil
-        }
+        guard item.kind == .file, let payload = item.filePayload, Self.isImageFileName(payload.fileName),
+              let url = engine?.blobURL(forHash: payload.fileHash) else { return nil }
+        return try? Data(contentsOf: url, options: .mappedIfSafe)
+    }
+
+    /// An item's picture, for Photos: a picture item's decoded off the main
+    /// thread, an image file's memory-mapped.
+    func pictureData(for item: SyncedItem) async -> Data? {
+        guard item.kind == .image else { return imageData(for: item) }
+        return await ClipboardService.decodePicture(content: item.entry.content, inlineURL: item.inlineURL)?.data
     }
 
     static func isImageFileName(_ name: String) -> Bool {
@@ -759,11 +1027,13 @@ final class AppModel: ObservableObject {
 
     func copyDeviceID() {
         clipboard.copyText(ownDeviceId)
+        noteUserClipboardChange()
         showToast("Device ID copied.")
     }
 
     func copyPairingInfo() {
         clipboard.copyText(snapshot.pairingPayload)
+        noteUserClipboardChange()
         showToast("Pairing info copied.")
     }
 
@@ -835,7 +1105,9 @@ extension AppModel: SyncEngineDelegate {
             #if DEBUG
             if self.usingFixtures { return }
             #endif
-            self.snapshot = snapshot
+            // Unchanged (a beacon from a device whose row says nothing new):
+            // nothing that watches the model is redrawn.
+            if self.snapshot != snapshot { self.snapshot = snapshot }
             self.refreshClipboardHint()
             self.requestsChanged(snapshot.pairingRequests)
         }

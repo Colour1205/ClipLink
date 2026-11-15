@@ -41,11 +41,31 @@ daemon process, so the iOS interop harness and old notes still line up.
   is sent to the others as a `delete` message (`ClipLinkEngine.BroadcastDelete`).
   An older peer keeps getting the head and the whole batch, and never a request
   or a delete. What just arrived is listed on top, whatever its time, with the
-  convenience item first and kept by the trim (`BatchGroups.Order`).
+  convenience item first and kept by the trim (`BatchGroups.Order`) - but only
+  a sync whose newest item is newer than everything this PC already has puts
+  anything on the clipboard or on top; an older one is stored quietly, by time.
+  `Storage/ContentPrint.cs` and `Storage/LastWrite.cs` recognise content
+  whoever copied it (see `design/sync-dedupe-spec.md`): a copy of what ClipLink
+  just wrote, or of the newest item, is not sent again; a received item the
+  clipboard already holds is listed but not applied; and the Synced page shows
+  one card per content (`HistoryAccess.GetHistoryWithBatches`), deleting all of
+  its entries. Nothing on the wire changes.
   `Storage/LocalFiles.cs` is the per-file check and payload (name, size,
   streamed SHA-256, 1 GB cap) shared by copied files and shared ones, and
   their copy into the FileStore, which refuses a file changed since it was
   hashed.
+  `Clipboard/ClipboardSync.cs` watches the clipboard through Win32 directly
+  (`Clipboard/Win32Clipboard.cs`: a message-only window told of every change,
+  no timer, no WinForms); anything slow - hashing copied files, preparing a
+  received file or picture - runs off its thread, and the engine publishes
+  local copies one at a time from a queue of its own.
+  `Storage/SafeFile.cs` writes every store file (history, trust, deleted,
+  blocked, settings) to a `.tmp`, then swaps it in keeping a `.bak`; reading
+  falls back on the `.bak`. History is written in the background
+  (`HistoryAccess.Flush` on stop). `Networking/Wire.cs` is the JSON written to
+  the wire and the history file: fewer escapes than the default encoder, the
+  same values for every reader, and an envelope built as UTF-8 without the
+  nested strings.
 
 Build: `dotnet build windows\ClipLink.slnx` — the engine is part of the app
 project. Tests: `ClipLink.Tests` (the plain parts, linked in) and

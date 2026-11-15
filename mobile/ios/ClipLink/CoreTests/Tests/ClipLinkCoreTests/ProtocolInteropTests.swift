@@ -135,6 +135,23 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertFalse(line.contains("\n"))
     }
 
+    func testSignableBytesAreTheJoinedTextInUTF8() {
+        let data = EntrySigning.signableData(content: "a:é\r\n😀", type: "text", deviceId: "MFkw", timestamp: "2026-09-26T12:34:56.1234567Z")
+        XCTAssertEqual(data, Data("a:é\r\n😀:text:MFkw:2026-09-26T12:34:56.1234567Z".utf8))
+        XCTAssertEqual(EntrySigning.signableData(content: "", type: "", deviceId: "", timestamp: ""), Data(":::".utf8))
+    }
+
+    func testOpenDataGivesThePlaintextBytesOfAStringOpen() throws {
+        let cipher = SessionCipher(keyBytes: Data((0..<32).map { UInt8($0) }))
+        let line = Data(try cipher.seal("{\"Type\":\"ping\",\"Payload\":\"é\"}").utf8)
+        XCTAssertEqual(try cipher.openData(line), Data(try cipher.open(line).utf8))
+        // A slice of a bigger buffer, as the framer hands lines over.
+        let framed = Data("x".utf8) + line + Data("\n".utf8)
+        XCTAssertEqual(try cipher.openData(framed[1..<(framed.count - 1)]), Data("{\"Type\":\"ping\",\"Payload\":\"é\"}".utf8))
+        XCTAssertEqual(Envelope.parse(data: try cipher.openData(line)), Envelope(type: "ping", payload: "é"))
+        XCTAssertNil(Envelope.parse(data: Data("not json".utf8)))
+    }
+
     func testTamperedLineThrows() throws {
         let cipher = SessionCipher(keyBytes: Data(count: 32))
         var packed = Data(base64Encoded: try cipher.seal("hello"))!
@@ -187,6 +204,16 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertTrue(DotNetTimestamp.isEarlier("2026-09-26T12:34:56.12345Z", than: "2026-09-26T12:34:56.1234567Z"))
         XCTAssertTrue(DotNetTimestamp.isEarlier("2026-09-26T14:00:00.0000000+02:00", than: "2026-09-26T12:00:00.0000001Z"))
         XCTAssertFalse(DotNetTimestamp.isEarlier("2026-09-26T12:00:00.0000001Z", than: "2026-09-26T14:00:00.0000000+02:00"))
+    }
+
+    func testTicksAreTheSameWhenAskedAgainAndAnUnparsableTimeStaysNil() {
+        // 2026-09-26T12:34:56Z is 1_790_426_096 s after the epoch; .1234567 adds 1_234_567 ticks.
+        let ts = "2026-09-26T12:34:56.1234567Z"
+        XCTAssertEqual(DotNetTimestamp.epochTicks(ts), 17_904_260_961_234_567)
+        XCTAssertEqual(DotNetTimestamp.epochTicks(ts), 17_904_260_961_234_567, "remembered, the same")
+        XCTAssertNil(DotNetTimestamp.epochTicks("yesterday"))
+        XCTAssertNil(DotNetTimestamp.epochTicks("yesterday"), "remembered as nil")
+        XCTAssertEqual(DotNetTimestamp.epochTicks("2026-09-26T14:34:56.1234567+02:00"), 17_904_260_961_234_567)
     }
 
     func testTrimmedWindowsEntryVerifiesAndIsStoredCanonical() {
@@ -457,6 +484,21 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertEqual(try f.append(Data("xyz\nok\n".utf8)).map { String(data: $0, encoding: .utf8)! }, ["ok"])
         XCTAssertEqual(try f.append(Data("0123456789\nfine\n".utf8)).map { String(data: $0, encoding: .utf8)! }, ["fine"])
         XCTAssertEqual(f.droppedLines, 2)
+    }
+
+    func testFramedLinesStayIntactWhileMoreArrives() throws {
+        var f = LineFramer(maxLineBytes: 1024)
+        let first = try f.append(Data("one\r\ntwo\nthr".utf8))
+        let second = try f.append(Data("ee\nfour\nfi".utf8))
+        let third = try f.append(Data("ve\n".utf8))
+        func text(_ lines: [Data]) -> [String] { lines.map { String(decoding: $0, as: UTF8.self) } }
+        // The earlier lines are slices of what had arrived then: nothing written
+        // since touches them.
+        XCTAssertEqual(text(first), ["one", "two"])
+        XCTAssertEqual(text(second), ["three", "four"])
+        XCTAssertEqual(text(third), ["five"])
+        XCTAssertEqual(f.bufferedByteCount, 0)
+        XCTAssertEqual(Array(second[1]), Array("four".utf8), "a slice reads like any Data")
     }
 
     func testWindowsSafeFileNames() {

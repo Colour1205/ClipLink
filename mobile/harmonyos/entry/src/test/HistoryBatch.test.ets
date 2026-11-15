@@ -142,8 +142,8 @@ export default function historyBatchTest() {
 
     it('frontOkIsAskedOnceWithTheNewestEntryReallyAddedAndDecidesWhatTheTrimSpares', 0, () => {
       const asked: string[] = [];
-      const yes = (x: ClipboardEntry): boolean => { asked.push(x.Signature ?? ''); return true; };
-      const no = (x: ClipboardEntry): boolean => { asked.push(x.Signature ?? ''); return false; };
+      const yes = (x: ClipboardEntry, localNewest: string | null): boolean => { asked.push(x.Signature ?? ''); return true; };
+      const no = (x: ClipboardEntry, localNewest: string | null): boolean => { asked.push(x.Signature ?? ''); return false; };
       const base = (): ClipboardEntry[] => [e('a', 10), e('b', 11), e('c', 12)];
       // 'b' is known; of the new ones 'y' is the newest. Cap 3 pushes two out.
       const spared: ClipboardEntry[] = base();

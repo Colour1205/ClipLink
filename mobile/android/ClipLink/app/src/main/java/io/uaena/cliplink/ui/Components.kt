@@ -14,13 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Circle
-import androidx.compose.material.icons.outlined.Description
-import androidx.compose.material.icons.outlined.Devices
-import androidx.compose.material.icons.outlined.Image
-import androidx.compose.material.icons.outlined.Link
-import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -40,6 +33,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.engine.SyncedItem
+import io.uaena.cliplink.ui.icons.Icons
+import io.uaena.cliplink.ui.icons.filled.Circle
+import io.uaena.cliplink.ui.icons.outlined.Description
+import io.uaena.cliplink.ui.icons.outlined.Devices
+import io.uaena.cliplink.ui.icons.outlined.Image
+import io.uaena.cliplink.ui.icons.outlined.Link
+import io.uaena.cliplink.ui.icons.outlined.TextFields
 
 /**
  * The visual identity of a content type: icon plus a container/on-container

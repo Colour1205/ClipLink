@@ -39,20 +39,18 @@ public sealed partial class ClipLinkEngine
                 Console.WriteLine($"[clip] received {entry.Type} entry from {DeviceLabel.ShortId(entry.DeviceId)} - deleted here, ignoring");
                 return;
             }
+            // Into history first, and onto the clipboard only if history took
+            // it: one already here, deleted meanwhile, or older than everything
+            // a full history keeps (trimmed at once) is neither listed nor
+            // applied - it used to overwrite the clipboard all the same.
+            if (!historyAccess.addToHistory(entry))
+            {
+                Console.WriteLine($"[clip] received {entry.Type} entry from {DeviceLabel.ShortId(entry.DeviceId)} - already here, deleted, or older than all history keeps; ignoring");
+                return;
+            }
             Console.WriteLine($"[clip] received {entry.Type} entry from {DeviceLabel.ShortId(entry.DeviceId)} - applying");
-
-            if (entry.Type == "file")
-            {
-                HandleIncomingFileEntry(entry);
-            }
-            else
-            {
-                clipboardSync.addToQueue(entry.Content, entry.Type);
-            }
-            if (historyAccess.addToHistory(entry))
-            {
-                NotifyHistoryChanged();
-            }
+            NotifyHistoryChanged();
+            ApplyReceivedEntry(entry);
         }
         else if (envelope.Type == "history_head")
         {
@@ -149,8 +147,9 @@ public sealed partial class ClipLinkEngine
     // changed" - not one of each per entry, which showed the Synced page's
     // cards arriving one at a time. What a received item does besides
     // (onto the clipboard, asking for a file's bytes) happens once for the
-    // batch's newest new item, not once for every item - and that is the one
-    // put on the clipboard even when it is older than this PC's own newest.
+    // batch's newest new item, not once for every item - and only when that
+    // is newer than everything this PC had (see BatchGroups.ApplyBatch):
+    // otherwise the batch is stored quietly.
     // From a version 2 peer, a batch answers a history_request (see
     // HandleSyncAnswer, or HandleLateAnswer when the request had expired); one
     // nobody asked for is handled like a version 1 batch.
@@ -182,12 +181,11 @@ public sealed partial class ClipLinkEngine
         if (outcome.Added.Count == 0) return;
         Console.WriteLine($"[clip] history batch: {outcome.Added.Count} new, {outcome.Duplicates} known, {outcome.Deleted} deleted here, {outcome.Rejected} rejected");
 
-        var newest = HistoryBatch.Newest(outcome.Added);
         foreach (var entry in outcome.Added)
         {
             // (After a history_head the newest entry is already on the
             // clipboard, and this batch's newest is older: not again.)
-            if (ReferenceEquals(entry, newest) && !outcome.HeadApplied)
+            if (ReferenceEquals(entry, outcome.Applied))
             {
                 ApplyReceivedEntry(entry);
             }
@@ -213,8 +211,25 @@ public sealed partial class ClipLinkEngine
         }
         else
         {
-            clipboardSync.addToQueue(entry.Content, entry.Type);
+            QueueReceived(entry);
         }
+    }
+
+    // Queues a received entry (in history already) for the clipboard - unless
+    // what ClipLink last wrote there, or last saw copied here, already is that
+    // content (LastWrite): this PC's own copy echoed back by another device
+    // (an older build re-sends what it was given), say. Then it's only
+    // listed - as one card with its twin - and not announced either.
+    private void QueueReceived(ClipboardEntry entry)
+    {
+        if (clipboardSync.Holds(ContentPrint.Key(entry)))
+        {
+            Console.WriteLine($"[clip] {entry.Type} entry from {DeviceLabel.ShortId(entry.DeviceId)} is what the clipboard already holds - not applied again");
+            historyAccess.MarkQuiet(entry.Key());
+            NotifyHistoryChanged();
+            return;
+        }
+        clipboardSync.addToQueue(entry.Content, entry.Type, fromElsewhere: entry.DeviceId != ownId);
     }
 
     // ---- version 2 sync -------------------------------------------------------
@@ -294,7 +309,7 @@ public sealed partial class ClipLinkEngine
             Console.WriteLine($"[sync] asking {DeviceLabel.ShortId(conn.PeerDeviceId)} for {plan.Wanted} missing item(s) in {plan.Requests.Count} request(s)");
             foreach (var request in plan.Requests)
             {
-                SendEnvelope(conn, "history_request", JsonSerializer.Serialize(new KeysMessage(request.Keys.ToList())));
+                SendEnvelope(conn, "history_request", Wire.Envelope("history_request", new KeysMessage(request.Keys.ToList())));
             }
         }
     }
@@ -322,7 +337,7 @@ public sealed partial class ClipLinkEngine
         Console.WriteLine($"[sync] answer from {DeviceLabel.ShortId(conn.PeerDeviceId)}{(request.Convenience ? " (newest item)" : "")}: {outcome.Added.Count} new, {outcome.Duplicates} known, {outcome.Deleted} deleted here, {outcome.Rejected} rejected");
         if (request.Convenience && outcome.Applied == null && outcome.Added.Count > 0)
         {
-            Console.WriteLine("[sync] newest item not put on the clipboard: another one was, a moment ago, and this one is not newer");
+            Console.WriteLine("[sync] newest item not put on the clipboard: it is not newer than everything here, or another one went there a moment ago (stored quietly)");
         }
         foreach (var entry in outcome.Added)
         {
@@ -377,7 +392,7 @@ public sealed partial class ClipLinkEngine
             .OrderByDescending(entry => HistoryHead.UnixMs(entry.Timestamp))
             .ToList();
         Console.WriteLine($"[sync] {DeviceLabel.ShortId(conn.PeerDeviceId)} asked for {keys.Count} item(s), sending {answer.Count}");
-        SendEnvelope(conn, "history_batch", JsonSerializer.Serialize(answer));
+        SendEnvelope(conn, "history_batch", Wire.Envelope("history_batch", answer));
     }
 
     // Tells every connected version 2 peer the user deleted these entries here
@@ -389,9 +404,10 @@ public sealed partial class ClipLinkEngine
         var peers = connectionsByDeviceId.Values.Where(conn => conn.Protocol >= 2).ToList();
         foreach (string payload in KeysMessage.Serialize(keys))
         {
+            var envelope = Wire.Envelope("delete", payload);
             foreach (var conn in peers)
             {
-                SendEnvelope(conn, "delete", payload);
+                SendEnvelope(conn, "delete", envelope);
             }
         }
     }
@@ -427,13 +443,13 @@ public sealed partial class ClipLinkEngine
         if (changed) NotifyHistoryChanged();
     }
 
-    // One message to a peer, in the order this is called. A failure is logged;
-    // the connection's read loop notices a dead link.
-    private static void SendEnvelope(PeerConnection conn, string type, string payload)
+    // One message to a peer (made by Wire.Envelope; type only names it in the
+    // log), in the order this is called. A failure is logged; the
+    // connection's read loop notices a dead link.
+    private static void SendEnvelope(PeerConnection conn, string type, ReadOnlyMemory<byte> envelope)
     {
-        string json = JsonSerializer.Serialize(new Envelope(type, payload));
         string peerShort = DeviceLabel.ShortId(conn.PeerDeviceId);
-        _ = conn.Send(json).ContinueWith(t =>
+        _ = conn.Send(envelope).ContinueWith(t =>
         {
             Console.WriteLine($"[sync] failed sending {type} to {peerShort}: {t.Exception?.GetBaseException().Message}");
         }, TaskContinuationOptions.OnlyOnFaulted);
@@ -460,12 +476,12 @@ public sealed partial class ClipLinkEngine
     // it does not know), is left to RequestQuiet.
     private static void SendUnpairAndClose(PeerConnection conn)
     {
-        string json = JsonSerializer.Serialize(new Envelope("unpair", "{}"));
+        var envelope = Wire.Envelope("unpair", "{}");
         _ = Task.Run(async () =>
         {
             try
             {
-                await conn.Send(json);
+                await conn.Send(envelope);
                 await Task.Delay(300); // let it leave before the socket goes
             }
             catch (Exception ex)
@@ -507,14 +523,25 @@ public sealed partial class ClipLinkEngine
         if (fileStore.Exists(payload.FileHash))
         {
             // already have these exact bytes locally — apply right away
-            if (applyToClipboard) clipboardSync.addToQueue(entry.Content, entry.Type);
+            if (applyToClipboard) QueueReceived(entry);
             return;
         }
 
         // don't have it yet — remember to apply it once file_chunk messages for
         // this hash finish arriving and verify, and ask every connected peer
-        // (not just whoever handed us this entry) whether they have it
-        if (applyToClipboard) fileTransferState.PendingEntries[payload.FileHash] = entry;
+        // (not just whoever handed us this entry) whether they have it. Not
+        // when the clipboard already holds that file (see QueueReceived).
+        if (applyToClipboard)
+        {
+            if (clipboardSync.Holds(ContentPrint.File(payload.FileHash)))
+            {
+                QueueReceived(entry); // (only marks it quiet)
+            }
+            else
+            {
+                fileTransferState.PendingEntries[payload.FileHash] = new PendingApply(entry, Environment.TickCount64, clipboardSync.Sequence);
+            }
+        }
         SendFileRequest(payload.FileHash, connectionsByDeviceId.Values);
     }
 
@@ -536,12 +563,10 @@ public sealed partial class ClipLinkEngine
 
     private static void SendFileRequest(string fileHash, IEnumerable<PeerConnection> to)
     {
-        var request = new FileRequestMessage(fileHash);
-        var envelope = new Envelope("file_request", JsonSerializer.Serialize(request));
-        var json = JsonSerializer.Serialize(envelope);
+        var envelope = Wire.Envelope("file_request", new FileRequestMessage(fileHash));
         foreach (var conn in to)
         {
-            _ = conn.Send(json);
+            _ = conn.Send(envelope);
         }
     }
 
@@ -554,9 +579,15 @@ public sealed partial class ClipLinkEngine
     private void RequestMissingFiles(PeerConnection conn)
     {
         var wanted = MissingFiles();
-        foreach (var (hash, entry) in fileTransferState.PendingEntries)
+        foreach (var (hash, pending) in fileTransferState.PendingEntries)
         {
-            if (!historyAccess.isEntryDeleted(entry)) wanted.Add(hash);
+            // One whose entry has left history (trimmed, deleted) waits for nothing.
+            if (historyAccess.isEntryDeleted(pending.Entry) || !historyAccess.isEntryInHistory(pending.Entry))
+            {
+                fileTransferState.PendingEntries.TryRemove(new KeyValuePair<string, PendingApply>(hash, pending));
+                continue;
+            }
+            wanted.Add(hash);
         }
         var asking = wanted.Where(hash => !fileStore.Exists(hash) && !incomingFiles.IsReceiving(hash)).ToList();
         if (asking.Count == 0) return;
@@ -587,7 +618,7 @@ public sealed partial class ClipLinkEngine
     // Whether an item still waits on fileHash's bytes - one just received,
     // or an older one (see MissingFiles).
     private bool IsWanted(string fileHash) =>
-        (fileTransferState.PendingEntries.TryGetValue(fileHash, out var pending) && !historyAccess.isEntryDeleted(pending))
+        (fileTransferState.PendingEntries.TryGetValue(fileHash, out var pending) && !historyAccess.isEntryDeleted(pending.Entry))
         || MissingFiles().Contains(fileHash);
 
     // How often a file is asked for again between successes - see
@@ -742,15 +773,22 @@ public sealed partial class ClipLinkEngine
     // chunk-reassembly path happens to be the one that completed it. Not if
     // the user deleted that entry meanwhile - deleting never touches the
     // clipboard (see ForgetPendingApplies, which this backs up if the bytes
-    // land mid-delete). Returns whether an entry was applied.
+    // land mid-delete) - nor if it left history, something else went on the
+    // clipboard since it was received, or the bytes took more than ten
+    // minutes (see PendingApply): a slow file mustn't overwrite what is newer.
+    // Returns whether an entry was waiting for them.
     private bool TryFulfillPendingEntry(string fileHash)
     {
-        if (fileTransferState.PendingEntries.TryRemove(fileHash, out var pendingEntry) && !historyAccess.isEntryDeleted(pendingEntry))
+        if (!fileTransferState.PendingEntries.TryRemove(fileHash, out var pending)) return false;
+        var entry = pending.Entry;
+        if (historyAccess.isEntryDeleted(entry) || !historyAccess.isEntryInHistory(entry)) return false;
+        if (!pending.IsDue(Environment.TickCount64, clipboardSync.Sequence))
         {
-            clipboardSync.addToQueue(pendingEntry.Content, pendingEntry.Type);
+            Console.WriteLine($"[file] {fileHash[..12]}... arrived after something newer went on the clipboard, or too late - stored, not applied");
             return true;
         }
-        return false;
+        QueueReceived(entry);
+        return true;
     }
 
     // Deleting never touches the clipboard - so a deleted file entry whose
@@ -761,9 +799,9 @@ public sealed partial class ClipLinkEngine
         foreach (var entry in removed)
         {
             string? fileHash = HistoryAccess.FileHashOf(entry);
-            if (fileHash != null)
+            if (fileHash != null && fileTransferState.PendingEntries.TryGetValue(fileHash, out var pending) && pending.Entry == entry)
             {
-                fileTransferState.PendingEntries.TryRemove(new KeyValuePair<string, ClipboardEntry>(fileHash, entry));
+                fileTransferState.PendingEntries.TryRemove(new KeyValuePair<string, PendingApply>(fileHash, pending));
             }
         }
     }
@@ -794,8 +832,7 @@ public sealed partial class ClipLinkEngine
                 bool isLast = stream.Position >= stream.Length;
                 byte[] chunkBytes = bytesRead == chunkSize ? buffer : buffer[..bytesRead];
                 var chunkMsg = new FileChunkMessage(fileHash, chunkIndex, isLast, Convert.ToBase64String(chunkBytes));
-                var envelope = new Envelope("file_chunk", JsonSerializer.Serialize(chunkMsg));
-                await conn.Send(JsonSerializer.Serialize(envelope));
+                await conn.Send(Wire.Envelope("file_chunk", chunkMsg));
                 chunkIndex++;
             }
             if (chunkIndex == 0 && FileStore.IsEmptyFileHash(fileHash))
@@ -808,7 +845,7 @@ public sealed partial class ClipLinkEngine
                 // decode an empty chunk and go on waiting, as they always
                 // have.
                 var emptyChunk = new FileChunkMessage(fileHash, 0, true, "");
-                await conn.Send(JsonSerializer.Serialize(new Envelope("file_chunk", JsonSerializer.Serialize(emptyChunk))));
+                await conn.Send(Wire.Envelope("file_chunk", emptyChunk));
                 chunkIndex++;
             }
             Console.WriteLine($"[file] finished sending {fileHash[..12]}... to {shortPeer} ({chunkIndex} chunks)");
@@ -913,7 +950,7 @@ public sealed partial class ClipLinkEngine
     {
         if (conn.Protocol >= 2)
         {
-            SendEnvelope(conn, "history_head", JsonSerializer.Serialize(historyAccess.SyncHead()));
+            SendEnvelope(conn, "history_head", Wire.Envelope("history_head", historyAccess.SyncHead()));
             return;
         }
         SendHistoryBatch(conn);
@@ -928,22 +965,34 @@ public sealed partial class ClipLinkEngine
         // not know "history_head" skip it.
         if (HistoryHead.ForBatch(history) is { } head)
         {
-            _ = conn.Send(JsonSerializer.Serialize(new Envelope("history_head", JsonSerializer.Serialize(head))));
+            _ = conn.Send(Wire.Envelope("history_head", head));
         }
-        var envelope = new Envelope("history_batch", JsonSerializer.Serialize(history));
-        var json = JsonSerializer.Serialize(envelope);
-        _ = conn.Send(json);
+        _ = conn.Send(Wire.Envelope("history_batch", history));
     }
 
     // Wires up a connection for actual use - history sync, message
     // handling, disconnect cleanup. Shared by every path that ends up with
     // a live, already-trusted connection (reconnects, the TCP accept loop,
     // and AcceptPairing once the user approves a candidate).
-    private void RegisterConnection(PeerConnection conn)
+    //
+    // A connection that hasn't proven its session yet doesn't take the place
+    // of one that has: the handshake's signature covers only its ephemeral
+    // key, so a captured handshake of a trusted device can be replayed by
+    // anyone on the network, and the replay used to replace - and close - the
+    // device's real connection, every time (the device flapped, and what was
+    // copied meanwhile went to a socket that couldn't read it). The new one
+    // takes over once a line from it decrypts (SessionProven), which a
+    // replayer can never manage; until then the proven one stays in use.
+    // provenAddress: an address to store for the device once it has proven
+    // itself (a replay mustn't overwrite its stored one).
+    private void RegisterConnection(PeerConnection conn, string? provenAddress = null)
     {
         connectionsByDeviceId.TryGetValue(conn.PeerDeviceId, out var previous);
-        connectionsByDeviceId[conn.PeerDeviceId] = conn;
-        Console.WriteLine($"[conn] connected: {DeviceLabel.ShortId(conn.PeerDeviceId)} ({connectionsByDeviceId.Count} total)");
+        bool deferred = previous != null && previous != conn && previous.IsSessionProven;
+        if (!deferred) connectionsByDeviceId[conn.PeerDeviceId] = conn;
+        Console.WriteLine(deferred
+            ? $"[conn] connecting again: {DeviceLabel.ShortId(conn.PeerDeviceId)} - the live connection stays until the new one proves itself"
+            : $"[conn] connected: {DeviceLabel.ShortId(conn.PeerDeviceId)} ({connectionsByDeviceId.Count} total)");
         try
         {
             SendHistory(conn);
@@ -976,7 +1025,12 @@ public sealed partial class ClipLinkEngine
         // Its handshake's name is stored only now, and off the read loop.
         conn.SessionProven += () =>
         {
-            _ = Task.Run(() => RememberProvenName(conn));
+            if (deferred) TakeOver(conn, previous!);
+            _ = Task.Run(() =>
+            {
+                RememberProvenName(conn);
+                if (provenAddress != null) RememberProvenAddress(conn, provenAddress);
+            });
             NotifyDevicesChanged(); // waiting becomes connected
         };
         conn.Disconnected += () =>
@@ -1017,7 +1071,7 @@ public sealed partial class ClipLinkEngine
             }
         };
         _ = conn.Listen();
-        if (previous != null && previous != conn)
+        if (previous != null && previous != conn && !deferred)
         {
             // A second connection to this same peer just replaced the first
             // one in the map (duplicate connections happen when a
@@ -1048,6 +1102,37 @@ public sealed partial class ClipLinkEngine
             // have missed this one, which would then stay open (heartbeat
             // and all) with nothing running here.
             conn.Close();
+        }
+    }
+
+    // conn proved its session while previous, the connection it was to
+    // replace, was still in use (see RegisterConnection): it takes over now,
+    // and previous is closed. If previous has gone meanwhile, conn just takes
+    // its place; if another connection took it, conn was superseded and goes.
+    private void TakeOver(PeerConnection conn, PeerConnection previous)
+    {
+        if (connectionsByDeviceId.TryUpdate(conn.PeerDeviceId, conn, previous) || connectionsByDeviceId.TryAdd(conn.PeerDeviceId, conn))
+        {
+            Console.WriteLine($"[conn] connected: {DeviceLabel.ShortId(conn.PeerDeviceId)} ({connectionsByDeviceId.Count} total)");
+            previous.Close();
+        }
+        else
+        {
+            conn.Close();
+        }
+    }
+
+    // A trusted device's address, learned from a connection once it proved
+    // its session (see HandleNewConnection).
+    private void RememberProvenAddress(PeerConnection conn, string address)
+    {
+        try
+        {
+            if (trustStore.IsTrusted(conn.PeerDeviceId)) trustStore.Trust(conn.PeerDeviceId, address);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[conn] couldn't store the address of {DeviceLabel.ShortId(conn.PeerDeviceId)}: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -1107,7 +1192,11 @@ public sealed partial class ClipLinkEngine
                 // address at all (an old bug - it always passed null),
                 // instead of leaving it permanently stuck with no address
                 // to reconnect off-LAN with. (Trust() keeps the stored name.)
-                trustStore.Trust(conn.PeerDeviceId, address);
+                // Once the connection proves its session, though: a replayed
+                // handshake from anywhere got this far too, and its address
+                // replaced the device's real (Tailscale) one.
+                RegisterConnection(conn, provenAddress: address);
+                return PairOutcome.Connected;
             }
             RegisterConnection(conn);
             return conn.NewlyTrustedViaPassphrase ? PairOutcome.PairedByPasscode : PairOutcome.Connected;
@@ -1228,9 +1317,10 @@ public sealed partial class ClipLinkEngine
             // reconnect loop's Task.WhenAll - so no other peer was retried -
             // and kept this peer reserved in connectingTo, blocking beacon
             // dials to it as well.
+            using var timeout = new CancellationTokenSource(HandshakeTimeout);
             conn = await PeerConnection.CreateAsync(client, identity, trustStore, passphraseKeyStore, deviceName.Current,
-                    answeredAsSelf: () => answeredAsSelf = true, isBlocked: blockStore.IsBlocked, protocol: options.Protocol)
-                .WaitAsync(HandshakeTimeout);
+                    answeredAsSelf: () => answeredAsSelf = true, isBlocked: blockStore.IsBlocked, protocol: options.Protocol,
+                    cancellationToken: timeout.Token);
         }
         catch
         {
@@ -1271,12 +1361,20 @@ public sealed partial class ClipLinkEngine
             //
             // Trust is decided by CreateAsync for the identity that actually
             // answered, so it's safe to treat this as a connection to THAT
-            // device. The stale entry keeps its trust (and its name - Trust()
-            // only ever merges names) but loses the address, so it's never
-            // dialled here again (it's re-learned if that device really does
-            // come back).
-            Console.WriteLine($"[conn] {address} answered as {DeviceLabel.ShortId(conn.PeerDeviceId)}, not {DeviceLabel.ShortId(peerDeviceId)} - clearing that stale address");
-            trustStore.Trust(peerDeviceId, null);
+            // device. The stale entry keeps its trust (and its name) but loses
+            // the address, so it's never dialled here again (it's re-learned
+            // if that device really does come back) - only when that address
+            // is the one stored for it, though, as for answeredAsSelf above: a
+            // beacon carries any id from any sender, and a spoofed one used to
+            // wipe a trusted device's real (Tailscale) address this way.
+            if (trustStore.ForgetAddress(peerDeviceId, address))
+            {
+                Console.WriteLine($"[conn] {address} answered as {DeviceLabel.ShortId(conn.PeerDeviceId)}, not {DeviceLabel.ShortId(peerDeviceId)} - cleared that stale address");
+            }
+            else
+            {
+                Console.WriteLine($"[conn] {address} answered as {DeviceLabel.ShortId(conn.PeerDeviceId)}, not {DeviceLabel.ShortId(peerDeviceId)} - not its stored address, kept that");
+            }
         }
 
         HandleNewConnection(conn, address);
@@ -1287,11 +1385,23 @@ public sealed partial class ClipLinkEngine
     // hold a socket open indefinitely.
     private static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(15);
 
+    // Incoming connections still in their handshake: anything on the network
+    // can open them, so past this many more are turned away at once.
+    private const int MaxHandshakesInFlight = 32;
+    private int handshakesInFlight;
+
     // One incoming connection, from the TCP accept loop. Everything is
     // caught here: nothing a single peer does may take the listener down.
     private async Task AcceptConnection(TcpClient client)
     {
         string? remoteAddress = null;
+        if (Interlocked.Increment(ref handshakesInFlight) > MaxHandshakesInFlight)
+        {
+            Interlocked.Decrement(ref handshakesInFlight);
+            Console.WriteLine($"[listen] {MaxHandshakesInFlight} handshakes already under way - turned a connection away");
+            client.Close();
+            return;
+        }
         try
         {
             EnableKeepAlive(client);
@@ -1302,9 +1412,9 @@ public sealed partial class ClipLinkEngine
             // reconnect loop), only ever be reconnected TO.
             remoteAddress = (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString();
 
+            using var timeout = new CancellationTokenSource(HandshakeTimeout);
             var conn = await PeerConnection.CreateAsync(client, identity, trustStore, passphraseKeyStore, deviceName.Current,
-                    isBlocked: blockStore.IsBlocked, protocol: options.Protocol)
-                .WaitAsync(HandshakeTimeout);
+                    isBlocked: blockStore.IsBlocked, protocol: options.Protocol, cancellationToken: timeout.Token);
             if (conn == null)
             {
                 // handshake failed - it disconnected, sent a bad handshake, or
@@ -1316,11 +1426,19 @@ public sealed partial class ClipLinkEngine
 
             HandleNewConnection(conn, remoteAddress);
         }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine($"[listen] connection from {remoteAddress ?? "unknown"} sent no handshake in {HandshakeTimeout.TotalSeconds:0} s - dropped");
+            client.Close();
+        }
         catch (Exception ex)
         {
-            // Closing the socket also ends a handshake that timed out above.
             Console.WriteLine($"[listen] connection from {remoteAddress ?? "unknown"} dropped during handshake: {ex.GetType().Name}: {ex.Message}");
             client.Close();
+        }
+        finally
+        {
+            Interlocked.Decrement(ref handshakesInFlight);
         }
     }
 
@@ -1338,9 +1456,10 @@ public sealed partial class ClipLinkEngine
             EnableKeepAlive(client);
             // Same reason as ConnectToPeer's timeout.
             bool answeredAsSelf = false;
+            using var timeout = new CancellationTokenSource(HandshakeTimeout);
             var conn = await PeerConnection.CreateAsync(client, identity, trustStore, passphraseKeyStore, deviceName.Current,
-                    answeredAsSelf: () => answeredAsSelf = true, isBlocked: blockStore.IsBlocked, protocol: options.Protocol)
-                .WaitAsync(HandshakeTimeout);
+                    answeredAsSelf: () => answeredAsSelf = true, isBlocked: blockStore.IsBlocked, protocol: options.Protocol,
+                    cancellationToken: timeout.Token);
             if (conn == null)
             {
                 client.Close();

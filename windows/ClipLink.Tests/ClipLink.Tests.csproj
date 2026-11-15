@@ -6,7 +6,8 @@
        applied and shown as a stack (HistoryBatch.cs, BatchGrouping.cs), with the
        history_head that comes first (HistoryHead.cs, BatchGroups.cs), and the
        version 2 sync: handshake, head, requests and where items are placed
-       (HandshakeMessage.cs, KeysMessage.cs, SyncRequests.cs). Run with
+       (HandshakeMessage.cs, KeysMessage.cs, SyncRequests.cs, Wire.cs), and how content
+       is recognised whoever copied it (ContentPrint.cs, LastWrite.cs). Run with
        `dotnet test windows\ClipLink.Tests`. ClipLink.csproj is a WinUI exe,
        which a test project can't sensibly reference, so the source files are
        linked in (not copied) instead - which is also why these files must stay
@@ -37,9 +38,17 @@
     <Compile Include="..\ClipLink\Engine\Storage\HistoryHead.cs" Link="Engine\HistoryHead.cs" />
     <Compile Include="..\ClipLink\Engine\Storage\BatchGroups.cs" Link="Engine\BatchGroups.cs" />
     <Compile Include="..\ClipLink\Engine\Storage\SyncRequests.cs" Link="Engine\SyncRequests.cs" />
+    <Compile Include="..\ClipLink\Engine\Storage\ContentPrint.cs" Link="Engine\ContentPrint.cs" />
+    <Compile Include="..\ClipLink\Engine\Storage\LastWrite.cs" Link="Engine\LastWrite.cs" />
+    <Compile Include="..\ClipLink\Engine\Storage\PendingApply.cs" Link="Engine\PendingApply.cs" />
+    <Compile Include="..\ClipLink\Engine\Storage\SafeFile.cs" Link="Engine\SafeFile.cs" />
+    <Compile Include="..\ClipLink\Engine\Storage\FilePayload.cs" Link="Engine\FilePayload.cs" />
+    <Compile Include="..\ClipLink\Engine\Storage\FileStore.cs" Link="Engine\FileStore.cs" />
     <Compile Include="..\ClipLink\Engine\Networking\Envelope.cs" Link="Engine\Envelope.cs" />
     <Compile Include="..\ClipLink\Engine\Networking\HandshakeMessage.cs" Link="Engine\HandshakeMessage.cs" />
     <Compile Include="..\ClipLink\Engine\Networking\KeysMessage.cs" Link="Engine\KeysMessage.cs" />
+    <Compile Include="..\ClipLink\Engine\Networking\Wire.cs" Link="Engine\Wire.cs" />
+    <Compile Include="..\ClipLink\Engine\Networking\FileChunkMessage.cs" Link="Engine\FileChunkMessage.cs" />
     <Compile Include="..\ClipLink\BatchGrouping.cs" Link="BatchGrouping.cs" />
   </ItemGroup>
 

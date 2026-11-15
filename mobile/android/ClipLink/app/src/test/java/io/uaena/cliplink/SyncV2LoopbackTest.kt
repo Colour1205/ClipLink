@@ -80,19 +80,20 @@ class SyncV2LoopbackTest {
     }
 
     @Test
-    fun `an item older than the device's own newest is the one that reaches the clipboard`() {
+    fun `items older than the device's own newest are stored by time, and only a newer one reaches the clipboard`() {
         val mine = entryOf("mine", 90, "bob")
         bob.history.addAll(listOf(mine))
         alice.history.addAll(items)
         connect()
         eventually("bob has everything") { bob.history.all().size == 6 }
         Thread.sleep(200)
-        // Older than bob's own item, and still on top of the list and on the clipboard.
-        assertEquals(listOf("e5"), bob.applied.map { it.content })
-        assertEquals(listOf("e5", "e4", "e3", "e2", "e1", "mine"), bob.view())
-        // Alice learns bob's one item the same way.
+        // Older than bob's own item: stored quietly, by time - not on top, not on the clipboard.
+        assertTrue(bob.applied.isEmpty())
+        assertEquals(listOf("mine", "e5", "e4", "e3", "e2", "e1"), bob.view())
+        // Alice learns bob's one item, which is newer than all she has: on top, and on her clipboard.
         eventually("alice has it") { alice.history.all().size == 6 }
         assertEquals(listOf("mine"), alice.applied.map { it.content })
+        assertEquals("mine", alice.view().first())
     }
 
     @Test

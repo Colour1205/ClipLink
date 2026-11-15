@@ -150,27 +150,33 @@ final class ShareModel: ObservableObject {
         if let picture = captures.first(where: Self.isPicture) {
             thumbnail = await Task.detached(priority: .userInitiated) { ShareModel.previewImage(of: picture) }.value
         }
-        sendNext(captures[...], with: engine)
+        // What every device has already - the newest items of the shared
+        // history, as many as are shared - is not signed again: sharing what
+        // was just copied (and synced by the app) is one item, not two.
+        let filter: SendFilter = await withCheckedContinuation { continuation in
+            engine.makeSendFilter(newest: captures.count) { continuation.resume(returning: $0) }
+        }
+        sendNext(captures[...], with: engine, filter: filter)
         poll()
     }
 
     /// One at a time, in the order shared: each file is hashed and stored
     /// before the next, and the entries go out in that order.
-    private func sendNext(_ rest: ArraySlice<Capture>, with engine: SyncEngine) {
+    private func sendNext(_ rest: ArraySlice<Capture>, with engine: SyncEngine, filter: SendFilter) {
         guard let capture = rest.first else { return allStored() }
         let then: (SendResult) -> Void = { [weak self] result in
             ItemLoader.discard(capture)
             self?.stored(result)
-            self?.sendNext(rest.dropFirst(), with: engine)
+            self?.sendNext(rest.dropFirst(), with: engine, filter: filter)
         }
         switch capture {
         case .text(let text):
-            engine.sendText(text, completion: then)
+            engine.sendText(text, filter: filter, completion: then)
         case .image(let png):
             // Within maxInlineImageBytes: shareCaptures made any more a file.
-            engine.sendImage(png: png, completion: then)
+            engine.sendImage(png: png, filter: filter, completion: then)
         case .file(let url, let name):
-            engine.sendFile(at: url, name: name, moveIntoStore: true, completion: then)
+            engine.sendFile(at: url, name: name, moveIntoStore: true, filter: filter, completion: then)
         }
     }
 

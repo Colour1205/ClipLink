@@ -80,7 +80,7 @@ class SharedCopiesTest {
         val now = 10 * day
         val stale = folder(root, "stale", day + 1, now)
 
-        val removed = pruneSharedDir(root, now, day, keepName = null)
+        val removed = pruneSharedDir(root, now, day, keep = emptyList())
 
         assertEquals(1, removed)
         assertFalse(stale.exists())
@@ -92,7 +92,7 @@ class SharedCopiesTest {
         val now = 10 * day
         val fresh = folder(root, "fresh", day - 60_000, now)
 
-        val removed = pruneSharedDir(root, now, day, keepName = null)
+        val removed = pruneSharedDir(root, now, day, keep = emptyList())
 
         assertEquals(0, removed)
         assertTrue(fresh.exists())
@@ -106,9 +106,22 @@ class SharedCopiesTest {
         val onClipboard = folder(root, "abc123", 5 * day, now)
         val other = folder(root, "def456", 5 * day, now)
 
-        val removed = pruneSharedDir(root, now, day, keepName = "abc123")
+        val removed = pruneSharedDir(root, now, day, keep = listOf("abc123"))
 
         assertEquals(1, removed)
+        assertTrue(onClipboard.exists())
+        assertFalse(other.exists())
+    }
+
+    @Test
+    fun theClipOnTheClipboardIsSparedInEitherCase() {
+        val root = temp.newFolder("shared")
+        val now = 10 * day
+        // A blob received from Windows is named in uppercase; the record of the clipboard spells it in lowercase.
+        val onClipboard = folder(root, "ABC123", 5 * day, now)
+        val other = folder(root, "def456", 5 * day, now)
+
+        assertEquals(1, pruneSharedDir(root, now, day, keep = listOf("abc123", "fed654")))
         assertTrue(onClipboard.exists())
         assertFalse(other.exists())
     }
@@ -122,13 +135,13 @@ class SharedCopiesTest {
             setLastModified(now - 3 * day)
         }
 
-        assertEquals(1, pruneSharedDir(root, now, day, keepName = null))
+        assertEquals(1, pruneSharedDir(root, now, day, keep = emptyList()))
         assertFalse(stray.exists())
     }
 
     @Test
     fun aMissingFolderIsNothingToPrune() {
-        assertEquals(0, pruneSharedDir(File(temp.root, "nope"), 0L, day, keepName = null))
+        assertEquals(0, pruneSharedDir(File(temp.root, "nope"), 0L, day, keep = emptyList()))
     }
 
     // ---- limits ---------------------------------------------------------------

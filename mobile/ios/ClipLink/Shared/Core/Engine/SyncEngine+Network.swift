@@ -60,8 +60,10 @@ extension SyncEngine {
 
     func startTimers() {
         guard tickTimer == nil, reconnectTimer == nil else { return }
+        // With some leeway, so the system can fold these wakeups in with others;
+        // a beacon or a reconnect pass a fraction of a second late changes nothing.
         let tick = DispatchSource.makeTimerSource(queue: queue)
-        tick.schedule(deadline: .now() + Self.tickInterval, repeating: Self.tickInterval)
+        tick.schedule(deadline: .now() + Self.tickInterval, repeating: Self.tickInterval, leeway: .milliseconds(150))
         tick.setEventHandler { [weak self] in
             self?.beaconTick()
             self?.retryStalledFiles()
@@ -71,7 +73,7 @@ extension SyncEngine {
         tickTimer = tick
 
         let reconnect = DispatchSource.makeTimerSource(queue: queue)
-        reconnect.schedule(deadline: .now() + Self.reconnectInterval, repeating: Self.reconnectInterval)
+        reconnect.schedule(deadline: .now() + Self.reconnectInterval, repeating: Self.reconnectInterval, leeway: .seconds(1))
         reconnect.setEventHandler { [weak self] in self?.kick(reason: "periodic") }
         reconnect.resume()
         reconnectTimer = reconnect
@@ -816,7 +818,12 @@ extension SyncEngine {
 
     func register(_ link: PeerLink, acceptedByUser: Bool) {
         let id = link.peerDeviceId
-        link.onMessage = { [weak self] link, text in self?.handleMessage(text, from: link) }
+        // Parsed from the decrypted bytes; the temporaries of a big line go
+        // when it is done.
+        link.onMessageData = { [weak self] link, data in
+            guard let self else { return }
+            autoreleasepool { self.handleMessage(data, from: link) }
+        }
         link.onClosed = { [weak self] link in self?.linkClosed(link) }
         link.onOversizedLine = { [weak self] link in
             guard let self else { return }

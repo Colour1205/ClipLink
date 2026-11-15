@@ -65,18 +65,25 @@ class DeviceSettings(context: Context) {
             prefs.edit().putString(TAILSCALE_IP_KEY, value.trim()).commit()
         }
 
+    // The four switches below use apply(), not commit(), like syncedLayout:
+    // they're flipped from the Me screen on the main thread, and apply()
+    // updates the in-memory value at once (so ClipLinkService.start right after
+    // already sees it) while the XML write happens off the UI thread. The
+    // notification's Stop writes keepAlive from a service, and the system
+    // finishes pending apply() writes when a service stops.
+
     /** Whether the foreground service should keep sync alive with the app closed. */
     var keepAlive: Boolean
         get() = prefs.getBoolean(KEEP_ALIVE_KEY, true)
         set(value) {
-            prefs.edit().putBoolean(KEEP_ALIVE_KEY, value).commit()
+            prefs.edit().putBoolean(KEEP_ALIVE_KEY, value).apply()
         }
 
     /** Auto-copy a received item straight to the system clipboard. */
     var autoApply: Boolean
         get() = prefs.getBoolean(AUTO_APPLY_KEY, true)
         set(value) {
-            prefs.edit().putBoolean(AUTO_APPLY_KEY, value).commit()
+            prefs.edit().putBoolean(AUTO_APPLY_KEY, value).apply()
         }
 
     /**
@@ -85,13 +92,13 @@ class DeviceSettings(context: Context) {
      * This is the closest Android allows to the Windows daemon's silent
      * background capture: reading the clipboard requires foreground focus
      * since Android 10, so "when the app comes forward" is the only automatic
-     * moment available. Echo suppression (see ClipboardBridge.lastKnownHash)
+     * moment available. Echo suppression (see ClipboardBridge.lastWrite)
      * keeps it from re-sending something that just arrived.
      */
     var autoCapture: Boolean
         get() = prefs.getBoolean(AUTO_CAPTURE_KEY, true)
         set(value) {
-            prefs.edit().putBoolean(AUTO_CAPTURE_KEY, value).commit()
+            prefs.edit().putBoolean(AUTO_CAPTURE_KEY, value).apply()
         }
 
     /**
@@ -110,7 +117,7 @@ class DeviceSettings(context: Context) {
     var dynamicColor: Boolean
         get() = prefs.getBoolean(DYNAMIC_COLOR_KEY, true)
         set(value) {
-            prefs.edit().putBoolean(DYNAMIC_COLOR_KEY, value).commit()
+            prefs.edit().putBoolean(DYNAMIC_COLOR_KEY, value).apply()
         }
 
     private companion object {

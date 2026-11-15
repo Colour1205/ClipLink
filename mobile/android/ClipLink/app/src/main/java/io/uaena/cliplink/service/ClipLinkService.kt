@@ -48,6 +48,13 @@ class ClipLinkService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            // Stop means keep-alive off, as the Me screen's switch does: left on,
+            // the switch still said so, and the next time the app was opened it
+            // started the service again - Stop looked like it hadn't worked.
+            val engine = ClipLinkApplication.engine()
+            engine.deviceSettings.keepAlive = false
+            // And what keep-alive off stops in the background stops now too.
+            engine.onKeepAliveStopped()
             stopSelf()
             return START_NOT_STICKY
         }

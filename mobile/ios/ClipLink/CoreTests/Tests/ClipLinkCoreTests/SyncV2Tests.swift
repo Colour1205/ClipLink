@@ -209,16 +209,21 @@ final class SyncV2Tests: XCTestCase {
         XCTAssertEqual(wanted(head, gone: ["k3"], pending: ["k2"]), ["k1"])
     }
 
-    func testOnlyWhatTheHistoryWouldKeepIsWorthAskingForButCIsAlwaysAsked() {
+    func testOnlyWhatTheHistoryWouldKeepIsWorthAskingForNotEvenTheNewestMissingOne() {
         // 25 entries here, at 1000, 1010 ... 1240 ms.
         let local = (0..<25).map { ("local-\($0)", Int64(1000 + 10 * $0)) }
         // Newest first as the sender lists them: m0 is the newest, m2 would land inside our 25, m1 would not.
         let head = HistoryHeadV2(keys: ["m0", "m2", "m1"], times: [2000, 1105, 500], deleted: [])
         XCTAssertEqual(wanted(head, local: local), ["m0", "m2"], "the 25 newest of ours and theirs: m1 is too old to keep")
 
-        // C is asked for whatever its age: everything else here is newer, and it still goes first.
+        // Older than everything a full history here keeps: an item trimmed here, or
+        // one a partly paired peer still holds, is not fetched again on every reconnect.
         let older = HistoryHeadV2(keys: ["c", "d"], times: [500, 400], deleted: [])
-        XCTAssertEqual(wanted(older, local: local), ["c"], "only C: d is not worth it")
+        XCTAssertEqual(wanted(older, local: local), [], "not even the first one")
+
+        // With room in the history, anything missing is worth having.
+        XCTAssertEqual(wanted(older, local: Array(local.prefix(23))), ["c", "d"])
+        XCTAssertEqual(wanted(older, local: Array(local.prefix(24))), ["c"], "one slot left: the newer of the two")
     }
 
     func testWithoutUsableTimesEverythingMissingIsAskedForUpTo25() {
@@ -535,48 +540,123 @@ final class SyncV2Tests: XCTestCase {
         XCTAssertTrue(snapshot(engine).groups.isEmpty)
     }
 
-    func testCMayBeOlderThanWhatIsHereAndStillLandsOnTheClipboardAndOnTop() throws {
+    func testACThatIsNotNewerThanWhatIsHereIsStoredQuietlyByTime() throws {
         let (engine, recorder) = makeEngine()
         let peer = trustedPeer(engine)
         engine.history.add(contentsOf: try signedBatch(3, from: peer, start: 1_800_000_000, label: "mine"))
         let old = try sign("old", at: 1_700_000_000, by: peer)
 
-        answer(engine, [old], convenience: true, last: true, expected: 1, from: peer)
+        let outcome = answer(engine, [old], convenience: true, last: true, expected: 1, from: peer)
         settle()
 
-        XCTAssertEqual(recorder.received.map(\.content), ["old"], "even though it is older than the newest item here")
+        XCTAssertEqual(outcome.fresh.map(\.content), ["old"], "stored")
+        XCTAssertTrue(outcome.quiet, "and the rest of its sync is quiet too")
+        XCTAssertNil(outcome.group)
+        XCTAssertTrue(recorder.received.isEmpty, "not on the clipboard, no notification")
+        XCTAssertNil(engine.queue.sync { engine.lastConvenience })
         let snap = snapshot(engine)
-        XCTAssertEqual(snap.items.last?.entry.content, "old", "by the clock it is the oldest")
-        XCTAssertEqual(StackPlanner.rows(items: snap.items, groups: snap.blocks).map(\.item.entry.content), ["old", "mine 2", "mine 1", "mine 0"])
+        XCTAssertTrue(snap.blocks.isEmpty, "not on top")
+        XCTAssertEqual(StackPlanner.rows(items: snap.items, groups: snap.blocks).map(\.item.entry.content), ["mine 2", "mine 1", "mine 0", "old"], "a card by its time")
     }
 
-    func testTheTrimSparesCAndDropsTheOldestOtherItemUntilANewerBlockArrives() throws {
+    func testACAsOldAsTheNewestItemHereIsNotFreshButAnyCIsInAnEmptyHistory() throws {
+        let (engine, recorder) = makeEngine()
+        let peer = trustedPeer(engine)
+        let first = try sign("first", at: 1_790_000_000, by: peer)
+        XCTAssertTrue(engine.queue.sync { engine.isFresh(first) }, "an empty history: anything is newer")
+        engine.history.add(first)
+        let same = try sign("same moment", at: 1_790_000_000, by: peer)
+        XCTAssertFalse(engine.queue.sync { engine.isFresh(same) }, "strictly newer only")
+
+        let outcome = answer(engine, [same], convenience: true, last: true, expected: 1, from: peer)
+        settle()
+        XCTAssertTrue(outcome.quiet)
+        XCTAssertTrue(recorder.received.isEmpty)
+    }
+
+    func testTheAnswersAfterAQuietCAreQuietTooUpToTheNextSync() throws {
+        let now = Date()
+        func request(_ convenience: Bool) -> HistoryRequest { HistoryRequest(keys: ["k"], convenience: convenience, sentAt: now) }
+        let waiting = [request(false), request(false), request(true), request(false)]
+        XCTAssertEqual(SyncEngine.quietingRestOfSync(waiting).map(\.quiet), [true, true, false, false], "the next convenience request starts another sync")
+        XCTAssertEqual(SyncEngine.quietingRestOfSync([]).count, 0)
+
+        // A quiet request's answer joins no block, even one that is waiting on the connection.
+        let (engine, recorder) = makeEngine()
+        let peer = trustedPeer(engine)
+        let front = try sign("front", at: 1_790_000_100, by: peer)
+        answer(engine, [front], convenience: true, last: false, expected: 3, from: peer)
+        let rest = try signedBatch(2, from: peer, start: 1_790_000_000, label: "rest")
+        let quietRequest = HistoryRequest(keys: rest.map(key), convenience: false, sentAt: now, quiet: true)
+        let outcome = engine.queue.sync {
+            engine.applyAnswer(rest, to: quietRequest, last: true, expectedSize: 3, from: peer.publicKeyBase64, connection: connectionOne)
+        }
+        settle()
+        XCTAssertEqual(outcome.fresh.count, 2)
+        XCTAssertNil(outcome.group)
+        let snap = snapshot(engine)
+        XCTAssertEqual(snap.blocks.first?.memberIDs, [HistoryStore.identity(of: front)], "the quiet items are cards by time")
+        XCTAssertNil(snap.blocks.first?.expectedSize, "and the block stopped waiting with the last answer")
+        XCTAssertEqual(recorder.received.map(\.content), ["front"])
+    }
+
+    // MARK: - The rest of a sync, a few keys to a request
+
+    func testTheRestOfASyncIsAskedForAFewKeysToARequestInOrder() {
+        let now = Date()
+        let keys = (0..<10).map { "k\($0)" }
+        let requests = SyncEngine.restRequests(keys, sentAt: now, quiet: false)
+        XCTAssertEqual(requests.map(\.keys), [["k0", "k1", "k2", "k3"], ["k4", "k5", "k6", "k7"], ["k8", "k9"]])
+        XCTAssertTrue(requests.allSatisfy { !$0.convenience && !$0.quiet && !$0.expired && $0.sentAt == now })
+        XCTAssertEqual(SyncEngine.restRequests(Array(keys.prefix(4)), sentAt: now, quiet: false).map(\.keys), [["k0", "k1", "k2", "k3"]])
+        XCTAssertEqual(SyncEngine.restRequests(Array(keys.prefix(5)), sentAt: now, quiet: true).map(\.quiet), [true, true])
+        XCTAssertTrue(SyncEngine.restRequests([], sentAt: now, quiet: false).isEmpty)
+        // A quiet C quiets every one of them, up to the next sync.
+        let waiting = requests + [HistoryRequest(keys: ["c"], convenience: true, sentAt: now)]
+        XCTAssertEqual(SyncEngine.quietingRestOfSync(waiting).map(\.quiet), [true, true, true, false])
+    }
+
+    func testAStackFillsInOverSeveralAnswersAndOnlyCReachesTheClipboard() throws {
+        let (engine, recorder) = makeEngine()
+        let peer = trustedPeer(engine)
+        let newestFirst = Array(try signedBatch(9, from: peer).reversed())
+
+        answer(engine, [newestFirst[0]], convenience: true, last: false, expected: 9, from: peer)
+        answer(engine, Array(newestFirst[1...4]), convenience: false, last: false, expected: 9, from: peer)
+        var snap = snapshot(engine)
+        XCTAssertEqual(snap.groups.first?.memberIDs.count, 5)
+        XCTAssertEqual(snap.groups.first?.expectedSize, 9, "the badge still counts all of the sync")
+
+        answer(engine, Array(newestFirst[5...8]), convenience: false, last: true, expected: 9, from: peer)
+        settle()
+        snap = snapshot(engine)
+        XCTAssertEqual(snap.items.count, 9)
+        XCTAssertEqual(snap.groups.count, 1)
+        XCTAssertEqual(snap.groups.first?.memberIDs.count, 9)
+        XCTAssertNil(snap.groups.first?.expectedSize, "the real count once the last answer is in")
+        XCTAssertEqual(recorder.received.map(\.content), ["item 8"], "C only")
+    }
+
+    func testAFreshCStaysAndAnOlderMemberOfItsSyncIsTheOneTheTrimCuts() throws {
         let (engine, _) = makeEngine()
         let peer = trustedPeer(engine)
         engine.history.add(contentsOf: try signedBatch(Wire.historyCap, from: peer, start: 1_700_000_000, label: "base"))
-        let c = try sign("c", at: 1_600_000_000, by: peer)
+        let c = try sign("c", at: 1_750_000_000, by: peer)
 
         answer(engine, [c], convenience: true, last: false, expected: 2, from: peer)
         var contents = snapshot(engine).items.map(\.entry.content)
         XCTAssertEqual(contents.count, Wire.historyCap, "the total stays 25")
         XCTAssertTrue(contents.contains("c"))
-        XCTAssertFalse(contents.contains("base 0"), "the oldest other item went instead")
+        XCTAssertFalse(contents.contains("base 0"), "the oldest item went")
+        XCTAssertEqual(engine.queue.sync { engine.batchGroups.convenienceID }, HistoryStore.identity(of: c))
 
         // Another member of the same sync, older than the rest: it is the one cut, C stays.
         let later = try sign("later member", at: 1_650_000_000, by: peer)
         answer(engine, [later], convenience: false, last: true, expected: 2, from: peer)
         contents = snapshot(engine).items.map(\.entry.content)
         XCTAssertEqual(contents.count, Wire.historyCap)
-        XCTAssertTrue(contents.contains("c"), "only C is protected, and it is")
-        XCTAssertFalse(contents.contains("later member"), "the other stack members are not")
-
-        // A live item is a newer block: C is trimmed by the normal rules from the next trim on.
-        engine.sendText("live")
-        engine.queue.sync {}
-        contents = snapshot(engine).items.map(\.entry.content)
-        XCTAssertEqual(contents.count, Wire.historyCap)
-        XCTAssertTrue(contents.contains("live"))
-        XCTAssertFalse(contents.contains("c"))
+        XCTAssertTrue(contents.contains("c"))
+        XCTAssertFalse(contents.contains("later member"), "older than everything kept: cut at once")
     }
 
     func testALiveItemAfterASyncIsAboveItsBlockEvenWhenTheBlockIsNewerByTheClock() throws {
@@ -778,10 +858,13 @@ final class SyncV2Tests: XCTestCase {
         XCTAssertEqual(recorder.received.map(\.content), ["first C"], "older and equal: not on the clipboard")
         XCTAssertEqual(second.fresh.map(\.content), ["older C"], "but in the history")
         XCTAssertEqual(third.fresh.map(\.content), ["same time C"])
+        XCTAssertTrue(second.quiet && third.quiet, "not newer than what is here: stored quietly")
         let snap = snapshot(engine)
         XCTAssertEqual(snap.items.count, 3)
-        XCTAssertEqual(snap.blocks.count, 3, "each still leads a block of its own")
-        XCTAssertEqual(StackPlanner.rows(items: snap.items, groups: snap.blocks).map(\.item.entry.content), ["same time C", "older C", "first C"])
+        XCTAssertEqual(snap.blocks.count, 1, "only the first leads a block")
+        let rows = StackPlanner.rows(items: snap.items, groups: snap.blocks).map(\.item.entry.content)
+        XCTAssertEqual(rows.first, "first C")
+        XCTAssertEqual(rows.last, "older C", "the others are cards by time")
         XCTAssertEqual(engine.queue.sync { engine.batchGroups.convenienceID }, HistoryStore.identity(of: first), "only what went to the clipboard is protected")
 
         // A newer one is applied as always, and becomes the one to beat.
@@ -792,7 +875,7 @@ final class SyncV2Tests: XCTestCase {
         XCTAssertEqual(engine.queue.sync { engine.lastConvenience?.time }, SyncEngine.ticks(of: newer))
     }
 
-    func testAConvenienceItemAfterTheWindowGoesToTheClipboardEvenIfOlder() throws {
+    func testAConvenienceItemAfterTheWindowGoesToTheClipboardEvenIfOlderThanTheLastOne() throws {
         let (engine, recorder) = makeEngine()
         let peer = trustedPeer(engine)
         let c1 = try sign("c1", at: 1_790_000_100, by: peer)
@@ -801,7 +884,12 @@ final class SyncV2Tests: XCTestCase {
         let start = Date()
 
         answer(engine, [c1], convenience: true, last: true, expected: 1, from: peer, now: start)
-        answer(engine, [c2], convenience: true, last: true, expected: 1, from: peer, now: start.addingTimeInterval(Wire.requestTimeout - 1))
+        // c1 is deleted here, so c2 is newer than everything left - but not than the item
+        // that went to the clipboard moments ago.
+        engine.queue.sync { _ = engine.applyRemoteDeletions([key(c1)]) }
+        let second = answer(engine, [c2], convenience: true, last: true, expected: 1, from: peer, now: start.addingTimeInterval(Wire.requestTimeout - 1))
+        XCTAssertFalse(second.quiet, "fresh")
+        XCTAssertEqual(snapshot(engine).blocks.last?.frontID, HistoryStore.identity(of: c2), "it leads its block")
         XCTAssertEqual(engine.queue.sync { engine.lastConvenience?.time }, SyncEngine.ticks(of: c1), "89 seconds: still the same reconnect")
         settle()
         XCTAssertEqual(recorder.received.map(\.content), ["c1"])
@@ -815,24 +903,23 @@ final class SyncV2Tests: XCTestCase {
         XCTAssertFalse(engine.queue.sync { engine.shouldApplyConvenience(c2, now: start.addingTimeInterval(Wire.requestTimeout + 2)) }, "c2 is not newer than c3: 90 seconds are not over")
     }
 
-    func testAConvenienceItemThatStaysOffTheClipboardIsNotProtectedFromTheTrim() throws {
+    func testAConvenienceItemOlderThanAFullHistoryIsCutAtOnceAndProtectsNothing() throws {
         let (engine, recorder) = makeEngine()
         let peer = trustedPeer(engine)
         engine.history.add(contentsOf: try signedBatch(Wire.historyCap, from: peer, start: 1_700_000_000, label: "base"))
-        let c1 = try sign("c1", at: 1_600_000_000, by: peer)
-        let c2 = try sign("c2", at: 1_500_000_000, by: peer)
+        let trimmed = try sign("trimmed here long ago", at: 1_600_000_000, by: peer)
 
-        answer(engine, [c1], convenience: true, last: true, expected: 1, from: peer)
-        XCTAssertEqual(snapshot(engine).items.count, Wire.historyCap)
-        let second = answer(engine, [c2], convenience: true, last: true, expected: 1, from: peer)
+        let outcome = answer(engine, [trimmed], convenience: true, last: true, expected: 1, from: peer)
         settle()
 
         let contents = snapshot(engine).items.map(\.entry.content)
         XCTAssertEqual(contents.count, Wire.historyCap)
-        XCTAssertTrue(contents.contains("c1"), "the item on the clipboard is spared")
-        XCTAssertFalse(contents.contains("c2"), "the one that is not is the oldest: cut at once")
-        XCTAssertTrue(second.fresh.isEmpty)
-        XCTAssertEqual(recorder.received.map(\.content), ["c1"])
+        XCTAssertFalse(contents.contains("trimmed here long ago"), "older than everything kept: cut at once")
+        XCTAssertTrue(contents.contains("base 0"), "nothing newer went in its place")
+        XCTAssertTrue(outcome.fresh.isEmpty)
+        XCTAssertTrue(outcome.quiet)
+        XCTAssertTrue(recorder.received.isEmpty, "the clipboard never hears of it")
+        XCTAssertNil(engine.queue.sync { engine.batchGroups.convenienceID })
     }
 
     func testASyncWhoseFrontIsNotProtectedLeavesTheProtectionWhereItWas() {
@@ -842,6 +929,209 @@ final class SyncV2Tests: XCTestCase {
         XCTAssertEqual(group?.frontID, "c2", "it still leads its stack")
         XCTAssertEqual(tracker.blocks.count, 2)
         XCTAssertEqual(tracker.convenienceID, "c1")
+    }
+
+    // MARK: - One card per content, and deleting it
+
+    func testTwoEntriesWithTheSameContentAreOneCardAndDeletingItDeletesBoth() throws {
+        let (engine, _) = makeEngine()
+        let first = trustedPeer(engine)
+        let second = trustedPeer(engine)
+        let older = try sign("same text", at: 1_790_000_000, by: first)
+        let newer = try sign("same text\r\n", at: 1_790_000_010, by: second)
+        let other = try sign("other", at: 1_790_000_005, by: first)
+        engine.history.add(contentsOf: [older, newer, other])
+
+        var snap = snapshot(engine)
+        XCTAssertEqual(snap.items.count, 3, "both stay in the history")
+        let rows = StackPlanner.rows(items: snap.items, groups: snap.blocks)
+        XCTAssertEqual(rows.map(\.item.entry.signature), [newer.signature, other.signature], "the newest twin shows, line endings aside")
+
+        engine.deleteItem(id: rows[0].item.id)
+        engine.queue.sync {}
+        snap = snapshot(engine)
+        XCTAssertEqual(snap.items.map(\.entry.content), ["other"], "the hidden twin goes too, or it would come back")
+        XCTAssertTrue(engine.queue.sync { engine.deleted.contains(older) && engine.deleted.contains(newer) })
+    }
+
+    func testALiveTwinOnTopHidesTheOlderCardEvenInsideAStack() throws {
+        let (engine, _) = makeEngine()
+        let peer = trustedPeer(engine)
+        let newestFirst = Array(try signedBatch(3, from: peer).reversed())
+        answer(engine, [newestFirst[0]], convenience: true, last: false, expected: 3, from: peer)
+        answer(engine, Array(newestFirst.dropFirst()), convenience: false, last: true, expected: 3, from: peer)
+        XCTAssertEqual(StackPlanner.rows(items: snapshot(engine).items, groups: snapshot(engine).blocks).first?.stack?.memberIDs.count, 3)
+
+        // This device copies "item 1" again: on top, and the stack loses its twin.
+        engine.sendText("item 1")
+        engine.queue.sync {}
+        let snap = snapshot(engine)
+        let rows = StackPlanner.rows(items: snap.items, groups: snap.blocks)
+        XCTAssertEqual(rows.map(\.item.entry.content), ["item 1", "item 2"])
+        XCTAssertTrue(rows[0].item.isOwn)
+        XCTAssertEqual(rows[1].stack?.memberIDs.count, 2, "counted from the members left")
+    }
+
+    // MARK: - Shares: what every device has already
+
+    func testAShareOfWhatIsAlreadyNewestIsNotSignedAgainAndTwoOfOneShareGoOnce() throws {
+        let (engine, _) = makeEngine()
+        engine.sendText("copied and synced")
+        engine.queue.sync {}
+        let made = expectation(description: "filter")
+        var madeFilter: SendFilter?
+        engine.makeSendFilter(newest: 1) { madeFilter = $0; made.fulfill() }
+        wait(for: [made], timeout: 5)
+        let filter = try XCTUnwrap(madeFilter)
+        XCTAssertEqual(filter.prints, [ContentPrint.text("copied and synced")], "the newest entry, before the share")
+
+        let done = expectation(description: "sent")
+        done.expectedFulfillmentCount = 3
+        var results: [SendResult] = []
+        engine.sendText("copied and synced\n", filter: filter) { results.append($0); done.fulfill() }
+        engine.sendText("new", filter: filter) { results.append($0); done.fulfill() }
+        engine.sendText("new", filter: filter) { results.append($0); done.fulfill() }
+        wait(for: [done], timeout: 5)
+
+        XCTAssertEqual(results.count, 3)
+        XCTAssertTrue(results.allSatisfy { if case .sent = $0 { return true } else { return false } }, "reported as shared")
+        XCTAssertEqual(snapshot(engine).items.map(\.entry.content), ["new", "copied and synced"], "signed once each")
+    }
+
+    /// The app's on-open capture is checked against the history as it is once
+    /// the reload of coming back is done - items the Share extension stored
+    /// meanwhile included - not against the list it last showed.
+    func testTheCaptureCheckSeesTheHistoryAfterTheWorkAlreadyQueued() throws {
+        let (engine, _) = makeEngine()
+        let peer = trustedPeer(engine)
+        engine.history.add(contentsOf: [try sign("older", at: 1_790_000_000, by: peer), try sign("newer\r\n", at: 1_790_000_001, by: peer)])
+        // Another process writes the same history; the reload is queued first.
+        let directory = engine.config.storageDirectory
+        HistoryStore(directory: directory, fileStore: FileStore(directory: directory)).add(try sign("shared", at: 1_790_000_002, by: peer))
+        engine.queue.async { engine.reloadFromDisk() }
+
+        let asked = expectation(description: "prints")
+        var answer: (all: Set<String>, newest: Set<String>)?
+        engine.contentPrints(newest: 1) { all, newest in
+            answer = (all: all, newest: newest)
+            asked.fulfill()
+        }
+        wait(for: [asked], timeout: 5)
+        let prints = try XCTUnwrap(answer)
+        XCTAssertEqual(prints.all, Set([ContentPrint.text("older"), ContentPrint.text("newer"), ContentPrint.text("shared")]))
+        XCTAssertEqual(prints.newest, Set([ContentPrint.text("shared")]), "the shared item is the newest")
+    }
+
+    // MARK: - A file waiting for its bytes
+
+    func testAFileWaitingForItsBytesIsAppliedOnlyIfNothingNewerCameAndInTime() {
+        let entry = ClipboardEntry(content: "{}", type: Wire.EntryType.file, deviceId: "d", timestamp: "")
+        let armed = Date(timeIntervalSince1970: 1_000_000)
+        var pending = PendingFile(entry: entry, apply: true, armedAt: armed, armedGeneration: 4, armedSerial: 7)
+        XCTAssertTrue(pending.mayApply(now: armed.addingTimeInterval(60), generation: 4, serial: 7))
+        XCTAssertTrue(pending.mayApply(now: armed.addingTimeInterval(PendingFile.applyLimit), generation: 4, serial: 7))
+        XCTAssertFalse(pending.mayApply(now: armed.addingTimeInterval(PendingFile.applyLimit + 1), generation: 4, serial: 7), "over 10 minutes")
+        XCTAssertFalse(pending.mayApply(now: armed, generation: 5, serial: 7), "the user changed the clipboard")
+        XCTAssertFalse(pending.mayApply(now: armed, generation: 4, serial: 8), "a newer entry was meant for it")
+        pending.apply = false
+        XCTAssertFalse(pending.mayApply(now: armed, generation: 4, serial: 7))
+        XCTAssertFalse(PendingFile(entry: entry, apply: true).mayApply(now: armed, generation: 0, serial: 0), "never armed")
+    }
+
+    func testAnOlderFileWhoseBytesLandAfterANewerItemIsNotApplied() throws {
+        let (engine, recorder) = makeEngine()
+        let peer = trustedPeer(engine)
+        let bytes = Data("the file".utf8)
+        let hash = ContentHash.sha256Hex(bytes)
+        let descriptor = FilePayload(fileName: "late.bin", fileHash: hash, fileSize: Int64(bytes.count)).jsonString()
+        let file = try EntrySigning.sign(content: descriptor, type: Wire.EntryType.file, identity: peer,
+                                         timestamp: DotNetTimestamp.now(Date(timeIntervalSince1970: 1_790_000_000)))
+        let text = try sign("newer text", at: 1_790_000_001, by: peer)
+        engine.queue.sync {
+            engine.history.add(file)
+            engine.received(file, apply: true)
+            engine.history.add(text)
+            engine.received(text, apply: true)
+            try? engine.files.write(bytes, hash: hash)
+            engine.fulfillPendingFile(FileStore.key(hash))
+        }
+        settle()
+        XCTAssertEqual(recorder.received.map(\.content), ["newer text"], "the file only finishes its card")
+
+        // On its own, the same arrives and is applied.
+        let (fresh, freshRecorder) = makeEngine()
+        let sender = trustedPeer(fresh)
+        let alone = try EntrySigning.sign(content: descriptor, type: Wire.EntryType.file, identity: sender)
+        fresh.queue.sync {
+            fresh.history.add(alone)
+            fresh.received(alone, apply: true)
+            try? fresh.files.write(bytes, hash: hash)
+            fresh.fulfillPendingFile(FileStore.key(hash))
+        }
+        settle()
+        XCTAssertEqual(freshRecorder.received.map(\.type), [Wire.EntryType.file])
+    }
+
+    /// File hashes are compared whatever their case (sync-dedupe-spec rule 4):
+    /// iOS sends them in upper case, the other platforms in lower.
+    func testAFileHashNamesTheSameBytesInEitherCase() throws {
+        let (engine, recorder) = makeEngine()
+        let peer = trustedPeer(engine)
+        let bytes = Data("either case".utf8)
+        let lower = ContentHash.sha256Hex(bytes)
+        func fileEntry(_ hash: String, at seconds: TimeInterval) throws -> ClipboardEntry {
+            try EntrySigning.sign(content: FilePayload(fileName: "a.txt", fileHash: hash, fileSize: Int64(bytes.count)).jsonString(),
+                                  type: Wire.EntryType.file, identity: peer,
+                                  timestamp: DotNetTimestamp.now(Date(timeIntervalSince1970: seconds)))
+        }
+        let upperEntry = try fileEntry(lower.uppercased(), at: 1_790_000_000)
+        let lowerEntry = try fileEntry(lower, at: 1_790_000_001)
+
+        // Waiting under the upper-case hash; the bytes land under the lower-case one.
+        engine.queue.sync {
+            engine.history.add(upperEntry)
+            engine.received(upperEntry, apply: true)
+            try? engine.files.write(bytes, hash: lower)
+            engine.fulfillPendingFile(FileStore.key(lower))
+        }
+        settle()
+        XCTAssertEqual(recorder.received.map(\.content), [upperEntry.content], "fulfilled")
+        XCTAssertTrue(engine.files.exists(lower.uppercased()), "and found in either case")
+
+        // Two entries name the same bytes, one in each case: the blob stays while either does.
+        engine.history.add(lowerEntry)
+        engine.history.remove(identity: HistoryStore.identity(of: upperEntry))
+        XCTAssertTrue(engine.files.exists(lower), "the other entry still uses it")
+        engine.history.remove(identity: HistoryStore.identity(of: lowerEntry))
+        XCTAssertFalse(engine.files.exists(lower))
+    }
+
+    // MARK: - Exported copies
+
+    func testAnExportedCopyGoesWithItsBlobWhenTheItemIsTrimmedAndOrphansGoAtStart() throws {
+        let (engine, _) = makeEngine()
+        let peer = trustedPeer(engine)
+        let bytes = Data("exported".utf8)
+        let hash = ContentHash.sha256Hex(bytes)
+        try engine.files.write(bytes, hash: hash)
+        let file = try EntrySigning.sign(content: FilePayload(fileName: "a.txt", fileHash: hash, fileSize: Int64(bytes.count)).jsonString(),
+                                         type: Wire.EntryType.file, identity: peer,
+                                         timestamp: DotNetTimestamp.now(Date(timeIntervalSince1970: 1_700_000_000)))
+        engine.history.add(file)
+        let export = try engine.files.exportCopy(hash: hash, fileName: "a.txt")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: export.path))
+
+        // 25 newer items push it out.
+        engine.history.add(contentsOf: try signedBatch(Wire.historyCap, from: peer, start: 1_800_000_000))
+        XCTAssertFalse(engine.files.exists(hash))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: export.path), "the copy held all the bytes")
+
+        // A copy left behind by an older build goes when the app's node starts.
+        let orphan = engine.files.exports.appendingPathComponent(String(repeating: "c", count: 64), isDirectory: true)
+        try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
+        let restarted = SyncEngine(config: EngineConfig(storageDirectory: engine.config.storageDirectory), identity: SoftwareIdentity(), secrets: MemorySecretStore())
+        engines.append(restarted)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphan.path))
     }
 
     // MARK: - Round 2: parsing
@@ -858,14 +1148,12 @@ final class SyncV2Tests: XCTestCase {
         XCTAssertEqual(HistoryHeadV2.parse("{\"Keys\":[\(keys)]}")?.keys, (0..<25).map { "k\($0)" })
     }
 
-    func testTheWantedListIsNeverLongerThan25EvenWhenTheTimesAreOutOfOrder() {
-        // C is the oldest, the rest get newer down the list: the 25 newest by time are m5 ... m29,
-        // and C is always wanted on top of them - 26 before the cut.
+    func testTheWantedListIsTheNewest25InTheSendersOrderEvenWhenTheTimesAreOutOfOrder() {
+        // The first key is the oldest, the rest get newer down the list: the 25 newest
+        // by time are m5 ... m29, and the first key is not one of them.
         let keys = ["c"] + (1...29).map { "m\($0)" }
         let times = [Int64(1)] + (1...29).map { Int64(1000 + $0) }
         let result = wanted(HistoryHeadV2(keys: keys, times: times, deleted: []))
-        XCTAssertEqual(result.count, 25)
-        XCTAssertEqual(result.first, "c")
-        XCTAssertEqual(result.last, "m28", "cut after C and the rest, in the sender's order")
+        XCTAssertEqual(result, (5...29).map { "m\($0)" })
     }
 }

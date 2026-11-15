@@ -321,3 +321,32 @@ fun arrange(entries: List<ClipboardEntry>, blocks: List<PlacedBlock>): List<Clip
     for (entry in timeline) place(entry.deletionKey)
     return result
 }
+
+/**
+ * [ordered] (the list top to bottom, as [arrange] lays it out) with every
+ * entry whose content is already shown above it left out: one card per
+ * content, and the topmost wins - a live item is on top, so it beats an older
+ * card, and after a restart the newest timestamp does. Entries [keyOf] gives
+ * no key for are never folded. Display only: the history, the heads built
+ * from it and the trim keep every twin, so nothing a peer sees changes.
+ */
+fun <T> foldTwins(ordered: List<T>, keyOf: (T) -> String?): List<T> {
+    val seen = HashSet<String>()
+    return ordered.filter { item ->
+        val key = keyOf(item)
+        key == null || seen.add(key)
+    }
+}
+
+/**
+ * The tags of [tags] that still make a stack once [shown] (the list after
+ * [foldTwins]) is all the list shows: a group is counted by the cards it
+ * still shows, and one left with fewer than [GROUP_MIN_ITEMS] is a plain card
+ * - unless it is provisional, its rest still on the way. A group whose front
+ * card was folded away has the next of its cards in front, as when the front
+ * is deleted: the list keeps its order.
+ */
+fun tagsOfShown(shown: List<ClipboardEntry>, tags: Map<String, GroupTag>): Map<String, GroupTag> {
+    val counts = shown.mapNotNull { tags[it.deletionKey]?.id }.groupingBy { it }.eachCount()
+    return tags.filterValues { it.expectedSize > 0 || (counts[it.id] ?: 0) >= GROUP_MIN_ITEMS }
+}

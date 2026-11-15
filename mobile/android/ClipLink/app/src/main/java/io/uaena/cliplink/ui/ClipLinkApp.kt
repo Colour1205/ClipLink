@@ -13,13 +13,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.ContentPaste
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.outlined.ContentPaste
-import androidx.compose.material.icons.outlined.Devices
-import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -47,6 +40,13 @@ import io.uaena.cliplink.engine.DeviceRow
 import io.uaena.cliplink.engine.LogLine
 import io.uaena.cliplink.engine.PairingRequest
 import io.uaena.cliplink.engine.SyncedItem
+import io.uaena.cliplink.ui.icons.Icons
+import io.uaena.cliplink.ui.icons.filled.ContentPaste
+import io.uaena.cliplink.ui.icons.filled.Devices
+import io.uaena.cliplink.ui.icons.filled.Person
+import io.uaena.cliplink.ui.icons.outlined.ContentPaste
+import io.uaena.cliplink.ui.icons.outlined.Devices
+import io.uaena.cliplink.ui.icons.outlined.Person
 import kotlinx.coroutines.launch
 
 enum class Tab(val label: String, val selectedIcon: ImageVector, val icon: ImageVector) {

@@ -4,6 +4,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
+import java.security.InvalidKeyException
 import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.PublicKey
@@ -26,6 +27,15 @@ import java.security.spec.X509EncodedKeySpec
 class DeviceIdentity {
 
     private var cachedPublicKeyBase64: String? = null
+
+    /**
+     * The private key's handle after the first lookup. It is only a reference
+     * to the key inside the Keystore - no key material - so keeping it costs
+     * nothing in security, and saves every signature (each copied item, each
+     * handshake) two Keystore loads and their binder round trips.
+     */
+    @Volatile
+    private var cachedPrivateKey: PrivateKey? = null
 
     private fun keyStore(): KeyStore =
         KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
@@ -55,9 +65,10 @@ class DeviceIdentity {
     }
 
     private fun privateKey(): PrivateKey {
+        cachedPrivateKey?.let { return it }
         ensureKey()
         val entry = keyStore().getEntry(KEY_ALIAS, null) as KeyStore.PrivateKeyEntry
-        return entry.privateKey
+        return entry.privateKey.also { cachedPrivateKey = it }
     }
 
     /** Base64 X.509 SPKI DER - this device's ID on the wire. */
@@ -76,7 +87,15 @@ class DeviceIdentity {
      */
     fun sign(data: ByteArray): ByteArray {
         val signature = Signature.getInstance(SIGNATURE_ALGORITHM)
-        signature.initSign(privateKey())
+        try {
+            signature.initSign(privateKey())
+        } catch (e: InvalidKeyException) {
+            // A cached handle the Keystore no longer accepts (the key was
+            // invalidated or replaced underneath it): look it up once more.
+            // KeyPermanentlyInvalidatedException is a subclass, so it lands here.
+            cachedPrivateKey = null
+            signature.initSign(privateKey())
+        }
         signature.update(data)
         return EcdsaDer.derToRaw(signature.sign())
     }

@@ -26,6 +26,9 @@ const AUTO_CAPTURE_KEY = 'auto_capture_on_open';
 const PASTEBOARD_ASKED_KEY = 'pasteboard_permission_asked';
 const ACCENT_THEME_KEY = 'accent_theme';
 const LAST_SEEN_CLIP_COUNT_KEY = 'last_seen_clip_count';
+// ClipboardWatcher's LastWrite (storage/ContentPrint.ets), as JSON
+// {"prints":[...],"count":n}. New in this build; older ones kept nothing.
+const LAST_WRITE_KEY = 'lastWrite';
 const BOTTOM_GLOW_KEY = 'bottom_glow';
 const CARD_TRANSPARENCY_KEY = 'card_transparency';
 const SYNCED_VIEW_MODE_KEY = 'synced_view_mode';
@@ -163,6 +166,21 @@ export class DeviceSettings {
   async setLastSeenClipCount(context: common.UIAbilityContext, count: number): Promise<void> {
     const prefs = await this.getPrefs(context);
     prefs.putSync(LAST_SEEN_CLIP_COUNT_KEY, count);
+    await prefs.flush();
+  }
+
+  // What ClipLink last wrote to the clipboard or dealt with there (see
+  // ClipboardWatcher), kept across restarts so a restart does not send it
+  // back as a new copy. Synchronous like getLastSeenClipCountSync; '' when
+  // none was saved.
+  getLastWriteSync(context: common.UIAbilityContext): string {
+    const prefs = preferences.getPreferencesSync(context, { name: PREFERENCES_NAME });
+    return prefs.getSync(LAST_WRITE_KEY, '') as string;
+  }
+
+  async setLastWrite(context: common.UIAbilityContext, json: string): Promise<void> {
+    const prefs = await this.getPrefs(context);
+    prefs.putSync(LAST_WRITE_KEY, json);
     await prefs.flush();
   }
 

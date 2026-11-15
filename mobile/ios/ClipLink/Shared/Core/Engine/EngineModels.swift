@@ -99,6 +99,15 @@ public struct SyncedItem: Identifiable, Equatable {
     public let date: Date?
     /// "This device", a device label, or "Other device".
     public let sourceLabel: String
+    /// What its content is (see ContentPrint.key): the Synced list shows one
+    /// card per content. Nil matches nothing.
+    public var contentKey: String? = nil
+    /// For a big picture: the file with its base64 text. The history keeps it
+    /// there, not in `entry`, whose Content is then empty (see
+    /// HistoryStore.inlineLimit).
+    public var inlineURL: URL? = nil
+    /// A file that doesn't fit in the free space: not being fetched.
+    public var needsSpace = false
 
     public var preview: String {
         switch kind {
@@ -148,8 +157,11 @@ public struct SyncedItem: Identifiable, Equatable {
             let trimmed = entry.content.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.range(of: #"^(https?|ftp)://\S+$"#, options: [.regularExpression, .caseInsensitive]) != nil { return .link }
             // HarmonyOS' "Encoded data" heuristic: 40+ chars of base64/hex-ish
-            // text with no spaces reads as a token or key, not prose.
-            if trimmed.count >= 40, trimmed.range(of: #"^[A-Za-z0-9+/=_-]+$"#, options: .regularExpression) != nil { return .opaque }
+            // text with no spaces reads as a token or key, not prose. The
+            // pattern first: what it matches is ASCII, whose UTF-8 length is
+            // its character count - counting a long text's characters walks
+            // all of it.
+            if trimmed.range(of: #"^[A-Za-z0-9+/=_-]+$"#, options: .regularExpression) != nil, trimmed.utf8.count >= 40 { return .opaque }
             return .text
         }
     }

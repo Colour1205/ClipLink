@@ -371,7 +371,7 @@ final class HistoryHeadTests: XCTestCase {
         XCTAssertEqual(applyHead(engine, head, from: peer, on: connectionOne).expectedNew, 3)
     }
 
-    func testANewestEntryThatIsKnownAlreadyStartsNoGroup() throws {
+    func testAHeadWhoseNewestEntryIsKnownIsIgnoredAndItsOlderBatchIsQuiet() throws {
         let (engine, recorder) = makeEngine()
         let peer = trustedPeer(engine)
         let entries = try batch(from: peer, count: 5)
@@ -380,17 +380,18 @@ final class HistoryHeadTests: XCTestCase {
         let outcome = applyHead(engine, try head(for: entries), from: peer, on: connectionOne)
         settle()
 
-        XCTAssertTrue(outcome.accepted)
+        XCTAssertFalse(outcome.accepted, "nothing newer than what is here: ignored")
         XCTAssertFalse(outcome.newestIsNew)
-        XCTAssertEqual(outcome.expectedNew, 4, "the others are still counted")
         XCTAssertNil(outcome.group, "the front card would be an old one: no provisional stack")
         XCTAssertTrue(recorder.received.isEmpty, "a known entry is not applied again")
 
-        // The batch then behaves as today: its group appears at batch time.
+        // The batch works on its own: everything in it is older than what is here.
         let batchOutcome = applyBatch(engine, entries, from: peer, on: connectionOne)
+        settle()
         XCTAssertEqual(batchOutcome.fresh.count, 4)
-        XCTAssertEqual(batchOutcome.group?.memberIDs.count, 4)
-        XCTAssertNil(batchOutcome.group?.expectedSize)
+        XCTAssertNil(batchOutcome.group, "stored by time, no stack")
+        XCTAssertTrue(snapshot(engine).blocks.isEmpty)
+        XCTAssertTrue(recorder.received.isEmpty, "and nothing on the clipboard")
     }
 
     func testANewestEntryTheUserDeletedIgnoresTheHead() throws {
@@ -493,7 +494,7 @@ final class HistoryHeadTests: XCTestCase {
         XCTAssertEqual(recorder.received.map(\.content), ["item 4"], "still the one apply, from the head")
     }
 
-    func testAHeadsNewestEntryLandsOnTheClipboardEvenWhenSomethingNewerIsHere() throws {
+    func testAHeadAndBatchOlderThanWhatIsHereAreStoredQuietly() throws {
         let (engine, recorder) = makeEngine()
         let peer = trustedPeer(engine)
         // Something newer is here already.
@@ -503,12 +504,18 @@ final class HistoryHeadTests: XCTestCase {
         let outcome = applyHead(engine, try head(for: entries), from: peer, on: connectionOne)
         settle()
 
-        XCTAssertTrue(outcome.newestIsNew)
-        XCTAssertEqual(recorder.received.map(\.content), ["item 2"], "the head's newest entry is the one item of a reconnect that lands on the clipboard")
+        XCTAssertFalse(outcome.accepted, "an item trimmed here, or a partly paired peer's, must not come back on top")
+        XCTAssertEqual(snapshot(engine).items.count, 1, "nothing added early")
+        XCTAssertTrue(recorder.received.isEmpty)
 
-        _ = applyBatch(engine, entries, from: peer, on: connectionOne)
+        let batchOutcome = applyBatch(engine, entries, from: peer, on: connectionOne)
         settle()
-        XCTAssertEqual(recorder.received.map(\.content), ["item 2"], "and the batch behind it adds nothing there")
+        XCTAssertEqual(batchOutcome.fresh.count, 3, "stored")
+        XCTAssertNil(batchOutcome.group)
+        let snap = snapshot(engine)
+        XCTAssertTrue(snap.blocks.isEmpty)
+        XCTAssertEqual(StackPlanner.rows(items: snap.items, groups: snap.blocks).map(\.item.entry.content), ["newer 0", "item 2", "item 1", "item 0"], "by time")
+        XCTAssertTrue(recorder.received.isEmpty, "nothing on the clipboard")
     }
 
     func testTheConnectionClosingBeforeTheBatchEndsTheProvisionalGroup() throws {

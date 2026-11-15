@@ -10,7 +10,8 @@
 // and its tombstones. The receiver deletes what the tombstones name, works out
 // which items it is missing and wants (SyncProtocol.wantedKeys), and asks for
 // them with history_request: the newest one alone first (it goes on the
-// clipboard), then the rest in a second request. Each request is answered with
+// clipboard if it is newer than everything this device has; if not, the whole
+// sync is stored by time, quietly), then the rest in a second request. Each request is answered with
 // one history_batch, in order, so the connection keeps the requests it is
 // waiting on in a queue (SyncLink.queue). With an older peer (v1) nothing
 // changes: a head with Newest and Keys when there are two or more entries, then
@@ -26,7 +27,9 @@ import { ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
 import { ApplyResult } from '../clipboard/ClipboardApply';
 import { entryKey } from '../storage/DeletedEntries';
 import { MAX_HISTORY_ITEMS } from '../storage/HistoryAccess';
-import { GROUP_MIN_ITEMS, MergeResult, applyBatch, applyHead, buildHeadPayload, newestOf, parseHead } from '../storage/HistoryBatch';
+import {
+  GROUP_MIN_ITEMS, MergeResult, applyBatch, applyHead, buildHeadPayload, isFresh, newestOf, newestStamp, parseHead
+} from '../storage/HistoryBatch';
 import {
   ConvenienceMemory, MAX_HEAD_DELETED, PROTOCOL_VERSION, PendingKeys, REQUEST_TIMEOUT_MS, SentRequest, answerFor, buildHeadV2Payload, buildKeysPayload,
   parseHeadV2, parseKeysPayload, splitKeys, unixMillis, wantedKeys
@@ -47,7 +50,7 @@ function envelopeJson(type: string, payload: string): string {
 }
 
 // For an add whose newest new entry goes on the clipboard without a check.
-function anyEntry(entry: ClipboardEntry): boolean {
+function anyEntry(entry: ClipboardEntry, localNewest: string | null): boolean {
   return true;
 }
 
@@ -130,6 +133,10 @@ export class SyncLink {
   askedFront: boolean = false;
   // This connection's sync put an item on the clipboard.
   frontServed: boolean = false;
+  // This connection's convenience answer brought nothing newer than what this
+  // device already held: that answer and every later one are stored by time,
+  // quietly (design/sync-dedupe-spec.md rule 3).
+  syncQuiet: boolean = false;
   // A v2 stack made on this connection is still waiting for answers.
   waiting: boolean = false;
   // A v1 head put an item into the history and its batch has not been dealt
@@ -165,9 +172,10 @@ export interface SyncHost {
   isDeleted: (entry: ClipboardEntry) => Promise<boolean>;
   // Adds the candidates in one step; newFront: the newest new one is the item
   // that goes on the clipboard, which the trim spares, if frontOk (asked once,
-  // with that entry, before the trim) says yes. The result's front is that entry
-  // or null.
-  addBatch: (candidates: ClipboardEntry[], newFront: boolean, frontOk: (entry: ClipboardEntry) => boolean) => Promise<MergeResult>;
+  // with that entry and the newest timestamp held before the merge, before the
+  // trim) says yes. The result's front is that entry or null.
+  addBatch: (candidates: ClipboardEntry[], newFront: boolean,
+    frontOk: (entry: ClipboardEntry, localNewest: string | null) => boolean) => Promise<MergeResult>;
   // Tombstones these keys and removes the entries (and their files, and any
   // entry still waiting for its bytes) from this device.
   deleteKeys: (keys: string[]) => Promise<void>;
@@ -323,6 +331,9 @@ export class HistorySync {
       requests.push(new SentRequest(wanted, convenience, now, wanted.length));
     }
     for (const request of requests) {
+      // A sync with no convenience request is never fresh: what it brings is
+      // stored by time, quietly.
+      request.quiet = !convenience;
       link.queue.push(request);
       this.pending.claim(link.id, request.keys);
     }
@@ -338,15 +349,21 @@ export class HistorySync {
   // A head of the old form: its newest entry is checked like a live entry and
   // added at once, and the UI hears how many items the batch behind it will
   // bring. Its signature failing leaves it ignored entirely - the batch then
-  // works as it does without a head.
+  // works as it does without a head. So does a newest entry that is not newer
+  // than everything this device holds (an item it trimmed, say): it would only
+  // come back on top and onto the clipboard, and the batch stores it by time.
   private async handleHeadV1(link: SyncLink, payload: string): Promise<void> {
     const head = parseHead(payload);
     if (head === null) {
       this.host.log('received invalid message from peer (bad history_head)');
       return;
     }
+    const localNewest: string | null = newestStamp(await this.host.getHistory());
     await applyHead(head,
-      (entry: ClipboardEntry) => this.host.verified(entry),
+      async (entry: ClipboardEntry): Promise<ClipboardEntry | null> => {
+        const verified: ClipboardEntry | null = await this.host.verified(entry);
+        return verified !== null && isFresh(verified, localNewest) ? verified : null;
+      },
       (keys: string[]) => this.host.goneKeys(keys),
       (candidates: ClipboardEntry[]) => this.host.addBatch(candidates, true, anyEntry),
       (newest: ClipboardEntry, expectedNew: number) => this.announceHead(newest, expectedNew, link),
@@ -438,28 +455,49 @@ export class HistorySync {
   // The answer to a request of this device (see onBatch): every entry is
   // checked as for any batch, all the new ones go into the history in one step,
   // and the UI hears once. Only the convenience request's newest new entry goes
-  // on the clipboard.
+  // on the clipboard, and only when it is fresh: newer than everything this
+  // device held. If it is not (or the answer brought nothing), the sync is not
+  // fresh, and this answer and every later one are stored by time, quietly - an
+  // item this device trimmed, or one a peer still holds, no longer comes back
+  // on top and onto the clipboard at every reconnect.
   private async handleAnswer(link: SyncLink, request: SentRequest, entries: ClipboardEntry[], last: boolean): Promise<void> {
+    if (!request.convenience && (request.quiet || link.syncQuiet)) {
+      await this.handleQuietAnswer(link, entries, false);
+      this.settleIfLast(link, last, 0);
+      return;
+    }
     // Whether the convenience item goes on the clipboard is decided once, inside
     // the merge, with the newest entry really added (see ConvenienceMemory): the
     // trim spares that entry and announceAnswer puts it on the clipboard.
     let sparedKey: string | null = null;
+    let fresh: boolean = false;
     const outcome = await applyBatch(entries,
       (entry: ClipboardEntry) => this.host.verified(entry),
       (entry: ClipboardEntry) => this.host.isDeleted(entry),
       async (candidates: ClipboardEntry[]): Promise<MergeResult> => {
         const merged: MergeResult = await this.host.addBatch(candidates, request.convenience,
-          (newest: ClipboardEntry): boolean => this.convenience.allows(canonicalTimestamp(newest.Timestamp), this.host.now()));
+          (newest: ClipboardEntry, localNewest: string | null): boolean => {
+            fresh = isFresh(newest, localNewest);
+            return fresh && this.convenience.allows(canonicalTimestamp(newest.Timestamp), this.host.now());
+          });
         sparedKey = merged.front !== null ? entryKey(merged.front) : null;
         return merged;
       },
-      (added: ClipboardEntry[]) => this.announceAnswer(link, request, added, sparedKey, last));
+      (added: ClipboardEntry[]) => request.convenience && !fresh
+        ? this.announceQuiet(link, added, false)
+        : this.announceAnswer(link, request, added, sparedKey, last));
+    if (request.convenience && !fresh) link.syncQuiet = true;
+    this.settleIfLast(link, last, outcome.added.length);
+  }
+
+  // The last answer of a sync is in: the stack, if there was one, is final now.
+  // When the answer added items to it the UI was told with them
+  // (announceAnswer); if it added none (or stored them quietly), say so.
+  private settleIfLast(link: SyncLink, last: boolean, added: number): void {
     if (last) {
-      // The stack, if there was one, is final now. When the answer added items
-      // the UI was told with them (announceAnswer); if it added none, say so.
       const waited: boolean = link.waiting;
       link.waiting = false;
-      if (waited && outcome.added.length === 0) this.host.settled(link.id);
+      if (waited && added === 0) this.host.settled(link.id);
     }
   }
 
@@ -469,19 +507,29 @@ export class HistorySync {
   // The clipboard, the user and the stacks are left alone: the sync it belonged
   // to has had its turn.
   private async handleLateAnswer(link: SyncLink, entries: ClipboardEntry[]): Promise<void> {
+    await this.handleQuietAnswer(link, entries, true);
+  }
+
+  // An answer stored quietly: given up on (late), or of a sync that is not
+  // fresh. The same as handleLateAnswer describes.
+  private async handleQuietAnswer(link: SyncLink, entries: ClipboardEntry[], late: boolean): Promise<void> {
     await applyBatch(entries,
       (entry: ClipboardEntry) => this.host.verified(entry),
       (entry: ClipboardEntry) => this.host.isDeleted(entry),
       (candidates: ClipboardEntry[]) => this.host.addBatch(candidates, false, anyEntry),
-      async (added: ClipboardEntry[]): Promise<void> => {
-        for (const entry of added) {
-          if (entry.Type === 'file') this.host.prepareFile(entry, false);
-        }
-        this.host.log(`received ${added.length} item(s) late from ${link.label}`);
-        this.host.syncApplied({
-          from: link.id, added: added, front: null, applied: null, expectedTotal: 0, last: false, superseded: false, quiet: true
-        });
-      });
+      (added: ClipboardEntry[]) => this.announceQuiet(link, added, late));
+  }
+
+  // Entries stored by time, with no clipboard, stack or notice: only the bytes
+  // of new files are asked for, and the list places them by time.
+  private async announceQuiet(link: SyncLink, added: ClipboardEntry[], late: boolean): Promise<void> {
+    for (const entry of added) {
+      if (entry.Type === 'file') this.host.prepareFile(entry, false);
+    }
+    this.host.log(`received ${added.length} item(s) ${late ? 'late' : 'older than the newest here'} from ${link.label}`);
+    this.host.syncApplied({
+      from: link.id, added: added, front: null, applied: null, expectedTotal: 0, last: false, superseded: false, quiet: true
+    });
   }
 
   // What a received item does besides being listed, once for the answer: with
@@ -530,13 +578,23 @@ export class HistorySync {
 
   // A whole history_batch of the old kind, as ONE unit: every entry is checked
   // (signature, trusted maker, not deleted here), then all the new ones go
-  // into the history in one step - one write, and one report to the UI.
+  // into the history in one step - one write, and one report to the UI. Its
+  // newest new item goes on the clipboard and on top only when it is fresh
+  // (newer than everything held); otherwise the whole batch is stored by
+  // time, quietly. After a head that was applied, as before: the batch joins
+  // the head's stack.
   private async handleBatchV1(link: SyncLink, entries: ClipboardEntry[]): Promise<void> {
+    const afterHead: boolean = link.headPending;
+    let fresh: boolean = false;
     const outcome = await applyBatch(entries,
       (entry: ClipboardEntry) => this.host.verified(entry),
       (entry: ClipboardEntry) => this.host.isDeleted(entry),
-      (candidates: ClipboardEntry[]) => this.host.addBatch(candidates, !link.headPending, anyEntry),
-      (added: ClipboardEntry[]) => this.announceBatch(added, link));
+      (candidates: ClipboardEntry[]) => this.host.addBatch(candidates, !afterHead,
+        (newest: ClipboardEntry, localNewest: string | null): boolean => {
+          fresh = isFresh(newest, localNewest);
+          return fresh;
+        }),
+      (added: ClipboardEntry[]) => afterHead || fresh ? this.announceBatch(added, link) : this.announceQuiet(link, added, false));
     // The head's stack, if there was one, is final now. When the batch added
     // items the UI was told with them (announceBatch); if it added none, say so.
     if (link.headPending) {
@@ -546,9 +604,9 @@ export class HistorySync {
   }
 
   // What a received item does besides being listed, once for the batch: its
-  // newest NEW item goes on the clipboard (a file's once its bytes are here),
-  // even when it is older than this device's own newest, and every file in it
-  // that is not here yet is asked for - the ask made when the peer connected
+  // newest NEW item goes on the clipboard (a file's once its bytes are here) -
+  // only called when that item is fresh (see handleBatchV1) - and every file
+  // in it that is not here yet is asked for - the ask made when the peer connected
   // went out before this batch came, so an older file would otherwise stay
   // "transferring" until the next connection. Then the UI hears of the batch,
   // once. After a head, the peer's newest item is the head's, which has had its

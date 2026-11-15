@@ -63,9 +63,24 @@ private struct SyncedTextViewRepresentable: UIViewRepresentable {
     }
 }
 
+/// A read-only text view whose Copy writes the way ClipLink's own Copy does
+/// (AppModel.copySelection): marked as ClipLink's write, so opening the app
+/// again does not read it back and send it as a new item, and kept off
+/// Universal Clipboard, which would hand it to the user's other Apple devices
+/// as a brand-new copy.
+class SyncedCopyingTextView: UITextView {
+    override func copy(_ sender: Any?) {
+        let range = selectedRange
+        guard let text, range.location != NSNotFound, range.length > 0,
+              NSMaxRange(range) <= (text as NSString).length
+        else { return super.copy(sender) }
+        AppModel.shared.copySelection((text as NSString).substring(with: range))
+    }
+}
+
 /// Reports the height its text needs whenever its width, text or Dynamic
 /// Type size changes.
-final class SyncedAutoSizingTextView: UITextView {
+final class SyncedAutoSizingTextView: SyncedCopyingTextView {
     var onHeightChange: ((CGFloat) -> Void)?
     var appliedText: String?
     private var lastWidth: CGFloat = 0
@@ -110,7 +125,7 @@ struct SyncedScrollingText: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> UITextView {
-        let view = UITextView()
+        let view = SyncedCopyingTextView()
         view.isEditable = false
         view.isSelectable = true
         view.isScrollEnabled = true

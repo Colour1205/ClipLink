@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { encodeBeacon, parseBeacon, PeerBeacon } from '../main/ets/networking/Discovery';
+import { encodeBeacon, parseBeacon, PeerBeacon, sameBeacon } from '../main/ets/networking/Discovery';
 
 const ID = 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAELJdLZfH8G9XIDYe6E1HXjg728AExFbYPZCfEVXyR9VQ=';
 const SENDER = '192.168.1.40';
@@ -88,6 +88,27 @@ export default function beaconTest() {
       expect(beacon.deviceId).assertEqual(ID);
       expect(beacon.proof).assertEqual('proof');
       expect(beacon.address).assertEqual('100.64.0.1');
+    });
+
+    // The page replaces its beacon state only for one that says something new
+    // (see Index's onPeerDiscovered). Built as objects: names don't decode in
+    // this runtime (see above).
+    it('tellsARepeatedBeaconFromOneThatChanged', 0, () => {
+      const beacon = (port: number, proof: string | null, address: string | null, name: string | null,
+        sender: string): PeerBeacon => {
+        const made: PeerBeacon = { tcpPort: port, deviceId: ID, proof: proof, address: address, name: name, senderIp: sender };
+        return made;
+      };
+      const first = beacon(49152, 'proof', '100.64.0.1', 'Pixel', SENDER);
+      expect(sameBeacon(first, beacon(49152, 'proof', '100.64.0.1', 'Pixel', SENDER))).assertTrue();
+      expect(sameBeacon(first, beacon(49153, 'proof', '100.64.0.1', 'Pixel', SENDER))).assertFalse();
+      expect(sameBeacon(first, beacon(49152, null, '100.64.0.1', 'Pixel', SENDER))).assertFalse();
+      expect(sameBeacon(first, beacon(49152, 'proof', null, 'Pixel', SENDER))).assertFalse();
+      expect(sameBeacon(first, beacon(49152, 'proof', '100.64.0.1', 'Tablet', SENDER))).assertFalse();
+      expect(sameBeacon(first, beacon(49152, 'proof', '100.64.0.1', 'Pixel', '192.168.1.41'))).assertFalse();
+      // And one parsed twice from the same datagram is the same.
+      const text: string = encodeBeacon(49152, ID, 'proof', '100.64.0.1', null);
+      expect(sameBeacon(parsed(text), parsed(text))).assertTrue();
     });
   });
 }

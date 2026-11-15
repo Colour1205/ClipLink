@@ -189,6 +189,8 @@ internal class V2Peer(
     scope: CoroutineScope,
     clock: () -> Long = System::currentTimeMillis,
     maxStoredChars: Long = Limits.MAX_STORED_CHARS,
+    /** The clipboard's generation, as ClipboardBridge counts it - see SyncManager's pending files. */
+    generation: () -> Long = { 0L },
 ) {
     val tomb = Tombstones()
     val trusted: MutableSet<String> = ConcurrentHashMap.newKeySet()
@@ -210,7 +212,7 @@ internal class V2Peer(
     val listChanges = AtomicInteger()
 
     val sync: SyncManager = SyncManager(
-        scope, history, TrustCheck { it in trusted }, files, { it }, Limits.MAX_ENTRY_CONTENT_CHARS, clock,
+        scope, history, TrustCheck { it in trusted }, files, { it }, Limits.MAX_ENTRY_CONTENT_CHARS, clock, generation,
     ).also { sync ->
         sync.onLog = { log.add(it) }
         sync.onEntryApplied = { applied.add(it) }

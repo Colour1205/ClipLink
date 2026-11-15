@@ -12,6 +12,7 @@ import android.provider.OpenableColumns
 import androidx.core.content.FileProvider
 import io.uaena.cliplink.core.B64
 import io.uaena.cliplink.core.ClipboardEntry
+import io.uaena.cliplink.core.ContentPrint
 import io.uaena.cliplink.net.FilePayload
 import io.uaena.cliplink.share.ShareIntake
 import io.uaena.cliplink.share.isShareableUri
@@ -21,6 +22,9 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.util.concurrent.atomic.AtomicLong
+import org.json.JSONArray
+import org.json.JSONObject
 
 /** Something captured locally, on its way to becoming a signed entry. */
 sealed interface Capture {
@@ -63,37 +67,130 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
         .getSharedPreferences("cliplink_clipboard", Context.MODE_PRIVATE)
 
     /**
-     * Hash of whatever this device last put on, or took off, the clipboard.
-     * Without it, applying a received entry immediately looks like a fresh
-     * local copy and gets broadcast straight back to the peer that sent it.
+     * The prints (see [ContentPrint]) of what this device believes is on the
+     * clipboard because of ClipLink: the last thing it wrote there, or the
+     * last copy it captured and classified. The LastWrite record of
+     * design/sync-dedupe-spec.md. Without it, applying a received entry
+     * immediately looks like a fresh local copy and gets broadcast straight
+     * back to the peer that sent it.
+     *
+     * Written only once the clipboard write has succeeded: set before it, as
+     * the single hash this replaced was, a write that failed (a text too big
+     * for a Binder transaction, a full disk) left the record naming what never
+     * got there - and the user's earlier copy, still on the clipboard, synced
+     * again as a duplicate on the next open.
      *
      * Persisted, because the clipboard outlives this process: after the OS
      * kills the app, the capture on the next launch would otherwise take the
      * item it last sent - one the user may have deleted from the history
-     * since - for a fresh copy, and sync it all over again.
+     * since - for a fresh copy, and sync it all over again. An older build's
+     * single hash is read as an `x:` print until the first write replaces it.
      */
-    var lastKnownHash: String? = prefs.getString(LAST_HASH_KEY, null)
-        private set(value) {
-            field = value
-            prefs.edit().putString(LAST_HASH_KEY, value).apply()
+    @Volatile
+    var lastWrite: Set<String> = loadLastWrite()
+        private set
+
+    /**
+     * Counts the changes of the clipboard this app knows of: its own writes,
+     * the received items it has queued to go there (see [noteIncoming]), and
+     * the local copies it captured: a file armed to go on the clipboard once
+     * its bytes arrive is not put there if this moved meanwhile (see
+     * SyncManager's pending files) - something newer is there by then.
+     * Android has no system counter an app may read, so this stands in for
+     * one. Memory only.
+     */
+    private val generationCounter = AtomicLong()
+    val generation: Long get() = generationCounter.get()
+
+    private fun loadLastWrite(): Set<String> {
+        prefs.getString(LAST_WRITE_KEY, null)?.let { json ->
+            val stored = runCatching {
+                val array = JSONObject(json).getJSONArray("prints")
+                (0 until array.length()).mapNotNullTo(LinkedHashSet()) { array.optString(it).takeIf(String::isNotEmpty) }
+            }.getOrNull()
+            if (stored != null) return stored
         }
+        // Migration: the single hash builds before this one kept, as a legacy print.
+        return prefs.getString(LAST_HASH_KEY, null)?.takeIf { it.isNotEmpty() }?.let { setOf(ContentPrint.legacy(it)) }
+            ?: emptySet()
+    }
+
+    private fun rememberWrite(prints: Set<String>) {
+        lastWrite = prints
+        val json = JSONObject().put("prints", JSONArray(prints.toList())).toString()
+        prefs.edit().putString(LAST_WRITE_KEY, json).remove(LAST_HASH_KEY).apply()
+    }
+
+    /**
+     * Records what a capture was classified as: [prints] are on the clipboard,
+     * and everyone has them now (or had them already). A copy that went out
+     * ([sent]) counts as a change of the clipboard - see [generation] - and
+     * so does one found already synced that is not what this app last knew
+     * was there (the newest entry copied again, say). The same clip found
+     * again on the next open changed nothing: counted, it would keep a file
+     * armed meanwhile off the clipboard for no reason.
+     */
+    fun noteCaptured(prints: Set<String>, sent: Boolean) {
+        if (sent || !ContentPrint.matches(lastWrite, prints)) generationCounter.incrementAndGet()
+        rememberWrite(prints)
+    }
+
+    /**
+     * A received item is on its way to the clipboard (see ClipLinkEngine's
+     * apply queue): counted now, in the order it arrived, not once the queue
+     * gets to it. A file armed after it is newer, and an earlier item's write
+     * landing meanwhile must not make it look stale. Its [apply] is then told
+     * not to count it again.
+     */
+    fun noteIncoming() {
+        generationCounter.incrementAndGet()
+    }
+
+    /**
+     * Whether the clipboard still holds a clip this app wrote - a received
+     * item it applied, or one copied from the history or the app's own
+     * screens: they are all labelled [CLIP_LABEL]. Told without reading the
+     * content, so it costs no "pasted from your clipboard" notice either.
+     */
+    fun holdsOwnWrite(): Boolean = try {
+        manager.primaryClipDescription?.label?.toString() == CLIP_LABEL
+    } catch (e: SecurityException) {
+        false
+    }
+
+    /**
+     * Puts [text] on the clipboard as this app's own clip: a device id copied
+     * from a screen, a selection copied out of an item. Labelled and recorded
+     * like an applied item, so it is never captured and synced back as a new
+     * one. False when the clipboard refused it.
+     */
+    fun copyText(text: String): Boolean = try {
+        manager.setPrimaryClip(ClipData.newPlainText(CLIP_LABEL, text))
+        generationCounter.incrementAndGet()
+        rememberWrite(setOf(ContentPrint.text(text)))
+        true
+    } catch (e: Exception) {
+        false
+    }
 
     /** Too big to remember by identity: a file over 1 GB, which a repeat tap would otherwise stream and hash again. */
     private var tooLargeMemo: Pair<String, Capture.TooLarge>? = null
 
-    /** Null when the clipboard is empty, unreadable (backgrounded), or holds nothing we handle. */
-    fun capture(): Capture? {
-        // A clip this app wrote - a received item it applied, or one copied
-        // from the history - is already synced. The hash check alone misses
-        // it for an image (re-encoded below, it no longer hashes to what
-        // arrived) and after a restart, and a deleted item would then come
-        // straight back as a new one. The label is read without the content.
+    /**
+     * Null when the clipboard is empty, unreadable (backgrounded), or holds
+     * nothing we handle. [known] says whether content is already synced, by
+     * its prints and raw hashes (see [ContentPrint.matches]): a file or image
+     * clip that has not changed since it was last read is recognised by it
+     * without being read again, and comes back as [Capture.Ours]. Whether a
+     * clip this app wrote should be read at all is the caller's to decide
+     * first (see [holdsOwnWrite]).
+     */
+    fun capture(known: (prints: Set<String>, rawHashes: Set<String>) -> Boolean = { _, _ -> false }): Capture? {
         val description = try {
             manager.primaryClipDescription
         } catch (e: SecurityException) {
             null
         }
-        if (description?.label?.toString() == CLIP_LABEL) return Capture.Ours
 
         val clip = try {
             manager.primaryClip
@@ -110,10 +207,10 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
             // The same clip as last time: another app's file left on the
             // clipboard is still there on every resume, and reading it means
             // streaming up to 1 GB into the store and hashing it, only for the
-            // engine to find the hash equal to lastKnownHash afterwards - so
+            // engine to find it already synced afterwards (see [lastWrite]) - so
             // it is recognised first, by what is cheap to compare.
             val identity = clipIdentity(uri, description)
-            unchangedUriClip(identity)?.let { return it }
+            unchangedUriClip(identity, known)?.let { return it }
             readUri(uri)?.let {
                 rememberUriClip(identity, it)
                 return it
@@ -202,16 +299,18 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
 
     /**
      * [Capture.Ours] - already synced - when [identity] is the clip captured
-     * last time AND that capture did go out: the hash it produced is the one
-     * lastKnownHash holds, and the engine notes it only once it has gone on to
-     * broadcast. A capture the engine gave up on (still starting, say) is not
-     * recognised, so a second tap tries again. Null when it has to be read.
+     * last time AND [known] still counts what it produced as synced: the
+     * engine records a capture in [lastWrite] only once it has classified
+     * it, so a capture it gave up on (still starting, say) is not recognised,
+     * and a second tap tries again. Null when it has to be read. The memo
+     * holds the raw hash, of a file or of a PNG: both prints are asked about,
+     * as the same bytes are the same content either way.
      */
-    private fun unchangedUriClip(identity: String): Capture? {
+    private fun unchangedUriClip(identity: String, known: (Set<String>, Set<String>) -> Boolean): Capture? {
         tooLargeMemo?.takeIf { it.first == identity }?.let { return it.second }
-        val hash = prefs.getString(URI_CLIP_HASH_KEY, null) ?: return null
+        val hash = prefs.getString(URI_CLIP_HASH_KEY, null)?.lowercase() ?: return null
         if (prefs.getString(URI_CLIP_KEY, null) != identity) return null
-        return if (hash == lastKnownHash) Capture.Ours else null
+        return if (known(setOf("f:$hash", "i:$hash"), setOf(hash))) Capture.Ours else null
     }
 
     private fun rememberUriClip(identity: String, capture: Capture) {
@@ -299,32 +398,36 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
         }
     }
 
-    /** Writes a received entry onto the system clipboard. */
-    fun apply(entry: ClipboardEntry): Boolean {
+    /**
+     * Writes a received entry onto the system clipboard - or one from the
+     * history, for a card's Copy. [lastWrite] names it only once the write
+     * has succeeded; after a failure it stays as it was, naming what really
+     * is on the clipboard as far as this app knows. BLOCKING: a file is
+     * copied to a human-named file first (see [contentUriFor]). [counted]:
+     * [noteIncoming] counted this write already, when it was queued.
+     */
+    fun apply(entry: ClipboardEntry, counted: Boolean = false): Boolean {
         return try {
-            when (entry.type) {
+            val written: String = when (entry.type) {
                 ClipboardEntry.TYPE_TEXT -> {
-                    lastKnownHash = FileStore.hashOf(entry.content.toByteArray(Charsets.UTF_8))
                     manager.setPrimaryClip(ClipData.newPlainText(CLIP_LABEL, entry.content))
-                    true
+                    ContentPrint.text(entry.content)
                 }
 
                 ClipboardEntry.TYPE_IMAGE -> {
                     val bytes = B64.decodeOrNull(entry.content) ?: return false
                     val hash = FileStore.hashOf(bytes)
-                    lastKnownHash = hash
                     // Images travel inline in the entry, but the clipboard
                     // needs a URI - so the bytes get parked in the blob cache
                     // purely to have something FileProvider can hand out.
                     if (!fileStore.exists(hash)) fileStore.write(hash, bytes)
                     manager.setPrimaryClip(uriClip(fileStore.path(hash), "$hash.png", "image/png"))
-                    true
+                    ContentPrint.image(bytes)
                 }
 
                 ClipboardEntry.TYPE_FILE -> {
                     val payload = FilePayload.parse(entry.content) ?: return false
                     if (!fileStore.exists(payload.fileHash)) return false
-                    lastKnownHash = payload.fileHash
                     manager.setPrimaryClip(
                         uriClip(
                             fileStore.path(payload.fileHash),
@@ -332,20 +435,19 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
                             guessMimeType(payload.fileName),
                         ),
                     )
-                    true
+                    ContentPrint.file(payload.fileHash)
                 }
 
-                else -> false
-            }
+                else -> null
+            } ?: return false
+            if (!counted) generationCounter.incrementAndGet()
+            rememberWrite(setOf(written))
+            true
         } catch (e: Exception) {
             false
         } catch (e: OutOfMemoryError) {
             false // an image's base64 and bytes at once, for one
         }
-    }
-
-    fun noteLocalHash(hash: String) {
-        lastKnownHash = hash
     }
 
     /**
@@ -476,7 +578,9 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
      * is spared, as it may be pasted much later. Blocking; never throws.
      */
     fun pruneSharedCopies(): Int = try {
-        pruneSharedDir(fileStore.sharedDir, System.currentTimeMillis(), SHARED_COPY_MAX_AGE_MS, lastKnownHash)
+        // A copy's folder is named by its blob's hash, which a print carries after its prefix.
+        val keep = lastWrite.map { it.substringAfter(':') }
+        pruneSharedDir(fileStore.sharedDir, System.currentTimeMillis(), SHARED_COPY_MAX_AGE_MS, keep)
     } catch (e: Exception) {
         0
     }
@@ -492,7 +596,12 @@ class ClipboardBridge(private val context: Context, private val fileStore: FileS
     companion object {
         /** What every clip this app writes is labelled - see [capture]. */
         const val CLIP_LABEL = "ClipLink"
+
+        /** Where earlier builds kept their single hash - read once, for [lastWrite], and removed by its first write. */
         private const val LAST_HASH_KEY = "last_known_hash"
+
+        /** [lastWrite], as `{"prints":[...]}`. */
+        private const val LAST_WRITE_KEY = "last_write"
 
         /** The last foreign file/image clip captured (see [capture]), and the hash it produced. */
         private const val URI_CLIP_KEY = "last_uri_clip"
@@ -570,11 +679,13 @@ internal fun placeCopy(source: File, target: File) {
 /**
  * Deletes what is directly under [sharedDir] - a folder per blob, or a stray
  * file - that was last modified [maxAgeMs] or more before [now], except the
- * one named [keepName]. Returns how many went.
+ * ones named in [keep], in either case (a folder is named as its blob is, and
+ * a hash may be spelt either way). Returns how many went.
  */
-internal fun pruneSharedDir(sharedDir: File, now: Long, maxAgeMs: Long, keepName: String?): Int {
+internal fun pruneSharedDir(sharedDir: File, now: Long, maxAgeMs: Long, keep: Collection<String>): Int {
     val entries = sharedDir.listFiles() ?: return 0
+    val kept = keep.mapTo(HashSet()) { it.lowercase() }
     return entries.count { entry ->
-        entry.name != keepName && now - entry.lastModified() >= maxAgeMs && entry.deleteRecursively()
+        entry.name.lowercase() !in kept && now - entry.lastModified() >= maxAgeMs && entry.deleteRecursively()
     }
 }

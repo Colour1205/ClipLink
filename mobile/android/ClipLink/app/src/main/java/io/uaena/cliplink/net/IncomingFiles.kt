@@ -1,7 +1,9 @@
 package io.uaena.cliplink.net
 
+import io.uaena.cliplink.core.toHex
 import io.uaena.cliplink.store.FileStore
 import java.io.RandomAccessFile
+import java.security.MessageDigest
 
 /**
  * The files arriving as file_chunk streams, keyed by hash exactly as the
@@ -58,6 +60,14 @@ internal class IncomingFiles<O : Any>(
         var nextIndex = 0
         var received = 0L
 
+        /**
+         * SHA-256 of every byte written so far, in order. Checking the file
+         * once the last chunk is in then needs no second pass over it - up to
+         * a gigabyte read back from flash while this sender's other messages
+         * wait. A stream that starts over gets a new Transfer, so a new digest.
+         */
+        val digest: MessageDigest = MessageDigest.getInstance("SHA-256")
+
         @Volatile
         var lastWriteAt = now
     }
@@ -111,6 +121,9 @@ internal class IncomingFiles<O : Any>(
             synchronized(transfers) { drop(hash, transfer) }
             return Result.Failed("failed writing file chunk ($e)")
         }
+        // Only after the write succeeded: a failed one dropped the transfer
+        // above, so the digest never covers bytes that aren't on disk.
+        transfer.digest.update(bytes)
         transfer.lastWriteAt = clock()
         transfer.nextIndex++
         if (!chunk.isLast) return Result.Written
@@ -121,13 +134,10 @@ internal class IncomingFiles<O : Any>(
         // for: bytes that hash right but number otherwise are not its file.
         val sizeOk = transfer.expectedSize == null || transfer.received == transfer.expectedSize
         // The hash inside the SIGNED entry is what's trusted here, never
-        // whatever bytes actually turned up. Still this sender's while it's
-        // checked, so no other stream can start on the same temp file.
-        val verified = sizeOk && try {
-            FileStore.hashOf(temp).equals(hash, ignoreCase = true)
-        } catch (e: Exception) {
-            false
-        }
+        // whatever bytes actually turned up - and the digest is of exactly the
+        // bytes written to the temp file, in order. Still this sender's while
+        // it's checked, so no other stream can start on the same temp file.
+        val verified = sizeOk && transfer.digest.digest().toHex().equals(hash, ignoreCase = true)
         val stored = verified && temp.renameTo(fileStore.path(hash))
         synchronized(transfers) { transfers.remove(hash, transfer) }
         if (stored) return Result.Stored

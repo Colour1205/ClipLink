@@ -17,12 +17,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.outlined.Block
-import androidx.compose.material.icons.outlined.DevicesOther
-import androidx.compose.material.icons.outlined.LockOpen
-import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -49,6 +43,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.uaena.cliplink.engine.DeviceRow
+import io.uaena.cliplink.ui.icons.Icons
+import io.uaena.cliplink.ui.icons.filled.Add
+import io.uaena.cliplink.ui.icons.outlined.Block
+import io.uaena.cliplink.ui.icons.outlined.DevicesOther
+import io.uaena.cliplink.ui.icons.outlined.LockOpen
+import io.uaena.cliplink.ui.icons.outlined.MoreVert
 
 /** What a row says about its device, on the card and on the detail screen - one wording, so they cannot disagree. */
 internal fun deviceStatusLabel(device: DeviceRow): String = when {

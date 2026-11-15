@@ -110,7 +110,7 @@ final class PeerLink {
     private var cipher: SessionCipher?
     private var pendingLines: [Data] = []
     private var lineWaiter: ((Data?) -> Void)?
-    private var heldMessages: [String] = []
+    private var heldMessages: [Data] = []
     private var lastActivity = Date()
     private var receivedSessionLine = false
     /// The nonces (a sealed line's first 16 base64 characters) of the lines
@@ -140,6 +140,10 @@ final class PeerLink {
 
     /// Called on the delivery queue, in arrival order.
     var onMessage: ((PeerLink, String) -> Void)?
+    /// The same, as the decrypted bytes - taken instead of `onMessage` when
+    /// set: a history line runs to tens of megabytes, and turning it into a
+    /// String first is one more copy of it.
+    var onMessageData: ((PeerLink, Data) -> Void)?
     /// Called once, on the delivery queue.
     var onClosed: ((PeerLink) -> Void)?
     /// Called once, on the delivery queue, when the first session line (a
@@ -383,7 +387,9 @@ final class PeerLink {
                 self.lastActivity = Date()
                 do {
                     for line in try self.framer.append(data) {
-                        self.handleIncomingLine(line)
+                        // Decrypting a big line makes temporaries Foundation
+                        // may autorelease: freed per line, not per read.
+                        autoreleasepool { self.handleIncomingLine(line) }
                     }
                 } catch {
                     // Only possible before the handshake line: a stranger
@@ -427,9 +433,9 @@ final class PeerLink {
             teardown()
             return
         }
-        let text: String
+        let plain: Data
         do {
-            text = try cipher.open(line)
+            plain = try cipher.openData(line)
         } catch {
             // A corrupt or forged line ends the connection, as on every platform.
             teardown()
@@ -441,16 +447,24 @@ final class PeerLink {
             sentNonces = nil
             deliveryQueue.async { [self] in onFirstSessionLine?(self) }
         }
-        if text == Wire.pingSentinel { return }
+        if plain == Self.pingBytes { return }
         if phase == .holding {
-            heldMessages.append(text)
+            heldMessages.append(plain)
         } else {
-            deliver(text)
+            deliver(plain)
         }
     }
 
-    private func deliver(_ text: String) {
-        deliveryQueue.async { [self] in onMessage?(self, text) }
+    private static let pingBytes = Data(Wire.pingSentinel.utf8)
+
+    private func deliver(_ plain: Data) {
+        deliveryQueue.async { [self] in
+            if let handler = onMessageData {
+                handler(self, plain)
+            } else {
+                onMessage?(self, String(decoding: plain, as: UTF8.self))
+            }
+        }
     }
 
     private func awaitLine(_ waiter: @escaping (Data?) -> Void) {
@@ -493,8 +507,10 @@ final class PeerLink {
     }
 
     private func startHeartbeat() {
+        // Some leeway lets the system fold the wakeups in with others: a ping up
+        // to half a second late is well inside every peer's dead-link window.
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + Self.heartbeatInterval, repeating: Self.heartbeatInterval)
+        timer.schedule(deadline: .now() + Self.heartbeatInterval, repeating: Self.heartbeatInterval, leeway: .milliseconds(500))
         timer.setEventHandler { [weak self] in
             guard let self, self.phase == .live else { return }
             self.sendNow(Wire.pingSentinel, completion: nil)

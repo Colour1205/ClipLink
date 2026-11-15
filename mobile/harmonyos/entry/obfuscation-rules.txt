@@ -17,7 +17,15 @@
 # -keep-property-name: specifies property names that you want to keep
 # -keep-global-name: specifies names that you want to keep in the global scope
 
--enable-property-obfuscation
--enable-toplevel-obfuscation
--enable-filename-obfuscation
--enable-export-obfuscation
+# No obfuscation options are switched on here, on purpose. Release builds
+# don't obfuscate (build-profile.json5), but if that is ever turned on these
+# rules are what it uses, and the template's options here were a trap:
+# property obfuscation renames the fields of every interface - the
+# handshake's EphemeralPublicKey, the envelope's Type and Payload, the
+# entry's Content and FileHash - which JSON.stringify writes and JSON.parse
+# reads by name. That would break pairing and sync with every other app and
+# every older install, and make the history and trust list already stored
+# unreadable. Don't add -enable-property-obfuscation (or the top-level,
+# filename or export options) without a complete -keep-property-name list
+# for the wire and storage interfaces, and test pairing and sync with
+# Windows, Android and an older HarmonyOS build before shipping it.

@@ -7,13 +7,18 @@ import UIKit
 struct ItemDetailView: View {
     let itemID: String
 
-    @EnvironmentObject private var model: AppModel
+    /// The items, watched instead of the whole model (see SyncedStore): it
+    /// redrew with every beacon and log line while open. A file still on its
+    /// way follows the transfers on its own (see `fileInfo`).
+    @ObservedObject private var store = AppModel.shared.synced
     @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
 
     @State private var confirmingDelete = false
 
-    private var item: SyncedItem? { model.snapshot.items.first { $0.id == itemID } }
+    /// For the actions only, not watched.
+    private var model: AppModel { AppModel.shared }
+    private var item: SyncedItem? { store.value.items.first { $0.id == itemID } }
     private var actions: SyncedItemActions { SyncedItemActions(model: model, haptics: settings.haptics) }
 
     var body: some View {
@@ -207,10 +212,20 @@ struct ItemDetailView: View {
         }
     }
 
-    /// Name, size or transfer progress, and the file actions.
+    /// Name, size or transfer progress, and the file actions. Only a file
+    /// still on its way follows the transfers.
+    @ViewBuilder
     private func fileInfo(_ item: SyncedItem, centered: Bool) -> some View {
+        if item.fileAvailable {
+            fileInfo(item, centered: centered, transfers: [:])
+        } else {
+            SyncedTransfersReader { transfers in fileInfo(item, centered: centered, transfers: transfers) }
+        }
+    }
+
+    private func fileInfo(_ item: SyncedItem, centered: Bool, transfers: [String: TransferProgress]) -> some View {
         let name = item.filePayload?.fileName ?? "File"
-        let fraction = SyncedItemActions.transferFraction(item, transfers: model.snapshot.transfers)
+        let fraction = SyncedItemActions.transferFraction(item, transfers: transfers)
         let isPicture = SyncedItemActions.hasPicture(item)
         return VStack(alignment: centered ? .center : .leading, spacing: 14) {
             VStack(alignment: centered ? .center : .leading, spacing: 6) {
@@ -223,7 +238,7 @@ struct ItemDetailView: View {
                     if !item.fileAvailable, fraction == nil {
                         ProgressView()
                     }
-                    Text(SyncedItemActions.fileStatus(item, transfers: model.snapshot.transfers))
+                    Text(SyncedItemActions.fileStatus(item, transfers: transfers))
                         .font(.subheadline.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -251,9 +266,8 @@ struct ItemDetailView: View {
         .frame(maxWidth: .infinity, alignment: centered ? .center : .leading)
     }
 
-    /// `String.count` walks every character, and this screen re-renders with
-    /// each snapshot (several a second during transfers) - so remember the
-    /// last item's.
+    /// `String.count` walks every character, and this screen re-renders
+    /// whenever the list changes - so remember the last item's.
     private static var characterCountCache: (id: String, label: String)?
 
     private static func characterCount(_ item: SyncedItem) -> String {

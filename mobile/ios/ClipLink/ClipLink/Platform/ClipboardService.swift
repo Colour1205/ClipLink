@@ -24,7 +24,9 @@ final class ClipboardService {
     private enum Keys {
         static let ownChangeCount = "clip.ownChangeCount"
         static let seenChangeCount = "clip.seenChangeCount"
-        static let lastHash = "clip.lastHash"
+        static let lastWrite = "clip.lastWrite"
+        /// Builds up to 2.1.2 kept one hash here instead of `lastWrite`.
+        static let legacyLastHash = "clip.lastHash"
     }
 
     /// Biggest file we'll put on the pasteboard (it goes in memory).
@@ -57,11 +59,23 @@ final class ClipboardService {
         set { defaults.set(newValue, forKey: Keys.seenChangeCount) }
     }
 
-    /// Hash of whatever this device last sent or applied (persisted, unlike on
-    /// Android, so a relaunch doesn't re-send the same clipboard).
-    private(set) var lastKnownHash: String? {
-        get { defaults.string(forKey: Keys.lastHash) }
-        set { defaults.set(newValue, forKey: Keys.lastHash) }
+    /// What ClipLink last put on the clipboard, or last read off it and sent or
+    /// found already synced (see LastWrite). Persisted, so a relaunch doesn't
+    /// re-send the same clipboard; read from the older single hash when this
+    /// build has not written one yet.
+    private(set) lazy var lastWrite: LastWrite = LastWrite.load(json: self.defaults.string(forKey: Keys.lastWrite),
+                                                                legacyHash: self.defaults.string(forKey: Keys.legacyLastHash))
+
+    /// Bumped by every write of ours: a read that suspended checks it did not
+    /// change meanwhile (sync-dedupe-spec 1.6). Memory only.
+    private(set) var writeSerial = 0
+
+    /// Replaces the record, only ever after the clipboard write (or the
+    /// classification) it describes succeeded.
+    func noteLastWrite(_ prints: Set<String>) {
+        lastWrite = LastWrite(prints: prints)
+        defaults.set(lastWrite.jsonString(), forKey: Keys.lastWrite)
+        defaults.removeObject(forKey: Keys.legacyLastHash)
     }
 
     /// True when the pasteboard changed since we last wrote or looked, and
@@ -69,8 +83,17 @@ final class ClipboardService {
     var hasUnseenChange: Bool {
         let count = pasteboard.changeCount
         guard count != ownChangeCount, count != seenChangeCount else { return false }
-        return pasteboard.hasStrings || pasteboard.hasImages || pasteboard.hasURLs || pasteboard.numberOfItems > 0
+        // What it holds can't change without the count changing: asked once
+        // per count, not on every snapshot (each is a round trip to the
+        // pasteboard server, on the main thread).
+        if let known = contentCheck, known.count == count { return known.hasContent }
+        let hasContent = pasteboard.hasStrings || pasteboard.hasImages || pasteboard.hasURLs || pasteboard.numberOfItems > 0
+        contentCheck = (count, hasContent)
+        return hasContent
     }
+
+    /// The last answer `hasUnseenChange` got from the pasteboard, and for which count.
+    private var contentCheck: (count: Int, hasContent: Bool)?
 
     /// True when the pasteboard still holds what this app last wrote.
     var holdsOwnWrite: Bool { pasteboard.changeCount == ownChangeCount }
@@ -93,21 +116,16 @@ final class ClipboardService {
         if seenChangeCount > now { seenChangeCount = -1 }
     }
 
-    func noteSent(hash: String) {
-        lastKnownHash = hash
-    }
-
-    /// After something is deleted from history: pasting it again is a
-    /// deliberate act, not a repeat to skip.
-    func forgetLastHash() {
-        lastKnownHash = nil
-    }
-
     // MARK: - Reading
 
     /// The last capture() came back empty because a read was declined
     /// (iOS 16+ "Don't Allow"), not because there was nothing to read.
     private(set) var lastCaptureDeclined = false
+
+    /// The last capture() was a picture held in another format (JPEG, HEIC...)
+    /// and re-encoded as PNG: the hash of the bytes as they were, which a file
+    /// with those bytes goes by (see CapturePrint.alternates).
+    private(set) var lastCaptureSourceHash: String?
 
     /// Reads the pasteboard. Prompts on iOS 16+ unless the user allowed paste.
     ///
@@ -116,6 +134,7 @@ final class ClipboardService {
     func capture() async -> Capture? {
         markSeen()
         lastCaptureDeclined = false
+        lastCaptureSourceHash = nil
         // On iOS 16+ a declined read just comes back empty. Stop at the first
         // one instead of asking again with the next accessor.
         let declinedEndsIt = Self.readsAsk
@@ -160,7 +179,11 @@ final class ClipboardService {
         }
         if let type = types.first(where: { UTType($0)?.conforms(to: .image) == true }) {
             guard let data = pasteboard.data(forPasteboardType: type) else { return (false, nil) }
-            return (true, await Task.detached(priority: .userInitiated) { ItemLoader.pngData(fromImageData: data) }.value)
+            let (png, source) = await Task.detached(priority: .userInitiated) {
+                (ItemLoader.pngData(fromImageData: data), ContentHash.sha256Hex(data))
+            }.value
+            lastCaptureSourceHash = source
+            return (true, png)
         }
         guard let image = pasteboard.image else { return (false, nil) }
         return (true, await Task.detached(priority: .userInitiated) { ItemLoader.pngData(image) }.value)
@@ -177,32 +200,72 @@ final class ClipboardService {
 
     // MARK: - Writing
 
-    /// Puts a received (or re-copied) entry on the pasteboard.
+    /// A picture ready for the pasteboard: its bytes, their type, and their
+    /// print (see `decodePicture`).
+    struct Picture {
+        let data: Data
+        let type: String
+        let print: String
+    }
+
+    /// Decodes a picture entry's base64 - the entry's own, or the file the
+    /// history keeps a big one in (SyncedItem.inlineURL) - and works out its
+    /// type and print. Megabytes of decoding and hashing: off the main thread.
+    nonisolated static func decodePicture(content: String, inlineURL: URL?) async -> Picture? {
+        await Task.detached(priority: .userInitiated) { () -> Picture? in
+            let data: Data?
+            if !content.isEmpty {
+                data = Data(base64Encoded: content)
+            } else if let inlineURL, let text = try? Data(contentsOf: inlineURL, options: .mappedIfSafe) {
+                data = Data(base64Encoded: text)
+            } else {
+                data = nil
+            }
+            guard let data else { return nil }
+            let type = (CGImageSourceCreateWithData(data as CFData, nil).flatMap { CGImageSourceGetType($0) } as String?) ?? UTType.png.identifier
+            return Picture(data: data, type: type, print: ContentPrint.image(data))
+        }.value
+    }
+
+    /// Puts a decoded picture on the pasteboard.
+    func apply(_ picture: Picture) {
+        let before = pasteboard.changeCount
+        pasteboard.setItems([[picture.type: picture.data]], options: Self.writeOptions)
+        noteOwnWrite(before: before)
+        noteLastWrite([picture.print])
+    }
+
+    /// Puts a received (or re-copied) entry on the pasteboard. Pictures go
+    /// through `decodePicture` and `apply(_: Picture)` instead.
     @discardableResult
     func apply(_ entry: ClipboardEntry, fileURL: URL?) -> Bool {
         let before = pasteboard.changeCount
+        let print: String?
         switch entry.type {
         case Wire.EntryType.text:
             pasteboard.setItems([[UTType.utf8PlainText.identifier: entry.content]], options: Self.writeOptions)
-            lastKnownHash = ContentHash.sha256Hex(Data(entry.content.utf8))
+            print = ContentPrint.text(entry.content)
         case Wire.EntryType.image:
             guard let data = Data(base64Encoded: entry.content) else { return false }
             let type = (CGImageSourceCreateWithData(data as CFData, nil).flatMap { CGImageSourceGetType($0) } as String?) ?? UTType.png.identifier
             pasteboard.setItems([[type: data]], options: Self.writeOptions)
-            lastKnownHash = ContentHash.sha256Hex(data)
+            print = ContentPrint.image(data)
         case Wire.EntryType.file:
-            guard let payload = FilePayload.parse(entry.content), let fileURL else { return false }
-            guard payload.fileSize <= Self.maxPasteboardFileBytes,
+            // The size of the bytes that are here, not the one the sender
+            // declared: a peer that leaves it out says 0.
+            guard let payload = FilePayload.parse(entry.content), let fileURL,
+                  let size = Self.fileSize(at: fileURL), size <= Self.maxPasteboardFileBytes,
                   let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe)
             else { return false }
             let ext = (payload.fileName as NSString).pathExtension
             let type = UTType(filenameExtension: ext) ?? .data
             pasteboard.setItems([[type.identifier: data]], options: Self.writeOptions)
-            lastKnownHash = payload.fileHash.lowercased()
+            print = ContentPrint.file(hash: payload.fileHash)
         default:
             return false
         }
         noteOwnWrite(before: before)
+        noteLastWrite(Set([print].compactMap { $0 }))
         return true
     }
 
@@ -210,6 +273,12 @@ final class ClipboardService {
         let before = pasteboard.changeCount
         pasteboard.setItems([[UTType.utf8PlainText.identifier: text]], options: Self.writeOptions)
         noteOwnWrite(before: before)
+        noteLastWrite([ContentPrint.text(text)])
+    }
+
+    /// Bytes on disk, nil when the file can't be looked at.
+    nonisolated static func fileSize(at url: URL) -> Int64? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value
     }
 
     /// Items ClipLink writes stay on this device: Universal Clipboard would
@@ -228,6 +297,7 @@ final class ClipboardService {
         let expected = before + 1
         ownChangeCount = expected
         seenChangeCount = expected
+        writeSerial += 1
         DispatchQueue.main.async { [self] in
             let settled = pasteboard.changeCount
             ownChangeCount = settled

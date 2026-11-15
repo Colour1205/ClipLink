@@ -6,7 +6,8 @@ import UIKit
 struct SyncedZoomableImageView: View {
     let item: SyncedItem
 
-    @EnvironmentObject private var model: AppModel
+    /// Not watched: the picture never depends on the rest of the model.
+    private var model: AppModel { AppModel.shared }
     @State private var image: UIImage?
     @State private var failed = false
 

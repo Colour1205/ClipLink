@@ -51,11 +51,20 @@ function concatBytes(parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
-// One line's bytes before the Base64: nonce || tag || ciphertext.
-export async function encryptPacked(sessionKey: Uint8Array, plaintext: string): Promise<Uint8Array> {
-  const nonce = randomBytes(NONCE_SIZE);
+// The session key as the cipher takes it. Made once per connection (see
+// PeerConnection.create) and used for every envelope after: converting it
+// again for each one - a ping each way every 3 s, hundreds of file chunks
+// for a big file - cost two native round trips that did no new work. Only
+// the key is shared; every envelope still gets a fresh random nonce and a
+// cipher of its own.
+export async function importSessionKey(sessionKey: Uint8Array): Promise<cryptoFramework.SymKey> {
   const keyGen = cryptoFramework.createSymKeyGenerator('AES256');
-  const symKey = await keyGen.convertKey({ data: sessionKey });
+  return keyGen.convertKey({ data: sessionKey });
+}
+
+// One line's bytes before the Base64: nonce || tag || ciphertext.
+export async function encryptPacked(symKey: cryptoFramework.SymKey, plaintext: string): Promise<Uint8Array> {
+  const nonce = randomBytes(NONCE_SIZE);
 
   const cipher = cryptoFramework.createCipher('AES256|GCM|NoPadding');
   const params: cryptoFramework.GcmParamsSpec = {
@@ -78,16 +87,13 @@ export async function encryptPacked(sessionKey: Uint8Array, plaintext: string): 
 // A line already decoded from its Base64. Throws if it's too short to hold
 // a nonce and a tag (as Windows' and Android's Decrypt do), or was forged,
 // corrupted or sealed with another key.
-export async function decryptPacked(sessionKey: Uint8Array, packed: Uint8Array): Promise<string> {
+export async function decryptPacked(symKey: cryptoFramework.SymKey, packed: Uint8Array): Promise<string> {
   if (packed.length < NONCE_SIZE + TAG_SIZE) {
     throw new Error('packed message too short');
   }
   const nonce = packed.slice(0, NONCE_SIZE);
   const tag = packed.slice(NONCE_SIZE, NONCE_SIZE + TAG_SIZE);
   const cipherBytes = packed.slice(NONCE_SIZE + TAG_SIZE);
-
-  const keyGen = cryptoFramework.createSymKeyGenerator('AES256');
-  const symKey = await keyGen.convertKey({ data: sessionKey });
 
   const cipher = cryptoFramework.createCipher('AES256|GCM|NoPadding');
   const params: cryptoFramework.GcmParamsSpec = {

@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Buffers.Text;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
@@ -24,16 +26,26 @@ public class PeerConnection
 
     private readonly TcpClient client;
     private readonly StreamReader reader;
-    private readonly StreamWriter writer;
-    private readonly byte[] sessionKey;
+    // Lines are written straight to the stream (see Send) - the handshake's
+    // StreamWriter flushes every write, so it never holds anything back.
+    private readonly Stream stream;
+    // One cipher per direction for the connection's life, rather than a new
+    // one per line. AesGcm isn't safe to share between threads: Send runs
+    // on many (the heartbeat timer, the chunk loop, the read loop's
+    // answers), so encrypting takes encryptGate, while only the read loop
+    // ever decrypts.
+    private readonly AesGcm encryptor;
+    private readonly AesGcm decryptor;
+    private readonly object encryptGate = new();
     private DateTime lastActivityAt = DateTime.UtcNow;
     private System.Threading.Timer? heartbeatTimer;
-    // StreamWriter isn't safe for concurrent calls - without this, the
+    // Writes aren't safe for concurrent calls - without this, the
     // heartbeat timer's own Send(ping) can race a real Send() from, say,
-    // StreamFileToPeer's chunk loop (different threads entirely) and
-    // corrupt the writer's internal state. That's what an
-    // ArgumentOutOfRangeException out of WriteLineAsync actually was -
-    // this serializes every Send() so only one write is ever in flight.
+    // StreamFileToPeer's chunk loop (different threads entirely): two
+    // lines interleave on the wire, or (back when lines went through a
+    // StreamWriter) its internal state broke - an
+    // ArgumentOutOfRangeException out of WriteLineAsync. This serializes
+    // every Send() so only one write is ever in flight.
     private readonly SemaphoreSlim writeLock = new(1, 1);
 
     // Known the moment the connection is created — verified during the
@@ -103,12 +115,13 @@ public class PeerConnection
     private HashSet<string>? sentNonces = new();
     private readonly object sentNoncesGate = new(); // Send runs off the read loop
 
-    private PeerConnection(TcpClient client, StreamReader reader, StreamWriter writer, byte[] sessionKey, string peerDeviceId, bool wasAlreadyTrusted, bool newlyTrustedViaPassphrase, string? peerDeviceName, int peerProtocol, int ownProtocol)
+    private PeerConnection(TcpClient client, StreamReader reader, Stream stream, byte[] sessionKey, string peerDeviceId, bool wasAlreadyTrusted, bool newlyTrustedViaPassphrase, string? peerDeviceName, int peerProtocol, int ownProtocol)
     {
         this.client = client;
         this.reader = reader;
-        this.writer = writer;
-        this.sessionKey = sessionKey;
+        this.stream = stream;
+        encryptor = new AesGcm(sessionKey, TagSize);
+        decryptor = new AesGcm(sessionKey, TagSize);
         PeerDeviceId = peerDeviceId;
         WasAlreadyTrusted = wasAlreadyTrusted;
         NewlyTrustedViaPassphrase = newlyTrustedViaPassphrase;
@@ -156,7 +169,14 @@ public class PeerConnection
     // protocol is the sync protocol this side sends and speaks (see
     // HandshakeMessage.Protocol): always the current one, except in tests and
     // tools that stand in for an older build.
-    public static async Task<PeerConnection?> CreateAsync(TcpClient client, DeviceIdentity myIdentity, TrustStore trustStore, PassphraseKeyStore passphraseKeyStore, string? myDeviceName = null, Action? answeredAsSelf = null, Func<string, bool>? isBlocked = null, int protocol = HandshakeMessage.CurrentProtocol)
+    //
+    // cancellationToken ends the handshake (the caller's timeout): its read
+    // or write then throws OperationCanceledException, to the caller. Merely
+    // giving up on the task (WaitAsync) left it running until the caller
+    // closed the socket, and that failure was then nobody's - logged as an
+    // unobserved task error, stack and all, on every redial of a peer that
+    // accepts TCP and never answers.
+    public static async Task<PeerConnection?> CreateAsync(TcpClient client, DeviceIdentity myIdentity, TrustStore trustStore, PassphraseKeyStore passphraseKeyStore, string? myDeviceName = null, Action? answeredAsSelf = null, Func<string, bool>? isBlocked = null, int protocol = HandshakeMessage.CurrentProtocol, CancellationToken cancellationToken = default)
     {
         Stream stream = client.GetStream();
         var reader = new StreamReader(stream);
@@ -177,9 +197,9 @@ public class PeerConnection
             myProof,
             DeviceNameStore.Normalize(myDeviceName),
             protocol);
-        await writer.WriteLineAsync(JsonSerializer.Serialize(myHandshake));
+        await writer.WriteLineAsync(JsonSerializer.Serialize(myHandshake).AsMemory(), cancellationToken);
 
-        string? theirHandshakeJson = await reader.ReadLineAsync();
+        string? theirHandshakeJson = await ReadHandshakeLineAsync(reader, MaxHandshakeChars, cancellationToken);
         if (theirHandshakeJson == null) return null;
 
         HandshakeMessage? theirHandshake;
@@ -246,21 +266,70 @@ public class PeerConnection
 
         byte[] sessionKey = ecdh.DeriveKeyFromHash(theirEcdh.PublicKey, HashAlgorithmName.SHA256);
 
-        return new PeerConnection(client, reader, writer, sessionKey, theirHandshake.IdentityPublicKey, effectivelyTrusted, passphraseVerified, DeviceNameStore.Normalize(theirHandshake.DeviceName),
+        return new PeerConnection(client, reader, stream, sessionKey, theirHandshake.IdentityPublicKey, effectivelyTrusted, passphraseVerified, DeviceNameStore.Normalize(theirHandshake.DeviceName),
             HandshakeMessage.Normalize(theirHandshake.Protocol), protocol);
     }
 
-    public async Task Send(string message)
+    // The longest handshake line read (characters). A real one is a few
+    // hundred: two keys, a signature, a proof and a name.
+    public const int MaxHandshakeChars = 16 * 1024;
+
+    // The peer's handshake line, or null if the stream ends first or the
+    // line runs past MaxHandshakeChars. Anyone on the network can connect and
+    // send this before proving anything, and ReadLineAsync kept everything
+    // until a newline - a host streaming bytes without one made this buffer
+    // gigabytes. Reads through reader, so whatever it has buffered beyond the
+    // line is still there for Listen. A line ends at "\n" (every build ends
+    // its lines with "\n" or "\r\n"); a "\r" before it is dropped.
+    public static async Task<string?> ReadHandshakeLineAsync(StreamReader reader, int maxChars = MaxHandshakeChars, CancellationToken cancellationToken = default)
     {
-        string encrypted = Encrypt(message);
-        await writeLock.WaitAsync();
+        var line = new StringBuilder();
+        var one = new char[1];
+        while (true)
+        {
+            int read = await reader.ReadAsync(one.AsMemory(), cancellationToken);
+            if (read == 0) return null;
+            char c = one[0];
+            if (c == '\n') return line.ToString();
+            if (c == '\r') continue;
+            if (line.Length >= maxChars) return null;
+            line.Append(c);
+        }
+    }
+
+    public Task Send(string message) => Send(Encoding.UTF8.GetBytes(message));
+
+    // One message, already UTF-8 (see Wire.Envelope): sealed into one buffer
+    // and written as one Base64 line - the same bytes as ever, with the
+    // "\r\n" StreamWriter.WriteLine ended it with - but without the copies a
+    // picture used to make on the way: its UTF-8, the ciphertext, the packed
+    // bytes and a Base64 string twice their size, for every peer.
+    public async Task Send(ReadOnlyMemory<byte> message)
+    {
+        int packedLength = NonceSize + TagSize + message.Length;
+        byte[] packed = ArrayPool<byte>.Shared.Rent(packedLength);
+        byte[]? line = null;
         try
         {
-            await writer.WriteLineAsync(encrypted);
+            Encrypt(message.Span, packed.AsSpan(0, packedLength));
+            line = ArrayPool<byte>.Shared.Rent(Base64.GetMaxEncodedToUtf8Length(packedLength) + 2);
+            Base64.EncodeToUtf8(packed.AsSpan(0, packedLength), line, out _, out int written);
+            line[written++] = (byte)'\r';
+            line[written++] = (byte)'\n';
+            await writeLock.WaitAsync();
+            try
+            {
+                await stream.WriteAsync(line.AsMemory(0, written));
+            }
+            finally
+            {
+                writeLock.Release();
+            }
         }
         finally
         {
-            writeLock.Release();
+            ArrayPool<byte>.Shared.Return(packed);
+            if (line != null) ArrayPool<byte>.Shared.Return(line);
         }
     }
 
@@ -296,6 +365,7 @@ public class PeerConnection
         finally
         {
             StopHeartbeat();
+            decryptor.Dispose(); // only ever used by this loop
             Disconnected?.Invoke();
         }
     }
@@ -334,31 +404,27 @@ public class PeerConnection
     private const int NonceSize = 12; // AES-GCM standard nonce size
     private const int TagSize = 16;
 
-    private string Encrypt(string plaintext)
+    // plaintext sealed into packed, laid out as the wire has it - nonce, tag,
+    // ciphertext - with nothing copied on the way.
+    private void Encrypt(ReadOnlySpan<byte> plaintext, Span<byte> packed)
     {
-        byte[] nonce = RandomNumberGenerator.GetBytes(NonceSize);
+        Span<byte> nonce = packed[..NonceSize];
+        RandomNumberGenerator.Fill(nonce);
         lock (sentNoncesGate) sentNonces?.Add(Convert.ToBase64String(nonce));
-        byte[] plainBytes = Encoding.UTF8.GetBytes(plaintext);
-        byte[] cipherBytes = new byte[plainBytes.Length];
-        byte[] tag = new byte[TagSize];
-
-        using var aesGcm = new AesGcm(sessionKey, TagSize);
-        aesGcm.Encrypt(nonce, plainBytes, cipherBytes, tag);
-
-        byte[] packed = new byte[NonceSize + TagSize + cipherBytes.Length];
-        Buffer.BlockCopy(nonce, 0, packed, 0, NonceSize);
-        Buffer.BlockCopy(tag, 0, packed, NonceSize, TagSize);
-        Buffer.BlockCopy(cipherBytes, 0, packed, NonceSize + TagSize, cipherBytes.Length);
-        return Convert.ToBase64String(packed);
+        lock (encryptGate)
+        {
+            encryptor.Encrypt(nonce, plaintext, packed[(NonceSize + TagSize)..], packed[NonceSize..(NonceSize + TagSize)]);
+        }
     }
 
+    // Decrypted in place, in the bytes the line decodes to.
     private string Decrypt(string packedBase64)
     {
         byte[] packed = Convert.FromBase64String(packedBase64);
-        byte[] nonce = packed[0..NonceSize];
-        byte[] tag = packed[NonceSize..(NonceSize + TagSize)];
-        byte[] cipherBytes = packed[(NonceSize + TagSize)..];
-        byte[] plainBytes = new byte[cipherBytes.Length];
+        if (packed.Length < NonceSize + TagSize) throw new CryptographicException("line too short"); // caught in Listen()
+        ReadOnlySpan<byte> nonce = packed.AsSpan(0, NonceSize);
+        ReadOnlySpan<byte> tag = packed.AsSpan(NonceSize, TagSize);
+        Span<byte> cipher = packed.AsSpan(NonceSize + TagSize);
         lock (sentNoncesGate)
         {
             if (sentNonces != null && sentNonces.Contains(Convert.ToBase64String(nonce)))
@@ -367,8 +433,7 @@ public class PeerConnection
             }
         }
 
-        using var aesGcm = new AesGcm(sessionKey, TagSize);
-        aesGcm.Decrypt(nonce, cipherBytes, tag, plainBytes); // throws if tampered — caught in Listen()
-        return Encoding.UTF8.GetString(plainBytes);
+        decryptor.Decrypt(nonce, cipher, tag, cipher); // throws if tampered — caught in Listen()
+        return Encoding.UTF8.GetString(cipher);
     }
 }

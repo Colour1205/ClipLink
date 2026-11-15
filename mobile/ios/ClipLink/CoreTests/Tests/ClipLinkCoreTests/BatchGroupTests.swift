@@ -347,6 +347,28 @@ final class BatchGroupTests: XCTestCase {
         XCTAssertEqual(outcome.group?.memberIDs.count, 3, "the known and deleted entries are not in the group")
     }
 
+    /// An older peer resends its whole history on every connect: what is here
+    /// already is skipped before its signature is checked (each check copies and
+    /// hashes the entry whole, pictures and all).
+    func testAnEntryAlreadyHereIsKnownWithoutItsSignatureBeingChecked() throws {
+        let (engine, _) = makeEngine()
+        let peer = trustedPeer(engine)
+        let entries = try batch(from: peer, count: 3)
+        engine.history.add(entries[0])
+        // Same identity (who, when, kind, signature), other content: were it
+        // checked, its signature would fail.
+        var resent = entries[0]
+        resent.content = "not what was signed"
+
+        let outcome = apply(engine, [resent, entries[1], entries[2]], from: peer)
+
+        XCTAssertEqual(outcome.known, 1)
+        XCTAssertEqual(outcome.rejected, 0)
+        XCTAssertEqual(outcome.fresh.map(\.content), ["item 2", "item 1"])
+        let here = engine.history.entries.filter { HistoryStore.identity(of: $0) == HistoryStore.identity(of: entries[0]) }
+        XCTAssertEqual(here.map(\.content), ["item 0"], "the copy here is untouched")
+    }
+
     func testOneNewEntryIsNotAGroup() throws {
         let (engine, _) = makeEngine()
         let peer = trustedPeer(engine)
@@ -386,14 +408,22 @@ final class BatchGroupTests: XCTestCase {
         XCTAssertNotEqual(groups[0].id, groups[1].id)
     }
 
-    func testTheNewestNewItemIsAppliedEvenWhenSomethingNewerIsAlreadyHere() throws {
+    func testABatchOlderThanWhatIsHereIsStoredQuietlyByTime() throws {
         let (engine, recorder) = makeEngine()
         let peer = trustedPeer(engine)
         // Something newer is already here.
         engine.history.add(try batch(from: peer, count: 1, start: 1_800_000_000, label: "newer")[0])
-        _ = apply(engine, try batch(from: peer, count: 3), from: peer)
+        let outcome = apply(engine, try batch(from: peer, count: 3), from: peer)
         settle()
-        XCTAssertEqual(recorder.received.map(\.content), ["item 2"], "a reconnect puts the newest item it brought on the clipboard, old or not")
+        XCTAssertEqual(outcome.fresh.count, 3)
+        XCTAssertNil(outcome.group, "no stack on top")
+        XCTAssertTrue(snapshot(engine).blocks.isEmpty)
+        XCTAssertTrue(recorder.received.isEmpty, "only something newer than everything here goes on the clipboard")
+
+        // One newer than everything is applied, and only that one.
+        _ = apply(engine, try batch(from: peer, count: 2, start: 1_900_000_000, label: "newest"), from: peer)
+        settle()
+        XCTAssertEqual(recorder.received.map(\.content), ["newest 1"])
     }
 
     func testTheHistoryCapTrimsAGroup() throws {

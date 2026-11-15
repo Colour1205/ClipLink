@@ -1,8 +1,13 @@
 package io.uaena.cliplink.ui
 
+import androidx.compose.runtime.Immutable
 import io.uaena.cliplink.engine.SyncedItem
 
-/** A [SyncedItem] together with the key every list, cache and saved state refers to it by. */
+/**
+ * A [SyncedItem] together with the key every list, cache and saved state refers to it by.
+ * @Immutable like [SyncedItem], and for the same reason: keep its fields vals.
+ */
+@Immutable
 data class KeyedItem(val key: String, val item: SyncedItem)
 
 /**

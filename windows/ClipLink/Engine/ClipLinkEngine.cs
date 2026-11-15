@@ -62,11 +62,13 @@ public sealed partial class ClipLinkEngine : IDisposable
     // Bundles the state chunked file transfers need besides the streams
     // being received (those are IncomingFiles'): any entry that arrived (and
     // was verified) before its bytes finished streaming in, waiting to be
-    // applied once they do, and how often each file has been asked for again
-    // after a transfer of it failed (see RequestAgain).
+    // applied once they do (see PendingApply), and how often each file has
+    // been asked for again after a transfer of it failed (see RequestAgain).
+    // By hash in either case: the phones send lowercase, this PC uppercase,
+    // and a copy here has to find the entry a phone sent.
     private class FileTransferState
     {
-        public ConcurrentDictionary<string, ClipboardEntry> PendingEntries = new();
+        public ConcurrentDictionary<string, PendingApply> PendingEntries = new(StringComparer.OrdinalIgnoreCase);
         public ConcurrentDictionary<string, int> Retries = new(StringComparer.OrdinalIgnoreCase);
         // Guards against streaming the same file to the same peer twice at
         // once: ClipboardChanged proactively streams a freshly-captured
@@ -156,6 +158,14 @@ public sealed partial class ClipLinkEngine : IDisposable
     // the order they happened, off the networking threads.
     private readonly Channel<Action> events = Channel.CreateUnbounded<Action>(new UnboundedChannelOptions { SingleReader = true });
 
+    // What was copied on this PC is published from here, one copy at a time
+    // in the order they were made - not on the clipboard watcher's thread,
+    // which raises them: signing a picture, caching a file in FileStore (up
+    // to 1 GB, from a USB stick or a share) and adding it to history held
+    // that thread, so no peer's item could reach the clipboard meanwhile
+    // and nothing copied next was seen.
+    private readonly Channel<Action> localCopies = Channel.CreateUnbounded<Action>(new UnboundedChannelOptions { SingleReader = true });
+
     // Bursts of changes (a whole history batch, a beacon from every device)
     // become one event each this long after the first.
     private static readonly TimeSpan CoalesceDelay = TimeSpan.FromMilliseconds(100);
@@ -167,6 +177,7 @@ public sealed partial class ClipLinkEngine : IDisposable
     public ClipLinkEngine()
     {
         _ = Task.Run(DeliverEvents);
+        _ = Task.Run(PublishLocalCopies);
     }
 
     public EngineStatus Status
@@ -206,7 +217,8 @@ public sealed partial class ClipLinkEngine : IDisposable
             passphraseKeyStore = new PassphraseKeyStore(label);
             deviceName = new DeviceNameStore(label);
             clipboardSync = new ClipboardSync(fileStore, label);
-            clipboardSync.ClipboardChanged += OnLocalClipboardChanged;
+            clipboardSync.ClipboardChanged += content => localCopies.Writer.TryWrite(() => OnLocalClipboardChanged(content));
+            clipboardSync.FilesCopied += files => localCopies.Writer.TryWrite(() => OnLocalFilesCopied(files));
             ownId = identity.GetPublicKey();
             storesLoaded = true;
             Console.WriteLine($"Device ID (public key): {ownId}");
@@ -275,6 +287,10 @@ public sealed partial class ClipLinkEngine : IDisposable
                     conn.Close();
                 }
             }
+            localCopies.Writer.TryComplete();
+            // History is written in the background (see HistoryAccess.saveHistory):
+            // the last change has to be on disk before the process exits.
+            if (storesLoaded) historyAccess.Flush();
             SetStatus(new EngineStatus(EngineState.Stopped, null));
             // Whatever is queued (Stopped included) is still delivered;
             // nothing after it is.
@@ -352,9 +368,8 @@ public sealed partial class ClipLinkEngine : IDisposable
     {
         if (!options.WatchClipboard) return;
 
-        // Its own STA thread with its own WinForms message loop and timer,
-        // exactly as in the daemon - independent of whatever UI thread the
-        // app runs.
+        // Its own thread with its own message loop (see ClipboardSync.Watch) -
+        // independent of whatever UI thread the app runs.
         Thread thisThread = new Thread(() =>
         {
             clipboardSync.Watch();
@@ -580,11 +595,53 @@ public sealed partial class ClipLinkEngine : IDisposable
         }
     }
 
-    // clipboard watcher: something was copied on this PC
+    // clipboard watcher: something was copied on this PC (that ClipLink didn't
+    // write or see already). Not sent when it is what the newest item already
+    // has - the devices have it on top (from a share, say, or a clipboard
+    // shared by Windows or the phone itself) - but an older item copied again
+    // is: that's how the user gets it back onto the other devices (the
+    // Synced page then shows it once, on top - see HistoryAccess.GetHistoryWithBatches).
     private void OnLocalClipboardChanged((string content, string type, string? sourceFilePath) content)
     {
         Console.WriteLine($"[clip] detected local {content.type} change ({content.content.Length} chars/bytes-base64) - {connectionsByDeviceId.Count} peer(s) connected");
+        if (ContentPrint.Of(content.content, content.type) is string print && historyAccess.NewestHas(new[] { print }, 1))
+        {
+            Console.WriteLine($"[clip] that {content.type} is the newest item already - not sent again");
+            return;
+        }
         PublishLocal(content.content, content.type, content.sourceFilePath, "copied");
+    }
+
+    // Files copied in Explorer (see ClipboardSync.FilesCopied): each goes out
+    // as if copied alone, except those the newest items already have - as
+    // many newest as files were copied, from before any of them went out.
+    private void OnLocalFilesCopied(IReadOnlyList<(string content, string path)> files)
+    {
+        Console.WriteLine($"[clip] detected {files.Count} local file(s) copied - {connectionsByDeviceId.Count} peer(s) connected");
+        foreach (var file in SkipNewest(files, file => ContentPrint.Of(file.content, "file")))
+        {
+            PublishLocal(file.content, "file", file.path, "copied");
+        }
+    }
+
+    // The items of one share or copy that aren't what the newest items (as
+    // many as there are items, taken from history before any goes out)
+    // already have: those aren't signed again - the devices have them on
+    // top - and count as shared. Two with the same content go out once.
+    private List<T> SkipNewest<T>(IReadOnlyList<T> items, Func<T, string?> printOf)
+    {
+        var prints = items.Select(printOf).ToList();
+        var known = historyAccess.NewestPrints(items.Count);
+        var seen = new HashSet<string>();
+        var fresh = new List<T>();
+        for (int i = 0; i < items.Count; i++)
+        {
+            string? print = prints[i];
+            if (print != null && (known.Contains(print) || !seen.Add(print))) continue;
+            fresh.Add(items[i]);
+        }
+        if (fresh.Count < items.Count) Console.WriteLine($"[clip] {items.Count - fresh.Count} of {items.Count} item(s) are the newest already, or the same as another - not sent again");
+        return fresh;
     }
 
     // Something new from this PC - copied here, or shared with "Share to
@@ -617,12 +674,12 @@ public sealed partial class ClipLinkEngine : IDisposable
 
         var entry = new ClipboardEntry(content, type, ownId, DateTime.UtcNow);
         var signedEntry = SigningService.Sign(entry, identity);
-        var envelope = new Envelope("entry", JsonSerializer.Serialize(signedEntry));
-        var json = JsonSerializer.Serialize(envelope);
+        // Made once, as UTF-8, for every peer (see Wire.Envelope).
+        var envelope = Wire.Envelope("entry", signedEntry);
         foreach (var conn in connectionsByDeviceId.Values)
         {
             string peerShort = DeviceLabel.ShortId(conn.PeerDeviceId);
-            _ = conn.Send(json).ContinueWith(t =>
+            _ = conn.Send(envelope).ContinueWith(t =>
             {
                 if (t.IsFaulted)
                 {
@@ -645,7 +702,25 @@ public sealed partial class ClipLinkEngine : IDisposable
             // waiting on from a peer (e.g. this device independently
             // captured the same file another connected device just
             // applied) — fulfill that now rather than leaving it stuck
+            // (in either case: see FileTransferState)
             TryFulfillPendingEntry(payload.FileHash);
+        }
+    }
+
+    // See localCopies. One copy failing doesn't stop the ones after it.
+    private async Task PublishLocalCopies()
+    {
+        await foreach (var publish in localCopies.Reader.ReadAllAsync())
+        {
+            if (stopping.IsCancellationRequested) continue; // what's left is dropped
+            try
+            {
+                publish();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[clip] couldn't send what was copied: {ex.GetType().Name}: {ex.Message}");
+            }
         }
     }
 

@@ -79,6 +79,12 @@ export interface PeerBeacon {
   senderIp: string;
 }
 
+// Whether two beacons say the same thing, field for field.
+export function sameBeacon(a: PeerBeacon, b: PeerBeacon): boolean {
+  return a.tcpPort === b.tcpPort && a.deviceId === b.deviceId && a.proof === b.proof && a.address === b.address
+    && a.name === b.name && a.senderIp === b.senderIp;
+}
+
 // The beacon as sent. "-" stands in for a missing proof, address or name, so
 // the name is always the sixth field. The fifth is always "-" too: it used to
 // say the sender's Pairing screen was open, and stays only so builds from

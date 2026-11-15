@@ -25,9 +25,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -57,6 +54,9 @@ import com.google.zxing.MultiFormatReader
 import com.google.zxing.NotFoundException
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
+import io.uaena.cliplink.ui.icons.Icons
+import io.uaena.cliplink.ui.icons.automirrored.filled.ArrowBack
+import io.uaena.cliplink.ui.icons.filled.CameraAlt
 import java.util.concurrent.Executors
 
 // Reused across frames rather than allocated per-frame - safe because

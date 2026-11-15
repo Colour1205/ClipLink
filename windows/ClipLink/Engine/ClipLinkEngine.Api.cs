@@ -486,8 +486,9 @@ public sealed partial class ClipLinkEngine
     // Puts a history entry back on this PC's clipboard - through the
     // clipboard watcher's queue like every clipboard write, so it isn't
     // echoed back out as a new copy. An image or file is also saved under
-    // ReceivedFiles, as receiving one is. False if key isn't in history, or
-    // it's a file whose bytes aren't here.
+    // ReceivedFiles, as receiving one is (another device's file with the Mark
+    // of the Web). False if key isn't in history, or it's a file whose bytes
+    // aren't here.
     public bool CopyToClipboard(string key)
     {
         var entry = FindEntry(key);
@@ -503,7 +504,7 @@ public sealed partial class ClipLinkEngine
             default:
                 return false;
         }
-        clipboardSync.addToQueue(entry.Content, entry.Type);
+        clipboardSync.addToQueue(entry.Content, entry.Type, fromElsewhere: entry.DeviceId != ownId);
         return true;
     }
 
@@ -522,20 +523,24 @@ public sealed partial class ClipLinkEngine
     // its copy, and a device that is off hears of it in this PC's next history
     // head). The clipboard is left alone. Remembered as deleted either way, so a
     // peer's next history batch can't restore it. Its copies opened from here
-    // (GetFileToOpen) go too, unless the user has edited them. False if it
-    // wasn't in history. ("delete_history_entry")
+    // (GetFileToOpen) go too, unless the user has edited them. The card is all
+    // the entries with its content (see HistoryAccess.GetHistoryWithBatches),
+    // so all of them go - a twin left behind would show up again as the
+    // deleted item come back. False if it wasn't in history.
+    // ("delete_history_entry")
     public bool DeleteHistoryEntry(string key)
     {
         RequireStores();
         if (string.IsNullOrEmpty(key)) return false;
-        var removed = historyAccess.removeFromHistory(key);
+        var keys = historyAccess.TwinKeys(key);
+        var removed = historyAccess.RemoveMany(keys);
         ForgetPendingApplies(removed);
         foreach (var entry in removed)
         {
             DeleteOpenCopies(OpenFolderFor(entry));
         }
         // (Told even if it had left history meanwhile: the user deleted it.)
-        BroadcastDelete(new[] { key });
+        BroadcastDelete(keys);
         if (removed.Count == 0) return false;
         NotifyHistoryChanged();
         return true;
@@ -574,7 +579,10 @@ public sealed partial class ClipLinkEngine
     // skipped (see ShareResult and FileSkipReason); a path given twice is
     // shared once. Hashing and caching a big file takes a while, so this
     // runs off the caller's thread. Works while Faulted too: the entries
-    // wait in history for the next connection.
+    // wait in history for the next connection. A file the newest items
+    // already are (as many newest as paths, from before the share), or one
+    // whose bytes were already shared in this share, counts as shared and
+    // isn't sent again.
     public async Task<ShareResult> ShareFilesAsync(IEnumerable<string> paths)
     {
         RequireStores();
@@ -588,6 +596,7 @@ public sealed partial class ClipLinkEngine
             {
                 var shared = new List<string>();
                 var skipped = new List<SkippedShare>();
+                var known = historyAccess.NewestPrints(unique.Count);
                 foreach (string path in unique)
                 {
                     var payload = LocalFiles.Describe(path, out var skip, out string? error);
@@ -595,6 +604,12 @@ public sealed partial class ClipLinkEngine
                     {
                         Console.WriteLine($"[share] skipped ({skip}{(error != null ? ": " + error : "")}): {path}");
                         skipped.Add(new SkippedShare(path, skip, error));
+                        continue;
+                    }
+                    if (!known.Add(ContentPrint.File(payload.FileHash)))
+                    {
+                        Console.WriteLine($"[share] already the newest item, or shared just now - not sent again: {path}");
+                        shared.Add(path);
                         continue;
                     }
                     // Its bytes first: one that can't be cached here (disk
@@ -633,12 +648,14 @@ public sealed partial class ClipLinkEngine
 
     // Text dropped on ClipLink's window: sent and kept exactly as if it had
     // been copied here, but this PC's clipboard isn't touched (as
-    // ShareFilesAsync). Works while Faulted too.
+    // ShareFilesAsync). Not again when the newest item already is that
+    // text. Works while Faulted too.
     public void ShareText(string text)
     {
         RequireStores();
         if (string.IsNullOrEmpty(text)) return;
         Console.WriteLine($"[share] dropped text ({text.Length} chars) - {connectionsByDeviceId.Count} peer(s) connected");
+        if (SkipNewest(new[] { text }, ContentPrint.Text).Count == 0) return;
         PublishLocal(text, "text", null, "dropped");
     }
 
@@ -649,6 +666,7 @@ public sealed partial class ClipLinkEngine
         RequireStores();
         if (png.Length == 0) return;
         Console.WriteLine($"[share] dropped image ({png.Length} bytes) - {connectionsByDeviceId.Count} peer(s) connected");
+        if (SkipNewest(new[] { png }, ContentPrint.Image).Count == 0) return;
         PublishLocal(Convert.ToBase64String(png), "image", null, "dropped");
     }
 

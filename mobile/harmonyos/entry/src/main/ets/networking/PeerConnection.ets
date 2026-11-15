@@ -92,7 +92,8 @@ const HANDSHAKE_TIMEOUT_MS = 10000;
 // PeerConnection.create() works identically for whichever side initiated
 // the TCP connection (matches PeerConnection.cs: the handshake itself has
 // no notion of "client" vs "server" role, both sides just write-then-read).
-interface TcpLike {
+// Exported for the tests (test/LineChannel.test.ets), as is TcpLineChannel.
+export interface TcpLike {
   onMessage(callback: (info: socket.SocketMessageInfo) => void): void;
   onClose(callback: () => void): void;
   send(options: socket.TCPSendOptions): Promise<void>;
@@ -227,6 +228,16 @@ export function sameIdentityKey(a: string, b: string): boolean {
   return (a.length > 0 && a === b) || sameKeyBytes(decodedKey(a), decodedKey(b));
 }
 
+// What a connection nobody reads yet may hold, in lines and the part of one
+// still arriving, when it came from a device that is not trusted (see
+// TcpLineChannel.limitUntilRead). A pairing request waits up to 3 minutes for
+// its answer, with nothing reading it, and a stranger could otherwise fill
+// this device's memory meanwhile: past the first line a line may be 192 MB,
+// and nothing capped how many queued. Generous enough for the history an
+// older build sends the moment it accepts this device (its 25 items, about
+// 13 MB on the wire).
+export const UNREAD_MAX_BYTES = 64 * 1024 * 1024;
+
 async function sha256(data: Uint8Array): Promise<Uint8Array> {
   const md = cryptoFramework.createMd('SHA256');
   await md.update({ data });
@@ -246,12 +257,23 @@ async function sha256(data: Uint8Array): Promise<Uint8Array> {
 // the UI thread - measured at about 90 ms for a 16 MB history batch - for
 // nothing. (A line that long is ordinary: an image item is its PNG in
 // Base64, and a history batch carries 25 items.)
-class TcpLineChannel {
+export class TcpLineChannel {
   private client: TcpLike;
   // Splits the socket's bytes into lines - bounded, and linear in what
   // arrives (see LineFramer).
   private framer: LineFramer = new LineFramer();
   private pendingLines: Uint8Array[] = [];
+  // The bytes in pendingLines.
+  private pendingBytes: number = 0;
+  // See limitUntilRead: the most pendingLines and a part line may hold while
+  // nothing reads the channel, or -1 for no limit.
+  private unreadLimit: number = -1;
+  // Went over unreadLimit: what was queued was dropped, and everything after
+  // is ignored. Lines are missing, so the connection can't be used for sync.
+  private overflow: boolean = false;
+  // When the socket last brought any bytes at all - a whole line or a piece
+  // of one (see PeerConnection.lastHeardAt).
+  private lastBytes: number = Date.now();
   private waiters: Array<(line: Uint8Array | null) => void> = [];
   // Notified whenever a line arrives or the socket closes - see
   // waitForActivity.
@@ -279,6 +301,17 @@ class TcpLineChannel {
   }
 
   private handleChunk(chunk: ArrayBuffer): void {
+    this.lastBytes = Date.now();
+    if (this.overflow) return;
+    if (this.unreadLimit >= 0 && this.pendingBytes + this.framer.bufferedBytes + chunk.byteLength > this.unreadLimit) {
+      // Kept open, so the request can still be answered; only the bytes go.
+      this.overflow = true;
+      this.pendingLines = [];
+      this.pendingBytes = 0;
+      this.framer = new LineFramer();
+      this.notifyActivity();
+      return;
+    }
     const lines: Uint8Array[] | null = this.framer.push(new Uint8Array(chunk));
     if (lines === null) {
       // Over the cap before a handshake even arrived - not a ClipLink peer,
@@ -308,8 +341,35 @@ class TcpLineChannel {
       waiter(line);
     } else {
       this.pendingLines.push(line);
+      this.pendingBytes += line.length;
     }
     this.notifyActivity();
+  }
+
+  // From now until something reads the channel (stopLimit), it holds at most
+  // maxBytes; past that it drops what it holds and ignores the rest (see
+  // overflowed). For a connection from a device that is not trusted, whose
+  // request can wait minutes for an answer with nothing reading it.
+  limitUntilRead(maxBytes: number): void {
+    this.unreadLimit = maxBytes;
+  }
+
+  stopLimit(): void {
+    this.unreadLimit = -1;
+  }
+
+  get overflowed(): boolean {
+    return this.overflow;
+  }
+
+  get lastBytesAt(): number {
+    return this.lastBytes;
+  }
+
+  private takePending(): Uint8Array {
+    const line: Uint8Array = this.pendingLines.shift()!;
+    this.pendingBytes -= line.length;
+    return line;
   }
 
   private flushWaiters(value: Uint8Array | null): void {
@@ -326,7 +386,7 @@ class TcpLineChannel {
 
   async readLine(): Promise<Uint8Array | null> {
     if (this.pendingLines.length > 0) {
-      return this.pendingLines.shift()!;
+      return this.takePending();
     }
     if (this.closed) return null;
     return new Promise<Uint8Array | null>((resolve) => {
@@ -338,7 +398,7 @@ class TcpLineChannel {
   // waiter is removed so it can't swallow a line that arrives later.
   async readLineWithin(timeoutMs: number): Promise<Uint8Array | null> {
     if (this.pendingLines.length > 0) {
-      return this.pendingLines.shift()!;
+      return this.takePending();
     }
     if (this.closed) return null;
     return new Promise<Uint8Array | null>((resolve) => {
@@ -368,7 +428,7 @@ class TcpLineChannel {
     return new Promise<PeerVerdict>((resolve) => {
       let timerId = -1;
       const settled = (): boolean => {
-        if (this.pendingLines.length > 0 || this.framer.bufferedBytes > 0) {
+        if (this.pendingLines.length > 0 || this.framer.bufferedBytes > 0 || this.overflow) {
           resolve('accepted');
           return true;
         }
@@ -471,6 +531,8 @@ export class PeerConnection {
   private tickCallback: (() => void) | null = null;
   private channel: TcpLineChannel;
   private sessionKey: Uint8Array;
+  // sessionKey as the cipher takes it, converted once (see AesGcm.importSessionKey).
+  private symKey: cryptoFramework.SymKey;
   private lastActivityAt: number = Date.now();
   private heartbeatTimerId: number = -1;
   public readonly peerDeviceId: string;
@@ -510,9 +572,10 @@ export class PeerConnection {
   // ping. listenLoop refuses such a line instead. Keyed by nonceKey.
   private sentNonces: Set<string> | null = new Set<string>();
 
-  private constructor(channel: TcpLineChannel, sessionKey: Uint8Array, peerDeviceId: string, wasAlreadyTrusted: boolean, newlyTrustedViaPassphrase: boolean, peerName: string | null, peerProtocol: number) {
+  private constructor(channel: TcpLineChannel, sessionKey: Uint8Array, symKey: cryptoFramework.SymKey, peerDeviceId: string, wasAlreadyTrusted: boolean, newlyTrustedViaPassphrase: boolean, peerName: string | null, peerProtocol: number) {
     this.channel = channel;
     this.sessionKey = sessionKey;
+    this.symKey = symKey;
     this.peerDeviceId = peerDeviceId;
     this.wasAlreadyTrusted = wasAlreadyTrusted;
     this.newlyTrustedViaPassphrase = newlyTrustedViaPassphrase;
@@ -631,11 +694,15 @@ export class PeerConnection {
       // Matches .NET's ecdh.DeriveKeyFromHash(theirPublicKey, SHA256) with
       // no secretPrepend/secretAppend - that's just SHA256(rawSharedSecret).
       const sessionKey = await sha256(sharedSecret.data);
+      const symKey: cryptoFramework.SymKey = await AesGcm.importSessionKey(sessionKey);
+      // A pairing request: nothing reads it until it is answered, which can
+      // take minutes (see UNREAD_MAX_BYTES).
+      if (!effectivelyTrusted) channel.limitUntilRead(UNREAD_MAX_BYTES);
 
       // Absent, null, empty or not a string: unknown.
       const sentName: string | undefined = theirHandshake.DeviceName;
       const theirName: string | null = typeof sentName === 'string' ? normalizeDeviceName(sentName) : null;
-      return new PeerConnection(channel, sessionKey, theirHandshake.IdentityPublicKey, effectivelyTrusted, passphraseVerified, theirName,
+      return new PeerConnection(channel, sessionKey, symKey, theirHandshake.IdentityPublicKey, effectivelyTrusted, passphraseVerified, theirName,
         peerProtocolOf(theirHandshake.Protocol));
     } catch (e) {
       return null;
@@ -646,7 +713,7 @@ export class PeerConnection {
   // on a worker), as the read loop's decoding is: a history batch of images
   // is tens of MB of it.
   async send(message: string): Promise<void> {
-    const packed: Uint8Array = await AesGcm.encryptPacked(this.sessionKey, message);
+    const packed: Uint8Array = await AesGcm.encryptPacked(this.symKey, message);
     // Before the write, so its echo can't arrive ahead of it.
     const nonce: string | null = nonceKey(packed);
     if (this.sentNonces !== null && nonce !== null) this.sentNonces.add(nonce);
@@ -697,6 +764,13 @@ export class PeerConnection {
     return this.channel.isClosed;
   }
 
+  // A pairing request that brought more than UNREAD_MAX_BYTES while it waited:
+  // what it sent was dropped, so it can't be used for sync. Once trusted, it is
+  // closed and the next dial brings up a clean link (see Index.acceptPairing).
+  get overflowed(): boolean {
+    return this.channel.overflowed;
+  }
+
   // Starts the read loop - fire-and-forget, matches PeerConnection.cs's
   // Listen() being kicked off without awaiting it. ANY failure (clean
   // close, corrupt/forged line that fails to decrypt) ends the whole
@@ -704,6 +778,13 @@ export class PeerConnection {
   // the heartbeat - both begin together since a connection isn't "live"
   // for either purpose until this point.
   listen(): void {
+    if (this.channel.overflowed) {
+      // Lines are missing (see overflowed): ended here, for a clean redial.
+      this.close();
+      this.disconnectedCallback?.();
+      return;
+    }
+    this.channel.stopLimit();
     void this.listenLoop();
     this.startHeartbeat();
   }
@@ -726,7 +807,7 @@ export class PeerConnection {
         if (this.sentNonces !== null && nonce !== null && this.sentNonces.has(nonce)) {
           throw new Error('reflected line');
         }
-        const decrypted = await AesGcm.decryptPacked(this.sessionKey, packed);
+        const decrypted = await AesGcm.decryptPacked(this.symKey, packed);
         this.lastActivityAt = Date.now();
         if (!this.sessionProven) this.markSessionProven();
         if (decrypted === PING_SENTINEL) continue; // heartbeat only, not real data
@@ -737,7 +818,7 @@ export class PeerConnection {
       // or an unproven session's own envelope echoed back
       failed = true;
     } finally {
-      const idleMs: number = Date.now() - this.lastActivityAt;
+      const idleMs: number = Date.now() - this.lastHeardAt();
       // Stops the heartbeat and closes the socket: a loop that ended on a
       // reflected or undecryptable line would otherwise leave the peer an
       // open, silent connection. Closing one that's already closed is
@@ -779,7 +860,7 @@ export class PeerConnection {
       } catch (e) {
         // a listener's failure must never stop the heartbeat
       }
-      if (Date.now() - this.lastActivityAt > HEARTBEAT_TIMEOUT_MS) {
+      if (Date.now() - this.lastHeardAt() > HEARTBEAT_TIMEOUT_MS) {
         // Nothing at all (ping or real data) for HEARTBEAT_TIMEOUT_MS -
         // the peer is gone even though TCP itself hasn't noticed yet.
         // Closing here is what actually makes isConnected()/connectedCount
@@ -788,6 +869,18 @@ export class PeerConnection {
         this.close();
       }
     }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  // When the peer was last heard from, for the watchdog. Once the session is
+  // proven, any bytes count, not only whole lines: a history answer is one
+  // line, tens of MB with pictures, and the peer can't ping while it writes
+  // it - over a slow or relayed link it took longer than HEARTBEAT_TIMEOUT_MS
+  // to arrive, the link was closed mid-line, and the reconnect asked for the
+  // same items again. A dead peer sends no bytes, so it is still caught as
+  // fast. Before the proof only lines that decrypt count, so a peer without
+  // the key can't hold a link open with junk.
+  private lastHeardAt(): number {
+    return this.sessionProven ? Math.max(this.lastActivityAt, this.channel.lastBytesAt) : this.lastActivityAt;
   }
 
   private stopHeartbeat(): void {

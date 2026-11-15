@@ -3,6 +3,10 @@ package io.uaena.cliplink
 import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.engine.BatchGroups
 import io.uaena.cliplink.engine.GROUP_MIN_ITEMS
+import io.uaena.cliplink.engine.GroupTag
+import io.uaena.cliplink.engine.arrange
+import io.uaena.cliplink.engine.foldTwins
+import io.uaena.cliplink.engine.tagsOfShown
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -229,5 +233,40 @@ class BatchGroupsTest {
         groups.noteLive("c", 2_000)
         val placement = groups.place(setOf("a", "b", "c", "old"), groups.horizon())
         assertEquals(mapOf("a" to 1_000L, "b" to 1_000L, "c" to 2_000L), placement.arrivals)
+    }
+
+    // ---- one card per content (the fold), and the stacks it leaves ----------------------------
+
+    @Test
+    fun `a stack member that is a twin of a card above is hidden, and a stack left with one card is a plain card`() {
+        val groups = BatchGroups()
+        // A sync brought x and y as a stack; then a live copy of x's content arrived on top.
+        val x = entry("x", 1)
+        val y = entry("y", 2)
+        groups.recordSync(y.deletionKey, listOf(x.deletionKey), 0, 1_000L)
+        val live = ClipboardEntry("x", ClipboardEntry.TYPE_TEXT, "ME", ts(3), "sig-live")
+        groups.noteLive(live.deletionKey, 2_000L)
+        val history = listOf(x, y, live)
+        val placement = groups.place(history.mapTo(HashSet()) { it.deletionKey }, groups.horizon())
+        val ordered = arrange(history, placement.blocks)
+        assertEquals(listOf(live, y, x), ordered)
+
+        val shown = foldTwins(ordered) { it.content }
+        assertEquals(listOf(live, y), shown)
+        // y's stack has one card left: it is a plain card now.
+        assertTrue(tagsOfShown(shown, placement.tags).isEmpty())
+        assertEquals(2, placement.tags.size)
+    }
+
+    @Test
+    fun `a stack keeps its tag while it still shows two cards, or is waiting for the rest`() {
+        val a = entry("a", 1)
+        val b = entry("b", 2)
+        val c = entry("c", 3)
+        val full = GroupTag(1, 0L)
+        val waiting = GroupTag(2, 0L, expectedSize = 5)
+        val tags = mapOf(a.deletionKey to full, b.deletionKey to full, c.deletionKey to waiting)
+        assertEquals(tags, tagsOfShown(listOf(a, b, c), tags))
+        assertEquals(mapOf(c.deletionKey to waiting), tagsOfShown(listOf(a, c), tags))
     }
 }

@@ -26,11 +26,15 @@ struct SyncedItemActions {
                 SyncedShareSheet.share([item.entry.content])
             }
         case .image:
-            guard let url = model.shareURL(for: item) else {
-                model.showToast("Couldn't read that image.")
-                return
+            let model = self.model
+            Task {
+                guard let url = await model.pictureShareURL(for: item) else {
+                    model.showToast("Couldn't read that image.")
+                    return
+                }
+                // The copy is only for the sheet: gone once it is done with it.
+                SyncedShareSheet.share([url]) { try? FileManager.default.removeItem(at: url) }
             }
-            SyncedShareSheet.share([url])
         case .file:
             guard let url = model.shareURL(for: item) else {
                 model.showToast("That file hasn't finished transferring yet.")
@@ -46,13 +50,16 @@ struct SyncedItemActions {
     }
 
     func saveToPhotos(_ item: SyncedItem) {
-        guard let data = model.imageData(for: item) else {
-            model.showToast(item.kind == .file && !item.fileAvailable
-                ? "That file hasn't finished transferring yet."
-                : "Couldn't save the image.")
-            return
+        let model = self.model
+        Task {
+            guard let data = await model.pictureData(for: item) else {
+                model.showToast(item.kind == .file && !item.fileAvailable
+                    ? "That file hasn't finished transferring yet."
+                    : "Couldn't save the image.")
+                return
+            }
+            SyncedPhotoSaver.save(data)
         }
-        SyncedPhotoSaver.save(data)
     }
 
     func quickLook(_ item: SyncedItem) {
@@ -86,9 +93,15 @@ struct SyncedItemActions {
             return NSItemProvider(object: item.entry.content as NSString)
         case .image:
             let content = item.entry.content
+            let inlineURL = item.inlineURL
             let provider = NSItemProvider()
             provider.registerDataRepresentation(forTypeIdentifier: UTType.png.identifier, visibility: .all) { completion in
-                completion(Data(base64Encoded: content, options: .ignoreUnknownCharacters), nil)
+                // A big picture's base64 is in the file the history keeps it in.
+                if content.isEmpty, let inlineURL, let text = try? Data(contentsOf: inlineURL, options: .mappedIfSafe) {
+                    completion(Data(base64Encoded: text, options: .ignoreUnknownCharacters), nil)
+                } else {
+                    completion(Data(base64Encoded: content, options: .ignoreUnknownCharacters), nil)
+                }
                 return nil
             }
             provider.suggestedName = "ClipLink Image"
@@ -121,12 +134,15 @@ struct SyncedItemActions {
 
     static func canSaveToPhotos(_ item: SyncedItem) -> Bool { hasPicture(item) }
 
-    /// "Transferring… 42%", "Transferring…", or the file's size.
+    /// "Transferring… 42%", "Transferring…", "Not enough storage", or the
+    /// file's size.
     static func fileStatus(_ item: SyncedItem, transfers: [String: TransferProgress]) -> String {
         guard let payload = item.filePayload else { return "" }
         if let progress = transferFraction(item, transfers: transfers) {
             return "Transferring… \(Int((progress * 100).rounded(.down)))%"
         }
+        // Fetched once there is room (see SyncEngine.needsSpace).
+        if !item.fileAvailable, item.needsSpace { return "Not enough storage" }
         if !item.fileAvailable { return "Transferring…" }
         return ByteSize.format(payload.fileSize)
     }

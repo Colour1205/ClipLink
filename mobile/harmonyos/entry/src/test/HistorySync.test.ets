@@ -151,7 +151,7 @@ class Device {
       goneKeys: (keys: string[]) =>
         Promise.resolve(new Set<string>(keys.filter((k: string) => this.has(k) || this.tombstones.includes(k)))),
       isDeleted: (entry: ClipboardEntry) => Promise.resolve(this.tombstones.includes(entry.Signature ?? '')),
-      addBatch: (candidates: ClipboardEntry[], newFront: boolean, frontOk: (entry: ClipboardEntry) => boolean) => {
+      addBatch: (candidates: ClipboardEntry[], newFront: boolean, frontOk: (entry: ClipboardEntry, localNewest: string | null) => boolean) => {
         this.adds++;
         const result: MergeResult = mergeBatch(this.entries, candidates, sameEntry,
           (x: ClipboardEntry) => this.tombstones.includes(x.Signature ?? ''), 25, newFront,
@@ -388,12 +388,12 @@ export default function historySyncTest() {
       done();
     });
 
-    it('theNewestMissingItemIsAskedForEvenIfItWouldNotStay', 0, async (done: Function) => {
+    it('aMissingItemOlderThanAFullHistoryIsNotAskedFor', 0, async (done: Function) => {
       const d: Device = new Device();
       for (let i = 0; i < 25; i++) d.entries.push(e(`l${i}`, 20 + i));
       const port: Port = d.port('l', 2);
       await d.engine.onHead(port.link, headJson(['old'], [5]));
-      expect(port.sent[0].keys().join(',')).assertEqual('old');
+      expect(port.sent.length).assertEqual(0);
       done();
     });
 
@@ -444,27 +444,63 @@ export default function historySyncTest() {
       done();
     });
 
-    it('theConvenienceAnswerAppliesItsNewestNewEntryEvenIfOlderThanTheOwnNewest', 0, async (done: Function) => {
+    it('aConvenienceAnswerOlderThanTheOwnNewestIsStoredQuietlyAndSoAreTheLaterAnswers', 0, async (done: Function) => {
       const d: Device = new Device();
       d.entries = [e('own', 50)];
+      const port: Port = d.port('l', 2);
+      await d.engine.onHead(port.link, headJson(['old', 'older'], [5, 4]));
+      expect(port.link.queue[0].convenience).assertTrue();
+      const first: Promise<void> = d.engine.onBatch(port.link, JSON.stringify([e('old', 5)]));
+      const second: Promise<void> = d.engine.onBatch(port.link, JSON.stringify([e('older', 4)]));
+      await first;
+      await second;
+      // Stored by time: nothing on the clipboard, nothing spared, no stack.
+      expect(d.clipboard.length).assertEqual(0);
+      expect(d.protectedKey).assertEqual(null);
+      expect(d.keys()).assertEqual('old,older,own');
+      expect(d.syncs.length).assertEqual(2);
+      expect(d.syncs[0].quiet).assertTrue();
+      expect(d.syncs[0].front).assertEqual(null);
+      expect(d.syncs[1].quiet).assertTrue();
+      expect(d.settled.length).assertEqual(0);
+      done();
+    });
+
+    it('aConvenienceAnswerThatBringsNothingMakesTheRestQuiet', 0, async (done: Function) => {
+      const d: Device = new Device();
+      const port: Port = d.port('l', 2);
+      await d.engine.onHead(port.link, headJson(['c', 'b', 'a'], [3, 2, 1]));
+      await d.engine.onBatch(port.link, '[]'); // the peer no longer has c
+      await d.engine.onBatch(port.link, JSON.stringify([e('b', 2), e('a', 1)]));
+      expect(d.clipboard.length).assertEqual(0);
+      expect(d.syncs.length).assertEqual(1);
+      expect(d.syncs[0].quiet).assertTrue();
+      expect(d.keys()).assertEqual('a,b');
+      done();
+    });
+
+    it('anEmptyHistoryMakesTheConvenienceItemFresh', 0, async (done: Function) => {
+      const d: Device = new Device();
       const port: Port = d.port('l', 2);
       await d.engine.onHead(port.link, headJson(['old'], [5]));
       await d.engine.onBatch(port.link, JSON.stringify([e('old', 5)]));
       expect(d.clipboard.join(',')).assertEqual('old');
       expect(d.protectedKey).assertEqual('old');
+      expect(d.syncs[0].quiet).assertFalse();
       done();
     });
 
-    it('theConvenienceItemIsKeptWhenTheHistoryIsFullAndTheOldestOtherGoes', 0, async (done: Function) => {
+    it('aFreshConvenienceItemIsKeptWhenTheHistoryIsFullAndTheOldestOtherGoes', 0, async (done: Function) => {
       const d: Device = new Device();
       for (let i = 0; i < 25; i++) d.entries.push(e(`l${i}`, 20 + i));
       const port: Port = d.port('l', 2);
-      await d.engine.onHead(port.link, headJson(['old'], [5]));
-      await d.engine.onBatch(port.link, JSON.stringify([e('old', 5)]));
+      await d.engine.onHead(port.link, headJson(['new'], [50]));
+      await d.engine.onBatch(port.link, JSON.stringify([e('new', 50)]));
       expect(d.entries.length).assertEqual(25);
-      expect(d.keys().indexOf('old') !== -1).assertTrue();
-      expect(d.keys().indexOf('l0,') === -1).assertTrue(); // the oldest other item went instead
-      expect(d.syncs[0].added.length).assertEqual(1);
+      expect(d.keys().indexOf('new') !== -1).assertTrue();
+      expect(d.keys().indexOf('l0,') === -1).assertTrue(); // the oldest went
+      expect(d.clipboard.join(',')).assertEqual('new');
+      expect(d.protectedKey).assertEqual('new');
       done();
     });
 
@@ -519,13 +555,43 @@ export default function historySyncTest() {
 
     it('aBatchNobodyAskedForIsDealtWithAsAnOldOneAndAppliesOnlyTheNewestNewItem', 0, async (done: Function) => {
       const d: Device = new Device();
-      d.entries = [e('own', 9)];
+      d.entries = [e('own', 3)];
       const port: Port = d.port('l', 2); // nothing was asked: the queue is empty
       await d.engine.onBatch(port.link, JSON.stringify([e('x', 1), e('y', 5), e('own', 9)]));
       expect(d.clipboard.join(',')).assertEqual('y');
       expect(d.batches.length).assertEqual(1);
       expect(sigs(d.batches[0].added)).assertEqual('x,y');
       expect(d.syncs.length).assertEqual(0);
+      done();
+    });
+
+    it('anOldBatchWhoseNewestIsNotFreshIsStoredQuietly', 0, async (done: Function) => {
+      const d: Device = new Device();
+      d.entries = [e('own', 9)];
+      const port: Port = d.port('l', 1);
+      await d.engine.onBatch(port.link, JSON.stringify([e('x', 1), e('y', 5), e('own', 9)]));
+      expect(d.clipboard.length).assertEqual(0);
+      expect(d.batches.length).assertEqual(0);
+      expect(d.syncs.length).assertEqual(1);
+      expect(d.syncs[0].quiet).assertTrue();
+      expect(sigs(d.syncs[0].added)).assertEqual('x,y');
+      expect(d.protectedKey).assertEqual(null);
+      done();
+    });
+
+    it('anOldHeadWhoseNewestIsNotFreshIsIgnored', 0, async (done: Function) => {
+      const d: Device = new Device();
+      d.entries = [e('own', 9)];
+      const port: Port = d.port('l', 1);
+      const all: ClipboardEntry[] = [e('c', 3), e('b', 2), e('a', 1)];
+      await d.engine.onHead(port.link, buildHeadPayload(all, (x: ClipboardEntry) => x.Signature ?? '') as string);
+      expect(d.heads.length).assertEqual(0);
+      expect(d.keys()).assertEqual('own'); // not added early
+      expect(port.link.headPending).assertFalse();
+      await d.engine.onBatch(port.link, JSON.stringify(all));
+      expect(d.clipboard.length).assertEqual(0);
+      expect(d.syncs[0].quiet).assertTrue();
+      expect(d.keys()).assertEqual('a,b,c,own');
       done();
     });
 
@@ -699,7 +765,7 @@ export default function historySyncTest() {
       expect(d.protectedKey).assertEqual(null);
       expect(port.link.expired.length).assertEqual(0);
       // The next batch nobody asked for is an old one again.
-      await d.engine.onBatch(port.link, JSON.stringify([e('z', 7)]));
+      await d.engine.onBatch(port.link, JSON.stringify([e('z', 10)]));
       expect(d.batches.length).assertEqual(1);
       expect(d.clipboard.join(',')).assertEqual('z');
       done();
@@ -792,8 +858,9 @@ export default function historySyncTest() {
       expect(d.clipboard.join(',')).assertEqual('x');
       expect(d.keys()).assertEqual('x,y'); // y is in the history all the same
       expect(d.syncs[0].superseded).assertFalse();
-      expect(d.syncs[1].front?.Signature).assertEqual('y'); // and leads its stack
-      expect(d.syncs[1].superseded).assertTrue();
+      // y is older than x, which is here now: stored by time, in no stack.
+      expect(d.syncs[1].front).assertEqual(null);
+      expect(d.syncs[1].quiet).assertTrue();
       expect(d.syncs[1].applied).assertEqual(null);
       expect(d.protectedKey).assertEqual('x'); // only what went on the clipboard is spared
       done();
@@ -822,11 +889,11 @@ export default function historySyncTest() {
       await d.engine.onBatch(one.link, JSON.stringify([e('x', 5)]));
       await d.engine.onBatch(two.link, JSON.stringify([e('y', 5)]));
       expect(d.clipboard.join(',')).assertEqual('x');
-      expect(d.syncs[1].superseded).assertTrue();
+      expect(d.syncs[1].quiet).assertTrue(); // not newer than x: not fresh
       done();
     });
 
-    it('anOlderConvenienceItemGoesOnTheClipboardOnceTheLastOneIs90SecondsOld', 0, async (done: Function) => {
+    it('anOlderConvenienceItemStaysOffTheClipboardEvenOnceTheLastOneIs90SecondsOld', 0, async (done: Function) => {
       const d: Device = new Device();
       const one: Port = d.port('one', 2);
       const two: Port = d.port('two', 2);
@@ -835,20 +902,21 @@ export default function historySyncTest() {
       await d.engine.onBatch(one.link, JSON.stringify([e('x', 5)]));
       d.clock += CONVENIENCE_WINDOW_MS;
       await d.engine.onBatch(two.link, JSON.stringify([e('y', 4)]));
-      expect(d.clipboard.join(',')).assertEqual('x,y');
-      expect(d.syncs[1].superseded).assertFalse();
-      expect(d.protectedKey).assertEqual('y');
+      // Older than x, which this device holds: never fresh, whatever the time.
+      expect(d.clipboard.join(',')).assertEqual('x');
+      expect(d.syncs[1].quiet).assertTrue();
+      expect(d.protectedKey).assertEqual('x');
       done();
     });
 
-    it('aSecondItemInsideTheWindowIsNotSparedByTheTrim', 0, async (done: Function) => {
+    it('aSecondOlderItemIsNotSparedByTheTrim', 0, async (done: Function) => {
       const d: Device = new Device();
       for (let i = 0; i < 24; i++) d.entries.push(e(`l${i}`, 20 + i));
       const one: Port = d.port('one', 2);
       const two: Port = d.port('two', 2);
-      await d.engine.onHead(one.link, headJson(['x'], [5]));
+      await d.engine.onHead(one.link, headJson(['x'], [50]));
       await d.engine.onHead(two.link, headJson(['y'], [4]));
-      await d.engine.onBatch(one.link, JSON.stringify([e('x', 5)])); // 25 items, x spared
+      await d.engine.onBatch(one.link, JSON.stringify([e('x', 50)])); // 25 items, x spared
       await d.engine.onBatch(two.link, JSON.stringify([e('y', 4)])); // 26: y is the oldest and not spared
       expect(d.entries.length).assertEqual(25);
       expect(d.keys().indexOf('x') !== -1).assertTrue();
@@ -999,13 +1067,13 @@ export default function historySyncTest() {
 
     it('anOldHeadThenItsBatchPutTheNewestOnTheClipboardOnce', 0, async (done: Function) => {
       const d: Device = new Device();
-      d.entries = [e('own', 9)];
+      d.entries = [e('own', 0)];
       const port: Port = d.port('l', 1);
       const all: ClipboardEntry[] = [e('c', 3), e('b', 2), e('a', 1)];
       const head: string = buildHeadPayload(all, (x: ClipboardEntry) => x.Signature ?? '') as string;
       await d.engine.onHead(port.link, head);
       await d.engine.onBatch(port.link, JSON.stringify(all.slice().reverse()));
-      // c is older than the own newest, and is the item on the clipboard.
+      // c is newer than everything here, and is the item on the clipboard.
       expect(d.clipboard.join(',')).assertEqual('c');
       expect(d.heads.length).assertEqual(1);
       expect(d.batches.length).assertEqual(1);
@@ -1029,12 +1097,15 @@ export default function historySyncTest() {
       // Three entries crossed the wire, not eight.
       expect(pair.entriesSent()).assertEqual(3);
       expect(pair.atA.ofType('history_batch').length).assertEqual(2); // two answers to b's two requests
+      // b4 is newer than everything a had: it goes on a's clipboard. a3 and a2
+      // are older than b's own b4: b stores them by time, quietly.
       expect(a.clipboard.join(',')).assertEqual('b4');
-      expect(b.clipboard.join(',')).assertEqual('a3');
+      expect(b.clipboard.length).assertEqual(0);
       expect(b.syncs.length).assertEqual(2);
-      expect(b.syncs[0].expectedTotal).assertEqual(2);
-      expect(b.syncs[1].last).assertTrue();
+      expect(b.syncs[0].quiet).assertTrue();
+      expect(b.syncs[1].quiet).assertTrue();
       expect(a.syncs.length).assertEqual(1);
+      expect(a.syncs[0].expectedTotal).assertEqual(1);
       expect(a.batches.length).assertEqual(0);
       done();
     });
@@ -1105,9 +1176,10 @@ export default function historySyncTest() {
       expect(pair.atA.types()).assertEqual('history_head,history_batch');
       expect(a.keys()).assertEqual('a1,a2,a3,b4');
       expect(b.keys()).assertEqual('a1,a2,a3,b4');
-      // Each put the other's newest new item on the clipboard.
+      // a put b's newest on its clipboard (newer than all it had); b's own b4
+      // is newer than a's items, which b stores by time, quietly.
       expect(a.clipboard.join(',')).assertEqual('b4');
-      expect(b.clipboard.join(',')).assertEqual('a3');
+      expect(b.clipboard.length).assertEqual(0);
       // A delete here is not sent to the older build.
       a.deleteLocally('a1');
       await flush();

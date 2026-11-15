@@ -28,24 +28,21 @@ public class DeletedEntries
         string app_data_dir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         deleted_path = Path.Combine(app_data_dir, "ClipboardDaemon", $"deleted{label}.json");
         Directory.CreateDirectory(Path.Combine(app_data_dir, "ClipboardDaemon"));
-        if (File.Exists(deleted_path))
+        // From its backup when the file is corrupt (see SafeFile). With
+        // neither, deleted items may come back from peers, but that's better
+        // than the daemon refusing to start. One that can't be opened (held by
+        // a virus scanner as Windows signs in) stops the start, as it always
+        // did: started empty, the next save would write over every tombstone.
+        var loaded = SafeFile.Read(deleted_path,
+            json => System.Text.Json.JsonSerializer.Deserialize<List<DeletedEntry>>(json) ?? new List<DeletedEntry>(),
+            "deleted history items", throwIfUnreadable: true);
+        if (loaded != null)
         {
-            try
+            foreach (var entry in loaded.Where(e => e != null && !string.IsNullOrEmpty(e.Key)).OrderBy(e => e.DeletedAt))
             {
-                string json = File.ReadAllText(deleted_path);
-                var loaded = System.Text.Json.JsonSerializer.Deserialize<List<DeletedEntry>>(json) ?? new List<DeletedEntry>();
-                foreach (var entry in loaded.Where(e => !string.IsNullOrEmpty(e.Key)).OrderBy(e => e.DeletedAt))
-                {
-                    if (keys.Add(entry.Key)) entries.Add(entry);
-                }
-                TrimToLimit();
+                if (keys.Add(entry.Key)) entries.Add(entry);
             }
-            catch (System.Text.Json.JsonException ex)
-            {
-                // Deleted items may come back from peers, but that's better
-                // than the daemon refusing to start.
-                Console.WriteLine($"Could not load deleted history items ({ex.Message}) — starting with none.");
-            }
+            TrimToLimit();
         }
     }
 
@@ -94,7 +91,9 @@ public class DeletedEntries
     {
         try
         {
-            File.WriteAllText(deleted_path, System.Text.Json.JsonSerializer.Serialize(entries));
+            // Swapped in whole: cut off midway, every tombstone was lost and
+            // deleted items came back from the peers.
+            SafeFile.Write(deleted_path, System.Text.Json.JsonSerializer.Serialize(entries));
         }
         catch (Exception ex)
         {

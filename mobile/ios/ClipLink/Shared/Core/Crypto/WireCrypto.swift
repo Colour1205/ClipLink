@@ -94,8 +94,19 @@ public enum WireSignature {
 
 public enum EntrySigning {
     /// `"{Content}:{Type}:{DeviceId}:{Timestamp}"`, UTF-8 - SigningService.cs.
+    ///
+    /// Byte for byte that interpolated string, built straight into one buffer:
+    /// interpolating first copied the whole content once more, and a picture's
+    /// is megabytes, on every signature check.
     public static func signableData(content: String, type: String, deviceId: String, timestamp: String) -> Data {
-        Data("\(content):\(type):\(deviceId):\(timestamp)".utf8)
+        var data = Data()
+        data.reserveCapacity(content.utf8.count + type.utf8.count + deviceId.utf8.count + timestamp.utf8.count + 3)
+        data.append(contentsOf: content.utf8)
+        for part in [type, deviceId, timestamp] {
+            data.append(0x3A) // ":"
+            data.append(contentsOf: part.utf8)
+        }
+        return data
     }
 
     public static func sign(content: String, type: String, identity: IdentitySigner, timestamp: String = DotNetTimestamp.now()) throws -> ClipboardEntry {
@@ -156,6 +167,14 @@ public struct SessionCipher {
     /// Throws on corrupt, forged or truncated input - the caller treats that
     /// as a dead connection, same as every other platform's single catch-all.
     public func open(_ line: Data) throws -> String {
+        guard let text = String(data: try openData(line), encoding: .utf8) else { throw WireError.malformed("session plaintext") }
+        return text
+    }
+
+    /// `open` without turning the plaintext into a String: a peer's messages
+    /// are parsed straight from these bytes (see PeerLink.onMessageData), one
+    /// whole copy of a line fewer.
+    public func openData(_ line: Data) throws -> Data {
         guard let packed = Data(base64Encoded: line), packed.count >= Self.nonceSize + Self.tagSize else {
             throw WireError.malformed("session line")
         }
@@ -163,9 +182,7 @@ public struct SessionCipher {
         let tag = packed.subdata(in: (packed.startIndex + Self.nonceSize)..<(packed.startIndex + Self.nonceSize + Self.tagSize))
         let ciphertext = packed.suffix(from: packed.startIndex + Self.nonceSize + Self.tagSize)
         let box = try AES.GCM.SealedBox(nonce: nonce, ciphertext: ciphertext, tag: tag)
-        let plain = try AES.GCM.open(box, using: key)
-        guard let text = String(data: plain, encoding: .utf8) else { throw WireError.malformed("session plaintext") }
-        return text
+        return try AES.GCM.open(box, using: key)
     }
 
     public func open(_ line: String) throws -> String {

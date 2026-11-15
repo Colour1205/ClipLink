@@ -6,7 +6,8 @@ import UIKit
 /// Pull to refresh re-runs discovery; "+" opens the pairing sheet; a device
 /// opens its detail screen.
 struct DevicesView: View {
-    @EnvironmentObject private var model: AppModel
+    /// What the tab shows; it redraws only when that changes (see DevicesStore).
+    @ObservedObject private var store = AppModel.shared.devices
     @EnvironmentObject private var settings: AppSettings
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -17,6 +18,8 @@ struct DevicesView: View {
     @State private var detailID = ""
     @State private var detailActive = false
 
+    /// For the actions only, not watched.
+    private var model: AppModel { AppModel.shared }
     private var actions: DeviceActions { DeviceActions(model: model, haptics: settings.haptics) }
 
     var body: some View {
@@ -47,19 +50,19 @@ struct DevicesView: View {
 
     // MARK: - List
 
-    private var paired: [DeviceRow] { model.snapshot.devices.filter { $0.trusted && !$0.blocked } }
-    private var nearby: [DeviceRow] { model.snapshot.devices.filter { !$0.trusted && !$0.blocked } }
-    private var blocked: [DeviceRow] { model.snapshot.devices.filter(\.blocked) }
+    private var paired: [DeviceRow] { store.value.devices.filter { $0.trusted && !$0.blocked } }
+    private var nearby: [DeviceRow] { store.value.devices.filter { !$0.trusted && !$0.blocked } }
+    private var blocked: [DeviceRow] { store.value.devices.filter(\.blocked) }
 
     private var list: some View {
         List {
             Section {
-                DevicesStatusRow(snapshot: model.snapshot)
+                DevicesStatusRow(connectedCount: store.value.connectedCount, sweeping: store.value.sweeping)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
                     .cardBackground(transparency: settings.cardTransparency)
                     .devicesCardRow()
-                if model.snapshot.network.localNetwork == .denied {
+                if store.value.network.localNetwork == .denied {
                     DevicesLocalNetworkWarning()
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 16)
@@ -120,7 +123,7 @@ struct DevicesView: View {
                 }
             }
 
-            DevicesNetworkSection(snapshot: model.snapshot, transparency: settings.cardTransparency)
+            DevicesNetworkSection(network: store.value.network, tailscaleIP: store.value.tailscaleIP, transparency: settings.cardTransparency)
 
             Section {
                 GetClipLinkRow()
@@ -144,7 +147,7 @@ struct DevicesView: View {
         // reorders anything - the engine's order is deliberate.
         .animation(
             reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.4, dampingFraction: 0.86),
-            value: model.snapshot.devices.map { "\($0.deviceId)|\($0.trusted)|\($0.blocked)" }
+            value: store.value.devices.map { "\($0.deviceId)|\($0.trusted)|\($0.blocked)" }
         )
     }
 
@@ -179,14 +182,14 @@ struct DevicesView: View {
 
     /// Test hooks (Debug builds only), for looking at states a screenshot
     /// can't reach by tapping. Use them with `-ClipLinkDebugFixtures devices`;
-    /// `<index>` counts `model.snapshot.devices`.
+    /// `<index>` counts the snapshot's devices.
     ///   -ClipLinkDebugDeviceDetail <index>   opens that device's detail screen
     ///   -ClipLinkDebugDevicesScroll <index>  scrolls the list to that device
     private func applyDebugHooks(_ proxy: ScrollViewProxy) {
         guard !Self.debugHandled else { return }
         Self.debugHandled = true
         let defaults = UserDefaults.standard
-        let devices = model.snapshot.devices
+        let devices = store.value.devices
         func device(_ key: String) -> DeviceRow? {
             guard let raw = defaults.string(forKey: key), let index = Int(raw), devices.indices.contains(index) else { return nil }
             return devices[index]
@@ -223,7 +226,8 @@ private enum DevicesRefresh {
 // MARK: - Status
 
 private struct DevicesStatusRow: View {
-    let snapshot: EngineSnapshot
+    let connectedCount: Int
+    let sweeping: Bool
 
     var body: some View {
         HStack(spacing: 12) {
@@ -236,7 +240,7 @@ private struct DevicesStatusRow: View {
                 Text(summary)
                     .font(.headline)
                     .foregroundColor(connected > 0 ? Theme.connected : .secondary)
-                if snapshot.sweeping {
+                if sweeping {
                     HStack(spacing: 6) {
                         ProgressView()
                             .scaleEffect(0.8, anchor: .leading)
@@ -251,11 +255,11 @@ private struct DevicesStatusRow: View {
             Spacer(minLength: 0)
         }
         .padding(.vertical, 4)
-        .animation(.easeInOut(duration: 0.2), value: snapshot.sweeping)
+        .animation(.easeInOut(duration: 0.2), value: sweeping)
         .accessibilityElement(children: .combine)
     }
 
-    private var connected: Int { snapshot.connectedCount }
+    private var connected: Int { connectedCount }
 
     private var summary: String {
         switch connected {
@@ -297,7 +301,8 @@ private struct DevicesLocalNetworkWarning: View {
 // MARK: - Network
 
 private struct DevicesNetworkSection: View {
-    let snapshot: EngineSnapshot
+    let network: NetworkStatus
+    let tailscaleIP: String
     let transparency: Double
 
     var body: some View {
@@ -305,12 +310,12 @@ private struct DevicesNetworkSection: View {
             DevicesValueRow(
                 title: "This \(ThisDeviceNoun.current)",
                 systemImage: UIDevice.current.userInterfaceIdiom == .pad ? "ipad" : "iphone",
-                value: snapshot.network.lanAddress ?? "Not on Wi-Fi",
-                copyable: snapshot.network.lanAddress != nil
+                value: network.lanAddress ?? "Not on Wi-Fi",
+                copyable: network.lanAddress != nil
             )
             .meRow(transparency: transparency)
-            if !snapshot.tailscaleIP.isEmpty {
-                DevicesValueRow(title: "Tailscale", systemImage: "network", value: snapshot.tailscaleIP)
+            if !tailscaleIP.isEmpty {
+                DevicesValueRow(title: "Tailscale", systemImage: "network", value: tailscaleIP)
                     .meRow(transparency: transparency)
             }
         }
@@ -318,7 +323,7 @@ private struct DevicesNetworkSection: View {
 
     @ViewBuilder
     private var footer: some View {
-        switch snapshot.network.broadcast {
+        switch network.broadcast {
         case .unavailable:
             Text("iOS limits network broadcasts, so ClipLink finds devices by contacting them directly.")
         case .available:
@@ -335,7 +340,8 @@ private struct DevicesValueRow: View {
     let value: String
     var copyable = true
 
-    @EnvironmentObject private var model: AppModel
+    /// For the copy action only, not watched.
+    private var model: AppModel { AppModel.shared }
 
     var body: some View {
         HStack {

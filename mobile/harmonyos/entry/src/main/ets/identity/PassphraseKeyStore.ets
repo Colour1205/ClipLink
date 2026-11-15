@@ -20,7 +20,7 @@
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
-import { util } from '@kit.ArkTS';
+import { taskpool, util } from '@kit.ArkTS';
 import { pbkdf2Sha256Manual } from '../crypto/Pbkdf2';
 
 const PREFERENCES_NAME = 'cliplink_passphrase_key';
@@ -55,7 +55,38 @@ function fixedTimeEquals(a: Uint8Array, b: Uint8Array): boolean {
   return diff === 0;
 }
 
+// The derivation, run in a TaskPool worker: its 210,000 rounds of HMAC are
+// synchronous calls (see Pbkdf2.ets), and on the UI thread they froze the app
+// for seconds - the "setting passcode" state could not even paint, and a block
+// that long risks the system's app-freeze kill. Same function, salt and
+// rounds, so the key is byte-for-byte the one every other platform derives.
+@Concurrent
+async function deriveKeyOffThread(password: Uint8Array, salt: Uint8Array, iterations: number, keyLenBytes: number): Promise<Uint8Array> {
+  return pbkdf2Sha256Manual(password, salt, iterations, keyLenBytes);
+}
+
+async function deriveKey(passphrase: string): Promise<Uint8Array> {
+  const password: Uint8Array = stringToBytes(passphrase);
+  const salt: Uint8Array = stringToBytes(FIXED_SALT);
+  try {
+    return await taskpool.execute(deriveKeyOffThread, password, salt, ITERATIONS, KEY_LEN_BYTES) as Uint8Array;
+  } catch (e) {
+    // No worker to run it on: here, as before, rather than not at all.
+    return pbkdf2Sha256Manual(password, salt, ITERATIONS, KEY_LEN_BYTES);
+  }
+}
+
+// How many proof verdicts are remembered before they are forgotten all at once.
+const MAX_VERDICTS = 64;
+
 export class PassphraseKeyStore {
+  // verifyProof's answers, by device id and proof, for the key in verdictsFor
+  // (Base64): a device on the LAN that is not trusted beacons its proof every
+  // 2 s, and each was checked with a fresh HMAC. Kept by the key, so setting or
+  // clearing the passcode starts them over.
+  private verdicts: Map<string, boolean> = new Map<string, boolean>();
+  private verdictsFor: string = '';
+
   private async getPrefs(context: common.UIAbilityContext): Promise<preferences.Preferences> {
     return preferences.getPreferences(context, PREFERENCES_NAME);
   }
@@ -69,7 +100,7 @@ export class PassphraseKeyStore {
   // the key is stored: false drops the result and resolves false. Index.ets
   // uses it so a Clear made while this was deriving isn't undone by it.
   async setPassphrase(context: common.UIAbilityContext, passphrase: string, stillWanted: () => boolean = () => true): Promise<boolean> {
-    const key = await pbkdf2Sha256Manual(stringToBytes(passphrase), stringToBytes(FIXED_SALT), ITERATIONS, KEY_LEN_BYTES);
+    const key = await deriveKey(passphrase);
     const prefs = await this.getPrefs(context);
     if (!stillWanted()) return false;
     prefs.putSync(KEY_KEY, base64Helper.encodeToStringSync(key));
@@ -106,6 +137,24 @@ export class PassphraseKeyStore {
   }
 
   async verifyProof(key: Uint8Array, deviceId: string, proofBase64: string): Promise<boolean> {
+    const keyText: string = base64Helper.encodeToStringSync(key);
+    if (keyText !== this.verdictsFor) {
+      this.verdicts.clear();
+      this.verdictsFor = keyText;
+    }
+    const asked: string = `${deviceId}\n${proofBase64}`;
+    const known: boolean | undefined = this.verdicts.get(asked);
+    if (known !== undefined) return known;
+    const verdict: boolean = await this.checkProof(key, deviceId, proofBase64);
+    // Read again: the passcode may have changed while this one was checked.
+    if (keyText === this.verdictsFor) {
+      if (this.verdicts.size >= MAX_VERDICTS) this.verdicts.clear();
+      this.verdicts.set(asked, verdict);
+    }
+    return verdict;
+  }
+
+  private async checkProof(key: Uint8Array, deviceId: string, proofBase64: string): Promise<boolean> {
     let expected: Uint8Array;
     let actual: Uint8Array;
     try {

@@ -4,7 +4,8 @@ import UIKit
 /// The Synced tab: clipboard history as a masonry grid or a list, with the
 /// Paste / Send dock floating above the tab bar.
 struct SyncedView: View {
-    @EnvironmentObject private var model: AppModel
+    /// What the tab shows; it redraws only when that changes (see SyncedStore).
+    @ObservedObject private var store = AppModel.shared.synced
     @EnvironmentObject private var settings: AppSettings
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -34,16 +35,18 @@ struct SyncedView: View {
     @State private var arrivals = SyncedArrivals()
     @Namespace private var cardZoom
 
-    private var items: [SyncedItem] { model.snapshot.items }
+    /// For the actions only, not watched.
+    private var model: AppModel { AppModel.shared }
+    private var items: [SyncedItem] { store.value.items }
     /// What arrived since the app started on top, the last arrival first, then
     /// everything else by time (see StackPlanner).
     private var rows: [SyncedRow] {
-        StackPlanner.rows(items: items, groups: model.snapshot.blocks, expanded: expandedGroups)
+        StackPlanner.rows(items: items, groups: store.value.blocks, expanded: expandedGroups)
     }
     /// Changes when items come in or go (not when a stack opens, which
     /// animates itself): the cards then move to their new places.
     private var arrivalKey: [String] {
-        model.snapshot.items.map(\.id) + model.snapshot.blocks.map(\.id)
+        store.value.items.map(\.id) + store.value.blocks.map(\.id)
     }
     private var actions: SyncedItemActions { SyncedItemActions(model: model, haptics: settings.haptics) }
 
@@ -51,8 +54,8 @@ struct SyncedView: View {
         NavigationView {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    ConnectionPill(snapshot: model.snapshot)
-                        .animation(.easeInOut(duration: 0.2), value: model.snapshot.connectedCount)
+                    ConnectionPill(connectedCount: store.value.connectedCount, network: store.value.network)
+                        .animation(.easeInOut(duration: 0.2), value: store.value.connectedCount)
                     content
                 }
                 .padding(.horizontal, Theme.pagePadding)
@@ -99,7 +102,7 @@ struct SyncedView: View {
 
     @ViewBuilder
     private var content: some View {
-        let _ = arrivals.note(model.snapshot)
+        let _ = arrivals.note(store.value)
         if items.isEmpty {
             EmptyStateView(
                 systemImage: "doc.on.clipboard",
@@ -358,10 +361,10 @@ private struct StackReveal {
 final class SyncedArrivals {
     private var tracker = FreshArrivals()
 
-    func note(_ snapshot: EngineSnapshot) {
+    func note(_ state: SyncedState) {
         var members = Set<String>()
-        for block in snapshot.blocks { members.formUnion(block.memberIDs) }
-        tracker.note(items: snapshot.items.map(\.id), blockMembers: members, now: Date.timeIntervalSinceReferenceDate)
+        for block in state.blocks { members.formUnion(block.memberIDs) }
+        tracker.note(items: state.items.map(\.id), blockMembers: members, now: Date.timeIntervalSinceReferenceDate)
     }
 
     func isFresh(_ id: String) -> Bool {
@@ -460,15 +463,19 @@ enum SyncedMasonry {
 /// Floating capsule above the tab bar: the "New Item" hint, Paste (the system
 /// paste control on iOS 16+, so no permission prompt) and Send.
 struct SyncedDock: View {
-    @EnvironmentObject private var model: AppModel
+    /// The "New item" hint: all the dock watches.
+    @ObservedObject private var hint = AppModel.shared.hint
     @EnvironmentObject private var settings: AppSettings
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var arrowNudged = false
 
+    /// For the actions only, not watched.
+    private var model: AppModel { AppModel.shared }
+
     var body: some View {
         HStack(spacing: 10) {
-            if model.hasNewClipboardItem {
+            if hint.visible {
                 newItemPill
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
@@ -479,7 +486,7 @@ struct SyncedDock: View {
         .background(.regularMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
         .shadow(color: .black.opacity(0.12), radius: 14, y: 4)
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: model.hasNewClipboardItem)
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: hint.visible)
         .frame(maxWidth: .infinity)
         .padding(.horizontal, Theme.pagePadding)
         .padding(.top, 6)
@@ -544,7 +551,7 @@ struct SyncedDock: View {
         if #available(iOS 16.0, *) {
             SyncedPasteControl(accent: settings.accentTheme.uiColor) { providers in
                 Haptics.tap(settings.haptics)
-                Task { await model.sendProviders(providers) }
+                Task { await model.sendProviders(providers, fromPasteboard: true) }
             }
             .fixedSize()
             .id(settings.accentTheme)

@@ -20,20 +20,28 @@ public class DeviceIdentity
         bool loaded = false;
         if (File.Exists(key_path))
         {
+            // A file that can't be read right now (a virus scanner or backup
+            // tool holding it as Windows signs in) throws from here after a
+            // few tries, and ClipLink says it couldn't start - it used to be
+            // taken for corrupt and replaced, a new identity that every
+            // paired device then stopped trusting.
+            byte[] protectedBytes = ReadKeyFile(key_path);
             try
             {
-                byte[] protectedBytes = File.ReadAllBytes(key_path);
                 byte[] pkcs8Bytes = System.Security.Cryptography.ProtectedData.Unprotect(protectedBytes, null, System.Security.Cryptography.DataProtectionScope.CurrentUser);
                 key.ImportPkcs8PrivateKey(pkcs8Bytes, out _);
                 loaded = true;
             }
-            catch (Exception ex)
+            catch (CryptographicException ex)
             {
                 // corrupt file, DPAPI blob from a different user/machine, etc. —
                 // regenerate rather than crash the whole daemon on startup.
                 // Note: this does change the device's public key, so any existing
-                // pairings would need to be redone.
+                // pairings would need to be redone. The old file is kept as
+                // "<file>.bad" (for whoever wants to look at it).
                 Console.WriteLine($"Could not load identity key ({ex.Message}) — generating a new one.");
+                try { File.Move(key_path, key_path + ".bad", overwrite: true); }
+                catch (Exception moveEx) when (moveEx is IOException or UnauthorizedAccessException) { }
             }
         }
         if (!loaded)
@@ -43,8 +51,38 @@ public class DeviceIdentity
             // DPAPI-encrypted at rest, tied to this Windows user — a copied file
             // is useless to anyone who isn't logged in as this same user on this machine.
             byte[] protectedBytes = System.Security.Cryptography.ProtectedData.Protect(pkcs8Bytes, null, System.Security.Cryptography.DataProtectionScope.CurrentUser);
-            File.WriteAllBytes(key_path, protectedBytes);
+            WriteKeyFile(key_path, protectedBytes);
         }
+    }
+
+    // The key file's bytes, tried a few times while something else holds it.
+    private static byte[] ReadKeyFile(string path)
+    {
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return File.ReadAllBytes(path);
+            }
+            catch (Exception ex) when ((ex is IOException or UnauthorizedAccessException) && attempt < 5)
+            {
+                Thread.Sleep(300);
+            }
+        }
+    }
+
+    // Written to "<file>.tmp", flushed, then moved into place: written
+    // straight onto the file, a crash or power cut during the first run left
+    // a cut-off key, thrown away as corrupt at the next start.
+    private static void WriteKeyFile(string path, byte[] bytes)
+    {
+        string temp = path + ".tmp";
+        using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            stream.Write(bytes);
+            stream.Flush(flushToDisk: true);
+        }
+        File.Move(temp, path, overwrite: true);
     }
     /*
     return the base64 publickey

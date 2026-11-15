@@ -145,7 +145,8 @@ struct KindChip: View {
 
 /// Green/grey connection status pill.
 struct ConnectionPill: View {
-    let snapshot: EngineSnapshot
+    let connectedCount: Int
+    let network: NetworkStatus
 
     var body: some View {
         HStack(spacing: 6) {
@@ -160,15 +161,15 @@ struct ConnectionPill: View {
     }
 
     private var color: Color {
-        if snapshot.connectedCount > 0 { return Theme.connected }
-        if snapshot.network.localNetwork == .denied { return .orange }
+        if connectedCount > 0 { return Theme.connected }
+        if network.localNetwork == .denied { return .orange }
         return .gray
     }
 
     private var text: String {
-        let n = snapshot.connectedCount
+        let n = connectedCount
         if n > 0 { return "\(n) device\(n == 1 ? "" : "s") connected" }
-        if snapshot.network.localNetwork == .denied { return "Local Network off" }
-        return snapshot.network.running ? "Looking for devices…" : "Not connected"
+        if network.localNetwork == .denied { return "Local Network off" }
+        return network.running ? "Looking for devices…" : "Not connected"
     }
 }

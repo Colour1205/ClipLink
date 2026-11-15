@@ -48,6 +48,17 @@ object Limits {
     /** Messages one connection may have waiting for its handler; the read loop waits beyond that. */
     const val INBOX_CAPACITY = 2
 
+    /**
+     * A message, in characters, from which it counts as large: an inline
+     * picture or a big history_batch, not text, a heartbeat or a 256 KB file
+     * chunk (about 350 K characters once encoded). One large message at a
+     * time is held on its way in, from all peers together, and one is
+     * encrypted at a time on its way out - see SyncManager.registerConnection
+     * and PeerConnection.send. Counting the inbox in messages alone let a
+     * burst of 24 MiB pictures from several peers sit in memory at once.
+     */
+    const val LARGE_MESSAGE_CHARS = 2 * 1024 * 1024
+
     /** Sockets that have connected and not finished their handshake yet, all together. */
     const val MAX_PENDING_HANDSHAKES = 8
 }

@@ -12,7 +12,9 @@ namespace ClipLink.EngineTests;
 // The version 2 sync with the real engine: against a peer played by the test
 // (every message by hand, so what the engine sends and how it answers can be
 // read), and between two engines. Each engine has its own files (see
-// TestData). The log (LogTap) is shared, so these run one at a time.
+// TestData). The log (LogTap) is shared, so these run one at a time. (So do the
+// other classes that read it: one collection.)
+[Collection("engine log")]
 public class SyncEngineTests
 {
     private readonly ITestOutputHelper output;
@@ -121,7 +123,7 @@ public class SyncEngineTests
     }
 
     [Fact]
-    public async Task A_version_1_peers_head_and_batch_apply_the_newest_new_item_to_the_clipboard_even_if_older_than_the_own_newest()
+    public async Task A_version_1_peers_head_and_batch_older_than_the_own_newest_are_stored_quietly()
     {
         using var node = new TestNode("a");
         node.SeedHistory(node.Make("own newest", 100));
@@ -136,9 +138,31 @@ public class SyncEngineTests
         await peer.SendAsync("history_head", JsonSerializer.Serialize(HistoryHead.ForBatch(all)));
         await peer.SendAsync("history_batch", JsonSerializer.Serialize(all));
 
+        // Nothing goes on the clipboard or on top: they are older than what is here.
+        Assert.True(await Wait.Until(() => node.Texts.Count == 4));
+        await Wait.Quiet(200);
+        Assert.Empty(node.Applied);
+        Assert.Equal(new[] { "own newest", "r3", "r2", "r1" }, node.Texts);
+        Assert.All(node.Engine!.GetHistory().Skip(1), item => { Assert.True(item.Quiet); Assert.Null(item.BatchId); });
+    }
+
+    [Fact]
+    public async Task A_version_1_peers_head_and_batch_apply_the_newest_new_item_when_it_is_newer_than_everything_here()
+    {
+        using var node = new TestNode("a");
+        node.SeedHistory(node.Make("own", 0));
+        node.Start();
+        using var peer = new RawPeer("old");
+        node.Trust(peer.Id);
+        await peer.ConnectAsync(node, protocol: 1);
+        var all = new List<ClipboardEntry> { peer.Make("r1", 1), peer.Make("r2", 2), peer.Make("r3", 3) };
+
+        await peer.SendAsync("history_head", JsonSerializer.Serialize(HistoryHead.ForBatch(all)));
+        await peer.SendAsync("history_batch", JsonSerializer.Serialize(all));
+
         Assert.True(await Wait.Until(() => node.Texts.Count == 4));
         Assert.Equal(new[] { "r3" }, node.Applied);
-        Assert.Equal(new[] { "r3", "r2", "r1", "own newest" }, node.Texts);
+        Assert.Equal(new[] { "r3", "r2", "r1", "own" }, node.Texts);
     }
 
     // ---- asking ----
@@ -147,7 +171,7 @@ public class SyncEngineTests
     public async Task The_newest_missing_item_is_asked_for_alone_first_and_is_the_only_one_put_on_the_clipboard()
     {
         using var node = new TestNode("a");
-        node.SeedHistory(node.Make("own newest", 100));
+        node.SeedHistory(node.Make("own", 0));
         node.Start();
         using var peer = new RawPeer("p");
         node.Trust(peer.Id);
@@ -162,14 +186,15 @@ public class SyncEngineTests
         output.WriteLine("history_request 2: " + requests[1].Payload);
         Assert.Equal(Keys(r3), RawPeer.KeysOf(requests[0]));
         Assert.Equal(Keys(r2, r1), RawPeer.KeysOf(requests[1]));
-        Assert.Equal("{\"Keys\":[" + string.Join(",", Keys(r3).Select(k => JsonSerializer.Serialize(k))) + "]}", requests[0].Payload);
+        // (Wire's JSON: a key's '+' as it is, not "\u002B" - still the same string to any parser.)
+        Assert.Equal("{\"Keys\":[" + string.Join(",", Keys(r3).Select(k => JsonSerializer.Serialize(k, Wire.Json))) + "]}", requests[0].Payload);
 
         // The answer to the first: r3 on the clipboard, a stack that counts all three at once.
         await peer.SendBatchAsync(r3);
         Assert.True(await Wait.Until(() => node.Applied.Count == 1));
         Assert.True(await Wait.Until(() => node.Texts.Contains("r3")));
         var shown = node.Engine!.GetHistory();
-        Assert.Equal(new[] { "r3", "own newest" }, shown.Select(i => i.TextPreview));
+        Assert.Equal(new[] { "r3", "own" }, shown.Select(i => i.TextPreview));
         Assert.NotNull(shown[0].BatchId);
         Assert.Equal(3, shown[0].BatchExpected);
         Assert.False(shown[0].Quiet);
@@ -179,7 +204,7 @@ public class SyncEngineTests
         Assert.True(await Wait.Until(() => node.Texts.Count == 4));
         Assert.Equal(new[] { "r3" }, node.Applied);
         shown = node.Engine.GetHistory();
-        Assert.Equal(new[] { "r3", "r2", "r1", "own newest" }, shown.Select(i => i.TextPreview));
+        Assert.Equal(new[] { "r3", "r2", "r1", "own" }, shown.Select(i => i.TextPreview));
         Assert.Single(shown.Take(3).Select(i => i.BatchId).Distinct());
         Assert.NotNull(shown[0].BatchId);
         Assert.Null(shown[0].BatchExpected);
@@ -228,7 +253,7 @@ public class SyncEngineTests
     }
 
     [Fact]
-    public async Task Only_the_25_newest_are_worth_asking_for_but_the_first_is_always_asked_for()
+    public async Task Only_the_25_newest_are_worth_asking_for_even_the_first_missing()
     {
         using var node = new TestNode("a");
         node.SeedHistory(Enumerable.Range(100, 25).Select(n => node.Make($"own {n}", n)).ToArray());
@@ -239,26 +264,22 @@ public class SyncEngineTests
         var older = new[] { peer.Make("r1", 1), peer.Make("r2", 2), peer.Make("r3", 3) };
 
         await peer.SendHeadAsync(older);
-        var requests = await peer.WaitForAsync("history_request", 1);
+        await HeadsReceived(1);
         await Wait.Quiet();
 
-        // Everything is older than the full history, so only the newest (the one for the clipboard) is wanted.
-        Assert.Single(peer.Received("history_request"));
-        Assert.Equal(Keys(older[2]), RawPeer.KeysOf(requests[0]));
-        await peer.SendBatchAsync(older[2]);
-        Assert.True(await Wait.Until(() => node.Applied.Count == 1));
-        Assert.Equal(new[] { "r3" }, node.Applied);
-        // Kept though it is the oldest of all: the oldest other item went, and the total is still 25.
+        // Everything is older than the full history: nothing is asked for, nothing
+        // goes on the clipboard, and the history stays what it was.
+        Assert.Empty(peer.Received("history_request"));
+        Assert.Empty(node.Applied);
         Assert.Equal(25, node.Texts.Count);
-        Assert.Equal("r3", node.Texts[0]);
-        Assert.DoesNotContain("own 100", node.Texts);
+        Assert.Equal("own 124", node.Texts[0]);
     }
 
     [Fact]
     public async Task A_batch_nobody_asked_for_on_a_version_2_connection_applies_like_a_version_1_batch()
     {
         using var node = new TestNode("a");
-        node.SeedHistory(node.Make("own newest", 100));
+        node.SeedHistory(node.Make("own", 0));
         node.Start();
         using var peer = new RawPeer("p");
         node.Trust(peer.Id);
@@ -269,7 +290,7 @@ public class SyncEngineTests
 
         Assert.True(await Wait.Until(() => node.Texts.Count == 4));
         Assert.Equal(new[] { "r3" }, node.Applied);
-        Assert.Equal(new[] { "r3", "r2", "r1", "own newest" }, node.Texts);
+        Assert.Equal(new[] { "r3", "r2", "r1", "own" }, node.Texts);
     }
 
     [Fact]
@@ -535,7 +556,7 @@ public class SyncEngineTests
         Assert.True(node.Engine!.DeleteHistoryEntry(a2.Key()));
         var first = (await v2.WaitForAsync("delete", 1))[0];
         output.WriteLine("delete: " + first.Payload);
-        Assert.Equal("{\"Keys\":[" + JsonSerializer.Serialize(a2.Key()) + "]}", first.Payload);
+        Assert.Equal("{\"Keys\":[" + JsonSerializer.Serialize(a2.Key(), Wire.Json) + "]}", first.Payload);
 
         node.Engine.ClearHistory();
         var second = (await v2.WaitForAsync("delete", 2))[1];
@@ -762,8 +783,9 @@ public class SyncEngineTests
         Assert.All(shown.Skip(1), item => { Assert.True(item.Quiet); Assert.Null(item.BatchId); });
         Assert.True(LogTap.Contains("late answer from"));
 
-        // The markers are gone: a batch nobody asked for is a version 1 batch again.
-        await peer.SendBatchAsync(peer.Make("r4", 4));
+        // The markers are gone: a batch nobody asked for is a version 1 batch again
+        // (newer than everything here, so its newest goes on the clipboard).
+        await peer.SendBatchAsync(peer.Make("r4", 200));
         Assert.True(await Wait.Until(() => node.Applied.Count == 1));
         Assert.Equal(new[] { "r4" }, node.Applied);
     }
@@ -819,8 +841,9 @@ public class SyncEngineTests
         await Wait.Quiet(200);
         Assert.Equal(new[] { "newer" }, node.Applied);
         var shown = node.Engine!.GetHistory();
-        Assert.Equal(new[] { "older", "newer" }, shown.Select(i => i.TextPreview)); // the later block on top
-        Assert.Equal(new[] { true, false }, shown.Select(i => i.Quiet));
+        // The older one is not newer than what is here by then: by its time, below, quiet.
+        Assert.Equal(new[] { "newer", "older" }, shown.Select(i => i.TextPreview));
+        Assert.Equal(new[] { false, true }, shown.Select(i => i.Quiet));
         Assert.True(LogTap.Contains("not put on the clipboard"));
     }
 
@@ -916,9 +939,10 @@ public class SyncEngineTests
 
         Assert.Equal(PairOutcome.Connected, outcome);
         Assert.True(await Wait.Until(() => a.Texts.Count == 4 && b.Texts.Count == 4));
-        Assert.Equal(new[] { "a three", "a two", "b one", "a one" }, b.Texts);   // the sync on top
-        Assert.Equal(new[] { "b one", "a three", "a two", "a one" }, a.Texts);
-        Assert.Equal(new[] { "a three" }, b.Applied);
+        // a's items are older than b's own newest: stored by time, quietly, nothing applied.
+        Assert.Equal(new[] { "b one", "a three", "a two", "a one" }, b.Texts);
+        Assert.Equal(new[] { "b one", "a three", "a two", "a one" }, a.Texts);   // the sync on top
+        Assert.Empty(b.Applied);
         Assert.Equal(new[] { "b one" }, a.Applied);
         // Only the missing items were asked for and sent: nothing was sent that the other had.
         var answers = LogTap.With("[sync] answer from");
@@ -931,7 +955,7 @@ public class SyncEngineTests
         // A delete while connected reaches the other, without touching its clipboard.
         Assert.True(a.Engine!.DeleteHistoryEntry(a3.Key()));
         Assert.True(await Wait.Until(() => !b.Has(a3)));
-        Assert.Equal(new[] { "a three" }, b.Applied);
+        Assert.Empty(b.Applied);
 
         // A delete while the other is off reaches it in the next head.
         b.Engine.Dispose();
@@ -969,7 +993,7 @@ public class SyncEngineTests
         Assert.False(LogTap.Contains("[sync] asking"));
         Assert.False(LogTap.Contains("[sync] ignored"));
         Assert.Equal(new[] { "old two" }, a.Applied); // the newest new item of the batch
-        Assert.Equal(new[] { "a two" }, old.Applied);
+        Assert.Empty(old.Applied); // a's are older than its own newest: stored quietly
         // A delete on the newer one is not sent to the older one, which keeps its copy; it does not come back to the newer one.
         Assert.True(a.Engine!.DeleteHistoryEntry(a1.Key()));
         await Wait.Quiet();

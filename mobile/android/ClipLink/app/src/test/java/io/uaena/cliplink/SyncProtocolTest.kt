@@ -257,11 +257,12 @@ class SyncProtocolTest {
     }
 
     @Test
-    fun `the first offered is always wanted even when it is older than everything`() {
+    fun `the first offered is not wanted when it is older than everything kept`() {
         val here = local(100..124)
         val head = head("old" to ms(50), "older" to ms(40), "new" to ms(200))
-        // "old" is the convenience item and stays in; "older" would be dropped at once; "new" is worth it.
-        assertEquals(listOf("old", "new"), SyncManager.wantedKeys(listOf("old", "older", "new"), head, here))
+        // Neither "old" nor "older" would survive the trim: downloaded, it would be dropped again on every
+        // connection. Only "new" is worth it - and it is what the sync's convenience request asks for.
+        assertEquals(listOf("new"), SyncManager.wantedKeys(listOf("old", "older", "new"), head, here))
     }
 
     @Test
@@ -270,21 +271,32 @@ class SyncProtocolTest {
         // 25 here from 100 to 124; "first" pushes out the oldest here (100), and "same" ties with it and loses.
         val head = head("first" to ms(150), "same" to ms(100))
         assertEquals(listOf("first"), SyncManager.wantedKeys(listOf("first", "same"), head, here))
-        // As the first offered, the same one is the convenience item and is wanted all the same.
+        // First offered or not, the one that ties loses.
         val head2 = head("same" to ms(100), "newer" to ms(150))
-        assertEquals(listOf("same", "newer"), SyncManager.wantedKeys(listOf("same", "newer"), head2, here))
+        assertEquals(listOf("newer"), SyncManager.wantedKeys(listOf("same", "newer"), head2, here))
     }
 
     @Test
     fun `times out of order never make more than 25 wanted`() {
         val here = local(100..123) // 24 here
-        // The first offered is the oldest of all, then 25 newer ones: the first stays in, so one of the rest has to go.
+        // The first offered is the oldest of all, then 25 newer ones: the 25 newer ones fill the history.
         val keys = listOf("first") + (1..25).map { "m$it" }
         val head = SyncHead(keys, listOf(ms(1)) + (1..25).map { ms(200 + it) }, emptyList())
         val wanted = SyncManager.wantedKeys(keys, head, here)
         assertEquals(25, wanted.size)
-        assertEquals("first", wanted.first())
-        assertEquals(keys.take(25), wanted)
+        assertEquals(keys.drop(1), wanted)
+    }
+
+    @Test
+    fun `a smaller cap wants only what is newer than the oldest entry kept`() {
+        // A history held down by its character cap: 3 entries, from second 100 to 102. Passed as the cap, the
+        // pictures it dropped for size (older) are not wanted again; one newer than its oldest still is.
+        val here = local(100..102)
+        val head = head("dropped" to ms(90), "between" to ms(101) + 500, "new" to ms(300))
+        // With the usual 25, everything counts as fitting - the dropped picture too.
+        assertEquals(listOf("dropped", "between", "new"), SyncManager.wantedKeys(listOf("dropped", "between", "new"), head, here))
+        assertEquals(listOf("new"), SyncManager.wantedKeys(listOf("dropped", "between", "new"), head, here, cap = 1))
+        assertEquals(listOf("between", "new"), SyncManager.wantedKeys(listOf("dropped", "between", "new"), head, here, cap = 3))
     }
 
     @Test

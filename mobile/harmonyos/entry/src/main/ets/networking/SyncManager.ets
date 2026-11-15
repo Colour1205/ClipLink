@@ -15,11 +15,15 @@ import { FileRequestMessage } from './FileRequestMessage';
 import { TrustStore } from '../identity/TrustStore';
 import { shortDeviceId } from '../identity/DeviceName';
 import { HistoryAccess } from '../storage/HistoryAccess';
+import { MergeResult } from '../storage/HistoryBatch';
 import { FileStore, isEmptyFile, isValidFileHash, removeIfThere, sha256File } from '../storage/FileStore';
 import { FilePayload } from '../storage/FilePayload';
 import { entryKey } from '../storage/DeletedEntries';
+import { contentKey, primeContentKeys } from '../storage/ContentPrint';
 import { ClipboardEntry, verifiedEntry } from '../crypto/Signing';
-import { applyEntryToClipboard, ApplyResult } from '../clipboard/ClipboardApply';
+import { ApplyResult, ClipboardWrite, writeEntryToClipboard } from '../clipboard/ClipboardApply';
+import { pasteboardChangeCount } from '../clipboard/ClipboardWatcher';
+import { pendingFileMayApply } from './PendingFiles';
 
 const base64Helper = new util.Base64Helper();
 const CHUNK_SIZE = 256 * 1024;
@@ -28,6 +32,47 @@ const MAX_RETRIES = 3;
 interface Envelope {
   Type: string;
   Payload: string;
+}
+
+// A send nobody waits on. Its failure is caught (it was an unhandled
+// rejection) and dropped: a socket that closes mid-send is routine, and the
+// read loop ending is what reports the link gone.
+function sendQuietly(conn: PeerConnection, json: string): void {
+  conn.send(json).catch(() => { /* the read loop reports the link gone */ });
+}
+
+// What JSON.parse gave is an object, not null, a number or a string - what a
+// peer's envelope and entry must be before anything reads their fields.
+function isObject(value: Object | null | undefined): boolean {
+  return value !== null && value !== undefined && typeof value === 'object';
+}
+
+// A file entry that goes on the clipboard once its bytes are here: when it
+// was set to (armedAt, ms since the epoch), and the pasteboard's change count
+// then (generation). The bytes landing much later, or after anything else
+// went on the clipboard, only store them (see tryFulfillPendingEntry).
+interface PendingFile {
+  entry: ClipboardEntry;
+  // As the entry spells it: what is asked for (an older peer may only find
+  // its blob under that spelling).
+  fileHash: string;
+  armedAt: number;
+  generation: number;
+}
+
+// What the page does around a clipboard write (see setClipboardHooks).
+export interface ClipboardHooks {
+  // Whether the clipboard holds this entry's content already, as far as
+  // ClipLink knows (it wrote it, or sent it, last): it is not written again,
+  // and nobody is told.
+  holds: (entry: ClipboardEntry) => boolean;
+  // A write of a received entry succeeded, with the prints of what is on the
+  // clipboard now: the change is ClipLink's own.
+  wrote: (entry: ClipboardEntry, prints: string[]) => void;
+  // Before an automatic write: a copy made here and not dealt with yet goes
+  // out first, so the write does not bury it unsent. Runs inside the
+  // clipboard lock (see withClipboard), so it must not take it again.
+  beforeWrite: () => Promise<void>;
 }
 
 // One file's bytes arriving over one connection (see handleFileChunk),
@@ -52,6 +97,7 @@ export class SyncManager {
   private syncAppliedCallback: ((sync: SyncApplied) => void) | null = null;
   private headSettledCallback: ((from: string) => void) | null = null;
   private entriesDeletedCallback: ((keys: string[]) => void) | null = null;
+  private entriesEvictedCallback: ((keys: string[]) => void) | null = null;
   private fileStoredCallback: ((fileHash: string) => void) | null = null;
   private logCallback: ((message: string) => void) | null = null;
   private connectionsChangedCallback: ((count: number) => void) | null = null;
@@ -65,11 +111,24 @@ export class SyncManager {
   // has its own file, and whichever finishes first is kept.
   private incoming: Map<string, IncomingTransfer> = new Map();
   // Entries that arrived (and verified) before their bytes finished
-  // streaming in, keyed by the file hash they're waiting on.
-  private pendingEntries: Map<string, ClipboardEntry> = new Map();
-  // File hashes whose waiting entry was deleted or cleared before the bytes
-  // finished arriving - see handleFileChunk.
+  // streaming in, keyed by the file hash they're waiting on, in lowercase:
+  // senders differ in case (iOS sends uppercase), and bytes stored under
+  // either spelling fulfil the entry.
+  private pendingEntries: Map<string, PendingFile> = new Map();
+  // File hashes (lowercase) whose waiting entry was deleted or cleared before
+  // the bytes finished arriving - see handleFileChunk.
   private abandonedHashes: Set<string> = new Set();
+  // Reading and writing the clipboard happen one at a time: the page's capture
+  // (from the read to the record of what was read) and every write of a
+  // received entry (from the write to the record of what was written). A
+  // capture could otherwise read a received item in the moment between its
+  // write and that record, and send it back as a copy of this device's own.
+  private clipboardChain: Promise<void> = Promise.resolve();
+  private clipboardHooks: ClipboardHooks | null = null;
+  // Live entries are dealt with one at a time, in the order they came: a
+  // picture takes far longer to check and write than text, and a copy made
+  // a second after it otherwise got there first and was buried by it.
+  private liveWork: Promise<void> = Promise.resolve();
   // How often each file (lowercase hash) has been asked for again after a
   // transfer of it came to nothing - see requestAgain.
   private retries: Map<string, number> = new Map();
@@ -95,6 +154,8 @@ export class SyncManager {
 
   constructor(fileStore: FileStore, trustStore: TrustStore, context: common.UIAbilityContext) {
     this.history = new HistoryAccess(fileStore);
+    this.history.onEvicted((keys: string[]) => { this.entriesEvictedCallback?.(keys); });
+    this.history.onSaveFailed((message: string) => { this.logCallback?.(message); });
     this.trustStore = trustStore;
     this.context = context;
     this.fileStore = fileStore;
@@ -104,8 +165,13 @@ export class SyncManager {
       deletedKeys: (limit: number) => this.history.recentDeleted(this.context, limit),
       goneKeys: (keys: string[]) => this.history.goneKeys(this.context, keys),
       isDeleted: (entry: ClipboardEntry) => this.history.isDeleted(this.context, entry),
-      addBatch: (candidates: ClipboardEntry[], newFront: boolean, frontOk: (entry: ClipboardEntry) => boolean) =>
-        this.history.addBatch(this.context, candidates, newFront, frontOk),
+      // The pictures' keys first, off the UI thread (see primeContentKeys):
+      // the list asks for them as it makes the cards.
+      addBatch: async (candidates: ClipboardEntry[], newFront: boolean,
+        frontOk: (entry: ClipboardEntry, localNewest: string | null) => boolean): Promise<MergeResult> => {
+        await primeContentKeys(candidates);
+        return this.history.addBatch(this.context, candidates, newFront, frontOk);
+      },
       deleteKeys: (keys: string[]) => this.dropEntries(keys),
       applyToClipboard: (entry: ClipboardEntry) => this.applyToClipboard(entry),
       prepareFile: (entry: ClipboardEntry, applyWhenStored: boolean) => this.prepareFileEntry(entry, applyWhenStored),
@@ -162,6 +228,24 @@ export class SyncManager {
   // head): they are gone from the history, and the list is to drop them.
   onEntriesDeleted(callback: (keys: string[]) => void): void {
     this.entriesDeletedCallback = callback;
+  }
+
+  // The history's cap pushed these items (by entryKey) out: the list drops
+  // them too, so it never shows more than the history holds.
+  onEntriesEvicted(callback: (keys: string[]) => void): void {
+    this.entriesEvictedCallback = callback;
+  }
+
+  setClipboardHooks(hooks: ClipboardHooks): void {
+    this.clipboardHooks = hooks;
+  }
+
+  // Runs `work` with the clipboard to itself (see clipboardChain). For the
+  // page's capture; the writes of received entries take it themselves.
+  withClipboard<T>(work: () => Promise<T>): Promise<T> {
+    const result: Promise<T> = this.clipboardChain.then(work);
+    this.clipboardChain = result.then(() => {}, () => {});
+    return result;
   }
 
   // A file's bytes arrived that no newly received entry was waiting on - an
@@ -223,8 +307,8 @@ export class SyncManager {
   // delete the items too; the others keep theirs.
   async clearHistory(listedKeys: string[]): Promise<void> {
     const keys: string[] = listedKeys.slice();
-    this.pendingEntries.forEach((entry: ClipboardEntry, fileHash: string) => {
-      keys.push(entryKey(entry));
+    this.pendingEntries.forEach((pending: PendingFile, fileHash: string) => {
+      keys.push(entryKey(pending.entry));
       this.abandonedHashes.add(fileHash);
     });
     this.pendingEntries.clear();
@@ -234,8 +318,26 @@ export class SyncManager {
 
   // One item, by entryKey - same rules as clearHistory.
   async deleteEntry(key: string): Promise<void> {
-    await this.dropEntries([key]);
-    this.sync.broadcastDelete([key]);
+    await this.deleteEntries([key]);
+  }
+
+  // Several items at once (a card and its twins, see twinKeys): one delete
+  // message with every key goes to v2 peers.
+  async deleteEntries(keys: string[]): Promise<void> {
+    await this.dropEntries(keys);
+    this.sync.broadcastDelete(keys);
+  }
+
+  // The keys of every history entry with the same content as `key`'s (see
+  // storage/ContentPrint.ets), `key` included: a card stands for all of them
+  // (the list shows one card per content), so deleting it deletes them all.
+  async twinKeys(key: string): Promise<string[]> {
+    const history: ClipboardEntry[] = await this.history.getHistory(this.context);
+    const entry: ClipboardEntry | undefined = history.find((e: ClipboardEntry) => entryKey(e) === key);
+    const print: string | null = entry !== undefined ? contentKey(entry) : null;
+    if (print === null) return [key];
+    const keys: string[] = history.filter((e: ClipboardEntry) => contentKey(e) === print).map((e: ClipboardEntry) => entryKey(e));
+    return keys.includes(key) ? keys : [key, ...keys];
   }
 
   // Deletes these items (by entryKey) from this device: tombstoned, out of the
@@ -245,8 +347,8 @@ export class SyncManager {
   private async dropEntries(keys: string[]): Promise<void> {
     const gone: Set<string> = new Set<string>(keys);
     const waiting: string[] = [];
-    this.pendingEntries.forEach((entry: ClipboardEntry, fileHash: string) => {
-      if (gone.has(entryKey(entry))) waiting.push(fileHash);
+    this.pendingEntries.forEach((pending: PendingFile, fileHash: string) => {
+      if (gone.has(entryKey(pending.entry))) waiting.push(fileHash);
     });
     for (const fileHash of waiting) {
       this.pendingEntries.delete(fileHash);
@@ -292,7 +394,14 @@ export class SyncManager {
     this.sync.open(link);
     // The peer answering changes what the Devices tab shows (waiting -> connected).
     conn.onSessionProven(() => { this.connectionsChangedCallback?.(this.connections.size); });
-    conn.onMessage((msg: string) => { void this.handleMessage(msg, conn, link); });
+    // Caught here: anything that throws in handling a message (a history
+    // that won't save, a payload that isn't what it says) was an unhandled
+    // rejection that never reached the activity log.
+    conn.onMessage((msg: string) => {
+      this.handleMessage(msg, conn, link).catch((e: Error) => {
+        this.logCallback?.(`could not deal with a message from ${shortDeviceId(conn.peerDeviceId)} (${e})`);
+      });
+    });
     conn.onTick(() => { this.sync.expire(link); });
     conn.onDisconnected(() => {
       // Whatever it still owed, and a stack that waited for it.
@@ -318,12 +427,14 @@ export class SyncManager {
       // connection to come up (see requestMissingFiles) if that's nobody.
       const others: PeerConnection[] = this.connectionsExcept(conn);
       for (const fileHash of cutOff) {
-        void this.requestAgain(fileHash, others);
+        this.requestAgain(fileHash, others).catch((e: Error) => { this.logCallback?.(`could not ask for a file again (${e})`); });
       }
     });
     conn.listen();
-    void this.sync.announce(link);
-    void this.requestMissingFiles(conn);
+    this.sync.announce(link).catch((e: Error) => {
+      this.logCallback?.(`could not tell ${shortDeviceId(conn.peerDeviceId)} what this device has (${e})`);
+    });
+    this.requestMissingFiles(conn).catch((e: Error) => { this.logCallback?.(`could not ask for missing files (${e})`); });
     if (previous !== undefined && previous !== conn) {
       // A second connection to this same peer just replaced the first one
       // in the map (duplicate connections happen when a beacon-triggered
@@ -395,7 +506,7 @@ export class SyncManager {
     const envelope: Envelope = { Type: 'entry', Payload: JSON.stringify(entry) };
     const json = JSON.stringify(envelope);
     for (const conn of this.connections.values()) {
-      void conn.send(json);
+      sendQuietly(conn, json);
     }
     await this.history.addToHistory(this.context, entry);
 
@@ -408,7 +519,8 @@ export class SyncManager {
       }
       if (this.fileStore.exists(payload.FileHash)) {
         for (const conn of this.connections.values()) {
-          void this.streamFileToPeer(conn, this.fileStore.getPath(payload.FileHash), payload.FileHash);
+          this.streamFileToPeer(conn, this.fileStore.getPath(payload.FileHash), payload.FileHash)
+            .catch((e: Error) => { this.logCallback?.(`could not send a file (${e})`); });
         }
       }
     }
@@ -425,10 +537,10 @@ export class SyncManager {
 
   private async applyAndReport(entry: ClipboardEntry): Promise<void> {
     if (entry.Type === 'file') {
-      this.handleIncomingFileEntry(entry);
+      await this.handleIncomingFileEntry(entry);
       return;
     }
-    const result: ApplyResult = this.autoApply ? await applyEntryToClipboard(entry, this.fileStore) : 'skipped';
+    const result: ApplyResult = await this.applyToClipboard(entry);
     this.entryAppliedCallback?.(entry, result, true);
   }
 
@@ -438,8 +550,8 @@ export class SyncManager {
   // apply once file_chunk messages for this hash finish arriving and
   // verifying, and ask every connected peer (not just whoever handed us
   // this entry) whether they have it.
-  private handleIncomingFileEntry(entry: ClipboardEntry): void {
-    if (this.prepareFileEntry(entry, true)) void this.applyFileEntry(entry);
+  private async handleIncomingFileEntry(entry: ClipboardEntry): Promise<void> {
+    if (this.prepareFileEntry(entry, true)) await this.applyFileEntry(entry);
   }
 
   // The first half of handleIncomingFileEntry: true if the entry's bytes are
@@ -476,7 +588,11 @@ export class SyncManager {
       }
       return true;
     }
-    if (applyWhenStored) this.pendingEntries.set(payload.FileHash, entry);
+    if (applyWhenStored) {
+      this.pendingEntries.set(payload.FileHash.toLowerCase(), {
+        entry: entry, fileHash: payload.FileHash, armedAt: Date.now(), generation: pasteboardChangeCount()
+      });
+    }
     // Already arriving (its sender streams a new file right after its entry,
     // and that can overtake the entry's checks here): more peers sending it
     // too would only be wasted.
@@ -485,12 +601,17 @@ export class SyncManager {
   }
 
   // Bytes are still fetched and cached when autoApply is off (handleIncomingFileEntry
-  // requests them regardless), so Share/Save work on the item later.
-  private async applyFileEntry(entry: ClipboardEntry): Promise<void> {
+  // requests them regardless), so Share/Save work on the item later. `pending`:
+  // the entry waited for its bytes, and goes on the clipboard only if
+  // pendingFileMayApply says so - nothing else went there meanwhile, and not
+  // too long ago. Otherwise it is only listed ('held').
+  private async applyFileEntry(entry: ClipboardEntry, pending: PendingFile | null = null): Promise<void> {
     // Deleted while its bytes were on their way - a relay of the same entry
     // can have queued it again after deleteEntry dropped it.
     if (await this.history.isDeleted(this.context, entry)) return;
-    const result: ApplyResult = this.autoApply ? await applyEntryToClipboard(entry, this.fileStore) : 'skipped';
+    const stale: boolean = pending !== null &&
+      !pendingFileMayApply(pending.armedAt, pending.generation, Date.now(), pasteboardChangeCount());
+    const result: ApplyResult = stale ? 'held' : await this.applyToClipboard(entry);
     this.entryAppliedCallback?.(entry, result, true);
   }
 
@@ -503,7 +624,7 @@ export class SyncManager {
   private broadcastFileRequest(fileHash: string): void {
     const json = this.fileRequestJson(fileHash);
     for (const conn of this.connections.values()) {
-      void conn.send(json);
+      sendQuietly(conn, json);
     }
   }
 
@@ -544,21 +665,38 @@ export class SyncManager {
   // iOS's requestMissingBlobs do the same.
   private async requestMissingFiles(conn: PeerConnection): Promise<void> {
     const wanted: Map<string, string> = new Map<string, string>();
-    for (const fileHash of this.pendingEntries.keys()) {
-      wanted.set(fileHash.toLowerCase(), fileHash);
-    }
     try {
+      await this.dropPendingNotInHistory();
       (await this.missingFiles()).forEach((fileHash: string, key: string) => {
         if (!wanted.has(key)) wanted.set(key, fileHash);
       });
     } catch (e) {
       // history unreadable - the entries waiting here are still asked for
     }
+    this.pendingEntries.forEach((pending: PendingFile, key: string) => {
+      if (!wanted.has(key)) wanted.set(key, pending.fileHash);
+    });
     wanted.forEach((fileHash: string) => {
       if (!this.fileStore.exists(fileHash) && !this.isReceiving(fileHash)) {
-        void conn.send(this.fileRequestJson(fileHash));
+        sendQuietly(conn, this.fileRequestJson(fileHash));
       }
     });
+  }
+
+  // An entry waiting for its bytes that the history no longer holds (the cap
+  // pushed it out) waits no more: its bytes are not asked for again, and if
+  // they come they are not applied.
+  private async dropPendingNotInHistory(): Promise<void> {
+    if (this.pendingEntries.size === 0) return;
+    const held: Set<string> = new Set<string>((await this.history.getHistory(this.context)).map((e: ClipboardEntry) => entryKey(e)));
+    const gone: string[] = [];
+    this.pendingEntries.forEach((pending: PendingFile, key: string) => {
+      if (!held.has(entryKey(pending.entry))) gone.push(key);
+    });
+    for (const key of gone) {
+      this.pendingEntries.delete(key);
+      this.abandonedHashes.add(key);
+    }
   }
 
   // Asks `from` for a file again after a transfer of it came to nothing -
@@ -570,7 +708,7 @@ export class SyncManager {
   private async requestAgain(fileHash: string, from: PeerConnection[]): Promise<void> {
     if (this.fileStore.exists(fileHash) || this.isReceiving(fileHash)) return;
     // A new item's (see pendingEntries), or an older one's.
-    let wanted: boolean = this.pendingEntries.has(fileHash);
+    let wanted: boolean = this.pendingEntries.has(fileHash.toLowerCase());
     if (!wanted) {
       try {
         wanted = (await this.missingFiles()).has(fileHash.toLowerCase());
@@ -591,7 +729,7 @@ export class SyncManager {
     }
     const json: string = this.fileRequestJson(fileHash);
     for (const c of live) {
-      void c.send(json);
+      sendQuietly(c, json);
     }
   }
 
@@ -606,7 +744,8 @@ export class SyncManager {
     // file a peer names (see FileStore's isValidFileHash).
     if (!isValidFileHash(request.FileHash)) return;
     if (this.fileStore.exists(request.FileHash)) {
-      void this.streamFileToPeer(requestingConn, this.fileStore.getPath(request.FileHash), request.FileHash);
+      this.streamFileToPeer(requestingConn, this.fileStore.getPath(request.FileHash), request.FileHash)
+        .catch((e: Error) => { this.logCallback?.(`could not send a file (${e})`); });
     }
     // if we don't have it either, just don't respond - the requester
     // already broadcast to everyone else too; someone else might have it
@@ -803,7 +942,7 @@ export class SyncManager {
     this.retries.delete(chunk.FileHash.toLowerCase());
     // Its item was deleted or cleared while these bytes were on their way,
     // and nothing is waiting on them now: kept, they'd be an orphan.
-    if (this.abandonedHashes.delete(chunk.FileHash) && !this.pendingEntries.has(chunk.FileHash)) {
+    if (this.abandonedHashes.delete(chunk.FileHash.toLowerCase()) && !this.pendingEntries.has(chunk.FileHash.toLowerCase())) {
       await this.history.deleteFileIfUnused(this.context, chunk.FileHash);
       return;
     }
@@ -823,8 +962,9 @@ export class SyncManager {
   }
 
   private isReceiving(fileHash: string): boolean {
+    const key: string = fileHash.toLowerCase();
     for (const transfer of this.incoming.values()) {
-      if (transfer.fileHash === fileHash) return true;
+      if (transfer.fileHash.toLowerCase() === key) return true;
     }
     return false;
   }
@@ -850,18 +990,71 @@ export class SyncManager {
   // FileStore can gain a blob through more than one path - chunk-stream
   // completion (above), but also this device's own local capture of a
   // file (see Index.ets's onPasteButtonClick). Whichever way a hash
-  // becomes available, a pending entry waiting on exactly that hash
-  // should get applied. False if none was waiting.
+  // becomes available, a pending entry waiting on that hash (in any case)
+  // is applied - if it still may be, see applyFileEntry. False if none was
+  // waiting.
   private async tryFulfillPendingEntry(fileHash: string): Promise<boolean> {
-    const entry = this.pendingEntries.get(fileHash);
-    if (entry === undefined) return false;
-    this.pendingEntries.delete(fileHash);
-    await this.applyFileEntry(entry);
+    const key: string = fileHash.toLowerCase();
+    const pending: PendingFile | undefined = this.pendingEntries.get(key);
+    if (pending === undefined) return false;
+    this.pendingEntries.delete(key);
+    // Pushed out of the history while its bytes were on their way: they are
+    // stored, but nothing is applied or listed.
+    const held: ClipboardEntry[] = await this.history.getHistory(this.context);
+    if (!held.some((e: ClipboardEntry) => entryKey(e) === entryKey(pending.entry))) {
+      await this.history.deleteFileIfUnused(this.context, fileHash);
+      return true;
+    }
+    await this.applyFileEntry(pending.entry, pending);
     return true;
   }
 
+  // Every write of a received entry to the clipboard: one at a time with the
+  // page's capture (see clipboardChain). Content the clipboard holds already
+  // is not written again ('already', no notice: an older peer echoing back
+  // what this device sent, say); a copy made here and not dealt with yet goes
+  // out first (ClipboardHooks.beforeWrite); and what was written is recorded.
   private applyToClipboard(entry: ClipboardEntry): Promise<ApplyResult> {
-    return this.autoApply ? applyEntryToClipboard(entry, this.fileStore) : Promise.resolve<ApplyResult>('skipped');
+    return this.withClipboard(async (): Promise<ApplyResult> => {
+      const hooks: ClipboardHooks | null = this.clipboardHooks;
+      if (hooks !== null && hooks.holds(entry)) return 'already';
+      if (!this.autoApply) return 'skipped';
+      if (hooks !== null) {
+        try {
+          await hooks.beforeWrite();
+        } catch (e) {
+          this.logCallback?.(`could not send the copy made here first (${e})`);
+        }
+      }
+      const write: ClipboardWrite = await writeEntryToClipboard(entry, this.fileStore);
+      if (write.result === 'applied') hooks?.wrote(entry, write.prints);
+      return write.result;
+    });
+  }
+
+  // A live entry: checked, then added to the history FIRST, and applied and
+  // listed only if the history took it - new, not deleted here, and not
+  // trimmed away at once for being older than everything it keeps. Before,
+  // it was applied and listed first: a card stayed for an item the history
+  // had refused, and a file waited for bytes nothing kept.
+  private async handleLiveEntry(received: ClipboardEntry): Promise<void> {
+    const entry = await this.verifiedAndTrusted(received);
+    if (entry === null) {
+      // Was silent (a routine consequence of trust mismatches during
+      // normal pairing setup) - re-enabled while chasing the image/file
+      // sync bug, since a silent drop here is indistinguishable from
+      // "nothing arrived at all" and was hiding where the failure
+      // actually happens. type/deviceId included since this is the
+      // first concrete data point telling us whether it's even getting
+      // this far.
+      this.logCallback?.(`dropped ${received.Type} entry from ${shortDeviceId(received.DeviceId)} - failed signature/trust check`);
+      return;
+    }
+    // Deleted here before, a repeat, or too old to keep: neither listed nor
+    // put on the clipboard.
+    if (!(await this.history.addToHistory(this.context, entry))) return;
+    await primeContentKeys([entry]);
+    await this.applyAndReport(entry);
   }
 
   private async handleMessage(msg: string, conn: PeerConnection, link: SyncLink): Promise<void> {
@@ -870,6 +1063,11 @@ export class SyncManager {
       envelope = JSON.parse(msg) as Envelope;
     } catch (e) {
       this.logCallback?.('received invalid message from peer (bad JSON)');
+      return;
+    }
+    // JSON, but not an envelope at all ("null", say): reading its Type threw.
+    if (!isObject(envelope)) {
+      this.logCallback?.('received invalid message from peer (not an envelope)');
       return;
     }
 
@@ -881,22 +1079,14 @@ export class SyncManager {
         this.logCallback?.('received invalid message from peer (bad entry JSON)');
         return;
       }
-      const entry = await this.verifiedAndTrusted(received);
-      if (entry === null) {
-        // Was silent (a routine consequence of trust mismatches during
-        // normal pairing setup) - re-enabled while chasing the image/file
-        // sync bug, since a silent drop here is indistinguishable from
-        // "nothing arrived at all" and was hiding where the failure
-        // actually happens. type/deviceId included since this is the
-        // first concrete data point telling us whether it's even getting
-        // this far.
-        this.logCallback?.(`dropped ${received.Type} entry from ${shortDeviceId(received.DeviceId)} - failed signature/trust check`);
+      if (!isObject(received)) {
+        this.logCallback?.('received invalid message from peer (bad entry JSON)');
         return;
       }
-      // Deleted here before - neither re-listed nor put on the clipboard.
-      if (await this.history.isDeleted(this.context, entry)) return;
-      await this.applyAndReport(entry);
-      await this.history.addToHistory(this.context, entry);
+      // Its place in the queue is taken now, before anything is awaited.
+      const work: Promise<void> = this.liveWork.then(() => this.handleLiveEntry(received));
+      this.liveWork = work.catch((e: Error) => { this.logCallback?.(`could not deal with an entry (${e})`); });
+      await this.liveWork;
     } else if (envelope.Type === 'history_head') {
       await this.sync.onHead(link, envelope.Payload);
     } else if (envelope.Type === 'history_batch') {

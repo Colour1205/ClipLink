@@ -40,6 +40,63 @@ public static class ReceivedFiles
         return dir;
     }
 
+    // Puts a file entry's bytes - source, its blob in the FileStore - in the
+    // received files folder under the sender's name made safe (only as a
+    // name: joined on as it came, a rooted or "..\" one put the file
+    // anywhere), and returns where. A copy already there that holds exactly
+    // these bytes is used as it is: applying the same file again (Copy in
+    // Synced, a retry, the next reconnect) used to write another full copy -
+    // "name (1).ext", "name (2).ext"... - every time. fromElsewhere: another
+    // device's file, which gets the Mark of the Web as a download would, so
+    // pasted and opened from Explorer it gets SmartScreen and Office's
+    // Protected View (as a copy opened from Synced does). Throws IOException /
+    // UnauthorizedAccessException if it can't be copied.
+    public static string SaveFile(string source, string? fileName, string fileHash, bool fromElsewhere)
+    {
+        string dir = Folder();
+        long length = new FileInfo(source).Length;
+        var (path, exists) = FileNames.CopyPath(dir, FileNames.Safe(fileName, "file"), existing => HasHash(existing, fileHash, length));
+        if (!exists)
+        {
+            File.Copy(source, path);
+        }
+        if (fromElsewhere)
+        {
+            MarkAsFromElsewhere(path);
+        }
+        return path;
+    }
+
+    // The Mark of the Web (zone 3, the internet). Best effort: some drives
+    // can't hold it.
+    private static void MarkAsFromElsewhere(string path)
+    {
+        try
+        {
+            File.WriteAllText(path + ":Zone.Identifier", "[ZoneTransfer]\r\nZoneId=3\r\n");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            Console.WriteLine($"couldn't mark {Path.GetFileName(path)} as downloaded: {ex.Message}");
+        }
+    }
+
+    // Whether path holds exactly the bytes with this SHA-256 (same size, same
+    // hash) - read while an app may have it open, hence the sharing.
+    private static bool HasHash(string path, string sha256Hex, long length)
+    {
+        try
+        {
+            if (new FileInfo(path).Length != length) return false;
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            return Convert.ToHexString(SHA256.HashData(stream)).Equals(sha256Hex, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     // Saves an image `label` received as "ClipLink image <first 12 hex
     // digits of its SHA-256>.<ext>" and returns the path - the existing
     // file's if one already holds exactly these bytes, so applying the same

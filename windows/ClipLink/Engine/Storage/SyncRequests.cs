@@ -40,11 +40,12 @@ public sealed class SyncRequests
     // PC has (has), deleted (gone) or is already asking for (asked). The cap
     // is the history's: of everything this PC would hold - what it has (its
     // times, localTimes) and what is missing - the cap newest by time are
-    // worth downloading, the rest would be trimmed at once. The first missing
-    // key is always wanted though: it is the convenience item, which goes on the
-    // clipboard and is kept by the trim, even when it is older than all of
-    // those. Without times (a head that had none, or not as many as keys) every
-    // missing key is wanted, up to the cap.
+    // worth downloading, the rest would be trimmed at once - the newest missing
+    // one too: it only goes on the clipboard when it is newer than everything
+    // here (see BatchGroups.ApplyAnswer), and asking for an older one every time
+    // brought back, onto the clipboard and to the top, an item this PC had
+    // trimmed. Without times (a head that had none, or not as many as keys)
+    // every missing key is wanted, up to the cap.
     public static List<string> Wanted(IReadOnlyList<string> keys, IReadOnlyList<long>? times, Func<string, bool> has,
         Func<string, bool> gone, Func<string, bool> asked, IReadOnlyList<long> localTimes, int cap = HistoryHead.MaxKeys)
     {
@@ -67,14 +68,13 @@ public sealed class SyncRequests
             .Where(candidate => candidate.Index >= 0)
             .Select(candidate => candidate.Index)
             .ToHashSet();
-        if (missing.Count > 0) inside.Add(0);
         return missing.Where((_, index) => inside.Contains(index)).Take(cap).Select(entry => entry.Key).ToList();
     }
 
     // Works out what to ask conn for from its head, and reserves it: the
     // requests are queued and their keys are pending. The convenience item
-    // is asked for alone, first, so it arrives (and goes on the clipboard)
-    // before the rest; then the rest in one request. allowConvenience false: no
+    // is asked for alone, first, so it arrives (and goes on the clipboard, if
+    // it is fresh) before the rest; then the rest in one request. allowConvenience false: no
     // request is for the convenience item, so nothing is put on the clipboard (when
     // asking again for what another connection lost, after the convenience
     // item was handled).

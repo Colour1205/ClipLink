@@ -210,11 +210,28 @@ public class HistoryHeadTests
         Assert.False(result.Changed);
         Assert.Empty(rig.Groups.Snapshot().Expected);
 
+        // What is new is older than what is here: stored quietly, by time, nothing applied.
         var (outcome, changed) = rig.Batch(peerHistory);
         Assert.Equal(3, outcome.Added.Count);
         Assert.False(outcome.HeadApplied);
+        Assert.Null(outcome.Applied);
         Assert.Equal(1, changed);
-        Assert.Contains(rig.Rows(), row => row.IsStack && row.Hidden == 2);
+        Assert.All(rig.Rows(), row => Assert.False(row.IsStack));
+        Assert.Equal(new[] { "sig-5", "sig-3", "sig-2", "sig-1" }, rig.Rows().Select(row => row.FrontKey));
+    }
+
+    [Fact]
+    public void A_head_whose_newest_is_not_newer_than_everything_here_is_ignored()
+    {
+        var rig = new Rig();
+        rig.Batch(Entries(10));
+
+        var result = rig.Head(Rig.HeadFor(Entries(1, 2, 3)));
+
+        Assert.Null(result.Added);
+        Assert.False(result.Changed);
+        Assert.Empty(rig.Groups.Snapshot().Expected);
+        Assert.Equal(new[] { "sig-10" }, rig.Rows().Select(row => row.FrontKey));
     }
 
     [Fact]
@@ -429,7 +446,7 @@ public class HistoryHeadTests
     }
 
     [Fact]
-    public void A_batch_that_arrives_after_the_stack_was_dissolved_is_a_group_of_its_own()
+    public void A_batch_that_arrives_after_the_stack_was_dissolved_is_stored_quietly_when_it_is_older()
     {
         var rig = new Rig();
         var peerHistory = Entries(1, 2, 3);
@@ -440,13 +457,12 @@ public class HistoryHeadTests
 
         Assert.False(outcome.HeadApplied);
         Assert.Equal(2, outcome.Added.Count);
-        // The early card stays a plain card, now below the two others, which came
-        // later and are a stack of their own.
+        // The two others are older than the early card, which stays on top: they
+        // are plain cards below it, by time, and nothing goes on the clipboard.
+        Assert.Null(outcome.Applied);
         var rows = rig.Rows();
-        Assert.Equal("sig-2", rows[0].FrontKey);
-        Assert.True(rows[0].IsStack);
-        Assert.Equal("sig-3", rows[1].FrontKey);
-        Assert.False(rows[1].IsStack);
+        Assert.Equal(new[] { "sig-3", "sig-2", "sig-1" }, rows.Select(row => row.FrontKey));
+        Assert.All(rows, row => Assert.False(row.IsStack));
     }
 
     [Fact]

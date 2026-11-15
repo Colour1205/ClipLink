@@ -41,9 +41,9 @@ function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
 // than just slow; SDK docs note the sync variants exist specifically for
 // tight loops like this. That trades away the async version's one real
 // advantage (yielding to the event loop between calls, keeping the UI
-// thread free) for something that actually finishes - setPassphrase is a
-// rare, one-off action, so a brief main-thread pause here is the right
-// side of that tradeoff versus a setup flow that never visibly completes.
+// thread free) for something that actually finishes. The loop blocks
+// whatever thread runs it for seconds, so PassphraseKeyStore runs it in a
+// TaskPool worker (see deriveKeyOffThread there), never on the UI thread.
 export async function pbkdf2Sha256Manual(password: Uint8Array, salt: Uint8Array, iterations: number, keyLenBytes: number): Promise<Uint8Array> {
   const hLen = 32; // SHA-256 output size
   const blockCount = Math.ceil(keyLenBytes / hLen);

@@ -10,9 +10,10 @@ public sealed record KeysMessage(List<string> Keys)
     // A longer key is not a key any device made.
     public const int MaxKeyLength = 2048;
 
-    // The message for these keys, split in messages of at most MaxKeys.
+    // The message for these keys, split in messages of at most MaxKeys (Wire's
+    // JSON: a key is Base64, whose '+' the default encoder spells "+").
     public static List<string> Serialize(IReadOnlyList<string> keys) =>
-        keys.Chunk(MaxKeys).Select(chunk => JsonSerializer.Serialize(new KeysMessage(chunk.ToList()))).ToList();
+        keys.Chunk(MaxKeys).Select(chunk => JsonSerializer.Serialize(new KeysMessage(chunk.ToList()), Wire.Json)).ToList();
 
     // The keys of a received payload: the first MaxKeys of its list, without
     // anything that is not a string or is too long. Never throws: anything

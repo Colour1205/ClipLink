@@ -78,7 +78,13 @@ public struct Envelope: Equatable {
     }
 
     public static func parse(_ json: String) -> Envelope? {
-        guard let obj = WireJSON.object(json),
+        guard let data = json.data(using: .utf8) else { return nil }
+        return parse(data: data)
+    }
+
+    /// From the decrypted bytes themselves (see PeerLink.onMessageData).
+    public static func parse(data: Data) -> Envelope? {
+        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let type = WireJSON.str(obj, "Type"), !type.isEmpty
         else { return nil }
         return Envelope(type: type, payload: WireJSON.str(obj, "Payload") ?? "")
