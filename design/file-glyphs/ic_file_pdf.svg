@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Top half of the dog-ear page; the bottom is left open for the letters -->
+  <path d="M4 11V5C4 3.89543 4.89543 3 6 3H14L20 9V11"/>
+  <!-- Fold crease -->
+  <polyline points="14 3 14 9 20 9"/>
+  <!-- P -->
+  <path d="M4 21V15H6C7.10457 15 8 15.8954 8 17C8 18.1046 7.10457 19 6 19H4"/>
+  <!-- D -->
+  <path d="M11 15V21H11.75C13.4069 21 14.75 19.6569 14.75 18C14.75 16.3431 13.4069 15 11.75 15H11Z"/>
+  <!-- F -->
+  <path d="M20.25 15H17.75V21"/>
+  <line x1="17.75" y1="18" x2="19.75" y2="18"/>
+</svg>

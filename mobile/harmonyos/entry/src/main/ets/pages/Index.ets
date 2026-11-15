@@ -58,7 +58,7 @@ import { DialFallback } from '../networking/DialFallback';
 import { SyncManager } from '../networking/SyncManager';
 import { BatchApplied, HeadApplied, SyncApplied } from '../networking/HistorySync';
 import { StackBadge, StackChrome, StackedCard } from '../stack/StackedCard';
-import { fileExtensionLabel } from '../stack/CardFooter';
+import { fileExtensionLabel, fileGlyphKind } from '../stack/CardFooter';
 import { BatchGroupTracker, BatchMember, BatchPlan, StackMotion, StackRow, buildRows, dissolveGroup, hiddenCount, placeBatch, placeQuiet, revealAnimates, settleGroup, staggerDelayMs, startInsetFraction, startPeekVp } from '../stack/SyncedRows';
 import { connection } from '@kit.NetworkKit';
 import { signEntry, ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
@@ -363,6 +363,13 @@ const SPLIT_PANE_MIN_VP: number = 320;
 const CARD_PRESS_MOVE_SLOP_VP: number = 10;
 // A pressed card's size (clickEffect's MIDDLE level, which cards used before).
 const CARD_PRESS_SCALE: number = 0.95;
+// The list behind an opening item preview at full strength (see
+// detailBackdrop): blurred by this radius and dimmed to this brightness. 24 vp
+// leaves the cards as soft shapes with no readable text, like the system's
+// frosted materials; 0.85 is about a 15% black veil, enough to push the list
+// back without greying it out.
+const DETAIL_BACKDROP_BLUR_VP: number = 24;
+const DETAIL_BACKDROP_BRIGHTNESS: number = 0.85;
 // The Devices split: the device list on the left takes this share, the
 // selected device's detail the rest.
 const DEVICES_LIST_PANE_FRACTION: number = 0.42;
@@ -799,6 +806,12 @@ struct Index {
   // meaningful full-screen preview for them) - tapping one just plays the
   // shared clickEffect() feedback every card gets, per request.
   @State selectedItemId: string = '';
+  // How far the list behind the one-column item preview is blurred and
+  // dimmed: 0 not at all, 1 fully (DETAIL_BACKDROP_*). It changes in the same
+  // animateTo as the preview's push and pop (openItemDetail/closeItemDetail),
+  // so it moves with the card's morph; it is 1 exactly while 'itemDetail' is
+  // on syncedNavStack.
+  @State detailBackdrop: number = 0;
   // List vs 2-column WaterFlow grid for the Synced tab - toggled by the
   // title bar's menu icon (see syncedTitleBar). The choice is kept across
   // launches (read in aboutToAppear, written by the toggle).
@@ -1508,7 +1521,7 @@ struct Index {
   private returnTabToMain(tab: number, onScreen: boolean = false): void {
     if (tab === 0) {
       if (this.syncedNavStack.size() > 1) {
-        if (onScreen) this.closeItemDetail(); else this.syncedNavStack.pop(false);
+        if (onScreen) this.closeItemDetail(); else this.dropItemDetail();
       }
     } else if (tab === 1) {
       if (this.devicesNavStack.size() > 1) {
@@ -2443,7 +2456,7 @@ struct Index {
   private async clearSyncedHistory(): Promise<void> {
     // An open preview would be left showing an item that no longer exists.
     if (this.syncedNavStack.size() > 1) {
-      this.syncedNavStack.pop(false);
+      this.dropItemDetail();
     }
     this.selectedItemId = '';
     // Emptied before the await, so an item that arrives while the clear is
@@ -2481,6 +2494,12 @@ struct Index {
     if (kept.length !== this.syncedItems.length) this.syncedItems = kept;
     if (previewOpen && !this.isSplitLayout()) {
       this.closeItemDetail();
+    } else if (previewOpen) {
+      // Left open in the one-column layout before the window widened. Its
+      // page is transparent now (a DIALOG destination, see syncedPageMap), so
+      // coming back to one column would show a blurred list under an empty
+      // page instead of the list.
+      this.dropItemDetail();
     }
     // The split's preview moves on to the next item by itself (previewItem).
     if (gone.has(this.selectedItemId)) this.selectedItemId = '';
@@ -3539,16 +3558,41 @@ struct Index {
     // inside animateTo, and pushPath's own default transition must be
     // disabled (the `false` argument) so it doesn't layer on top of the
     // geometryTransition-driven animation and produce a broken double
-    // animation.
-    this.getUIContext().animateTo({ curve: curves.interpolatingSpring(0, 1, 328, 36) }, () => {
+    // animation. The list behind blurs and dims in the same closure, so it
+    // runs on the morph's own curve and the two arrive together.
+    this.getUIContext().animateTo(this.detailMotion(), () => {
       this.syncedNavStack.pushPath({ name: 'itemDetail' }, false);
+      this.detailBackdrop = 1;
     });
   }
 
+  // The reverse: the card morphs back into its place while the list behind
+  // comes back into focus, again in one closure on one curve. Pops only while
+  // the preview is actually on the stack - a second back or a stale caller
+  // must never pop 'syncedList' itself and leave the tab empty - but clears
+  // the blur either way, so the list can never be left stuck behind it.
   closeItemDetail(): void {
-    this.getUIContext().animateTo({ curve: curves.interpolatingSpring(0, 1, 328, 36) }, () => {
-      this.syncedNavStack.pop(false);
+    this.getUIContext().animateTo(this.detailMotion(), () => {
+      if (this.syncedNavStack.size() > 1) this.syncedNavStack.pop(false);
+      this.detailBackdrop = 0;
     });
+  }
+
+  // Closes the preview with no animation, for when nobody is watching (its tab
+  // is off screen) or what it showed is gone. The list's blur goes with it, or
+  // the list would come back still blurred.
+  private dropItemDetail(): void {
+    if (this.syncedNavStack.size() > 1) this.syncedNavStack.pop(false);
+    this.detailBackdrop = 0;
+  }
+
+  // What the preview opens and closes on. With the system's reduce-animations
+  // setting on, a short ease instead of the spring, like the other
+  // reduce-motion paths here (showSynced, rowTransition); the list still
+  // blurs and clears, just quickly.
+  private detailMotion(): AnimateParam {
+    if (this.reduceMotion) return { duration: 150, curve: Curve.EaseInOut };
+    return { curve: curves.interpolatingSpring(0, 1, 328, 36) };
   }
 
   // Reads syncManager.isConnected() directly; connectedCount changing is
@@ -4485,7 +4529,8 @@ struct Index {
 
   // The solid colored tile with a type's glyph, never a thumbnail - a
   // picture gets the image glyph (see chipKindFor). Alone, it is what the
-  // grid cards' footer uses (see syncedCardFooter).
+  // grid cards' footer uses (see syncedCardFooter); a grid file card draws
+  // the same tile with its kind of file's own glyph (see syncedGridFileCard).
   @Builder
   typeGlyphTile(item: SyncedItem, size: number) {
     Stack() {
@@ -4763,9 +4808,113 @@ struct Index {
     })
   }
 
+  // The glyph for a kind of file - a PDF, a spreadsheet, a song... (see
+  // fileGlyphKind) - or the plain file glyph for any other. White baked in,
+  // like the chip glyphs (see typeGlyphTile).
+  private fileGlyph(item: SyncedItem): Resource {
+    const kind: string = fileGlyphKind(item.preview);
+    if (kind === 'pdf') return $r('app.media.ic_file_pdf');
+    if (kind === 'doc') return $r('app.media.ic_file_doc');
+    if (kind === 'sheet') return $r('app.media.ic_file_sheet');
+    if (kind === 'slides') return $r('app.media.ic_file_slides');
+    if (kind === 'txt') return $r('app.media.ic_file_txt');
+    if (kind === 'data') return $r('app.media.ic_file_data');
+    if (kind === 'code') return $r('app.media.ic_file_code');
+    if (kind === 'archive') return $r('app.media.ic_file_archive');
+    if (kind === 'audio') return $r('app.media.ic_file_audio');
+    if (kind === 'video') return $r('app.media.ic_file_video');
+    if (kind === 'package') return $r('app.media.ic_file_package');
+    if (kind === 'ebook') return $r('app.media.ic_file_ebook');
+    if (kind === 'font') return $r('app.media.ic_file_font');
+    if (kind === 'disc') return $r('app.media.ic_file_disc');
+    return $r('app.media.ic_chip_file');
+  }
+
+  // A file's card in GRID mode (a file shown as a picture gets the picture
+  // card instead). Drawn by syncedGridTextCard, as it used to be, a file read
+  // the same as a note with its name in it - only the small glyph in the
+  // footer told them apart. So a file leads with a tile showing what kind of
+  // file it is, then its name, extension and all. The list card needs none of
+  // this: its 44 vp chip already says what it is. The tile and up to 3 lines
+  // of name keep the card's height known from its first layout (see
+  // syncedGridCard).
+  @Builder
+  syncedGridFileCard(item: SyncedItem, chrome: StackChrome) {
+    Column({ space: 8 }) {
+      // The tile typeGlyphTile draws, with the kind of file's own glyph.
+      Stack() {
+        Image(this.fileGlyph(item))
+          .width(36 * 0.52)
+          .height(36 * 0.52)
+      }
+      .width(36)
+      .height(36)
+      .backgroundColor(this.accent())
+      .borderRadius(36 / 3.2)
+      // Always the name, even one looksLikeOpaqueData would call a key: it is
+      // still a file. BREAK_ALL, unlike the text card's body - a file name is
+      // often one long word ("backup_20240501_093012.tar.gz") that would
+      // otherwise run past the card's edge.
+      Text(this.previewLabel(item))
+        .fontSize(14)
+        .fontColor($r('sys.color.font_primary'))
+        .fontWeight(FontWeight.Medium)
+        .maxLines(3)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .wordBreak(WordBreak.BREAK_ALL)
+        .width('100%')
+
+      // The footer without its small glyph: the tile on top already says
+      // what the file is, and the two together looked cluttered. As tall as
+      // the other cards' footers, which their 18 vp glyph sets.
+      Row({ space: 6 }) {
+        this.cardBylineParts(item, 10, chrome)
+      }
+      .width('100%')
+      .constraintSize({ minHeight: 18 })
+      .alignItems(VerticalAlign.Center)
+    }
+    .width('100%')
+    .padding({ left: 12, right: 12, top: 12, bottom: 12 + this.stackHandleRoom(item.id) })
+    .borderRadius(18)
+    .backgroundColor(this.cardFillFor(item.id))
+    .alignItems(HorizontalAlign.Start)
+    .clip(true)
+    .border(this.cardSelectBorder(item.id))
+    .geometryTransition(this.gtId(item.id), { follow: true })
+    .scale(this.pressScaleFor(item.id))
+    .onTouch((event: TouchEvent) => { this.cardTouch(item.id, event); })
+    .onClick(() => { if (this.endsLongPress(item.id)) return; tapHaptic(); this.activateItem(item); })
+    // Held for MENU_LONG_PRESS_MS: the menu. Moved after that: the card is
+    // dragged out into another app (see menuDrag) - started here, not by
+    // draggable(): the system's drag needs the finger still for 500 ms.
+    .parallelGesture(GestureGroup(GestureMode.Sequence,
+      LongPressGesture({ duration: MENU_LONG_PRESS_MS }).onAction(() => { this.openMenuByLongPress(item.id); }),
+      PanGesture({ distance: MENU_DRAG_DISTANCE_VP })
+        .onActionStart((event: GestureEvent) => { this.menuDrag(item, event); })
+        .onActionEnd(() => { this.menuDragPending = null; })
+        .onActionCancel(() => { this.menuDragPending = null; })))
+    .bindContextMenu(this.menuShownKey === item.id, this.itemActionMenu(item), {
+      systemMaterial: this.menuMaterial(),
+      hapticFeedbackMode: HapticFeedbackMode.ENABLED,
+      aboutToAppear: () => { this.menuCardKey = item.id; },
+      onDidAppear: () => { this.menuOpened(item); },
+      onDisappear: () => { this.menuShownKey = ''; this.menuClosed(); },
+      // See syncedGridCard's identical options for why preview is set.
+      preview: MenuPreviewMode.IMAGE,
+      // Lifted from, and put back at, the card's own size (see
+      // syncedGridTextCard).
+      previewAnimationOptions: { scale: [1.0, 1.1] },
+      previewBorderRadius: 18,
+      targetSpace: LengthMetrics.vp(12),
+    })
+  }
+
   @Builder
   syncedGridCard(item: SyncedItem, chrome: StackChrome) {
-    if (item.type !== 'image' && this.imagePreviewUri(item) === null) {
+    if (item.type === 'file' && this.imagePreviewUri(item) === null) {
+      this.syncedGridFileCard(item, chrome)
+    } else if (item.type !== 'image' && this.imagePreviewUri(item) === null) {
       this.syncedGridTextCard(item, chrome)
     } else {
       Column({ space: 8 }) {
@@ -4780,7 +4929,7 @@ struct Index {
           .autoResize(true) // see typeChip
           .borderRadius(12)
         // The picture is the content, so no name or caption under it - a file
-        // with nothing to preview keeps its name (see syncedGridTextCard).
+        // with nothing to preview keeps its name (see syncedGridFileCard).
         // The standard footer. The 4 of padding on top of the card's 8 puts
         // the glyph where the text card's 12 does.
         Row() {
@@ -5415,6 +5564,17 @@ struct Index {
       // overlapping/spilling because its container's real layout size
       // was smaller than what was visible).
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+      // Behind an open item preview the list stays on screen ('itemDetail' is
+      // a DIALOG destination, below) and goes blurred and a little darker -
+      // never faded: its opacity stays 1. Set on the destination rather than
+      // on syncedListContent so its title bar and the paste dock go soft with
+      // it, instead of their labels showing sharp around the preview's own
+      // bar while the card morphs. blur() takes px (common.d.ts:19055 names
+      // no unit, and ArkUI's foreground blur radius is px), hence vp2px, so
+      // it looks the same at every density. brightness() is 1 for unchanged
+      // and lower for darker (common.d.ts:19192).
+      .blur(this.getUIContext().vp2px(DETAIL_BACKDROP_BLUR_VP) * this.detailBackdrop)
+      .brightness(1 - (1 - DETAIL_BACKDROP_BRIGHTNESS) * this.detailBackdrop)
     } else if (name === 'itemDetail') {
       HdsNavDestination() {
         if (this.syncedItems.find(i => i.id === this.selectedItemId)) {
@@ -5433,6 +5593,25 @@ struct Index {
       .hideBackButton(false)
       .onBackPressed(() => { this.closeItemDetail(); return true; })
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+      // DIALOG, not the default STANDARD. Pushing a STANDARD destination hides
+      // the one below it straight away, and this push has its own transition
+      // turned off (see openItemDetail), so the list vanished the instant a
+      // card was tapped and the card morphed over a blank page - and over the
+      // same blank page on the way back. A DIALOG destination is transparent
+      // and leaves the page below on screen (nav_destination.d.ts:214,
+      // NavDestinationMode.DIALOG: "Stack operations do not affect the
+      // visibility of underlying NavDestination components"); HdsNavDestination
+      // takes the same mode (@hms.hds.hdsBaseComponent.d.ets:2578). The list
+      // underneath is blurred and dimmed instead (detailBackdrop). DIALOG's
+      // own system transition (API 13+) never plays: the push and pop pass
+      // false. Being DIALOG also means the list gets no onShown/onHidden, and
+      // nothing here listens for them.
+      // The page stays transparent; what covers the list once the morph ends
+      // is itemDetailView's opaque surface, which IS the card's fill grown to
+      // full screen. Making that see-through would take away the shape that
+      // morphs, and leave the text, picture and PDF previews over the cards.
+      .mode(NavDestinationMode.DIALOG)
+      .backgroundColor(Color.Transparent)
     }
   }
 
