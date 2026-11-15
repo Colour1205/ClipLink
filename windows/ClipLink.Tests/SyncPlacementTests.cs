@@ -92,7 +92,21 @@ public class SyncPlacementTests
     // ---- the front item ----
 
     [Fact]
-    public void The_front_item_goes_on_top_although_it_is_older_than_the_items_below()
+    public void The_front_item_goes_on_top()
+    {
+        var rig = new Rig(1, 2, 3);
+        rig.Sync(1);
+
+        var merged = rig.Answer(new[] { 5 }, convenience: true, last: true);
+
+        Assert.Equal(Entries(5), merged.Added);
+        Assert.Equal(Entry(5), merged.Applied);
+        Assert.Equal(Sigs(5, 3, 2, 1), rig.Order());
+        Assert.All(rig.Rows(), row => Assert.False(row.IsStack));
+    }
+
+    [Fact]
+    public void A_front_item_older_than_an_item_here_is_stored_quietly_by_time_and_not_applied()
     {
         var rig = new Rig(10, 11, 12);
         rig.Sync(1);
@@ -100,8 +114,80 @@ public class SyncPlacementTests
         var merged = rig.Answer(new[] { 5 }, convenience: true, last: true);
 
         Assert.Equal(Entries(5), merged.Added);
-        Assert.Equal(Sigs(5, 12, 11, 10), rig.Order());
-        Assert.Equal(Sigs(5, 12, 11, 10), rig.Cards());
+        Assert.Null(merged.Applied);
+        Assert.Equal(Sigs(12, 11, 10, 5), rig.Order());
+        Assert.Contains("sig-5", rig.Groups.QuietKeys());
+        Assert.Null(rig.Groups.ProtectedKey);
+    }
+
+    [Fact]
+    public void A_sync_whose_front_item_is_not_fresh_is_quiet_with_every_later_answer()
+    {
+        var rig = new Rig(10, 11, 12);
+        rig.Sync(3);
+        rig.Answer(new[] { 5 }, convenience: true);
+
+        // Newer than everything here, but the sync was not fresh: still quiet, in no stack.
+        var merged = rig.Answer(new[] { 20, 4 }, convenience: false, last: true);
+
+        Assert.Equal(2, merged.Added.Count);
+        Assert.Null(merged.Applied);
+        Assert.Equal(Sigs(20, 12, 11, 10, 5, 4), rig.Order());
+        Assert.All(rig.Rows(), row => Assert.False(row.IsStack));
+        Assert.True(rig.Groups.QuietKeys().SetEquals(Sigs(5, 20, 4)));
+    }
+
+    [Fact]
+    public void A_front_item_with_the_same_time_as_the_newest_here_is_not_fresh()
+    {
+        var rig = new Rig(10);
+        rig.Sync(1);
+        var tie = new ClipboardEntry("text 10b", "text", "PEER", Start.AddMinutes(10), "sig-10b");
+
+        var merged = rig.Groups.ApplyAnswer(rig.Conn, rig.History, new[] { tie }, _ => false, Rig.Max, convenience: true, last: true);
+
+        Assert.Null(merged.Applied);
+        Assert.Contains("sig-10b", rig.Groups.QuietKeys());
+    }
+
+    [Fact]
+    public void Into_an_empty_history_the_front_item_is_fresh()
+    {
+        var rig = new Rig();
+        rig.Sync(1);
+
+        var merged = rig.Answer(new[] { 5 }, convenience: true, last: true);
+
+        Assert.Equal(Entry(5), merged.Applied);
+        Assert.Equal("sig-5", rig.Groups.ProtectedKey);
+    }
+
+    [Fact]
+    public void An_empty_answer_to_the_convenience_request_makes_the_sync_quiet()
+    {
+        var rig = new Rig(1);
+        rig.Sync(3);
+        rig.Answer(Array.Empty<int>(), convenience: true); // gone at the sender
+
+        var merged = rig.Answer(new[] { 6, 5 }, convenience: false, last: true);
+
+        Assert.Null(merged.Applied);
+        Assert.Equal(Sigs(6, 5, 1), rig.Order());
+        Assert.All(rig.Rows(), row => Assert.False(row.IsStack));
+        Assert.True(rig.Groups.QuietKeys().SetEquals(Sigs(6, 5)));
+        Assert.Null(rig.Groups.ProtectedKey);
+    }
+
+    [Fact]
+    public void A_sync_with_no_convenience_request_is_quiet()
+    {
+        var rig = new Rig(1);
+        rig.Sync(2);
+
+        var merged = rig.Answer(new[] { 6, 5 }, convenience: false, last: true);
+
+        Assert.Null(merged.Applied);
+        Assert.Equal(Sigs(6, 5, 1), rig.Order());
         Assert.All(rig.Rows(), row => Assert.False(row.IsStack));
     }
 
@@ -116,29 +202,29 @@ public class SyncPlacementTests
     [Fact]
     public void A_live_item_arriving_later_goes_above_the_block_even_when_its_time_is_older()
     {
-        var rig = new Rig(20, 21);
+        var rig = new Rig(1, 2);
         rig.Sync(1);
         rig.Answer(new[] { 7 }, convenience: true, last: true);
 
-        rig.Live(2);
+        rig.Live(4);
 
-        Assert.Equal(Sigs(2, 7, 21, 20), rig.Order());
+        Assert.Equal(Sigs(4, 7, 2, 1), rig.Order());
         rig.Live(30);
-        Assert.Equal(Sigs(30, 2, 7, 21, 20), rig.Order());
+        Assert.Equal(Sigs(30, 4, 7, 2, 1), rig.Order());
     }
 
     [Fact]
     public void A_later_sync_goes_above_an_earlier_one()
     {
-        var rig = new Rig(20);
+        var rig = new Rig(1);
         var other = new object();
         rig.Sync(1);
-        rig.Answer(new[] { 9 }, convenience: true, last: true);
+        rig.Answer(new[] { 4 }, convenience: true, last: true);
         rig.Sync(1, other);
 
-        rig.Answer(new[] { 4 }, convenience: true, last: true, conn: other);
+        rig.Answer(new[] { 9 }, convenience: true, last: true, conn: other);
 
-        Assert.Equal(Sigs(4, 9, 20), rig.Order());
+        Assert.Equal(Sigs(9, 4, 1), rig.Order());
     }
 
     [Fact]
@@ -156,7 +242,7 @@ public class SyncPlacementTests
     [Fact]
     public void A_sync_of_several_items_is_one_stack_with_the_front_item_in_front_and_the_size_asked_for()
     {
-        var rig = new Rig(20, 21);
+        var rig = new Rig(1, 2);
         rig.Sync(3);
 
         rig.Answer(new[] { 7 }, convenience: true);
@@ -167,13 +253,13 @@ public class SyncPlacementTests
         Assert.True(rows[0].IsStack);
         Assert.Equal(2, rows[0].Pending);
         Assert.Equal(2, rows[0].Hidden);
-        Assert.Equal(Sigs(7, 21, 20), rig.Cards());
+        Assert.Equal(Sigs(7, 2, 1), rig.Cards());
     }
 
     [Fact]
     public void The_next_answer_joins_the_stack_and_the_size_is_what_arrived_when_the_last_is_in()
     {
-        var rig = new Rig(20, 21);
+        var rig = new Rig(1, 2);
         rig.Sync(3);
         rig.Answer(new[] { 7 }, convenience: true);
 
@@ -191,7 +277,7 @@ public class SyncPlacementTests
     [Fact]
     public void A_stack_that_gets_less_than_asked_has_the_size_that_arrived()
     {
-        var rig = new Rig(20);
+        var rig = new Rig(1);
         rig.Sync(4);
         rig.Answer(new[] { 7 }, convenience: true);
 
@@ -206,7 +292,7 @@ public class SyncPlacementTests
     [Fact]
     public void A_stack_that_ends_with_only_the_front_item_is_a_single_card()
     {
-        var rig = new Rig(20);
+        var rig = new Rig(1);
         rig.Sync(3);
         rig.Answer(new[] { 7 }, convenience: true);
 
@@ -214,7 +300,7 @@ public class SyncPlacementTests
 
         Assert.True(merged.GroupChanged); // the page must show the real size
         Assert.False(rig.Rows()[0].IsStack);
-        Assert.Equal(Sigs(7, 20), rig.Cards());
+        Assert.Equal(Sigs(7, 1), rig.Cards());
         Assert.Null(rig.BatchIdOf(7));
     }
 
@@ -233,28 +319,28 @@ public class SyncPlacementTests
     [Fact]
     public void Opening_the_stack_keeps_its_items_together_right_below_the_front_above_every_other_item()
     {
-        var rig = new Rig(20, 21, 22);
+        var rig = new Rig(1, 2, 3);
         rig.Sync(3);
         rig.Answer(new[] { 7 }, convenience: true);
         rig.Answer(new[] { 6, 5 }, convenience: false, last: true);
         string batch = rig.BatchIdOf(7)!;
 
-        Assert.Equal(Sigs(7, 22, 21, 20), rig.Cards());
+        Assert.Equal(Sigs(7, 3, 2, 1), rig.Cards());
         // Opened: the other two come out below the front, not back where their times put them.
-        Assert.Equal(Sigs(7, 6, 5, 22, 21, 20), rig.Cards(new HashSet<string> { batch }));
+        Assert.Equal(Sigs(7, 6, 5, 3, 2, 1), rig.Cards(new HashSet<string> { batch }));
     }
 
     [Fact]
     public void An_opened_stack_stays_below_a_newer_live_item_and_above_the_rest()
     {
-        var rig = new Rig(20, 21);
+        var rig = new Rig(1, 2);
         rig.Sync(3);
         rig.Answer(new[] { 7, 6, 5 }, convenience: true, last: true);
         rig.Live(25);
 
         string batch = rig.BatchIdOf(7)!;
 
-        Assert.Equal(Sigs(25, 7, 6, 5, 21, 20), rig.Cards(new HashSet<string> { batch }));
+        Assert.Equal(Sigs(25, 7, 6, 5, 2, 1), rig.Cards(new HashSet<string> { batch }));
     }
 
     [Fact]
@@ -284,50 +370,49 @@ public class SyncPlacementTests
     }
 
     [Fact]
-    public void When_the_front_item_is_not_there_the_stack_has_no_front_item_and_the_newest_leads()
-    {
-        var rig = new Rig(20);
-        rig.Sync(3);
-
-        rig.Answer(Array.Empty<int>(), convenience: true); // gone at the sender
-        rig.Answer(new[] { 6, 5 }, convenience: false, last: true);
-
-        var rows = rig.Rows();
-        Assert.Equal("sig-6", rows[0].FrontKey);
-        Assert.Equal(Sigs(5), rows[0].HiddenKeys);
-        Assert.Null(rig.Groups.ProtectedKey);
-    }
-
-    [Fact]
     public void An_opened_stack_is_not_waiting_for_more()
     {
-        var rig = new Rig(20);
+        var rig = new Rig(1);
         rig.Sync(3);
         rig.Answer(new[] { 7 }, convenience: true);
         string batch = rig.BatchIdOf(7)!;
 
         // Opened while the rest is on its way: no pending card, only what is here.
-        Assert.Equal(Sigs(7, 20), rig.Cards(new HashSet<string> { batch }));
+        Assert.Equal(Sigs(7, 1), rig.Cards(new HashSet<string> { batch }));
         Assert.Equal(0, rig.Rows(new HashSet<string> { batch }).Sum(row => row.Pending));
     }
 
     // ---- the trim ----
 
     [Fact]
-    public void The_trim_spares_the_front_item_and_drops_the_oldest_other_item()
+    public void A_fresh_front_item_in_a_full_history_drops_the_oldest_item_and_is_protected()
+    {
+        var rig = new Rig(Enumerable.Range(100, 25).ToArray());
+        rig.Sync(1);
+
+        var merged = rig.Answer(new[] { 130 }, convenience: true, last: true);
+
+        Assert.Equal(Entries(130), merged.Added);
+        Assert.Equal(25, rig.History.Count);
+        Assert.Equal(new[] { Entry(100) }, merged.Evicted);
+        Assert.Equal("sig-130", rig.Order()[0]);
+        Assert.Equal("sig-130", rig.Groups.ProtectedKey);
+    }
+
+    [Fact]
+    public void A_front_item_older_than_a_full_history_is_trimmed_at_once_and_nothing_is_applied()
     {
         var rig = new Rig(Enumerable.Range(100, 25).ToArray());
         rig.Sync(1);
 
         var merged = rig.Answer(new[] { 5 }, convenience: true, last: true);
 
-        Assert.Equal(Entries(5), merged.Added);
+        Assert.Empty(merged.Added);
+        Assert.Equal(Entries(5), merged.Evicted);
+        Assert.Null(merged.Applied);
         Assert.Equal(25, rig.History.Count);
-        Assert.Contains("sig-5", rig.History.Select(e => e.Key()));
-        Assert.DoesNotContain("sig-100", rig.History.Select(e => e.Key()));
-        Assert.Equal(new[] { Entry(100) }, merged.Evicted);
-        Assert.Equal("sig-5", rig.Order()[0]);
-        Assert.Equal("sig-5", rig.Groups.ProtectedKey);
+        Assert.Contains("sig-100", rig.Order());
+        Assert.Null(rig.Groups.ProtectedKey);
     }
 
     [Fact]
@@ -335,13 +420,17 @@ public class SyncPlacementTests
     {
         var rig = new Rig(Enumerable.Range(100, 25).ToArray());
         rig.Sync(1);
-        rig.Answer(new[] { 5 }, convenience: true, last: true);
+        rig.Answer(new[] { 130 }, convenience: true, last: true);
+        // Newer items arrive quietly until the front item is the oldest: the trim spares it.
+        rig.Late(Enumerable.Range(131, 25).ToArray());
+        Assert.Contains("sig-130", rig.Order());
+        Assert.DoesNotContain("sig-131", rig.Order());
 
         rig.Live(300);
 
         Assert.Equal(25, rig.History.Count);
-        Assert.DoesNotContain("sig-5", rig.History.Select(e => e.Key()));
-        Assert.Contains("sig-101", rig.History.Select(e => e.Key()));
+        Assert.DoesNotContain("sig-130", rig.History.Select(e => e.Key()));
+        Assert.Contains("sig-132", rig.History.Select(e => e.Key()));
         Assert.Contains("sig-300", rig.History.Select(e => e.Key()));
         Assert.Null(rig.Groups.ProtectedKey);
     }
@@ -351,14 +440,14 @@ public class SyncPlacementTests
     {
         var rig = new Rig(Enumerable.Range(100, 25).ToArray());
         rig.Sync(3);
-        rig.Answer(new[] { 5 }, convenience: true);
+        rig.Answer(new[] { 130 }, convenience: true);
 
         var merged = rig.Answer(new[] { 4, 3 }, convenience: false, last: true);
 
         // The two others are older than everything: added and trimmed at once.
         Assert.Empty(merged.Added);
         Assert.Equal(25, rig.History.Count);
-        Assert.Contains("sig-5", rig.History.Select(e => e.Key()));
+        Assert.Contains("sig-130", rig.History.Select(e => e.Key()));
         Assert.DoesNotContain("sig-4", rig.History.Select(e => e.Key()));
         Assert.False(rig.Rows()[0].IsStack);
     }
@@ -377,71 +466,87 @@ public class SyncPlacementTests
     }
 
     [Fact]
-    public void A_version_1_head_with_a_newest_older_than_a_full_history_keeps_it_and_drops_the_oldest_other()
+    public void A_version_1_head_with_a_newest_older_than_the_history_is_ignored()
     {
         var rig = new Rig(Enumerable.Range(100, 25).ToArray());
         var head = HistoryHead.ForBatch(Entries(5, 4))!;
 
         var result = rig.Groups.HeadReceived(rig.Conn, rig.History, head, rig.Deleted.Contains, Rig.Max);
 
-        Assert.Equal(Entry(5), result.Added);
+        Assert.Null(result.Added);
+        Assert.Empty(result.Evicted);
         Assert.Equal(25, rig.History.Count);
-        Assert.Equal("sig-5", rig.Order()[0]);
-        Assert.Equal(new[] { Entry(100) }, result.Evicted);
+        Assert.Equal("sig-124", rig.Order()[0]);
     }
 
     // ---- version 1 ----
 
     [Fact]
-    public void A_version_1_batch_puts_its_newest_new_item_in_front_even_when_older_than_the_own_newest()
+    public void A_version_1_batch_puts_its_newest_new_item_in_front_when_it_is_newer_than_everything_here()
+    {
+        var rig = new Rig(1, 2);
+
+        var merged = rig.Batch(new[] { 4, 6, 5 });
+
+        Assert.Equal(Entry(6), merged.Applied);
+        Assert.Equal(Sigs(6, 5, 4, 2, 1), rig.Order());
+        var rows = rig.Rows();
+        Assert.Equal("sig-6", rows[0].FrontKey);
+        Assert.True(rows[0].IsStack);
+        Assert.Equal(Sigs(5, 4), rows[0].HiddenKeys);
+        Assert.Equal("sig-6", rig.Groups.ProtectedKey);
+    }
+
+    [Fact]
+    public void A_version_1_batch_whose_newest_new_item_is_older_than_the_own_newest_is_stored_quietly()
     {
         var rig = new Rig(20, 21);
 
         var merged = rig.Batch(new[] { 1, 3, 2 });
 
-        Assert.Equal(Entry(3), HistoryBatch.Newest(merged.Added));
-        Assert.Equal(Sigs(3, 2, 1, 21, 20), rig.Order());
-        var rows = rig.Rows();
-        Assert.Equal("sig-3", rows[0].FrontKey);
-        Assert.True(rows[0].IsStack);
-        Assert.Equal(Sigs(2, 1), rows[0].HiddenKeys);
-        Assert.Equal("sig-3", rig.Groups.ProtectedKey);
+        Assert.Equal(3, merged.Added.Count);
+        Assert.Null(merged.Applied);
+        Assert.Equal(Sigs(21, 20, 3, 2, 1), rig.Order());
+        Assert.All(rig.Rows(), row => Assert.False(row.IsStack));
+        Assert.True(rig.Groups.QuietKeys().SetEquals(Sigs(1, 2, 3)));
+        Assert.Null(rig.Groups.ProtectedKey);
     }
 
     [Fact]
     public void A_version_1_batch_of_one_new_item_is_a_card_on_top()
     {
-        var rig = new Rig(20, 21);
+        var rig = new Rig(1, 2);
 
-        rig.Batch(new[] { 20, 3 });
+        rig.Batch(new[] { 1, 3 });
 
-        Assert.Equal(Sigs(3, 21, 20), rig.Cards());
+        Assert.Equal(Sigs(3, 2, 1), rig.Cards());
         Assert.False(rig.Rows()[0].IsStack);
     }
 
     [Fact]
-    public void A_version_1_batch_in_a_full_history_keeps_its_newest_even_if_older_than_all()
+    public void A_version_1_batch_older_than_a_full_history_is_trimmed_at_once()
     {
         var rig = new Rig(Enumerable.Range(100, 25).ToArray());
 
         var merged = rig.Batch(new[] { 5, 4 });
 
-        Assert.Equal(Entries(5), merged.Added); // (the older one is trimmed at once)
+        Assert.Empty(merged.Added);
+        Assert.Null(merged.Applied);
         Assert.Equal(25, rig.History.Count);
-        Assert.Equal("sig-5", rig.Order()[0]);
+        Assert.Equal("sig-124", rig.Order()[0]);
     }
 
     [Fact]
     public void A_version_1_head_then_batch_places_the_batch_in_the_block_the_head_made()
     {
-        var rig = new Rig(20, 21);
+        var rig = new Rig(1, 2);
         var peer = Entries(5, 4, 3);
         rig.Groups.HeadReceived(rig.Conn, rig.History, HistoryHead.ForBatch(peer)!, rig.Deleted.Contains, Rig.Max);
 
         var merged = rig.Batch(new[] { 3, 4, 5 });
 
         Assert.True(merged.HeadApplied);
-        Assert.Equal(Sigs(5, 4, 3, 21, 20), rig.Order());
+        Assert.Equal(Sigs(5, 4, 3, 2, 1), rig.Order());
         Assert.Equal(Sigs(4, 3), rig.Rows()[0].HiddenKeys);
     }
 
@@ -467,7 +572,7 @@ public class SyncPlacementTests
     [Fact]
     public void When_a_request_times_out_or_the_connection_closes_the_stack_stops_waiting()
     {
-        var rig = new Rig(20);
+        var rig = new Rig(1);
         rig.Sync(4);
         rig.Answer(new[] { 7 }, convenience: true);
         Assert.Equal(3, rig.Rows()[0].Pending);
@@ -483,7 +588,7 @@ public class SyncPlacementTests
     [Fact]
     public void A_stack_with_two_or_more_items_stays_a_stack_of_what_arrived_when_waiting_ends()
     {
-        var rig = new Rig(20);
+        var rig = new Rig(1);
         rig.Sync(4);
         rig.Answer(new[] { 7 }, convenience: true);
         rig.Answer(new[] { 6 }, convenience: false);
@@ -504,16 +609,16 @@ public class SyncPlacementTests
         rig.Sync(2);
         rig.Sync(2, other);
 
-        rig.Answer(new[] { 9 }, convenience: true);
-        rig.Answer(new[] { 8 }, convenience: true, conn: other);
+        rig.Answer(new[] { 8 }, convenience: true);
+        rig.Answer(new[] { 9 }, convenience: true, conn: other);
         rig.Answer(new[] { 7 }, convenience: false, last: true);
         rig.Answer(new[] { 6 }, convenience: false, last: true, conn: other);
 
         var rows = rig.Rows();
         Assert.Equal(2, rows.Count);
-        Assert.Equal("sig-8", rows[0].FrontKey); // the later block first
+        Assert.Equal("sig-9", rows[0].FrontKey); // the later block first
         Assert.Equal(Sigs(6), rows[0].HiddenKeys);
-        Assert.Equal("sig-9", rows[1].FrontKey);
+        Assert.Equal("sig-8", rows[1].FrontKey);
         Assert.Equal(Sigs(7), rows[1].HiddenKeys);
     }
 
@@ -545,7 +650,7 @@ public class SyncPlacementTests
     [Fact]
     public void Deleting_the_front_card_puts_the_next_item_in_front()
     {
-        var rig = new Rig(20);
+        var rig = new Rig(1);
         rig.Sync(3);
         rig.Answer(new[] { 7 }, convenience: true);
         rig.Answer(new[] { 6, 5 }, convenience: false, last: true);
@@ -555,14 +660,14 @@ public class SyncPlacementTests
         var rows = rig.Rows();
         Assert.Equal("sig-6", rows[0].FrontKey);
         Assert.Equal(Sigs(5), rows[0].HiddenKeys);
-        Assert.Equal("sig-20", rows[1].FrontKey);
+        Assert.Equal("sig-1", rows[1].FrontKey);
         Assert.Null(rig.Groups.ProtectedKey); // the item that was protected is gone
     }
 
     [Fact]
     public void A_stack_left_with_one_item_is_a_single_card()
     {
-        var rig = new Rig(20);
+        var rig = new Rig(1);
         rig.Sync(3);
         rig.Answer(new[] { 7 }, convenience: true);
         rig.Answer(new[] { 6, 5 }, convenience: false, last: true);
@@ -570,14 +675,14 @@ public class SyncPlacementTests
         rig.Remove(6, 5);
 
         var rows = rig.Rows();
-        Assert.Equal(Sigs(7, 20), rig.Cards());
+        Assert.Equal(Sigs(7, 1), rig.Cards());
         Assert.All(rows, row => Assert.False(row.IsStack));
     }
 
     [Fact]
     public void Deleting_a_member_takes_it_out_of_the_stack()
     {
-        var rig = new Rig(20);
+        var rig = new Rig(1);
         rig.Sync(3);
         rig.Answer(new[] { 7 }, convenience: true);
         rig.Answer(new[] { 6, 5 }, convenience: false, last: true);
@@ -592,7 +697,7 @@ public class SyncPlacementTests
     [Fact]
     public void Deleting_while_the_rest_is_still_coming_leaves_the_rest_to_arrive()
     {
-        var rig = new Rig(20);
+        var rig = new Rig(1);
         rig.Sync(3);
         rig.Answer(new[] { 7 }, convenience: true);
 
@@ -622,9 +727,9 @@ public class SyncPlacementTests
     // ---- one clipboard change when two devices answer at once ----
 
     [Fact]
-    public void A_convenience_item_that_is_not_newer_than_one_put_on_the_clipboard_a_moment_ago_is_not_put_there()
+    public void A_convenience_item_older_than_one_put_on_the_clipboard_a_moment_ago_is_not_put_there()
     {
-        var rig = new Rig(20);
+        var rig = new Rig(1);
         var other = new object();
         rig.Sync(1);
         rig.Sync(1, other);
@@ -634,9 +739,9 @@ public class SyncPlacementTests
 
         Assert.Equal(Entry(9), first.Applied);
         Assert.Null(second.Applied);
-        // It is added, and leads its own block like any front item; but it is not announced.
+        // It is added, by its time and in no block (it is not newer than what is here); it is not announced.
         Assert.Equal(Entries(4), second.Added);
-        Assert.Equal(Sigs(4, 9, 20), rig.Order());
+        Assert.Equal(Sigs(9, 4, 1), rig.Order());
         Assert.Contains("sig-4", rig.Groups.QuietKeys());
         Assert.DoesNotContain("sig-9", rig.Groups.QuietKeys());
     }
@@ -644,7 +749,7 @@ public class SyncPlacementTests
     [Fact]
     public void A_convenience_item_with_the_same_time_is_not_newer_either()
     {
-        var rig = new Rig(20);
+        var rig = new Rig(1);
         var other = new object();
         rig.Sync(1);
         rig.Sync(1, other);
@@ -660,7 +765,7 @@ public class SyncPlacementTests
     [Fact]
     public void A_newer_convenience_item_is_put_on_the_clipboard_even_a_moment_after_another()
     {
-        var rig = new Rig(20);
+        var rig = new Rig(1);
         var other = new object();
         rig.Sync(1);
         rig.Sync(1, other);
@@ -676,35 +781,38 @@ public class SyncPlacementTests
     [Fact]
     public void After_90_seconds_an_older_convenience_item_is_put_on_the_clipboard_again()
     {
-        var rig = new Rig(20);
+        var rig = new Rig(1);
         var other = new object();
         var third = new object();
         rig.Sync(1);
         rig.Sync(1, other);
         rig.Sync(1, third);
         rig.Answer(new[] { 9 }, convenience: true, last: true, nowMs: 1_000);
+        rig.Remove(9); // deleted here: what comes next is fresh again, though older than it
 
         var justBefore = rig.Answer(new[] { 5 }, convenience: true, last: true, conn: other, nowMs: 1_000 + BatchGroups.ConvenienceWindowMs - 1);
-        var justAfter = rig.Answer(new[] { 4 }, convenience: true, last: true, conn: third, nowMs: 1_000 + BatchGroups.ConvenienceWindowMs);
+        var justAfter = rig.Answer(new[] { 6 }, convenience: true, last: true, conn: third, nowMs: 1_000 + BatchGroups.ConvenienceWindowMs);
 
         Assert.Null(justBefore.Applied);
-        Assert.Equal(Entry(4), justAfter.Applied);
+        Assert.Equal(Entry(6), justAfter.Applied);
     }
 
     [Fact]
     public void A_skipped_convenience_item_still_leads_its_stack()
     {
-        var rig = new Rig(20);
+        var rig = new Rig(1);
         var other = new object();
         rig.Sync(1);
         rig.Sync(2, other);
         rig.Answer(new[] { 9 }, convenience: true, last: true, nowMs: 1_000);
+        rig.Remove(9);
 
+        // Fresh, but not newer than the one put on the clipboard a moment ago: skipped.
         var front = rig.Answer(new[] { 4 }, convenience: true, conn: other, nowMs: 2_000);
         rig.Answer(new[] { 3 }, convenience: false, last: true, conn: other, nowMs: 2_000);
 
         Assert.Null(front.Applied);
-        Assert.Equal(Sigs(4, 3, 9, 20), rig.Order());
+        Assert.Equal(Sigs(4, 3, 1), rig.Order());
         var stack = Assert.Single(rig.Rows(), row => row.IsStack);
         Assert.Equal("sig-4", stack.FrontKey);
         Assert.Equal(1, stack.Hidden);
@@ -734,46 +842,35 @@ public class SyncPlacementTests
     }
 
     [Fact]
-    public void A_skipped_convenience_item_that_starts_a_block_leaves_the_protection_of_the_one_on_the_clipboard()
+    public void A_convenience_item_that_is_not_fresh_leaves_the_protection_of_the_one_on_the_clipboard()
     {
-        // 23 items, so the skipped one fits next to the 24 that are there after the first answer.
-        var rig = new Rig(Enumerable.Range(11, 23).ToArray());
+        var rig = new Rig(Enumerable.Range(11, 24).ToArray());
         var other = new object();
         rig.Sync(1);
         rig.Sync(1, other);
-        var first = rig.Answer(new[] { 5 }, convenience: true, last: true, nowMs: 1_000); // the oldest of all, on the clipboard
-        Assert.Equal(Entry(5), first.Applied);
-        Assert.Equal("sig-5", rig.Groups.ProtectedKey);
+        var first = rig.Answer(new[] { 40 }, convenience: true, last: true, nowMs: 1_000);
+        Assert.Equal(Entry(40), first.Applied);
+        Assert.Equal("sig-40", rig.Groups.ProtectedKey);
 
-        // Not newer than sig-5, so skipped: it is added and leads its own block, which does not end the protection.
-        var skipped = new ClipboardEntry("text 5b", "text", "PEER", Start.AddMinutes(5), "sig-5b");
-        var second = rig.Groups.ApplyAnswer(other, rig.History, new[] { skipped }, _ => false, Rig.Max, convenience: true, last: true, nowMs: 2_000);
+        var second = rig.Answer(new[] { 20 }, convenience: true, last: true, conn: other, nowMs: 2_000); // older than 40
 
         Assert.Null(second.Applied);
-        Assert.Equal(new[] { skipped }, second.Added);
+        Assert.Equal("sig-40", rig.Groups.ProtectedKey);
+        Assert.Equal("sig-40", rig.Order()[0]);
         Assert.Equal(25, rig.History.Count);
-        Assert.Equal("sig-5b", rig.Order()[0]);
-        Assert.Equal("sig-5", rig.Groups.ProtectedKey);
-
-        // A later trim still spares it, although it is the oldest and listed first among equal times.
-        var late = rig.Late(50);
-        Assert.Equal(Entries(50), late.Added);
-        Assert.Equal(new[] { skipped }, late.Evicted);
-        Assert.Contains("sig-5", rig.Order());
-        Assert.Equal("sig-5", rig.Groups.ProtectedKey);
     }
 
     [Fact]
     public void The_protection_kept_over_a_skipped_item_ends_when_a_newer_item_is_put_on_the_clipboard_or_a_live_one_arrives()
     {
-        var rig = new Rig(Enumerable.Range(11, 10).ToArray());
+        var rig = new Rig(Enumerable.Range(1, 10).ToArray());
         var (other, third) = (new object(), new object());
         rig.Sync(1);
         rig.Sync(1, other);
         rig.Sync(1, third);
-        rig.Answer(new[] { 9 }, convenience: true, last: true, nowMs: 1_000);
-        rig.Answer(new[] { 4 }, convenience: true, last: true, conn: other, nowMs: 2_000); // skipped
-        Assert.Equal("sig-9", rig.Groups.ProtectedKey);
+        rig.Answer(new[] { 30 }, convenience: true, last: true, nowMs: 1_000);
+        rig.Answer(new[] { 14 }, convenience: true, last: true, conn: other, nowMs: 2_000); // not fresh
+        Assert.Equal("sig-30", rig.Groups.ProtectedKey);
 
         var newer = rig.Answer(new[] { 40 }, convenience: true, last: true, conn: third, nowMs: 3_000);
         Assert.Equal(Entry(40), newer.Applied);
@@ -781,25 +878,6 @@ public class SyncPlacementTests
 
         rig.Live(41);
         Assert.Null(rig.Groups.ProtectedKey);
-    }
-
-    [Fact]
-    public void A_skipped_item_in_a_full_history_does_not_cost_the_protected_one_its_place()
-    {
-        var rig = new Rig(Enumerable.Range(11, 24).ToArray());
-        var other = new object();
-        rig.Sync(1);
-        rig.Sync(1, other);
-        rig.Answer(new[] { 5 }, convenience: true, last: true, nowMs: 1_000); // 25 items, the oldest is sig-5
-        var tie = new ClipboardEntry("text 5b", "text", "PEER", Start.AddMinutes(5), "sig-5b");
-
-        // Equal times: without the protection the trim would take sig-5 (listed first), not the new one.
-        var second = rig.Groups.ApplyAnswer(other, rig.History, new[] { tie }, _ => false, Rig.Max, convenience: true, last: true, nowMs: 2_000);
-
-        Assert.Null(second.Applied);
-        Assert.Equal(new[] { tie }, second.Evicted);
-        Assert.Contains("sig-5", rig.Order());
-        Assert.Equal("sig-5", rig.Groups.ProtectedKey);
     }
 
     // ---- the late answer to an expired request ----
@@ -824,7 +902,7 @@ public class SyncPlacementTests
     {
         var rig = new Rig(Enumerable.Range(11, 25).ToArray()); // a full history
         rig.Sync(1);
-        rig.Answer(new[] { 5 }, convenience: true, last: true, nowMs: 1_000); // on the clipboard, older than all
+        rig.Answer(new[] { 60 }, convenience: true, last: true, nowMs: 1_000); // on the clipboard
         Assert.Equal(25, rig.History.Count);
         rig.Deleted.Add("sig-40");
 
@@ -834,7 +912,7 @@ public class SyncPlacementTests
         Assert.Equal(1, merged.Deleted);
         Assert.Equal(1, merged.Duplicates);
         Assert.Equal(25, rig.History.Count);
-        Assert.Contains("sig-5", rig.Order());
+        Assert.Contains("sig-60", rig.Order());
         Assert.Equal(Entries(12), merged.Evicted);
     }
 

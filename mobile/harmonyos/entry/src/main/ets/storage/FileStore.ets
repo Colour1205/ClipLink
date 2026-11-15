@@ -162,17 +162,59 @@ export class FileStore {
     }
   }
 
-  clearNamedCopies(): void {
+  // Where a file put on the clipboard points: a copy under its real name, so a
+  // paste makes "report.pdf" and not a file named by its hash. Only for a file
+  // up to NAMED_COPY_SYNC_MAX_BYTES: every received file goes on the clipboard,
+  // and a copy of a huge one would cost as much again in storage; that one
+  // still goes on under its hash.
+  async clipboardPath(hash: string, fileName: string): Promise<string> {
+    try {
+      if (fs.statSync(this.getPath(hash)).size <= NAMED_COPY_SYNC_MAX_BYTES) {
+        const named: string | null = await this.namedCopy(hash, fileName);
+        if (named !== null) return named;
+      }
+    } catch (e) {
+      // not stored after all - the caller checked; it gets the plain path
+    }
+    return this.getPath(hash);
+  }
+
+  // `keepHash`: a file whose named copy is what the clipboard points at (see
+  // clipboardPath), kept so a paste after this start still finds it.
+  clearNamedCopies(keepHash: string | null = null): void {
     try {
       const dir: string = `${this.cacheDir}/${NAMED_SUBDIR}`;
-      if (fs.accessSync(dir)) fs.rmdirSync(dir);
+      if (!fs.accessSync(dir)) return;
+      if (keepHash === null) {
+        fs.rmdirSync(dir);
+        return;
+      }
+      const keep: string = keepHash.toLowerCase();
+      for (const name of fs.listFileSync(dir)) {
+        if (name !== keep) fs.rmdirSync(`${dir}/${name}`);
+      }
     } catch (e) {
       // the cache is the system's to clear anyway
     }
   }
 
-  getPath(hash: string): string {
+  private pathAsSpelt(hash: string): string {
     return `${this.baseDir}/${checked(hash)}`;
+  }
+
+  // The blob for this hash. A file is stored under the hash as it arrived,
+  // and senders differ in case (iOS sends uppercase, the others lowercase), so
+  // a blob kept under another spelling is found too; with none stored, the
+  // path to store one under, as spelt.
+  getPath(hash: string): string {
+    const spelt: string = this.pathAsSpelt(hash);
+    if (fs.accessSync(spelt)) return spelt;
+    for (const other of [hash.toLowerCase(), hash.toUpperCase()]) {
+      if (other === hash) continue;
+      const path: string = this.pathAsSpelt(other);
+      if (fs.accessSync(path)) return path;
+    }
+    return spelt;
   }
 
   // Where one incoming transfer writes before its bytes are verified - and
@@ -191,8 +233,10 @@ export class FileStore {
     return true;
   }
 
+  // Every spelling of it (see getPath): the caller has made sure no entry
+  // still points at these bytes, whatever its case.
   delete(hash: string): void {
-    if (this.exists(hash)) {
+    for (let spellings = 0; spellings < 3 && this.exists(hash); spellings++) {
       fs.unlinkSync(this.getPath(hash));
     }
   }

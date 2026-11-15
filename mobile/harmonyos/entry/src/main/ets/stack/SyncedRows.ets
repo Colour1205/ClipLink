@@ -205,6 +205,37 @@ export function placeQuiet<T extends BatchMember>(list: T[], fresh: T[], maxItem
   return placed.slice(0, maxItems);
 }
 
+// `items` (the list top to bottom, stack members in their place) with every
+// twin hidden: an item whose content (`keyOf`, see storage/ContentPrint.ets) is
+// the same as an item above it. The topmost one stays, so a copy that has just
+// arrived on top stands for the older card, and after a restart (time order)
+// the newest does. A null key is never a twin. The list itself keeps the twins
+// (they are still in the history, see design/sync-dedupe-spec.md rule 2): this
+// is only what is drawn, so buildRows counts a stack from what is left of it,
+// and when the shown twin goes the next one shows again.
+export function foldTwins<T extends BatchMember>(items: T[], keyOf: (item: T) => string | null): T[] {
+  const seen: Set<string> = new Set<string>();
+  const visible: T[] = [];
+  for (const item of items) {
+    const key: string | null = keyOf(item);
+    if (key !== null && seen.has(key)) continue;
+    if (key !== null) seen.add(key);
+    visible.push(item);
+  }
+  return visible;
+}
+
+// The ids of every item with the same content as the item `id` (itself
+// included): deleting a card deletes all of them, or a hidden twin would show
+// up again as the deleted item coming back.
+export function twinIds<T extends BatchMember>(items: T[], id: string, keyOf: (item: T) => string | null): string[] {
+  const item: T | undefined = items.find((i: T) => i.id === id);
+  const key: string | null = item !== undefined ? keyOf(item) : null;
+  if (key === null) return [id];
+  const ids: string[] = items.filter((i: T) => keyOf(i) === key).map((i: T) => i.id);
+  return ids.includes(id) ? ids : [id, ...ids];
+}
+
 // One card position of the list: an ordinary card (`memberIds` empty), or the
 // front card of a stack. `memberIds`: every member that is still there,
 // newest (the front card) first.

@@ -188,6 +188,14 @@ internal sealed class RawPeer : IDisposable
         Id = Identity.GetPublicKey();
     }
 
+    // A second connection of the same device (the same identity).
+    public RawPeer(RawPeer same)
+    {
+        label = same.label;
+        Identity = same.Identity;
+        Id = same.Id;
+    }
+
     public ClipboardEntry Make(string text, int minute) => TestData.Entry(Identity, text, minute);
 
     // The node must trust this peer already (TestNode.Trust), or it is a pairing request.
@@ -205,6 +213,16 @@ internal sealed class RawPeer : IDisposable
     }
 
     public int PeerProtocol => conn!.PeerProtocol;
+
+    // Connects and completes the handshake, then sends nothing at all - not
+    // even a heartbeat: what a replayed handshake looks like to the node.
+    public async Task ConnectSilentlyAsync(TestNode node)
+    {
+        var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, node.Port);
+        conn = await PeerConnection.CreateAsync(client, Identity, new TrustStore(label), new PassphraseKeyStore(label), "raw peer");
+        Assert.NotNull(conn);
+    }
 
     public Task SendAsync(string type, string payload) => conn!.Send(JsonSerializer.Serialize(new Envelope(type, payload)));
 

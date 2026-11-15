@@ -50,7 +50,8 @@ internal sealed class AppSettings
         AppSettings? settings = null;
         try
         {
-            if (File.Exists(path)) settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path));
+            // (From its backup if the file itself is cut short - see Save.)
+            settings = ClipboardDaemon.Storage.SafeFile.Read<AppSettings>(path, json => JsonSerializer.Deserialize<AppSettings>(json)!, "settings");
         }
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
         {
@@ -66,7 +67,9 @@ internal sealed class AppSettings
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            // Written whole and swapped in (SafeFile): a crash midway used to
+            // leave a cut-off file, and every setting back at its default.
+            ClipboardDaemon.Storage.SafeFile.Write(path, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

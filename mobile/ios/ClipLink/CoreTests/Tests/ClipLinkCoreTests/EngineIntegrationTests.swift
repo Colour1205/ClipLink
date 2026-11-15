@@ -1277,8 +1277,13 @@ final class EngineIntegrationTests: XCTestCase {
         a.engine.queue.sync { a.engine.requestedAt[keys[last]] = Date(timeIntervalSinceNow: -SyncEngine.fileRetryInterval - 1) }
         wait("asked once more") { asked(last) > before }
         stream(last)
-        wait("every file delivered") { a.recorder.receivedEntries.filter { $0.0.type == Wire.EntryType.file && $0.1 != nil }.count == count }
-        XCTAssertTrue((0..<count).allSatisfy(arrived))
+        wait("every file arrived") { (0..<count).allSatisfy(arrived) }
+        // Each came meant for the clipboard; once its bytes are here only the
+        // newest goes there - an older one must not replace it.
+        wait("the newest reached the clipboard") { a.recorder.receivedEntries.contains { $0.0.type == Wire.EntryType.file && $0.1 != nil } }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        let delivered = a.recorder.receivedEntries.filter { $0.0.type == Wire.EntryType.file && $0.1 != nil }
+        XCTAssertEqual(delivered.compactMap { FilePayload.parse($0.0.content)?.fileHash }, [hashes[last]])
         XCTAssertTrue(a.engine.queue.sync { a.engine.pendingFiles.isEmpty && a.engine.skippedStreams.isEmpty })
         link.close()
     }
@@ -1525,6 +1530,35 @@ final class EngineIntegrationTests: XCTestCase {
     }
 
     private func sig(_ entry: ClipboardEntry) -> String { DeletedStore.key(of: entry) }
+
+    /// A peer whose copy of a file keeps failing the hash check is asked for it
+    /// twice, then not again until it connects anew: the whole file was
+    /// downloaded over and over for nothing.
+    func testAPeerWhoseCopyOfAFileIsCorruptIsAskedTwiceThenNotAgain() throws {
+        let a = startedNode()
+        let peer = try connect(a, protocolVersion: nil)
+        waitRegistered(a)
+        let real = Data("the real bytes".utf8)
+        let payload = FilePayload(fileName: "notes.txt", fileHash: ContentHash.sha256Hex(real).uppercased(), fileSize: Int64(real.count))
+        let entry = try EntrySigning.sign(content: payload.jsonString(), type: Wire.EntryType.file, identity: peer.identity)
+        // Every request is answered with other bytes of the same size.
+        let inbox = peer.inbox
+        peer.link.onMessage = { link, text in
+            guard let envelope = Envelope.parse(text) else { return }
+            inbox.add(envelope)
+            guard envelope.type == Wire.MessageType.fileRequest else { return }
+            let chunk = FileChunkMessage(fileHash: payload.fileHash, chunkIndex: 0, isLast: true, dataBase64: Data("the fake bytes".utf8).base64EncodedString())
+            link.send(Envelope(type: Wire.MessageType.fileChunk, payload: chunk.jsonString()).jsonString())
+        }
+        peer.send(Wire.MessageType.entry, entry.jsonString())
+
+        wait("asked twice") { inbox.messages(ofType: Wire.MessageType.fileRequest).count == 2 }
+        // Past a retry tick: still twice.
+        RunLoop.main.run(until: Date().addingTimeInterval(SyncEngine.tickInterval + 1))
+        XCTAssertEqual(inbox.messages(ofType: Wire.MessageType.fileRequest).count, 2, "not a third time")
+        XCTAssertFalse(a.engine.files.exists(payload.fileHash))
+        XCTAssertEqual(a.engine.queue.sync { a.engine.badCopies[FileStore.key(payload.fileHash)]?[peer.identity.publicKeyBase64] }, SyncEngine.maxBadCopies)
+    }
 
     func testTheHandshakeSaysWhichSyncVersionEachSideSpeaks() throws {
         let a = startedNode()
@@ -1837,7 +1871,7 @@ final class EngineIntegrationTests: XCTestCase {
         XCTAssertEqual(a.recorder.receivedEntries.count, 1, "no delete ever touches the clipboard")
     }
 
-    func testAVersion1PeerGetsTheOldExchangeAndItsNewestNewItemLandsOnTheClipboardEvenIfOlder() throws {
+    func testAVersion1PeerGetsTheOldExchangeAndItsOlderItemsAreStoredQuietly() throws {
         let a = startedNode()
         a.engine.sendText("mine")
         wait("A has one") { a.recorder.items.count == 1 }
@@ -1850,11 +1884,16 @@ final class EngineIntegrationTests: XCTestCase {
         wait("caught up") { a.recorder.items.count == 4 }
         RunLoop.main.run(until: Date().addingTimeInterval(0.5))
 
-        XCTAssertEqual(a.recorder.receivedEntries.map(\.0.content), ["old 2"], "the newest NEW item, though older than 'mine'; once")
+        XCTAssertTrue(a.recorder.receivedEntries.isEmpty, "nothing newer than 'mine': the clipboard keeps it")
         let snap = a.engine.queue.sync { a.engine.buildSnapshot() }
-        XCTAssertEqual(snap.groups.first?.memberIDs.count, 3)
-        XCTAssertNil(snap.groups.first?.expectedSize)
+        XCTAssertTrue(snap.groups.isEmpty, "stored by time, no stack")
+        XCTAssertEqual(snap.items.first?.entry.content, "mine")
         XCTAssertEqual(peer.inbox.types, [Wire.MessageType.historyBatch], "one entry here: the batch alone, and no request or delete")
+
+        // Something newer from it still lands, as before.
+        let newer = try peer.sign("newer", at: 4_000_000_000)
+        peer.send(Wire.MessageType.historyBatch, ClipboardEntry.listJSONString([newer]))
+        wait("the newer item is applied") { a.recorder.receivedEntries.map(\.0.content) == ["newer"] }
 
         // A delete means nothing on a version 1 connection.
         peer.send(Wire.MessageType.delete, KeysMessage(keys: [sig(entries[0])]).jsonString())
@@ -1910,7 +1949,7 @@ final class EngineIntegrationTests: XCTestCase {
         wait("W is in") { a.recorder.items.count == 2 }
         RunLoop.main.run(until: Date().addingTimeInterval(0.4))
         XCTAssertEqual(a.recorder.receivedEntries.map(\.0.content), ["item 2"])
-        XCTAssertEqual(a.engine.queue.sync { a.engine.buildSnapshot().blocks.count }, 2, "W still leads a block of its own")
+        XCTAssertEqual(a.engine.queue.sync { a.engine.buildSnapshot().blocks.count }, 1, "W is older than C: a card by its time, no block")
         XCTAssertEqual(a.engine.queue.sync { a.engine.batchGroups.convenienceID }, HistoryStore.identity(of: newestFirst[0]), "only C is protected")
     }
 

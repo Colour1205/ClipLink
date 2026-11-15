@@ -10,7 +10,7 @@ file-transfer logic:
     another node on one Mac without touching ~/Library)
   * optional fixed identity key / preset passcode (tests pick tie-breaker order)
   * no STA apartment, optional fake Tailscale IP
-  * the WinForms clipboard is replaced by FakeClipboardSync.cs (stdin/stdout)
+  * the Win32 clipboard watcher is replaced by FakeClipboardSync.cs (stdin/stdout)
 HarnessHost.cs is the program: it starts the engine (discovery UDP port from
 CLIPLINK_UDP_PORT) and serves the old tray pipe commands the tests send.
 Usage: prepare.py <repo-root> <out-dir>
@@ -68,7 +68,9 @@ patch("Networking/Discovery.cs", "        await client.SendAsync(data, data.Leng
       "        if (string.IsNullOrEmpty(targets)) { await client.SendAsync(data, data.Length, new IPEndPoint(IPAddress.Broadcast, PORT)); return; }\n"
       "        foreach (var t in targets.Split(',', StringSplitOptions.RemoveEmptyEntries))\n"
       "        {\n            var parts = t.Split(':');\n"
-      "            await client.SendAsync(data, data.Length, new IPEndPoint(IPAddress.Parse(parts[0]), int.Parse(parts[1])));\n        }")
+      "            await client.SendAsync(data, data.Length, new IPEndPoint(IPAddress.Parse(parts[0]), int.Parse(parts[1])));\n        }\n"
+      # Only the targets: not the engine's per-network broadcasts after this line.
+      "        return;")
 patch("Networking/TailscaleHelper.cs", "    public static string? GetOwnTailscaleIp()\n    {",
       '    public static string? GetOwnTailscaleIp()\n    {\n        var fake = Environment.GetEnvironmentVariable("CLIPLINK_TAILSCALE_IP"); if (fake != null) return fake.Length == 0 ? null : fake;')
 patch("Engine/ClipLinkEngine.cs", "        thisThread.SetApartmentState(ApartmentState.STA);\n", "")

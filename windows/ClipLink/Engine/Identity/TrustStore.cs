@@ -1,3 +1,5 @@
+using ClipboardDaemon.Storage;
+
 namespace ClipboardDaemon.Identity;
 
 // Address is the peer's last-known reachable address off-LAN (e.g. a
@@ -27,24 +29,25 @@ public class TrustStore
         string app_data_dir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         truststore_path = Path.Combine(app_data_dir, "ClipboardDaemon", $"truststore{label}.json");
         Directory.CreateDirectory(Path.Combine(app_data_dir, "ClipboardDaemon"));
-        if (File.Exists(truststore_path))
+        // Saved whole and swapped in, the last version kept as a backup (see
+        // SafeFile): a crash mid-write used to leave a cut-off file, and every
+        // pairing gone at the next start. One that's corrupt anyway falls back
+        // on the backup - and, failing that, regenerates rather than crash:
+        // the pairings are lost and would need to be redone, but that's better
+        // than the daemon refusing to start at all. One that can't be opened
+        // (held by a virus scanner as Windows signs in) stops the start
+        // instead, after a few tries: started empty, the next save would have
+        // written over every pairing.
+        var devices = SafeFile.Read(truststore_path,
+            json => System.Text.Json.JsonSerializer.Deserialize<List<TrustedDevice>>(json) ?? new List<TrustedDevice>(),
+            "trust store", throwIfUnreadable: true);
+        if (devices == null && File.Exists(truststore_path))
         {
-            try
-            {
-                string json = File.ReadAllText(truststore_path);
-                var devices = System.Text.Json.JsonSerializer.Deserialize<List<TrustedDevice>>(json) ?? new List<TrustedDevice>();
-                foreach (var device in devices)
-                {
-                    trustedDevices[device.PublicKey] = device;
-                }
-            }
-            catch (System.Text.Json.JsonException ex)
-            {
-                // regenerate rather than crash — this does mean any existing pairings
-                // are lost and would need to be redone, but that's better than the
-                // daemon refusing to start at all
-                Console.WriteLine($"Could not load trust store ({ex.Message}) — starting with no trusted devices.");
-            }
+            Console.WriteLine("Could not load trust store — starting with no trusted devices.");
+        }
+        foreach (var device in devices ?? new List<TrustedDevice>())
+        {
+            trustedDevices[device.PublicKey] = device;
         }
     }
 
@@ -131,7 +134,7 @@ public class TrustStore
         lock (gate)
         {
             string json = System.Text.Json.JsonSerializer.Serialize(trustedDevices.Values.ToList());
-            File.WriteAllText(truststore_path, json);
+            SafeFile.Write(truststore_path, json);
         }
     }
 }

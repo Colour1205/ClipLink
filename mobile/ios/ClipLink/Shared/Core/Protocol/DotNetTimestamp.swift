@@ -99,10 +99,30 @@ public enum DotNetTimestamp {
         return "\(parts.dateTime).\(fraction)\(String(repeating: "0", count: 7 - fraction.count))\(parts.suffix)"
     }
 
+    /// Timestamps already parsed (nil for the ones that don't parse): sorting
+    /// the history compares each one many times, on every snapshot, and a
+    /// DateFormatter parse is the slow part. Bounded; any thread.
+    private static var parsed: [String: Int64?] = [:]
+    private static let parsedLock = NSLock()
+    private static let maxParsed = 1024
+
     /// 100ns ticks since the Unix epoch, for ordering only (never for
     /// signing). Handles trimmed fractions and explicit offsets, which plain
     /// string comparison gets wrong: ".12345Z" sorts after ".1234567Z".
     public static func epochTicks(_ s: String) -> Int64? {
+        parsedLock.lock()
+        let known = parsed[s]
+        parsedLock.unlock()
+        if let known { return known }
+        let ticks = parseTicks(s)
+        parsedLock.lock()
+        if parsed.count >= maxParsed { parsed.removeAll(keepingCapacity: true) }
+        parsed[s] = .some(ticks)
+        parsedLock.unlock()
+        return ticks
+    }
+
+    private static func parseTicks(_ s: String) -> Int64? {
         guard let parts = split(s),
               let base = secondsFormatter.date(from: String(parts.dateTime))
         else { return nil }

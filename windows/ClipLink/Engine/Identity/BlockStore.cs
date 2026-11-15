@@ -1,3 +1,5 @@
+using ClipboardDaemon.Storage;
+
 namespace ClipboardDaemon.Identity;
 
 // A device this PC refuses to hear from, with the name it had when it was
@@ -27,17 +29,18 @@ public class BlockStore
         string app_data_dir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         path = Path.Combine(app_data_dir, "ClipboardDaemon", $"blocked{label}.json");
         Directory.CreateDirectory(Path.Combine(app_data_dir, "ClipboardDaemon"));
-        if (!File.Exists(path)) return;
-        try
+        // Written and read the way the trust store is (see SafeFile): a
+        // corrupt file falls back on its backup, then regenerates rather than
+        // crash, the policy every store here follows; one that can't be
+        // opened stops the start rather than unblock everyone at the next save.
+        var devices = SafeFile.Read(path,
+            json => System.Text.Json.JsonSerializer.Deserialize<List<BlockedDevice>>(json) ?? new List<BlockedDevice>(),
+            "the block list", throwIfUnreadable: true);
+        if (devices == null && File.Exists(path))
         {
-            var devices = System.Text.Json.JsonSerializer.Deserialize<List<BlockedDevice>>(File.ReadAllText(path));
-            if (devices != null) blocked.AddRange(devices.Where(d => !string.IsNullOrWhiteSpace(d.PublicKey)));
+            Console.WriteLine("Could not load the block list - starting with nobody blocked.");
         }
-        catch (System.Text.Json.JsonException ex)
-        {
-            // Regenerate rather than crash, the policy every store here follows.
-            Console.WriteLine($"Could not load the block list ({ex.Message}) - starting with nobody blocked.");
-        }
+        if (devices != null) blocked.AddRange(devices.Where(d => !string.IsNullOrWhiteSpace(d.PublicKey)));
     }
 
     // Whether two device ids are one key, however each is spelt: equal text,
@@ -94,6 +97,6 @@ public class BlockStore
 
     private void Save()
     {
-        File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(blocked));
+        SafeFile.Write(path, System.Text.Json.JsonSerializer.Serialize(blocked));
     }
 }

@@ -153,16 +153,16 @@ class SyncV2Test {
     }
 
     @Test
-    fun `an item older than everything a full history keeps is not asked for unless it is the first`() {
+    fun `an item older than everything a full history keeps is not asked for, the first one neither`() {
         me.history.addAll((100..124).map { entryOf("l$it", it) })
         val old1 = entryOf("old1", 10)
         val old2 = entryOf("old2", 11)
         val peer = link()
         runBlocking { peer.deliver(Wire.headOf(listOf(old1, old2))) }
-        eventually("a request") { peer.requests().isNotEmpty() }
         quiet()
-        // The first (old2, the newer) is the item that goes on the clipboard; the other would be stored only to be dropped.
-        assertEquals(listOf(listOf(old2.dk)), peer.requests())
+        // Each would be stored only to be dropped - and asked for again on every connection.
+        assertTrue(peer.requests().isEmpty())
+        assertEquals(25, me.history.all().size)
     }
 
     @Test
@@ -251,14 +251,26 @@ class SyncV2Test {
     }
 
     @Test
-    fun `a batch nobody asked for is handled as an older peer's, the newest new item even if older than ours`() {
+    fun `a batch nobody asked for is handled as an older peer's, and older than ours it is stored quietly`() {
         me.history.addAll(listOf(entryOf("mine", 50)))
         val peer = link()
         runBlocking { peer.deliver(Wire.batch(listOf(a, b))) }
         eventually("stored") { me.history.all().size == 3 }
         quiet()
-        assertEquals(listOf(b), me.applied.toList())
+        assertTrue(me.applied.isEmpty())
         assertEquals(1, me.batches.size)
+        assertNull(me.batches.single().toApply)
+        assertEquals(listOf("mine", "b", "a"), me.view())
+    }
+
+    @Test
+    fun `a batch nobody asked for whose newest is newer than ours applies that one`() {
+        me.history.addAll(listOf(entryOf("mine", 2)))
+        val peer = link()
+        runBlocking { peer.deliver(Wire.batch(listOf(a, c))) }
+        eventually("stored") { me.history.all().size == 3 }
+        quiet()
+        assertEquals(listOf(c), me.applied.toList())
     }
 
     @Test
@@ -321,17 +333,21 @@ class SyncV2Test {
     }
 
     @Test
-    fun `a late answer does not move the item the trim spares, and is trimmed like any other`() {
+    fun `a convenience answer older than everything here is stored by time, and a late one is trimmed like any other`() {
         me.history.addAll((100..123).map { entryOf("kept$it", it) })
         val peer = link()
         runBlocking { peer.deliver(Wire.headOf(listOf(c))) }
         eventually("the request") { peer.requests().size == 1 }
         runBlocking { peer.deliver(Wire.batch(listOf(c))) }
         eventually("c in") { me.history.all().size == 25 }
-        assertEquals(listOf(c), me.applied.toList())
+        quiet()
+        // Not fresh: nothing on the clipboard, no block on top, nothing spared - c is simply the oldest card.
+        assertTrue(me.applied.isEmpty())
+        assertEquals("c", me.view().last())
+        assertNull(me.tagOf(c))
 
-        // Another item of the same peer, answered too late: it is newer than c but older than the rest. c is
-        // still the one the trim spares, so the late item is the oldest other one and goes at once.
+        // Another item of the same peer, answered too late: newer than c, older than the rest. Nothing spares c,
+        // the oldest, so it is the one the trim drops.
         val x = entryOf("x", 5)
         runBlocking { peer.deliver(Wire.headOf(listOf(c, x))) }
         eventually("asked") { peer.requests().size == 2 }
@@ -340,9 +356,58 @@ class SyncV2Test {
         runBlocking { peer.deliver(Wire.batch(listOf(x))) }
         quiet()
         assertEquals(25, me.history.all().size)
-        assertTrue(me.history.all().contains(c))
-        assertFalse(me.history.all().contains(x))
-        assertEquals(listOf(c), me.applied.toList())
+        assertFalse(me.history.all().contains(c))
+        assertTrue(me.history.all().contains(x))
+        assertTrue(me.applied.isEmpty())
+    }
+
+    @Test
+    fun `after a convenience answer that is not fresh, the rest of that sync is quiet too`() {
+        me.history.addAll(listOf(entryOf("mine", 50)))
+        val peer = link()
+        runBlocking { peer.deliver(Wire.headOf(listOf(c, b, a))) }
+        eventually("two requests") { peer.requests().size == 2 }
+        runBlocking {
+            peer.deliver(Wire.batch(listOf(c)))
+            peer.deliver(Wire.batch(listOf(b, a)))
+        }
+        eventually("all in") { me.history.all().size == 4 }
+        quiet()
+        assertTrue(me.applied.isEmpty())
+        assertEquals(listOf("mine", "c", "b", "a"), me.view())
+        assertTrue(listOf(a, b, c).all { me.tagOf(it) == null })
+        assertTrue(me.batches.all { it.toApply == null })
+    }
+
+    @Test
+    fun `an empty convenience answer makes the rest of its sync quiet`() {
+        val peer = link()
+        runBlocking { peer.deliver(Wire.headOf(listOf(c, b, a))) }
+        eventually("two requests") { peer.requests().size == 2 }
+        runBlocking {
+            // The peer no longer has c: nothing for the clipboard, so nothing of this sync goes on top.
+            peer.deliver(Wire.batch(emptyList()))
+            peer.deliver(Wire.batch(listOf(b, a)))
+        }
+        eventually("all in") { me.history.all().size == 2 }
+        quiet()
+        assertTrue(me.applied.isEmpty())
+        assertNull(me.tagOf(b))
+    }
+
+    @Test
+    fun `an empty history makes the convenience item fresh`() {
+        val peer = link()
+        runBlocking { peer.deliver(Wire.headOf(listOf(b, a))) }
+        eventually("two requests") { peer.requests().size == 2 }
+        runBlocking {
+            peer.deliver(Wire.batch(listOf(b)))
+            peer.deliver(Wire.batch(listOf(a)))
+        }
+        eventually("all in") { me.history.all().size == 2 }
+        quiet()
+        assertEquals(listOf(b), me.applied.toList())
+        assertEquals(listOf("b", "a"), me.view())
     }
 
     @Test
@@ -456,7 +521,7 @@ class SyncV2Test {
     }
 
     @Test
-    fun `two peers answering at once change the clipboard once, the older item is only stored and leads its card`() {
+    fun `two peers answering at once change the clipboard once, the older item is only stored, by time`() {
         val (one, two) = twoPeersEach(c, b)
         runBlocking { one.deliver(Wire.batch(listOf(c))) }
         eventually("c applied") { me.applied.size == 1 }
@@ -467,8 +532,8 @@ class SyncV2Test {
         assertEquals(listOf(c), me.applied.toList())
         assertEquals(2, me.batches.size)
         assertNull(me.batches[1].toApply)
-        // It is the front of its own block, which arrived last.
-        assertEquals(listOf("b", "c"), me.view())
+        // Older than c, which was here first: not placed on top.
+        assertEquals(listOf("c", "b"), me.view())
     }
 
     @Test
@@ -491,7 +556,7 @@ class SyncV2Test {
     }
 
     @Test
-    fun `after 90 seconds an older convenience item goes on the clipboard again`() {
+    fun `an older convenience item does not go on the clipboard, however long after`() {
         val (one, two) = twoPeersEach(c, b)
         runBlocking { one.deliver(Wire.batch(listOf(c))) }
         eventually("c applied") { me.applied.size == 1 }
@@ -502,12 +567,13 @@ class SyncV2Test {
         quiet()
         assertEquals(listOf(c), me.applied.toList())
 
-        now.addAndGet(2_000) // 91 seconds after c
+        now.addAndGet(2_000) // 91 seconds after c: the window is over, and a is still older than c
         runBlocking { two.deliver(Wire.headOf(listOf(a))) }
         eventually("asked for a") { two.requests().size == 2 }
         runBlocking { two.deliver(Wire.batch(listOf(a))) }
-        eventually("a applied") { me.applied.size == 2 }
-        assertEquals(listOf(c, a), me.applied.toList())
+        eventually("a stored") { me.history.all().size == 3 }
+        quiet()
+        assertEquals(listOf(c), me.applied.toList())
     }
 
     @Test
@@ -553,18 +619,21 @@ class SyncV2Test {
     @Test
     fun `the item that did not get the clipboard is not spared by the trim`() {
         me.history.addAll((100..123).map { entryOf("kept$it", it) })
-        val (one, two) = twoPeersEach(c, b)
-        runBlocking { one.deliver(Wire.batch(listOf(c))) }
-        eventually("c applied") { me.applied.size == 1 }
+        val newest = entryOf("newest", 300)
+        val older = entryOf("older", 150)
+        val (one, two) = twoPeersEach(newest, older)
+        runBlocking { one.deliver(Wire.batch(listOf(newest))) }
+        eventually("newest applied") { me.applied.size == 1 }
         assertEquals(25, me.history.all().size)
 
-        // b is older than c and all: not spared, so it goes at once, and nothing else takes its place on the clipboard.
-        runBlocking { two.deliver(Wire.batch(listOf(b))) }
+        // "older" is older than "newest": not fresh, nothing spares it - the oldest kept item goes for it, and
+        // nothing else takes the clipboard.
+        runBlocking { two.deliver(Wire.batch(listOf(older))) }
         quiet()
         assertEquals(25, me.history.all().size)
-        assertFalse(me.history.all().contains(b))
-        assertTrue(me.history.all().contains(c))
-        assertEquals(listOf(c), me.applied.toList())
+        assertTrue(me.history.all().contains(older))
+        assertFalse(me.history.all().any { it.content == "kept100" })
+        assertEquals(listOf(newest), me.applied.toList())
     }
 
     @Test
@@ -906,13 +975,24 @@ class SyncV2Test {
     }
 
     @Test
-    fun `a v1 batch puts only the newest new item on the clipboard, though ours is newer`() {
+    fun `a v1 batch whose newest is older than ours is stored quietly`() {
         me.history.addAll(listOf(entryOf("mine", 90)))
         val old = link("OLD", protocol = 1)
         runBlocking { old.deliver(Wire.batch(listOf(c, a, b))) }
         eventually("stored") { me.history.all().size == 4 }
         quiet()
-        assertEquals(listOf(c), me.applied.toList())
+        assertTrue(me.applied.isEmpty())
+        assertEquals(listOf("mine", "c", "b", "a"), me.view())
+    }
+
+    @Test
+    fun `a v1 batch puts only the newest new item on the clipboard when it is newer than ours`() {
+        me.history.addAll(listOf(entryOf("mine", 2)))
+        val old = link("OLD", protocol = 1)
+        runBlocking { old.deliver(Wire.batch(listOf(c, a, d, b))) }
+        eventually("stored") { me.history.all().size == 5 }
+        quiet()
+        assertEquals(listOf(d), me.applied.toList())
     }
 
     @Test
@@ -922,5 +1002,74 @@ class SyncV2Test {
         eventually("applied") { me.applied.size == 1 }
         assertEquals(listOf(a), me.applied.toList())
         assertFalse(me.history.all().isEmpty())
+    }
+
+    // ---- a file waiting for its bytes (rule 6.4) and its hash's case (rule 4) ------------------------------
+
+    private val generation = AtomicLong()
+
+    private fun fileEntryOf(hash: String, n: Int) = ClipboardEntry(
+        io.uaena.cliplink.net.FilePayload("f$n.bin", hash, 3).toJson(), ClipboardEntry.TYPE_FILE, "PEER", ts(n), "sig-file-$n",
+    )
+
+    /** A device whose clipboard generation the test moves; a file entry from Windows (uppercase hash) is waiting. */
+    private fun waitingFile(): Pair<V2Peer, ClipboardEntry> {
+        val device = V2Peer("waiting", temp.root, scope, now::get, generation = generation::get)
+        device.trusted.add("PEER")
+        val peer = V2Link("PEER").also { device.connectTo(it) }
+        val file = fileEntryOf("CD".repeat(32), 5)
+        runBlocking { peer.deliver(Wire.entry(file)) }
+        eventually("stored, waiting") { device.history.all().size == 1 }
+        quiet()
+        assertTrue(device.applied.isEmpty())
+        return device to file
+    }
+
+    @Test
+    fun `a file waiting under an uppercase hash is put on the clipboard by the same file hashed here in lowercase`() {
+        val (device, file) = waitingFile()
+        val lower = "cd".repeat(32)
+        device.files.write(lower, byteArrayOf(1, 2, 3))
+        assertTrue(device.sync.tryFulfillPendingEntry(lower))
+        assertEquals(listOf(file), device.applied.toList())
+    }
+
+    @Test
+    fun `a waiting file is not put on the clipboard once the clipboard has changed`() {
+        val (device, _) = waitingFile()
+        generation.incrementAndGet() // a copy here, or another item put there
+        device.files.write("cd".repeat(32), byteArrayOf(1, 2, 3))
+        assertTrue(device.sync.tryFulfillPendingEntry("cd".repeat(32)))
+        assertTrue(device.applied.isEmpty())
+    }
+
+    @Test
+    fun `a waiting file is not put on the clipboard after ten minutes`() {
+        val (device, _) = waitingFile()
+        now.addAndGet(10 * 60 * 1000L + 1)
+        assertTrue(device.sync.tryFulfillPendingEntry("CD".repeat(32)))
+        assertTrue(device.applied.isEmpty())
+    }
+
+    @Test
+    fun `a waiting file that left the history is not put on the clipboard`() {
+        val (device, file) = waitingFile()
+        device.sync.deleteEntry(file)
+        assertTrue(device.sync.tryFulfillPendingEntry("CD".repeat(32)))
+        assertTrue(device.applied.isEmpty())
+    }
+
+    // ---- deleting a card deletes every twin (rule 2.3) -----------------------------------------------------
+
+    @Test
+    fun `deleting several entries tombstones them all and tells v2 peers in one delete`() {
+        me.history.addAll(listOf(a, b, c))
+        val peer = link()
+        quiet()
+        me.sync.deleteEntries(listOf(a, c))
+        eventually("the delete") { peer.sentOfType(Protocol.TYPE_DELETE).isNotEmpty() }
+        assertEquals(listOf(listOf(a.dk, c.dk)), peer.sentOfType(Protocol.TYPE_DELETE).map(Wire::keysOf))
+        assertEquals(listOf(b), me.history.all())
+        assertTrue(me.tomb.contains(a.dk) && me.tomb.contains(c.dk))
     }
 }

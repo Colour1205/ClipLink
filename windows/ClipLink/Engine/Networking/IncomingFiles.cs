@@ -41,6 +41,12 @@ public sealed class IncomingFiles
     {
         public readonly object Owner;
         public readonly FileStream File;
+        // The SHA-256 of what was written so far, kept as the chunks go to
+        // disk: the whole file used to be read back once the last one came,
+        // on the connection's read loop - twice the disk I/O, and a stall
+        // long enough with a big file on a slow disk for the heartbeat to
+        // close the link mid-check.
+        public readonly IncrementalHash Hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         public int NextIndex;
 
         public Transfer(object owner, FileStream file)
@@ -99,6 +105,7 @@ public sealed class IncomingFiles
         try
         {
             transfer.File.Write(bytes, 0, bytes.Length);
+            transfer.Hash.AppendData(bytes);
         }
         catch (Exception ex)
         {
@@ -116,13 +123,19 @@ public sealed class IncomingFiles
         bool verified;
         try
         {
+            // Disposing flushes what's still buffered: a write that fails
+            // there fails the transfer, as one that failed above did.
             transfer.File.Dispose();
-            using var verifyStream = File.OpenRead(tempPath);
-            verified = string.Equals(Convert.ToHexString(SHA256.HashData(verifyStream)), hash, StringComparison.OrdinalIgnoreCase);
+            verified = string.Equals(Convert.ToHexString(transfer.Hash.GetHashAndReset()), hash, StringComparison.OrdinalIgnoreCase);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        // (Disposed: its link went away just now, and AbandonAll dropped it.)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException)
         {
             verified = false;
+        }
+        finally
+        {
+            transfer.Hash.Dispose();
         }
         bool stored = verified && MoveIntoStore(tempPath, hash);
         DeleteQuietly(tempPath); // gone already once it's stored
@@ -172,6 +185,7 @@ public sealed class IncomingFiles
         if (!transfers.TryGetValue(hash, out var current) || current != transfer) return;
         transfers.Remove(hash);
         try { transfer.File.Dispose(); } catch (IOException) { }
+        transfer.Hash.Dispose();
         DeleteQuietly(fileStore.GetTempPath(hash));
     }
 

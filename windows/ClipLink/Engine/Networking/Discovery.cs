@@ -6,6 +6,7 @@
 // (different ports) and watching them find each other.
 
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 using ClipboardDaemon.Identity;
@@ -171,6 +172,79 @@ public class Discovery
     {
         byte[] data = strToByte(message);
         await client.SendAsync(data, data.Length, new IPEndPoint(IPAddress.Broadcast, PORT));
+        await SendDirected(client, data);
+    }
+
+    // The same beacon to each network's own broadcast address too
+    // (192.168.1.255 for 192.168.1.x/24). Windows sends 255.255.255.255 out
+    // of one interface only, the one its routes prefer - with WSL, Hyper-V,
+    // a VPN or Wi-Fi Direct's virtual adapters that can be one no phone is
+    // on, and the phones on the Wi-Fi never heard this PC. The same datagram
+    // on the same port, so every build reads it; a device hearing it twice
+    // just sees this PC's beacon twice. The list is read again now and then
+    // (adapters come and go: Wi-Fi switching, a VPN connecting).
+    private List<IPAddress> directedTargets = new();
+    private long directedTargetsAt = long.MinValue;
+    private const long DirectedRefreshMs = 30_000;
+
+    private async Task SendDirected(UdpClient client, byte[] data)
+    {
+        long now = Environment.TickCount64;
+        if (directedTargetsAt == long.MinValue || now - directedTargetsAt > DirectedRefreshMs)
+        {
+            directedTargets = DirectedBroadcasts();
+            directedTargetsAt = now;
+        }
+        foreach (var target in directedTargets)
+        {
+            try
+            {
+                await client.SendAsync(data, data.Length, new IPEndPoint(target, PORT));
+            }
+            catch (SocketException)
+            {
+                // That network went away since the list was read; the limited
+                // broadcast above still went out.
+            }
+        }
+    }
+
+    // The broadcast address of every IPv4 network this PC is on now - up,
+    // not loopback or a tunnel, not a single-address link (Tailscale's /32,
+    // which has no broadcast) and not link-local (169.254.x.x, an adapter
+    // that never got an address).
+    public static List<IPAddress> DirectedBroadcasts()
+    {
+        var targets = new List<IPAddress>();
+        try
+        {
+            foreach (var adapter in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (adapter.OperationalStatus != OperationalStatus.Up
+                    || adapter.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel) continue;
+                foreach (var unicast in adapter.GetIPProperties().UnicastAddresses)
+                {
+                    if (DirectedBroadcast(unicast.Address, unicast.PrefixLength) is { } target && !targets.Contains(target)) targets.Add(target);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is NetworkInformationException or InvalidOperationException)
+        {
+            // No list this time: the limited broadcast still goes out.
+        }
+        return targets;
+    }
+
+    // address's network's broadcast address, or null when it has none worth
+    // sending to (see DirectedBroadcasts).
+    public static IPAddress? DirectedBroadcast(IPAddress address, int prefixLength)
+    {
+        if (address.AddressFamily != AddressFamily.InterNetwork || prefixLength < 1 || prefixLength > 30) return null;
+        byte[] bytes = address.GetAddressBytes();
+        if (bytes[0] == 127 || (bytes[0] == 169 && bytes[1] == 254)) return null;
+        uint host = uint.MaxValue >> prefixLength;
+        uint value = ((uint)bytes[0] << 24 | (uint)bytes[1] << 16 | (uint)bytes[2] << 8 | bytes[3]) | host;
+        return new IPAddress(new[] { (byte)(value >> 24), (byte)(value >> 16), (byte)(value >> 8), (byte)value });
     }
 
     private async Task<(string message, IPAddress sender)> Receive(UdpClient client, CancellationToken cancellationToken)

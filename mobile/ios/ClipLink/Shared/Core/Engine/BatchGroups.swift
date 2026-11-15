@@ -273,10 +273,15 @@ public enum StackPlanner {
     /// stays together on top even when its items are older than the rest.
     /// `expanded` holds groups the user already opened (the engine drops them a
     /// moment later, so a snapshot in between cannot close one again).
+    ///
+    /// One card per content (the fold of design/sync-dedupe-spec.md, rule 2):
+    /// in that final order, an item whose content (`SyncedItem.contentKey`) a
+    /// card above already shows is left out, stack members included - so the
+    /// topmost wins, and after a restart the newest. A block is counted from
+    /// the members left: with fewer than 2 it is a card, and when its front is
+    /// left out the next member leads.
     public static func rows(items: [SyncedItem], groups: [BatchGroup], expanded: Set<String> = []) -> [SyncedRow] {
-        guard !groups.isEmpty else { return items.map { SyncedRow(item: $0, stack: nil) } }
-        var rows: [SyncedRow] = []
-        rows.reserveCapacity(items.count)
+        var segments: [(group: BatchGroup?, members: [SyncedItem])] = []
         var placed = Set<String>()
         for group in groups.reversed() {
             let memberIDs = Set(group.memberIDs)
@@ -289,6 +294,23 @@ public enum StackPlanner {
                 let frontItem = members.remove(at: index)
                 members.insert(frontItem, at: 0)
             }
+            segments.append((group: group, members: members))
+        }
+        segments.append((group: nil, members: placed.isEmpty ? items : items.filter { !placed.contains($0.id) }))
+
+        var rows: [SyncedRow] = []
+        rows.reserveCapacity(items.count)
+        var seen = Set<String>()
+        for segment in segments {
+            let members = segment.members.filter { item in
+                guard let key = item.contentKey else { return true }
+                return seen.insert(key).inserted
+            }
+            guard !members.isEmpty else { continue }
+            guard let group = segment.group else {
+                rows.append(contentsOf: members.map { SyncedRow(item: $0, stack: nil) })
+                continue
+            }
             // A provisional block may have only its front card so far.
             let isStack = !group.isOpen && !expanded.contains(group.id)
                 && max(members.count, group.expectedSize ?? 0) >= BatchGroupTracker.minStackItems
@@ -298,9 +320,6 @@ public enum StackPlanner {
             } else {
                 rows.append(contentsOf: members.map { SyncedRow(item: $0, stack: nil) })
             }
-        }
-        for item in items where !placed.contains(item.id) {
-            rows.append(SyncedRow(item: item, stack: nil))
         }
         return rows
     }

@@ -17,6 +17,14 @@ namespace ClipboardDaemon.Storage;
 // Order. C is protected from the trim, once it goes to the clipboard, until a
 // newer item goes there or a live item arrives.
 //
+// Only a fresh sync is a block: one whose C is newer than everything this PC
+// already had (see HistoryBatch.LatestTime). A sync that brings only older
+// items - ones this PC trimmed, or a peer that was away still holds - is
+// merged quietly, like a late answer (see ApplyLate): by time, in no block,
+// nothing on the clipboard, nothing announced, nothing protected. Otherwise
+// an old item came back to the top and onto the clipboard on every reconnect,
+// and the two devices trimmed different items and kept bouncing it.
+//
 // A batch group is the stack: a block of a sync that brought two or more
 // entries. It is made either when the sync's entries are applied, or earlier:
 // from a version 1 history_head, or from the answer to a version 2 sync's
@@ -48,6 +56,11 @@ public sealed class BatchGroups
         public int Size;
         public long Block;
         public string? Batch;
+        // Decided by the answer to its convenience request: true when that
+        // added a fresh item, false when it didn't (then this answer and every
+        // later one of the sync are merged quietly). Null until then - and a
+        // sync with no convenience request is never fresh.
+        public bool? Fresh;
     }
     private readonly Dictionary<object, Sync> syncOf = new();
 
@@ -135,7 +148,9 @@ public sealed class BatchGroups
     // (the newest entry added, the cap applied). A head still waiting on the
     // same connection is finished first (it is replaced). isDeletedKey: the
     // user deleted this entry here. The newest entry is the convenience item,
-    // so it is never the one the cap drops.
+    // so it is never the one the cap drops. A head whose newest entry is not
+    // newer than everything here is ignored, as if it had not verified: the
+    // batch then works on its own (and is quiet, see ApplyBatch).
     public HeadResult HeadReceived(object conn, List<ClipboardEntry> history, HistoryHead.Payload head,
         Func<string, bool> isDeletedKey, int maxItems, long? nowMs = null)
     {
@@ -143,7 +158,8 @@ public sealed class BatchGroups
         var newest = head.Newest;
         string newestKey = newest.Key();
         var known = new HashSet<string>(history.Select(entry => entry.Key()));
-        if (known.Contains(newestKey) || isDeletedKey(newestKey))
+        if (known.Contains(newestKey) || isDeletedKey(newestKey)
+            || HistoryBatch.LatestTime(history) is { } latest && newest.Timestamp <= latest)
         {
             // Nothing to show early: the batch is applied as it would be
             // without a head.
@@ -178,25 +194,42 @@ public sealed class BatchGroups
 
     // conn's history_batch (version 1, or one nobody asked for): every new, not
     // deleted entry goes into history (one step, the cap applied once, see
-    // HistoryBatch.Merge). They are one block: the newest of them is the
-    // convenience item, which is kept by the trim even if it is older than
-    // all the rest; or, when conn's head already took the newest entry, they
-    // join the block that made. With two or more entries in it they are a group
-    // - the one the head made, or one of their own. The head is done. The
-    // result says, in HeadApplied, that the head had already added the newest
-    // entry (and done its side effects, so the batch must not put its own
-    // newest on the clipboard), and in GroupChanged, that a group the head
-    // made is final now (its real size shows, even if the batch added nothing).
+    // HistoryBatch.Merge). When the newest of them is fresh - newer than
+    // everything here - they are one block: that newest is the convenience
+    // item (the result's Applied, for the clipboard), kept by the trim; or,
+    // when conn's head already took the newest entry, they join the block that
+    // made. With two or more entries in it they are a group - the one the head
+    // made, or one of their own. A batch whose newest is not fresh is merged
+    // quietly instead (see ApplyLate). The head is done. The result says, in
+    // HeadApplied, that the head had already added the newest entry (and done
+    // its side effects, so the batch must not put its own newest on the
+    // clipboard), and in GroupChanged, that a group the head made is final now
+    // (its real size shows, even if the batch added nothing).
     public HistoryBatch.MergeResult ApplyBatch(object conn, List<ClipboardEntry> history, IEnumerable<ClipboardEntry> incoming,
         Func<ClipboardEntry, bool> isDeleted, int maxItems)
     {
         bool headApplied = headOf.Remove(conn, out Head? head);
-        var merged = HistoryBatch.Merge(history, incoming, isDeleted, maxItems, keep: ProtectedKey, keepNewestAdded: !headApplied);
+        DateTime? latest = HistoryBatch.LatestTime(history);
+        bool fresh = false;
+        var merged = HistoryBatch.Merge(history, incoming, isDeleted, maxItems, keep: ProtectedKey, keepNewestAdded: !headApplied,
+            keepIf: item => fresh = latest == null || item.Timestamp > latest);
         long block = head?.Block ?? 0;
         string? batch = head?.Batch;
         bool finishedGroup = batch != null;
         if (batch != null) expectedOf.Remove(batch);
-        if (head == null && HistoryBatch.Newest(merged.Added) is { } newest) block = NewBlock(newest.Key());
+        ClipboardEntry? applied = null;
+        if (head == null && HistoryBatch.Newest(merged.Added) is { } newest)
+        {
+            if (fresh)
+            {
+                block = NewBlock(newest.Key());
+                applied = newest;
+            }
+            else
+            {
+                foreach (var entry in merged.Added) quiet.Add(entry.Key());
+            }
+        }
         if (block != 0)
         {
             foreach (var entry in merged.Added) blockOf[entry.Key()] = block;
@@ -207,7 +240,7 @@ public sealed class BatchGroups
         // Fewer than two left (the rest was rejected, deleted or trimmed):
         // normal cards.
         if (finishedGroup) Dissolve(batch!);
-        return merged with { HeadApplied = headApplied, GroupChanged = finishedGroup };
+        return merged with { HeadApplied = headApplied, GroupChanged = finishedGroup, Applied = applied };
     }
 
     // conn closed before its batch arrived (or a new head replaces its head),
@@ -263,14 +296,42 @@ public sealed class BatchGroups
     // its stack, but it is not protected from the trim: only the item that went
     // to the clipboard is, and it keeps that protection (also in the trim of this
     // very call) until a newer item goes to the clipboard. nowMs: the clock (Environment.TickCount64 if null).
+    //
+    // A sync is fresh only when its convenience answer adds an item newer than
+    // everything here (see the class comment). One that is not - the item is
+    // older, already here, or gone at the sender - is merged quietly from that
+    // answer on, as late answers are; so is a sync with no convenience request.
     public HistoryBatch.MergeResult ApplyAnswer(object conn, List<ClipboardEntry> history, IEnumerable<ClipboardEntry> incoming,
         Func<ClipboardEntry, bool> isDeleted, int maxItems, bool convenience, bool last, long? nowMs = null)
     {
         bool tracked = syncOf.TryGetValue(conn, out var sync);
         sync ??= new Sync();
+        if (convenience ? sync.Fresh == false : sync.Fresh != true)
+        {
+            var quietly = ApplyLate(history, incoming, isDeleted, maxItems);
+            if (last) syncOf.Remove(conn);
+            else if (!tracked) syncOf[conn] = sync;
+            return quietly;
+        }
+        DateTime? latest = HistoryBatch.LatestTime(history);
         bool taken = false;
+        bool fresh = !convenience;
         var merged = HistoryBatch.Merge(history, incoming, isDeleted, maxItems, keep: ProtectedKey, keepNewestAdded: convenience,
-            keepIf: item => taken = TakeConvenience(item, nowMs ?? Environment.TickCount64));
+            keepIf: item =>
+            {
+                fresh = latest == null || item.Timestamp > latest;
+                return fresh && (taken = TakeConvenience(item, nowMs ?? Environment.TickCount64));
+            });
+        if (convenience) sync.Fresh = fresh;
+        if (!fresh)
+        {
+            // (Merged as ApplyLate would: the trim kept only what was protected.)
+            foreach (var entry in merged.Added) quiet.Add(entry.Key());
+            if (last) syncOf.Remove(conn);
+            else if (!tracked) syncOf[conn] = sync;
+            Forget(history);
+            return merged;
+        }
         ClipboardEntry? applied = null;
         if (merged.Added.Count > 0)
         {
@@ -356,6 +417,9 @@ public sealed class BatchGroups
         if (ProtectedKey != null && !present.Contains(ProtectedKey)) ProtectedKey = null;
     }
 
+    // An entry that is in history is not announced (see HistoryAccess.MarkQuiet).
+    public void MarkQuiet(string key) => quiet.Add(key);
+
     // History was cleared. (A connection's head or sync stays: the rest of it is
     // still coming, and what it adds is checked against the deleted list.)
     public void Clear()
@@ -369,7 +433,7 @@ public sealed class BatchGroups
     }
 
     // Whether a convenience item goes to the clipboard, and if it does, it is
-    // remembered as the last one (see ApplyAnswer).
+    // remembered as the last one (see ApplyAnswer). Only asked about a fresh one.
     private bool TakeConvenience(ClipboardEntry item, long nowMs)
     {
         long time = HistoryHead.UnixMs(item.Timestamp);

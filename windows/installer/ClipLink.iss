@@ -51,6 +51,37 @@ CloseApplications=no
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; Flags: unchecked
 
+; [Files] only copies over what was installed before, so a file a newer build
+; stopped shipping stayed in {app} for good. Those are deleted first (before
+; [Files] runs); one this build still ships - the debugger runtime file,
+; renamed with every .NET update - is put back right after.
+[InstallDelete]
+; Win2D, no longer used.
+Type: files; Name: "{app}\Microsoft.Graphics.Canvas*.dll"
+; Every .NET update's own copy of this file stayed next to the new one.
+Type: files; Name: "{app}\mscordaccore_amd64_amd64_*.dll"
+; WinForms and the rest of the Windows desktop framework, which ClipLink no
+; longer uses (the clipboard is read and written with Win32 itself).
+Type: files; Name: "{app}\System.Windows.Forms*.dll"
+Type: files; Name: "{app}\Accessibility.dll"
+Type: files; Name: "{app}\Microsoft.VisualBasic.Forms.dll"
+Type: files; Name: "{app}\Microsoft.Win32.Registry.AccessControl.dll"
+Type: files; Name: "{app}\System.CodeDom.dll"
+Type: files; Name: "{app}\System.Configuration.ConfigurationManager.dll"
+Type: files; Name: "{app}\System.Design.dll"
+Type: files; Name: "{app}\System.Diagnostics.EventLog.dll"
+Type: files; Name: "{app}\System.Diagnostics.EventLog.Messages.dll"
+Type: files; Name: "{app}\System.Diagnostics.PerformanceCounter.dll"
+Type: files; Name: "{app}\System.DirectoryServices.dll"
+Type: files; Name: "{app}\System.Drawing.Design.dll"
+Type: files; Name: "{app}\System.Formats.Nrbf.dll"
+Type: files; Name: "{app}\System.IO.Packaging.dll"
+Type: files; Name: "{app}\System.Resources.Extensions.dll"
+Type: files; Name: "{app}\System.Security.Cryptography.Pkcs.dll"
+Type: files; Name: "{app}\System.Security.Cryptography.Xml.dll"
+Type: files; Name: "{app}\System.Security.Permissions.dll"
+Type: files; Name: "{app}\System.Windows.Extensions.dll"
+
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 

@@ -7,12 +7,18 @@ import android.util.Log
 import io.uaena.cliplink.clipboard.Capture
 import io.uaena.cliplink.clipboard.ClipboardBridge
 import io.uaena.cliplink.core.B64
+import io.uaena.cliplink.core.CaptureVerdict
 import io.uaena.cliplink.core.ClipboardEntry
+import io.uaena.cliplink.core.ContentKeys
+import io.uaena.cliplink.core.ContentPrint
 import io.uaena.cliplink.core.DeviceIdentity
 import io.uaena.cliplink.core.DotNetTimestamp
 import io.uaena.cliplink.core.Ipv4
 import io.uaena.cliplink.core.Signing
+import io.uaena.cliplink.core.classifyCapture
 import io.uaena.cliplink.core.describeError
+import io.uaena.cliplink.core.newestEntries
+import io.uaena.cliplink.core.ownWriteVerdict
 import io.uaena.cliplink.net.ConnectionGate
 import io.uaena.cliplink.net.Discovery
 import io.uaena.cliplink.net.FilePayload
@@ -38,6 +44,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -89,7 +96,18 @@ class ClipLinkEngine(context: Context) {
         Log.e(TAG, "uncaught in a coroutine", error)
         log("internal error: ${describeError(error)}")
     }
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + crashGuard)
+
+    /**
+     * Dispatchers.IO, not Default: most of what runs here blocks - Keystore
+     * signing (binder IPC), the history's write and fsync, each connection's
+     * handler (shared with SyncManager) storing big entries. Default has only
+     * as many threads as cores, so a copy, a sync burst and a stack opening
+     * together could block all of them and stall everything else queued
+     * there. IO shares Default's threads, so CPU work is no slower; ordering
+     * comes from the channels and locks, never from the dispatcher. The one
+     * CPU-heavy job, the passcode derivation, asks for Default itself.
+     */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + crashGuard)
 
     val trustStore = TrustStore(appContext)
     val blockStore = BlockStore(appContext)
@@ -108,7 +126,19 @@ class ClipLinkEngine(context: Context) {
 
     private val identity = DeviceIdentity()
     private val discovery = Discovery()
-    private val syncManager = SyncManager(scope, historyStore, trustStore, fileStore)
+    private val syncManager = SyncManager(scope, historyStore, trustStore, fileStore, clipboardGeneration = { clipboard.generation })
+
+    /** Each history entry's content print, worked out once - see [ContentKeys]. */
+    private val contentKeys = ContentKeys()
+
+    /**
+     * Received entries to put on the clipboard, in the order they arrived:
+     * one coroutine takes them, so a file copy (up to a gigabyte, see
+     * ClipboardBridge.contentUriFor) no longer runs on - and stalls - the
+     * peer's message handler, and an older item can still never land after a
+     * newer one. See [applyReceived].
+     */
+    private val applyQueue = Channel<ClipboardEntry>(Channel.UNLIMITED)
 
     /** Which items arrived together, and in what order - memory only, see [BatchGroups]. */
     private val batchGroups = BatchGroups()
@@ -121,6 +151,21 @@ class ClipLinkEngine(context: Context) {
     private var reconnectJob: Job? = null
     private var housekeepingJob: Job? = null
     private var multicastLock: WifiManager.MulticastLock? = null
+
+    /** Guards [multicastLock]: connections, beacons and the lifecycle all decide on it - see [updateMulticastLock]. */
+    private val multicastGuard = Any()
+
+    /** Whether discovery is (meant to be) running - the multicast lock is only ever held while it is. */
+    @Volatile
+    private var discoveryActive = false
+
+    /**
+     * Whether any of the app's screens is showing (ProcessLifecycleOwner's
+     * start and stop, see ClipLinkApplication). False until one is: an engine
+     * the service started on its own is in the background.
+     */
+    @Volatile
+    private var appVisible = false
 
     /** Peers a dial is already in flight for - stops a beacon every 2s piling up attempts. */
     private val connectingTo: MutableSet<String> = Collections.synchronizedSet(mutableSetOf())
@@ -234,8 +279,20 @@ class ClipLinkEngine(context: Context) {
      */
     private val discoveryLock = Mutex()
 
-    /** One capture at a time: the on-open one and a tap on the paste button can overlap, and would both import a copied file. */
-    private val captureLock = Mutex()
+    /**
+     * The clipboard, one reader or writer at a time: a capture (from the read
+     * until what it read is recorded) and a received item being applied (from
+     * the write until it is recorded) never overlap. Otherwise an apply
+     * landing between a capture's read and its check takes the record over,
+     * and a clip that was already synced goes out again. Also one capture at
+     * a time: the on-open one and a tap on the paste button can overlap, and
+     * would both import a copied file.
+     */
+    private val clipboardLock = Mutex()
+
+    /** Discovery was stopped because the app went to the background with keep-alive off - see [onBackground]. */
+    @Volatile
+    private var discoveryPaused = false
 
     private val itemsLock = Any()
     private val devicesLock = Any()
@@ -250,6 +307,8 @@ class ClipLinkEngine(context: Context) {
         syncManager.onConnectionsChanged = { _ ->
             // Only links whose peer has answered count (see SyncManager.provenCount).
             _connectedCount.value = syncManager.provenCount
+            // refreshDevices also decides the multicast lock: a trusted link
+            // that dropped wants beacons heard again.
             refreshDevices()
         }
         syncManager.onLog = { message -> log(message) }
@@ -279,6 +338,7 @@ class ClipLinkEngine(context: Context) {
         historyStore.onProblem = { message -> log(message) }
         passphraseKeyStore.onLog = { message -> log(message) }
 
+        scope.launch { applyInOrder() }
         scope.launch { boot() }
     }
 
@@ -392,17 +452,17 @@ class ClipLinkEngine(context: Context) {
      * that was fine before the app was backgrounded can take seemingly forever
      * to come back.
      */
-    fun onForeground() {
+    fun onForeground(capture: Boolean = true) {
+        appVisible = true
         if (!started) return
-        // The only automatic capture Android permits: the clipboard is
-        // readable exactly while this app has focus. Silent when there is
-        // nothing new - captureAndBroadcast's echo check already
-        // suppresses whatever we last applied ourselves. First, and on its
-        // own: it used to wait behind the reconnects below, each stored
-        // peer that was away costing a 3 s connect timeout, so with a few
-        // of them the capture ran seconds after the app came up - when the
-        // user may already have left it, and the clipboard is unreadable.
-        if (deviceSettings.autoCapture) captureAndBroadcast(quiet = true)
+        // The on-open capture, unless the caller runs it itself once the
+        // window has focus (see [captureOnOpen]). First, and on its own: it
+        // used to wait behind the reconnects below, each stored peer that was
+        // away costing a 3 s connect timeout, so with a few of them the
+        // capture ran seconds after the app came up - when the user may
+        // already have left it, and the clipboard is unreadable.
+        if (capture) captureOnOpen()
+        discoveryPaused = false
         scope.launch {
             // The phone may have been renamed in system settings while away.
             // With no override set, that new name is ours from the next beacon.
@@ -410,6 +470,75 @@ class ClipLinkEngine(context: Context) {
             step("restarting discovery") { restartDiscovery() }
             step("reconnecting") { reconnectOffLanPeers() }
         }
+    }
+
+    /**
+     * The only automatic capture Android permits: the clipboard is readable
+     * exactly while this app has input focus. The Activity calls this once
+     * its window has focus - which comes after onResume, and a read made
+     * before it is refused without a word, so a copy was sometimes simply
+     * not synced. Silent when there is nothing new: the capture rules (see
+     * [captureAndBroadcast]) leave whatever ClipLink put there, or already
+     * sent, where it is.
+     */
+    fun captureOnOpen() {
+        if (!started) return
+        if (deviceSettings.autoCapture) captureAndBroadcast(quiet = true)
+    }
+
+    /**
+     * The app went to the background. With keep-alive on, the service keeps
+     * everything going, as it should. With it off, discovery stops and the
+     * multicast lock goes: nothing else stopped them, and a cached process
+     * went on beaconing every 2 s with the radio's multicast filter held
+     * open - the battery the setting is there to save. Connections are left
+     * alone; [onForeground] starts discovery again.
+     */
+    fun onBackground() {
+        appVisible = false
+        if (!started) return
+        if (deviceSettings.keepAlive) {
+            // Discovery goes on; the multicast lock only while it can help.
+            updateMulticastLock()
+            return
+        }
+        discoveryPaused = true
+        scope.launch {
+            step("pausing discovery") {
+                discoveryLock.withLock {
+                    // The app came back meanwhile: onForeground restarts it, or has.
+                    if (!discoveryPaused) return@withLock
+                    discovery.stop()
+                    _discoveryRunning.value = false
+                    discoveryActive = false
+                    updateMulticastLock()
+                }
+            }
+        }
+    }
+
+    /**
+     * Keep-alive was just turned off from outside the app's screens - the
+     * notification's Stop. With no screen showing, the app went to the
+     * background earlier, with keep-alive still on, and no later stop of a
+     * screen would come to pause discovery: the cached process beaconed on.
+     * With a screen showing, its stop does it (see [onBackground]).
+     */
+    fun onKeepAliveStopped() {
+        if (!appVisible) onBackground()
+    }
+
+    /** One of the app's screens came up (ProcessLifecycleOwner's start): beacons are worth hearing again. */
+    fun onAppShown() {
+        appVisible = true
+        if (started) updateMulticastLock()
+    }
+
+    /** Discovery again after [onBackground] paused it, for work that starts without the app coming forward - a share. */
+    private fun resumeDiscoveryIfPaused() {
+        if (!discoveryPaused) return
+        discoveryPaused = false
+        scope.launch { step("restarting discovery") { restartDiscovery() } }
     }
 
     /**
@@ -447,8 +576,10 @@ class ClipLinkEngine(context: Context) {
         }
 
         // Held while discovery runs, and not a moment longer than it can:
-        // without it the radio drops multicast packets to save power.
-        acquireMulticastLock()
+        // without it the radio drops multicast packets to save power. See
+        // updateMulticastLock for when it can't help and goes meanwhile.
+        discoveryActive = true
+        updateMulticastLock()
         if (startDiscovery(id)) return@withLock
         // A failed bind is the one error that must never be swallowed: it
         // means no peer is ever discovered for the rest of the session,
@@ -458,7 +589,8 @@ class ClipLinkEngine(context: Context) {
         delay(1000)
         if (!startDiscovery(id)) {
             _discoveryRunning.value = false
-            releaseMulticastLock()
+            discoveryActive = false
+            updateMulticastLock()
         }
     }
 
@@ -1268,21 +1400,34 @@ class ClipLinkEngine(context: Context) {
      * Reads the system clipboard and syncs it. Only works while the app is in
      * the foreground - that is an Android 10+ platform rule, not a choice
      * here. Never throws: a failure is logged, not toasted.
+     *
+     * [quiet] is the automatic on-open capture, which also leaves alone what
+     * it finds already synced in any way (see [classifyCapture]); a tap on
+     * the paste button sends again what was deleted from the history meanwhile.
      */
     fun captureAndBroadcast(quiet: Boolean = false) {
+        val auto = quiet
         scope.launch {
-            captureLock.withLock {
+            clipboardLock.withLock {
                 try {
+                    // ClipLink's own clip, told without reading it: no notice that the clipboard was read either.
+                    val lastWrite = clipboard.lastWrite
+                    if (ownWriteVerdict(auto, clipboard.holdsOwnWrite()) { inHistory(lastWrite) } == CaptureVerdict.Already) {
+                        return@withLock
+                    }
+                    val known = { prints: Set<String>, raws: Set<String> ->
+                        ContentPrint.matches(clipboard.lastWrite, prints, raws) && (auto || inHistory(prints))
+                    }
                     // On IO: a copied file is streamed into the FileStore right here.
-                    when (val capture = withContext(Dispatchers.IO) { clipboard.capture() }) {
+                    when (val capture = withContext(Dispatchers.IO) { clipboard.capture(known) }) {
                         // Nothing on the clipboard, or nothing new on it ([Capture.Ours]):
                         // nothing to sync and nothing to say - a toast on every paste
                         // tap was noise. `quiet` is for the automatic on-open capture,
                         // whose failures are not worth interrupting for either.
                         null -> Unit
-                        is Capture.Text -> broadcastText(capture.text)
-                        is Capture.Image -> broadcastImage(capture.pngBytes)
-                        is Capture.Payload -> broadcastFile(capture)
+                        is Capture.Text -> broadcastText(capture.text, auto)
+                        is Capture.Image -> broadcastImage(capture.pngBytes, auto)
+                        is Capture.Payload -> broadcastFile(capture, auto)
                         is Capture.TooLarge -> if (!quiet) showToast("${capture.fileName} is over 1 GB, too big to sync.")
                         Capture.Ours -> Unit
                     }
@@ -1329,6 +1474,7 @@ class ClipLinkEngine(context: Context) {
     }
 
     private suspend fun share(text: String?, uris: List<Uri>): ShareOutcome {
+        resumeDiscoveryIfPaused()
         val taken = uris.take(ShareIntake.MAX_FILES)
         val copies = withContext(Dispatchers.IO) { shareIntake.copyAll(taken) }
         val stored = copies.filterIsInstance<ShareIntake.Copy.Stored>()
@@ -1349,10 +1495,19 @@ class ClipLinkEngine(context: Context) {
             stored.forEach { historyStore.releaseBlobIfUnused(it.hash) }
             return ShareOutcome(failed = true)
         }
+        // What everyone has already: the newest entries, as many as this share has items. An item that is one
+        // of them - the text that was just copied, captured and is now shared too, the photo the clipboard
+        // already sent - is not signed again: the user's devices have it, which is what a share is for. Nor is
+        // an item that is in this share twice. Anything else goes out, an older item shared again included.
+        val itemCount = (if (sharedText != null) 1 else 0) + stored.size
+        val held = newestEntries(historyStore.all(), itemCount).mapNotNullTo(HashSet()) { contentKeys.of(it) }
         val entries = mutableListOf<ClipboardEntry>()
         try {
-            if (sharedText != null) entries += signDistinct(sharedText, ClipboardEntry.TYPE_TEXT, ownId, null)
+            if (sharedText != null && held.add(ContentPrint.text(sharedText))) {
+                entries += signDistinct(sharedText, ClipboardEntry.TYPE_TEXT, ownId, null)
+            }
             for (file in stored) {
+                if (ContentPrint.file(file.hash)?.let(held::add) == false) continue
                 val payload = FilePayload(file.name, file.hash, file.size).toJson()
                 entries += signDistinct(payload, ClipboardEntry.TYPE_FILE, ownId, entries.lastOrNull())
             }
@@ -1362,9 +1517,9 @@ class ClipLinkEngine(context: Context) {
             stored.forEach { historyStore.releaseBlobIfUnused(it.hash) }
             throw e
         }
-        // Deliberately not noted as lastKnownHash: that tracks the clipboard,
-        // and a share never touches it.
-        syncManager.broadcastEntries(entries)
+        // Deliberately not noted in the clipboard's record (ClipboardBridge.lastWrite): that tracks the
+        // clipboard, and a share never touches it.
+        if (entries.isNotEmpty()) syncManager.broadcastEntries(entries)
         stored.forEach { syncManager.tryFulfillPendingEntry(it.hash) }
         refreshItems()
         log("shared ${entries.size} item(s) to ${syncManager.connectionCount} peer(s)")
@@ -1392,46 +1547,67 @@ class ClipLinkEngine(context: Context) {
     private suspend fun readyOwnId(): String? =
         withTimeoutOrNull(READY_TIMEOUT_MS) { _ownDeviceId.first { it.isNotEmpty() } }
 
-    private suspend fun broadcastText(text: String) {
-        val hash = FileStore.hashOf(text.toByteArray(Charsets.UTF_8))
-        if (hash == clipboard.lastKnownHash) return
-        // Gave up waiting for the id: before the hash is noted, so a later try works.
+    /**
+     * Whether a capture with [prints] (and [rawHashes], see [ContentPrint.matches]) is new, by the capture
+     * rules - see [classifyCapture]. When it is not, it is recorded as what the clipboard holds, and nothing
+     * is sent.
+     */
+    private fun isNewCapture(auto: Boolean, prints: Set<String>, rawHashes: Set<String>): Boolean {
+        val verdict = classifyCapture(auto, prints, rawHashes, clipboard.lastWrite, ::inHistory, ::inNewest)
+        if (verdict == CaptureVerdict.Already) clipboard.noteCaptured(prints, sent = false)
+        return verdict == CaptureVerdict.New
+    }
+
+    /** Whether an entry of the history has content with one of [prints]. */
+    private fun inHistory(prints: Set<String>): Boolean =
+        prints.isNotEmpty() && historyStore.all().any { contentKeys.of(it) in prints }
+
+    /** Whether the newest entry of the history (or one tied with it) has content with one of [prints]. */
+    private fun inNewest(prints: Set<String>): Boolean =
+        prints.isNotEmpty() && newestEntries(historyStore.all()).any { contentKeys.of(it) in prints }
+
+    private suspend fun broadcastText(text: String, auto: Boolean) {
+        val prints = setOf(ContentPrint.text(text))
+        if (!isNewCapture(auto, prints, setOf(ContentPrint.rawText(text)))) return
+        // Gave up waiting for the id: before the capture is noted, so a later try works.
         val ownId = readyOwnId() ?: return
-        // Signed BEFORE the hash is noted: a Keystore that refuses must leave
+        // Signed BEFORE the capture is noted: a Keystore that refuses must leave
         // the clipboard unsynced, not marked as synced and never retried.
         val entry = Signing.sign(identity, text, ClipboardEntry.TYPE_TEXT, ownId)
-        clipboard.noteLocalHash(hash)
+        clipboard.noteCaptured(prints, sent = true)
         broadcast(entry)
         // No "Synced text." toast: the new card at the top of Synced is the answer.
     }
 
-    private suspend fun broadcastImage(pngBytes: ByteArray) {
+    private suspend fun broadcastImage(pngBytes: ByteArray, auto: Boolean) {
         val hash = FileStore.hashOf(pngBytes)
-        if (hash == clipboard.lastKnownHash) return
-        // Gave up waiting for the id: before the hash is noted, so a later try works.
+        val prints = setOf("i:$hash")
+        if (!isNewCapture(auto, prints, setOf(hash))) return
+        // Gave up waiting for the id: before the capture is noted, so a later try works.
         val ownId = readyOwnId() ?: return
         // Images travel inline as base64 in the entry itself, matching the
         // other two platforms - they are NOT sent through the file-chunk path.
         val content = B64.encode(pngBytes)
         val entry = Signing.sign(identity, content, ClipboardEntry.TYPE_IMAGE, ownId)
-        clipboard.noteLocalHash(hash)
+        clipboard.noteCaptured(prints, sent = true)
         broadcast(entry)
     }
 
     // A copy that goes no further here is left in the store for the next
     // start's sweep (FileStore.sweepUnreferenced) rather than deleted now: a
     // share of the same file may be about to record an entry for it.
-    private suspend fun broadcastFile(file: Capture.Payload) {
+    private suspend fun broadcastFile(file: Capture.Payload, auto: Boolean) {
         val hash = file.hash
-        if (hash == clipboard.lastKnownHash) return
-        // Gave up waiting for the id: before the hash is noted, so a later try works.
+        val prints = setOfNotNull(ContentPrint.file(hash))
+        if (!isNewCapture(auto, prints, setOf(hash.lowercase()))) return
+        // Gave up waiting for the id: before the capture is noted, so a later try works.
         val ownId = readyOwnId() ?: return
         // The bytes are in the store already (see ClipboardBridge.capture),
         // BEFORE the entry goes out: the receiver broadcasts a file_request
         // the instant it sees an entry it has no bytes for.
         val payload = FilePayload(file.fileName, hash, file.size).toJson()
         val entry = Signing.sign(identity, payload, ClipboardEntry.TYPE_FILE, ownId)
-        clipboard.noteLocalHash(hash)
+        clipboard.noteCaptured(prints, sent = true)
         broadcast(entry)
         syncManager.tryFulfillPendingEntry(hash)
     }
@@ -1447,7 +1623,45 @@ class ClipLinkEngine(context: Context) {
         log("received ${entry.type} from ${shortIdOf(entry.deviceId)}")
         // No toast for the copy: the item is in the list, and the system shows
         // its own note that the clipboard changed.
-        if (deviceSettings.autoApply) clipboard.apply(entry)
+        if (deviceSettings.autoApply) applyReceived(entry)
+    }
+
+    /**
+     * Queues [entry] for the clipboard - see [applyQueue]. Counted as a change
+     * of the clipboard now, in arrival order (see ClipboardBridge.noteIncoming):
+     * a file armed right after it must not look stale only because this
+     * write, queued before it, landed after.
+     */
+    private fun applyReceived(entry: ClipboardEntry) {
+        clipboard.noteIncoming()
+        applyQueue.trySend(entry)
+    }
+
+    /**
+     * [applyQueue]'s consumer: each received item onto the clipboard, under
+     * [clipboardLock]. Not one whose content the clipboard already holds as
+     * far as ClipLink knows (what it last wrote or captured): that is an echo
+     * - an older peer sending back what it was given - and putting it there
+     * again would change nothing but the system's "copied" notice.
+     */
+    private suspend fun applyInOrder() {
+        for (entry in applyQueue) {
+            try {
+                clipboardLock.withLock {
+                    withContext(Dispatchers.IO) {
+                        val key = contentKeys.of(entry)
+                        if (key != null && key in clipboard.lastWrite) return@withContext
+                        // A text over the ~1 MB a Binder transaction carries, a full disk, an evicted blob:
+                        // the clipboard keeps what it had, and so does the record of it.
+                        if (!clipboard.apply(entry, counted = true)) log("couldn't put the received ${entry.type} on the clipboard")
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                log("couldn't put the received ${entry.type} on the clipboard: ${describeError(e)}")
+            }
+        }
     }
 
     /**
@@ -1458,7 +1672,7 @@ class ClipLinkEngine(context: Context) {
     private fun onBatchReceived(batch: SyncManager.BatchApplied) {
         refreshItems()
         log("received ${batch.added.size} item(s) from ${shortIdOf(batch.from)}")
-        if (deviceSettings.autoApply) batch.toApply?.let { clipboard.apply(it) }
+        if (deviceSettings.autoApply) batch.toApply?.let(::applyReceived)
     }
 
     /**
@@ -1534,18 +1748,35 @@ class ClipLinkEngine(context: Context) {
         }
     }
 
-    fun applyToClipboard(item: SyncedItem): Boolean = clipboard.apply(item.entry)
+    /** A card's Copy: [item] onto the clipboard, as ClipLink's own clip. BLOCKING - for the IO dispatcher. */
+    suspend fun applyToClipboard(item: SyncedItem): Boolean = clipboardLock.withLock { clipboard.apply(item.entry) }
+
+    /**
+     * [text] onto the clipboard as ClipLink's own clip (see ClipboardBridge.copyText): a device id, or a
+     * selection copied out of an item. Under [clipboardLock] like every other write: a capture running at that
+     * moment would otherwise record what it read over this, and a tap on Paste could then send the id out.
+     */
+    fun copyOwnText(text: String) {
+        scope.launch {
+            val copied = clipboardLock.withLock { clipboard.copyText(text) }
+            if (!copied) log("couldn't copy a text to the clipboard")
+        }
+    }
 
     /**
      * Deletes an item for good - a peer's next history_batch won't bring it
      * back - and tells the peers that understand it (v2), which delete it
-     * too. The clipboard is left exactly as it was.
+     * too. The clipboard is left exactly as it was. A card stands for every
+     * entry with its content (see [foldTwins]), so they all go: the hidden
+     * twin would otherwise show up in its place, as the item that came back.
      */
     fun deleteItem(item: SyncedItem) {
         // Off the caller's thread - the UI's - which a disk write doesn't belong on.
         scope.launch(Dispatchers.IO) {
             step("deleting an item") {
-                syncManager.deleteEntry(item.entry)
+                val key = contentKeys.of(item.entry)
+                val twins = historyStore.all().filter { key != null && contentKeys.of(it) == key }
+                syncManager.deleteEntries((listOf(item.entry) + twins).distinctBy { it.deletionKey })
                 refreshItems()
             }
         }
@@ -1577,10 +1808,11 @@ class ClipLinkEngine(context: Context) {
             val history = historyStore.all()
             val placement = batchGroups.place(history.mapTo(HashSet()) { it.deletionKey }, horizon)
             // The blocks of this session first, the rest by timestamp (.NET round-trip
-            // format sorts chronologically once canonicalised) - see arrange.
-            val entries = arrange(history, placement.blocks)
+            // format sorts chronologically once canonicalised) - see arrange. Then one
+            // card per content, the topmost - see foldTwins.
+            val entries = foldTwins(arrange(history, placement.blocks)) { contentKeys.of(it) }
             val keys = uniqueKeysFor(entries)
-            val groups = placement.tags
+            val groups = tagsOfShown(entries, placement.tags)
             _items.value = entries.mapIndexed { index, entry ->
                 val file = if (entry.type == ClipboardEntry.TYPE_FILE) {
                     FilePayload.parse(entry.content)?.let { fileStore.path(it.fileHash) }?.takeIf { it.exists() }
@@ -1600,7 +1832,11 @@ class ClipLinkEngine(context: Context) {
         }
     }
 
-    /** Rebuilds [devices] - serialised like [refreshItems]. */
+    /**
+     * Rebuilds [devices] - serialised like [refreshItems] - and decides the
+     * multicast lock again: everything that changes which devices are trusted
+     * or connected ends up here.
+     */
     fun refreshDevices() {
         synchronized(devicesLock) {
             val linked = syncManager.connectedDeviceIds()
@@ -1654,6 +1890,7 @@ class ClipLinkEngine(context: Context) {
                 )
             }.sortedWith(DeviceRow.STABLE_ORDER)
         }
+        updateMulticastLock()
     }
 
     fun localAddresses(): List<String> = try {
@@ -1668,6 +1905,34 @@ class ClipLinkEngine(context: Context) {
 
     // ---- misc -------------------------------------------------------------
 
+    /**
+     * Holds the multicast lock only while it can help. While it's held the
+     * Wi-Fi chip stops filtering broadcast and multicast frames, so the CPU
+     * wakes for every mDNS, SSDP or NetBIOS packet on the LAN, not just ours -
+     * and with keep-alive on (the default) that went on around the clock.
+     * It's let go in the background once every trusted device has a proven
+     * link: their liveness comes from heartbeats, not beacons. It comes back
+     * when the app is shown, when any trusted link drops, or when a device is
+     * trusted that isn't connected yet. Beacons still go out either way -
+     * sending needs no lock - so peers still see and dial this phone.
+     */
+    private fun updateMulticastLock() = synchronized(multicastGuard) {
+        if (discoveryActive && (appVisible || !everyTrustedDeviceConnected())) {
+            acquireMulticastLock()
+        } else {
+            releaseMulticastLock()
+        }
+    }
+
+    /** No trusted devices counts as not connected: a passcode beacon may still be how the first one arrives. */
+    private fun everyTrustedDeviceConnected(): Boolean {
+        val trusted = trustStore.all()
+        if (trusted.isEmpty()) return false
+        val connected = syncManager.provenDeviceIds()
+        return trusted.all { it.publicKey in connected }
+    }
+
+    /** Under [multicastGuard] - see [updateMulticastLock]. */
     private fun acquireMulticastLock() {
         if (multicastLock != null) return
         runCatching {
@@ -1679,6 +1944,7 @@ class ClipLinkEngine(context: Context) {
         }
     }
 
+    /** Under [multicastGuard]. */
     private fun releaseMulticastLock() {
         runCatching { multicastLock?.takeIf { it.isHeld }?.release() }
         multicastLock = null

@@ -15,14 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.outlined.ContentCopy
-import androidx.compose.material.icons.outlined.DeleteOutline
-import androidx.compose.material.icons.outlined.MoreVert
-import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -48,6 +41,12 @@ import androidx.compose.ui.unit.dp
 import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.engine.SyncedItem
 import io.uaena.cliplink.engine.displayNameOf
+import io.uaena.cliplink.ui.icons.Icons
+import io.uaena.cliplink.ui.icons.automirrored.filled.ArrowBack
+import io.uaena.cliplink.ui.icons.outlined.ContentCopy
+import io.uaena.cliplink.ui.icons.outlined.DeleteOutline
+import io.uaena.cliplink.ui.icons.outlined.MoreVert
+import io.uaena.cliplink.ui.icons.outlined.Share
 
 @Composable
 fun DetailScreen(
@@ -163,7 +162,7 @@ fun DetailScreen(
                     // The file card, as two lines under the picture: the card
                     // itself would take a good part of the room the picture is
                     // meant to have.
-                    SelectionContainer {
+                    OwnSelectionContainer {
                         Text(
                             payload.fileName,
                             style = MaterialTheme.typography.titleSmall,
@@ -230,7 +229,7 @@ fun DetailScreen(
                                 }
                                 Spacer(Modifier.width(16.dp))
                                 // Selectable, so a file name can be copied out.
-                                SelectionContainer {
+                                OwnSelectionContainer {
                                     Column {
                                         Text(
                                             payload?.fileName ?: "File",
@@ -266,7 +265,7 @@ fun DetailScreen(
                             val content = item.entry.content
                             val shown = remember(content) { previewTextOf(content, DETAIL_TEXT_LIMIT) }
                             Column(Modifier.padding(20.dp)) {
-                                SelectionContainer {
+                                OwnSelectionContainer {
                                     Text(
                                         shown,
                                         style = MaterialTheme.typography.bodyLarge,

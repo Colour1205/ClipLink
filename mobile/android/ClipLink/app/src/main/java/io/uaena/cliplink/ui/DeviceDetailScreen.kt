@@ -17,12 +17,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.outlined.Block
-import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -43,6 +38,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.uaena.cliplink.engine.DeviceRow
 import io.uaena.cliplink.engine.fingerprintOf
+import io.uaena.cliplink.ui.icons.Icons
+import io.uaena.cliplink.ui.icons.automirrored.filled.ArrowBack
+import io.uaena.cliplink.ui.icons.outlined.Block
+import io.uaena.cliplink.ui.icons.outlined.ContentCopy
 
 /**
  * One device in full: everything the card leaves out. The card shows the one
@@ -175,7 +174,7 @@ fun DeviceDetailScreen(
                                 .padding(vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            SelectionContainer(Modifier.weight(1f)) {
+                            OwnSelectionContainer(Modifier.weight(1f)) {
                                 Text(
                                     address,
                                     style = MaterialTheme.typography.bodyLarge,
@@ -215,7 +214,7 @@ fun DeviceDetailScreen(
                             color = secondary,
                         )
                         Spacer(Modifier.height(4.dp))
-                        SelectionContainer {
+                        OwnSelectionContainer {
                             Text(
                                 device.deviceId,
                                 style = MaterialTheme.typography.bodySmall,

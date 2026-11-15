@@ -28,8 +28,19 @@ android {
 
     buildTypes {
         release {
+            // R8: code shrinking, optimisation and resource shrinking. Off, the
+            // release APK was 52 MB, nearly all of it library code the app never
+            // calls, stored uncompressed and kept as such on the phone. The
+            // default optimize rules come with it (keepRules.includeDefault);
+            // proguard-rules.pro says why nothing else needs keeping.
             optimization {
-                enable = false
+                enable = true
+            }
+            proguardFiles("proguard-rules.pro")
+            // No 32-bit x86 phone runs Android 12 (minSdk 31); the emulator
+            // runs debug builds. x86_64 stays for Chromebooks and the like.
+            ndk {
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
             }
         }
     }
@@ -43,6 +54,9 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            // Kotlin's builtins descriptors, read only by kotlin-reflect, which
+            // the app doesn't use.
+            excludes += "/kotlin/**"
         }
     }
 }
@@ -61,7 +75,6 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
-    implementation(libs.androidx.compose.material.icons.extended)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     implementation(libs.zxing.core)

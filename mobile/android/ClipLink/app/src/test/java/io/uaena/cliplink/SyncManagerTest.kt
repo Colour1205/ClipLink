@@ -16,6 +16,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -371,6 +372,62 @@ class SyncManagerTest {
         assertFalse(peer.isClosed)
     }
 
+    // ---- large messages, one at a time ------------------------------------------
+
+    /** An entry from [device] whose message counts as large (see [Limits.LARGE_MESSAGE_CHARS]), told apart by [tag]. */
+    private fun large(tag: String, n: Int, device: String) = entry("x".repeat(Limits.LARGE_MESSAGE_CHARS) + tag, n, device)
+
+    @Test
+    fun `a large message waits while another link's large message is handled, and small ones don't`() {
+        val first = link("A")
+        val second = link("B")
+        val third = link("C")
+        val release = CountDownLatch(1)
+        val handling = CountDownLatch(1)
+        sync.onEntryApplied = { entry ->
+            if (entry.content.endsWith("first")) {
+                handling.countDown()
+                release.await(10, TimeUnit.SECONDS)
+            }
+            applied.add(entry)
+        }
+        runBlocking { first.deliver(entryMessage(large("first", 1, "A"))) }
+        assertTrue(handling.await(5, TimeUnit.SECONDS))
+
+        val secondDelivered = AtomicInteger()
+        val reader = CoroutineScope(Dispatchers.IO).launch {
+            second.deliver(entryMessage(large("second", 2, "B")))
+            secondDelivered.incrementAndGet()
+        }
+        // A small message from a third link is not held up by either.
+        runBlocking { third.deliver(entryMessage(entry("small", 3, "C"))) }
+        eventually("the small message") { applied.any { it.content == "small" } }
+        Thread.sleep(200)
+        assertEquals("the second large message is still being read", 0, secondDelivered.get())
+
+        release.countDown()
+        eventually("both large messages") { applied.count { it.content.length > Limits.LARGE_MESSAGE_CHARS } == 2 }
+        runBlocking { reader.join() }
+        assertEquals(1, secondDelivered.get())
+    }
+
+    @Test
+    fun `a large message that blows up, or whose link goes, still lets the next one in`() {
+        val first = link("A")
+        val second = link("B")
+        sync.onEntryApplied = { entry ->
+            if (entry.content.endsWith("boom")) throw StackOverflowError()
+            applied.add(entry)
+        }
+        runBlocking {
+            first.deliver(entryMessage(large("boom", 1, "A")))
+            first.deliver(entryMessage(large("gone", 2, "A")))
+        }
+        first.close("test")
+        runBlocking { withTimeout(5_000) { second.deliver(entryMessage(large("next", 3, "B"))) } }
+        eventually("the next large message") { applied.any { it.content.endsWith("next") } }
+    }
+
     // ---- history batches --------------------------------------------------------
 
     @Test
@@ -477,10 +534,11 @@ class SyncManagerTest {
         val first = listOf(entry("a1", 1, "PEER"), entry("a2", 2, "PEER"))
         val second = listOf(entry("b1", 3, "OTHER"), entry("b2", 4, "OTHER"), entry("b3", 5, "OTHER"))
 
-        runBlocking {
-            peerA.deliver(batchMessage(first))
-            peerB.deliver(batchMessage(second))
-        }
+        // One after the other: each is newer than everything here when it lands. (The other way round, the
+        // first batch's items are older than the second's, and are merged quietly - see the freshness tests.)
+        runBlocking { peerA.deliver(batchMessage(first)) }
+        eventually("the first batch") { batches.size == 1 }
+        runBlocking { peerB.deliver(batchMessage(second)) }
         eventually("both batches") { batches.size == 2 }
 
         val tags = groups.resolve((first + second).map { it.signature!! }.toSet(), groups.horizon())
@@ -722,10 +780,33 @@ class SyncManagerTest {
         runBlocking { peer.deliver(batchMessage(all)) }
         eventually("the batch") { batches.isNotEmpty() }
         assertEquals(all.dropLast(1), batches.single().added)
-        // As without a head: the group is made when the batch is stored, and the newest new one is applied.
-        val tags = groups.resolve(all.map { it.deletionKey }.toSet(), groups.horizon())
-        assertEquals(all.dropLast(1).map { it.deletionKey }.toSet(), tags.keys)
-        assertEquals(listOf(all[1]), applied.toList())
+        // As without a head - and what it adds is older than what is here: stored by time, with no group, and
+        // nothing of it goes on the clipboard.
+        assertTrue(groups.resolve(all.map { it.deletionKey }.toSet(), groups.horizon()).isEmpty())
+        assertTrue(applied.isEmpty())
+    }
+
+    @Test
+    fun `a head whose newest is not newer than everything here is ignored whole`() {
+        val peer = link()
+        val mine = entry("mine", 10, "ME")
+        history.addAll(listOf(mine))
+        val theirs = (1..3).map { entry("item $it", it) }
+
+        runBlocking { peer.deliver(headMessage(theirs.last(), theirs.reversed())) }
+        Thread.sleep(300)
+        // Not stored early, no stack, nothing applied.
+        assertTrue(storedHeads.isEmpty())
+        assertTrue(applied.isEmpty())
+        assertEquals(listOf(mine), history.all())
+
+        // The batch then works on its own, and is just as old: stored quietly.
+        runBlocking { peer.deliver(batchMessage(theirs)) }
+        eventually("the batch") { batches.isNotEmpty() }
+        assertEquals(theirs, batches.single().added)
+        assertEquals(null, batches.single().toApply)
+        assertTrue(applied.isEmpty())
+        assertTrue(groups.resolve((theirs + mine).map { it.deletionKey }.toSet(), groups.horizon()).isEmpty())
     }
 
     @Test
@@ -936,10 +1017,10 @@ class SyncManagerTest {
         val a = (1..3).map { entry("a $it", it, "PEER") }
         val b = (11..13).map { entry("b $it", it, "OTHER") }
 
-        runBlocking {
-            peerA.deliver(headMessage(a.last(), a.reversed()))
-            peerB.deliver(batchMessage(b))
-        }
+        // The head first: each is newer than everything here when it lands (a head that is not is ignored).
+        runBlocking { peerA.deliver(headMessage(a.last(), a.reversed())) }
+        eventually("the head") { storedHeads.size == 1 }
+        runBlocking { peerB.deliver(batchMessage(b)) }
         eventually("both") { batches.size == 1 && storedHeads.size == 1 }
         Thread.sleep(100)
 

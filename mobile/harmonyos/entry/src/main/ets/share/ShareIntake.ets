@@ -105,10 +105,17 @@ function decodedOrRaw(s: string): string {
 // title defaults to that too, but a sender may put a caption there instead.
 // A query (?networkid=... on a distributed file) isn't part of the name.
 function sharedFileName(uri: string, title: string | undefined): string {
-  const path: string = uri.split('?')[0].split('#')[0];
-  const last: string = decodedOrRaw(path.substring(path.lastIndexOf('/') + 1));
+  const last: string = uriFileName(uri);
   const name: string = last.includes('.') || title === undefined || title.length === 0 ? last : title;
   return safeFileName(name, 'file');
+}
+
+// A URI's last path segment, unescaped where it can be: the file's name as the
+// app that made the URI wrote it. Also for a file pasted from the clipboard
+// (ClipboardWatcher), which is named by the same rule as a shared one.
+export function uriFileName(uri: string): string {
+  const path: string = uri.split('?')[0].split('#')[0];
+  return decodedOrRaw(path.substring(path.lastIndexOf('/') + 1));
 }
 
 const ASCII_ESCAPE: RegExp = new RegExp('^[0-7][0-9A-Fa-f]$');

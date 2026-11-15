@@ -101,16 +101,27 @@ public class SyncRequestsTests
 
         var wanted = SyncRequests.Wanted(Keys(5, 4, 3), new long[] { 5, 4, 3 }, Nothing, Nothing, Nothing, local);
 
-        // Only the first (the convenience item) is wanted, though it would be trimmed by time.
-        Assert.Equal(Keys(5), wanted);
+        // Not even the newest of them: it would be trimmed at once, and it is
+        // not newer than this PC's items, so it would not go on the clipboard.
+        Assert.Empty(wanted);
     }
 
     [Fact]
-    public void The_first_missing_key_is_always_wanted_even_when_it_is_older_than_the_whole_history()
+    public void The_first_missing_key_is_not_wanted_when_it_is_older_than_the_whole_history()
     {
         var local = Enumerable.Range(100, 25).Select(t => (long)t).ToList();
 
         var wanted = SyncRequests.Wanted(Keys(7), new long[] { 7 }, Nothing, Nothing, Nothing, local);
+
+        Assert.Empty(wanted);
+    }
+
+    [Fact]
+    public void The_first_missing_key_is_wanted_when_it_fits_the_history()
+    {
+        var local = Enumerable.Range(100, 24).Select(t => (long)t).ToList(); // room for one
+
+        var wanted = SyncRequests.Wanted(Keys(7, 6), new long[] { 7, 6 }, Nothing, Nothing, Nothing, local);
 
         Assert.Equal(Keys(7), wanted);
     }
@@ -129,7 +140,7 @@ public class SyncRequestsTests
     public void The_convenience_item_is_the_first_missing_key_not_the_first_key()
     {
         // The first KEY is known here: the first MISSING one (k4) is the convenience item.
-        var wanted = SyncRequests.Wanted(Keys(5, 4, 3), new long[] { 5, 4, 3 }, Set(5), Nothing, Nothing, Enumerable.Range(100, 25).Select(t => (long)t).ToList());
+        var wanted = SyncRequests.Wanted(Keys(5, 4, 3), new long[] { 5, 4, 3 }, Set(5), Nothing, Nothing, Enumerable.Range(100, 24).Select(t => (long)t).ToList());
 
         Assert.Equal(Keys(4), wanted);
     }
@@ -363,7 +374,7 @@ public class SyncRequestsTests
     [Fact]
     public void Times_that_are_not_in_order_never_make_more_than_25_wanted()
     {
-        // The first key is the oldest of 30 (always wanted); the other 29 are newer, newest first.
+        // The first key is the oldest of 30; the other 29 are newer, newest first.
         var keys = Enumerable.Range(1, 30).Select(n => $"k{n}").ToList();
         var times = new List<long> { 1 };
         times.AddRange(Enumerable.Range(1, 29).Select(i => 1000L - i));
@@ -371,8 +382,7 @@ public class SyncRequestsTests
         var wanted = SyncRequests.Wanted(keys, times, Nothing, Nothing, Nothing, Array.Empty<long>());
 
         Assert.Equal(25, wanted.Count);
-        Assert.Equal("k1", wanted[0]);
-        Assert.Equal(keys.Skip(1).Take(24), wanted.Skip(1)); // the first key, then the newest 24 of the rest
+        Assert.Equal(keys.Skip(1).Take(25), wanted); // the newest 25: the first key is not among them
     }
 
     [Fact]
@@ -385,7 +395,9 @@ public class SyncRequestsTests
         var wanted = SyncRequests.Wanted(keys, times, Nothing, Nothing, Nothing, local);
 
         Assert.True(wanted.Count <= 25);
-        Assert.Equal("k1", wanted[0]);
+        // Only ones among the 25 newest of everything, this PC's own items included.
+        long cutoff = local.Concat(times).OrderByDescending(t => t).ElementAt(24);
+        Assert.All(wanted, key => Assert.True(times[keys.IndexOf(key)] >= cutoff));
     }
 
     [Fact]

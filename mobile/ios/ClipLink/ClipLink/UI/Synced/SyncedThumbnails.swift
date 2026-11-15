@@ -58,18 +58,23 @@ final class SyncedThumbnailCache: @unchecked Sendable {
         let key = Self.key(item.id, maxPixel)
         if let hit = image(for: key) { return hit }
         var base64: String?
+        var inlineURL: URL?
         var fileData: Data?
         switch item.kind {
-        case .image: base64 = item.entry.content
+        case .image:
+            // A big picture's base64 is in the file the history keeps it in.
+            if item.entry.content.isEmpty { inlineURL = item.inlineURL } else { base64 = item.entry.content }
         case .file: fileData = model.imageData(for: item) // memory-mapped, cheap
         default: return nil
         }
-        guard base64 != nil || fileData != nil else { return nil }
-        let (encoded, mapped) = (base64, fileData)
+        guard base64 != nil || inlineURL != nil || fileData != nil else { return nil }
+        let (encoded, stored, mapped) = (base64, inlineURL, fileData)
         let image = await Task.detached(priority: .userInitiated) { () -> UIImage? in
-            guard let data = mapped ?? encoded.flatMap({ Data(base64Encoded: $0, options: .ignoreUnknownCharacters) }) else {
-                return nil
+            var data = mapped ?? encoded.flatMap { Data(base64Encoded: $0, options: .ignoreUnknownCharacters) }
+            if data == nil, let stored, let text = try? Data(contentsOf: stored, options: .mappedIfSafe) {
+                data = Data(base64Encoded: text, options: .ignoreUnknownCharacters)
             }
+            guard let data else { return nil }
             return SyncedThumbnailCache.decode(data, maxPixel: maxPixel)
         }.value
         if let image { store(image, for: key) }
@@ -95,7 +100,9 @@ struct SyncedThumbnailView: View {
     /// showing the file's name.
     var onFailure: (() -> Void)?
 
-    @EnvironmentObject private var model: AppModel
+    /// Not watched: a card's picture never depends on the rest of the model,
+    /// and every snapshot used to redraw every thumbnail.
+    private var model: AppModel { AppModel.shared }
     @State private var loaded: UIImage?
     @State private var failed = false
 

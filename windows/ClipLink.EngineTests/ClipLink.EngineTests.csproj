@@ -5,7 +5,7 @@
        peer that sends and reads the messages by hand. Run with
        `dotnet test windows\ClipLink.EngineTests`. ClipLink.csproj is a WinUI exe,
        which a test project can't sensibly reference, so the engine's source
-       files are linked in (not copied) instead. Its WinForms clipboard watcher
+       files are linked in (not copied) instead. Its clipboard watcher
        is swapped for TestClipboard.cs, which records what would be put on the
        clipboard, as the iOS interop harness does. Each engine keeps its files
        under %APPDATA%\ClipboardDaemon with a label of its own ("zz-e2e-...",
@@ -27,7 +27,7 @@
 
   <ItemGroup>
     <!-- (Where the engine's DPAPI calls are: as in ClipLink.csproj.) -->
-    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.12" />
   </ItemGroup>
 
   <ItemGroup>

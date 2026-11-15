@@ -64,9 +64,14 @@ enum SyncedPresenter {
 
 @MainActor
 enum SyncedShareSheet {
-    static func share(_ items: [Any]) {
+    /// `done` runs once the sheet has been dismissed, the items shared or not.
+    static func share(_ items: [Any], done: (() -> Void)? = nil) {
         guard !items.isEmpty else { return }
-        SyncedPresenter.present(UIActivityViewController(activityItems: items, applicationActivities: nil))
+        let sheet = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        if let done {
+            sheet.completionWithItemsHandler = { _, _, _, _ in done() }
+        }
+        SyncedPresenter.present(sheet)
     }
 }
 

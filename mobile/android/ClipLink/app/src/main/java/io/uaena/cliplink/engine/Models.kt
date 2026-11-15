@@ -1,5 +1,6 @@
 package io.uaena.cliplink.engine
 
+import androidx.compose.runtime.Immutable
 import io.uaena.cliplink.core.ClipboardEntry
 import io.uaena.cliplink.core.toHex
 import io.uaena.cliplink.net.FilePayload
@@ -9,7 +10,17 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
-/** A history entry, plus everything the list needs that isn't on the wire. */
+/**
+ * A history entry, plus everything the list needs that isn't on the wire.
+ *
+ * @Immutable because [file] is a java.io.File, which Compose can't prove
+ * stable: without the promise every card took this as unstable, compared it
+ * by identity, and recomposed on each refresh (each of which makes new
+ * items) - the whole visible grid, mid-way through a stack's reveal too. With
+ * it an equal item skips. The promise holds as long as every field stays a
+ * val of an immutable value - keep it that way.
+ */
+@Immutable
 data class SyncedItem(
     val entry: ClipboardEntry,
     val isOwn: Boolean,

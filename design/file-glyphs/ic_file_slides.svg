@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Document with dog-ear corner -->
+  <path d="M14 3H6C4.89543 3 4 3.89543 4 5V19C4 20.1046 4.89543 21 6 21H18C19.1046 21 20 20.1046 20 19V9L14 3Z"/>
+  <!-- Fold crease -->
+  <polyline points="14 3 14 9 20 9"/>
+  <!-- Bar chart -->
+  <line x1="8.5" y1="18" x2="8.5" y2="16"/>
+  <line x1="12" y1="18" x2="12" y2="12"/>
+  <line x1="15.5" y1="18" x2="15.5" y2="14"/>
+</svg>

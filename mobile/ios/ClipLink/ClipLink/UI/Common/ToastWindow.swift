@@ -49,7 +49,7 @@ final class ToastWindowAnchor: UIView {
         let toastWindow = ToastPassthroughWindow(windowScene: scene)
         toastWindow.windowLevel = .alert + 1
         toastWindow.backgroundColor = .clear
-        let content = ToastWindowContent(model: model) { [weak toastWindow] frame in
+        let content = ToastWindowContent(store: model.toasts) { [weak toastWindow] frame in
             toastWindow?.toastFrame = frame
         }
         let controller = ToastHostingController(rootView: content)
@@ -62,7 +62,7 @@ final class ToastWindowAnchor: UIView {
 
         // `$toast` fires before the value changes, so the window is up
         // before SwiftUI renders the toast and its entry animation shows.
-        subscription = model.$toast
+        subscription = model.toasts.$toast
             .map { $0 != nil }
             .removeDuplicates()
             .sink { [weak self] showing in self?.setShowing(showing) }
@@ -110,12 +110,14 @@ final class ToastPassthroughWindow: UIWindow {
     }
 }
 
+/// Watches the toast alone (see ToastStore): it redrew with every snapshot
+/// when it watched the whole model.
 fileprivate struct ToastWindowContent: View {
-    @ObservedObject var model: AppModel
+    @ObservedObject var store: ToastStore
     let onToastFrame: (CGRect) -> Void
 
     var body: some View {
-        ToastOverlay(toast: $model.toast)
+        ToastOverlay(toast: $store.toast)
             .onPreferenceChange(ToastFrameKey.self) { onToastFrame($0) }
     }
 }

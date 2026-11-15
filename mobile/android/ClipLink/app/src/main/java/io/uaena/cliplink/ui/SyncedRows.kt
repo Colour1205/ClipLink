@@ -1,16 +1,24 @@
 package io.uaena.cliplink.ui
 
+import androidx.compose.runtime.Immutable
 import io.uaena.cliplink.engine.GROUP_MIN_ITEMS
 
 /**
  * What the Synced list shows, top to bottom: an ordinary card, or one stack
  * standing for the items one sync with a peer added. Plain code with no
  * Compose in it, so the rules can be tested.
+ *
+ * @Immutable, every kind of row: a refresh rebuilds all the rows, and a row
+ * equal to the one before must let its card skip recomposing (see
+ * [io.uaena.cliplink.engine.SyncedItem]). A [Stack]'s members list is never
+ * changed once built. Keep every field a val of an immutable value.
  */
+@Immutable
 sealed interface SyncedRow {
     /** The key the lazy list tells this row by. */
     val key: String
 
+    @Immutable
     data class Single(val keyed: KeyedItem) : SyncedRow {
         override val key: String get() = keyed.key
     }
@@ -26,6 +34,7 @@ sealed interface SyncedRow {
      * arrived, while only its newest is here (see [io.uaena.cliplink.engine.GroupTag.expectedSize]);
      * 0 otherwise. The count and the layers follow whichever is more.
      */
+    @Immutable
     data class Stack(
         val groupId: Long,
         val createdAtMs: Long,

@@ -199,11 +199,15 @@ export default function syncProtocolTest() {
       expect(wanted.join(',')).assertEqual('new,mid');
     });
 
-    it('theFirstMissingKeyIsWantedWhateverItsTime', 0, () => {
+    it('theFirstMissingKeyIsNotWantedWhenItWouldNotStay', 0, () => {
+      // An item this device trimmed: asking for it again only brought it back
+      // on top and onto the clipboard at every reconnect.
       const local: number[] = [];
       for (let i = 100; i < 125; i++) local.push(i);
-      expect(wantedKeys(['old', 'older'], [5, 4], none, none, local, 25).join(',')).assertEqual('old');
+      expect(wantedKeys(['old', 'older'], [5, 4], none, none, local, 25).length).assertEqual(0);
       expect(wantedKeys(['new', 'old'], [130, 5], none, none, local, 25).join(',')).assertEqual('new');
+      // With room in the history, an older item is still wanted (it stays).
+      expect(wantedKeys(['old'], [5], none, none, [100], 25).join(',')).assertEqual('old');
     });
 
     it('withoutTimesEveryMissingKeyIsWantedUpTo25', 0, () => {
@@ -216,7 +220,7 @@ export default function syncProtocolTest() {
 
     it('theWantedListIsNeverLongerThanTheCapEvenWhenTheTimesAreOutOfOrder', 0, () => {
       // 26 missing keys: the first is the oldest, the 25 after it are newer, so
-      // 25 stay by time and the always-wanted first would be the 26th.
+      // those 25 stay by time and the first is not wanted.
       const keys: string[] = ['first'];
       const times: number[] = [1];
       for (let i = 0; i < 25; i++) {
@@ -225,8 +229,8 @@ export default function syncProtocolTest() {
       }
       const wanted: string[] = wantedKeys(keys, times, none, none, [], 25);
       expect(wanted.length).assertEqual(25);
-      expect(wanted[0]).assertEqual('first');
-      expect(wanted.includes('k24')).assertFalse(); // the last of the rest is cut
+      expect(wanted.includes('first')).assertFalse();
+      expect(wanted[0]).assertEqual('k0');
     });
 
     it('anEmptyKeyIsNoKeyInAHeadARequestOrADelete', 0, () => {

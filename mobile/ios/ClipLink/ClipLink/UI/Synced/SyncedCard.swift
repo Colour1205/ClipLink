@@ -15,12 +15,16 @@ struct SyncedCard: View {
     /// The Synced tab's namespace for the card's zoom into its screen.
     var zoom: Namespace.ID? = nil
 
-    @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
 
     /// An image file whose picture couldn't be decoded: a card with no
     /// preview, so it shows the file's name like any other file.
     @State private var pictureFailed = false
+
+    /// For the actions only, not watched: a card redraws when its item does
+    /// (or, for a file on its way, its transfer - see SyncedTransfersReader),
+    /// not with every snapshot.
+    private var model: AppModel { AppModel.shared }
 
     static let gridTextLines = 8
     static let listTextLines = 4
@@ -41,11 +45,20 @@ struct SyncedCard: View {
     private var footerInset: CGFloat { isPictureCard ? cardPadding - Self.pictureEdge : 0 }
 
     var body: some View {
+        // Only a file still on its way follows the transfers.
+        if item.kind == .file && !item.fileAvailable {
+            SyncedTransfersReader { transfers in card(transfers: transfers) }
+        } else {
+            card(transfers: [:])
+        }
+    }
+
+    private func card(transfers: [String: TransferProgress]) -> some View {
         Button {
             onOpen()
         } label: {
             VStack(alignment: .leading, spacing: 10) {
-                content
+                content(transfers: transfers)
                 footer
                     .padding(.horizontal, footerInset)
                     .padding(.bottom, footerInset)
@@ -60,7 +73,7 @@ struct SyncedCard: View {
         .contextMenu { SyncedItemMenuItems(item: item, actions: actions, onDelete: onDelete) }
         .onDrag { actions.dragProvider(for: item) }
         .modifier(SyncedZoomSource(id: item.id, namespace: zoom))
-        .accessibilityLabel(SyncedItemActions.accessibilitySummary(item, transfers: model.snapshot.transfers))
+        .accessibilityLabel(SyncedItemActions.accessibilitySummary(item, transfers: transfers))
         .accessibilityHint("Shows details.")
         .accessibilityAction(named: "Copy") { actions.copy(item) }
         .accessibilityAction(named: "Share") { actions.share(item) }
@@ -70,7 +83,7 @@ struct SyncedCard: View {
     // MARK: - Body per kind
 
     @ViewBuilder
-    private var content: some View {
+    private func content(transfers: [String: TransferProgress]) -> some View {
         switch item.kind {
         case .text:
             textBody(lines: compact ? Self.gridTextLines : Self.listTextLines)
@@ -95,7 +108,7 @@ struct SyncedCard: View {
             if isPictureCard {
                 pictureBody
             } else {
-                fileBody
+                fileBody(transfers: transfers)
             }
         }
     }
@@ -134,9 +147,9 @@ struct SyncedCard: View {
         .background(Capsule().fill(settings.accentTheme.color.opacity(0.14)))
     }
 
-    private var fileBody: some View {
+    private func fileBody(transfers: [String: TransferProgress]) -> some View {
         let name = item.filePayload?.fileName ?? "File"
-        let fraction = SyncedItemActions.transferFraction(item, transfers: model.snapshot.transfers)
+        let fraction = SyncedItemActions.transferFraction(item, transfers: transfers)
         return HStack(alignment: .center, spacing: 10) {
             SyncedFileTile(fileName: name, size: compact ? 36 : 44)
             VStack(alignment: .leading, spacing: 3) {
@@ -146,7 +159,7 @@ struct SyncedCard: View {
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
-                Text(SyncedItemActions.fileStatus(item, transfers: model.snapshot.transfers))
+                Text(SyncedItemActions.fileStatus(item, transfers: transfers))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -202,12 +215,31 @@ struct SyncedCard: View {
         return capped.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// The start of an opaque item (one token of 40 or more characters, see
+    /// SyncedItem.kind). Only its first characters are looked at: trimming and
+    /// counting all of a multi-megabyte token on every render stalled scrolling.
     static func opaqueFragment(_ content: String) -> String {
-        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let head = content.unicodeScalars.drop(while: { CharacterSet.whitespacesAndNewlines.contains($0) }).prefix(25)
+        let trimmed = String(Substring(head)).trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.count > 24 ? "\(trimmed.prefix(24))…" : trimmed
     }
 
     static func picturePlaceholderHeight(compact: Bool) -> CGFloat { compact ? 150 : 210 }
+}
+
+/// Hands its content the incoming transfers, and watches them: the card of a
+/// file still on its way redraws with its progress, and no other card does.
+struct SyncedTransfersReader<Content: View>: View {
+    @ObservedObject private var store = AppModel.shared.transfers
+    private let content: ([String: TransferProgress]) -> Content
+
+    init(@ViewBuilder content: @escaping ([String: TransferProgress]) -> Content) {
+        self.content = content
+    }
+
+    var body: some View {
+        content(store.value)
+    }
 }
 
 /// Accent-tinted tile with a glyph for the file's type.

@@ -19,11 +19,13 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ClosedSendChannelException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.io.File
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /** How long an "unpair" gets to leave before its socket is closed. */
@@ -59,9 +61,37 @@ class SyncManager(
     private val maxEntryContentChars: Int = Limits.MAX_ENTRY_CONTENT_CHARS,
     /** Milliseconds since the epoch - what the request timeouts are counted by. */
     private val clock: () -> Long = System::currentTimeMillis,
+    /**
+     * Moves on every change of the clipboard this device knows of (see
+     * ClipboardBridge.generation): a file armed to go on the clipboard once
+     * its bytes arrive is not put there if this moved meanwhile.
+     */
+    private val clipboardGeneration: () -> Long = { 0L },
 ) {
 
     private val connections = ConcurrentHashMap<String, PeerLink>()
+
+    /**
+     * The one large message (see [Limits.LARGE_MESSAGE_CHARS]) that may be on
+     * its way in, from every connection together: taken before it goes in its
+     * connection's inbox, given back once it has been handled. The engine
+     * makes one SyncManager, so this is the whole app's. Without it each link
+     * could hold a large message being read, two in its inbox and one being
+     * handled - with a burst of pictures, hundreds of MB at once. A read loop
+     * waiting for it is a reader waiting for its handler (see [PeerLink.onMessage]):
+     * the peer is slowed through TCP, and the wait isn't taken for silence.
+     */
+    private val largeInbound = Semaphore(1)
+
+    /** A message in a connection's inbox, and the large-message permit it holds, if it holds one. */
+    private class Inbound(val message: String, private val permit: Semaphore?) {
+        private val released = AtomicBoolean(false)
+
+        /** Gives the permit back, once however often it's called. */
+        fun release() {
+            if (permit != null && released.compareAndSet(false, true)) permit.release()
+        }
+    }
 
     /** Incoming chunk streams, one sender's per file - see [IncomingFiles]. */
     private val incoming = IncomingFiles<PeerLink>(fileStore, sizeHint = ::expectedSizeOf)
@@ -70,8 +100,19 @@ class SyncManager(
     private var lastConvenience: Pair<Long, Long>? = null
     private val convenienceLock = Any()
 
-    /** Verified entries waiting on bytes that are still streaming in, keyed by hash. */
-    private val pendingEntries = ConcurrentHashMap<String, ClipboardEntry>()
+    /**
+     * A verified file entry armed to go on the clipboard once its bytes are
+     * here: when it was armed ([armedAt], by [clock]) and the clipboard's
+     * [generation] then - see [tryFulfillPendingEntry].
+     */
+    private class Pending(val entry: ClipboardEntry, val armedAt: Long, val generation: Long)
+
+    /**
+     * Verified entries waiting on bytes that are still streaming in, keyed by
+     * the hash in lowercase: Windows and iOS spell it in uppercase, and the
+     * same file copied here hashes to lowercase - one key for both.
+     */
+    private val pendingEntries = ConcurrentHashMap<String, Pending>()
 
     /**
      * What a history_head did on a connection, until the history_batch it
@@ -98,6 +139,8 @@ class SyncManager(
         val sentAt: Long,
         /** For the convenience request: how many items the whole sync asked for, the number on its stack. */
         val expectedSize: Int,
+        /** Which sync of its connection asked for it - see [SyncState.freshSync]. */
+        val sync: Int = 0,
     ) {
         /**
          * Given up on after [REQUEST_TIMEOUT_MS] (see [expireRequests]). It stays in the queue as a marker: the
@@ -134,6 +177,16 @@ class SyncManager(
 
         /** The group of the sync under way (the stack its items are shown as), if it has one. */
         var groupId: Long? = null
+
+        /** Counts the syncs asked of this peer: each [ask] is one, and its requests carry the number. */
+        var syncCount = 0
+
+        /**
+         * The sync whose convenience answer was fresh (see HistoryStore.addIfFresh), or -1. Only its other
+         * answers join its block; those of any other sync - one whose convenience item was older than what
+         * this device had, never came, or was never asked for - are merged quietly, like a late answer.
+         */
+        var freshSync = -1
 
         /**
          * One coroutine writes this, so that requests, answers and deletes leave in the order they were
@@ -294,15 +347,24 @@ class SyncManager(
         // decode and a disk write per 256 KB chunk) then slows the sender
         // through TCP, where an unbounded queue used to hold however much of
         // a 1 GB file the phone could be sent before it ran out of memory.
-        val inbox = Channel<String>(Limits.INBOX_CAPACITY)
+        // A message that never reaches its handler - the inbox was cancelled
+        // with it inside - still gives its large-message permit back.
+        val inbox = Channel<Inbound>(Limits.INBOX_CAPACITY) { it.release() }
         // Before anything can be read: the peer's head may be the first line.
         val sync = if (conn.isV2) SyncState(conn).also { syncStates[conn] = it } else null
         if (sync != null) scope.launch { writeOutbox(sync) }
         conn.onMessage = { message ->
+            val permit = if (message.length >= Limits.LARGE_MESSAGE_CHARS) largeInbound else null
+            permit?.acquire()
+            val item = Inbound(message, permit)
             try {
-                inbox.send(message)
+                inbox.send(item)
             } catch (e: ClosedSendChannelException) {
                 // The link is ending; whatever was in flight goes with it.
+                item.release()
+            } catch (e: Throwable) {
+                item.release()
+                throw e
             }
         }
         scope.launch { handleInOrder(inbox, conn) }
@@ -420,20 +482,26 @@ class SyncManager(
     }
 
     /** [registerConnection]'s consumer: [conn]'s messages, in order, until it closes and they're all handled. */
-    private suspend fun handleInOrder(inbox: Channel<String>, conn: PeerLink) {
+    private suspend fun handleInOrder(inbox: Channel<Inbound>, conn: PeerLink) {
         try {
-            for (message in inbox) {
+            for (item in inbox) {
                 try {
-                    handleMessage(message, conn)
+                    handleMessage(item.message, conn)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {
                     // One bad message mustn't stop the ones after it - nor
                     // take the app with it, whatever it threw.
                     onLog?.invoke("couldn't handle a message from ${shortIdOf(conn.peerDeviceId)} ($e)")
+                } finally {
+                    item.release()
                 }
             }
         } finally {
+            // Cancelled with messages still queued: their permits go back with
+            // them (the inbox's undelivered-element hand-back), or no other
+            // link could ever bring in a large message again.
+            inbox.cancel()
             // Only now: the last chunks of a file it finished sending may
             // still have been queued when the link went.
             abandonTransfersFrom(conn)
@@ -524,9 +592,16 @@ class SyncManager(
     }
 
     /** Deletes [entry] on this device for good (see [HistoryStore.delete]) and tells the v2 peers to do the same. */
-    fun deleteEntry(entry: ClipboardEntry) {
-        history.delete(entry)
-        broadcastDelete(listOf(entry.deletionKey))
+    fun deleteEntry(entry: ClipboardEntry) = deleteEntries(listOf(entry))
+
+    /**
+     * [deleteEntry] for several at once - a card and the twins it stands for (see
+     * ClipLinkEngine.deleteItem) - told to the v2 peers in one delete.
+     */
+    fun deleteEntries(entries: List<ClipboardEntry>) {
+        if (entries.isEmpty()) return
+        entries.forEach(history::delete)
+        broadcastDelete(entries.map { it.deletionKey })
     }
 
     /** [deleteEntry] for everything in the history. */
@@ -580,16 +655,22 @@ class SyncManager(
         val local = history.all()
         val have = local.mapTo(HashSet()) { it.deletionKey }
         val missing = head.keys.distinct().filter { it !in have && !history.isKeyDeleted(it) && it !in pending }
-        val wanted = wantedKeys(missing, head, local)
+        // A history held down by its character cap keeps fewer than MAX_ITEMS: only what is newer than the
+        // oldest entry it kept fits, and what it dropped for size is not downloaded again only to be dropped.
+        val cap = if (history.trimmedForSize && local.isNotEmpty()) local.size else HistoryStore.MAX_ITEMS
+        val wanted = wantedKeys(missing, head, local, cap)
         if (wanted.isEmpty()) return false
         val now = clock()
+        val sync = ++state.syncCount
         val requests = if (convenienceOwed) {
             listOfNotNull(
-                Outstanding(listOf(wanted.first()), convenience = true, sentAt = now, expectedSize = wanted.size),
-                wanted.drop(1).takeIf { it.isNotEmpty() }?.let { Outstanding(it, convenience = false, sentAt = now, expectedSize = 0) },
+                Outstanding(listOf(wanted.first()), convenience = true, sentAt = now, expectedSize = wanted.size, sync = sync),
+                wanted.drop(1).takeIf { it.isNotEmpty() }?.let {
+                    Outstanding(it, convenience = false, sentAt = now, expectedSize = 0, sync = sync)
+                },
             )
         } else {
-            listOf(Outstanding(wanted, convenience = false, sentAt = now, expectedSize = 0))
+            listOf(Outstanding(wanted, convenience = false, sentAt = now, expectedSize = 0, sync = sync))
         }
         for (request in requests) {
             state.queue.addLast(request)
@@ -637,14 +718,22 @@ class SyncManager(
     /**
      * The answer to [request]: every entry in it is checked like any other, and the new ones are stored in
      * one go. If it was the request for the convenience item, the newest new entry is that item and goes on
-     * the clipboard - once, with the usual side effects; every other answer applies nothing to the
-     * clipboard, though a file's bytes are still asked for.
+     * the clipboard - once, with the usual side effects - but only when it is newer than everything this
+     * device had (see HistoryStore.addIfFresh). When it is not, or nothing new came, this answer and every
+     * later one of the same sync are merged quietly, as late answers are: an item this device trimmed, or one
+     * a peer still holds from long ago, must not come back to the top of the list and onto the clipboard on
+     * every reconnect. Every other answer of a fresh sync applies nothing to the clipboard, though a file's
+     * bytes are still asked for.
      */
     private fun handleSyncAnswer(payload: String, conn: PeerLink, request: Outstanding) {
         try {
-            val verified = verifiedBatch(payload) ?: return
             val state = syncStates[conn] ?: return
-            val groupBefore = synchronized(syncLock) { state.groupId }
+            val (groupBefore, freshSync) = synchronized(syncLock) { state.groupId to (state.freshSync == request.sync) }
+            if (!request.convenience && !freshSync) {
+                mergeQuietly(payload, conn)
+                return
+            }
+            val verified = verifiedBatch(payload) ?: return
             val arrival = when {
                 request.convenience -> Arrival.Sync
                 groupBefore != null -> Arrival.SyncMore
@@ -662,10 +751,25 @@ class SyncManager(
             } else {
                 null
             }
-            val fresh = history.addAllNew(verified, arrival, protectFront) { stored ->
+            val onStored: (List<ClipboardEntry>) -> Unit = { stored ->
                 val front = if (request.convenience) newestOf(stored) else null
                 group = onSyncStored?.invoke(SyncStored(stored, front, groupBefore, request.expectedSize))
                 told = true
+            }
+            val fresh = if (request.convenience) {
+                val merged = history.addIfFresh(verified, arrival, HistoryStore.IfStale.Quiet, protectFront, onStored)
+                if (!merged.fresh) {
+                    // Stored by time, quietly: nothing goes on the clipboard and nothing is placed on top.
+                    if (merged.added.isNotEmpty()) {
+                        merged.added.forEach(::fetchWithoutApplying)
+                        onBatchApplied?.invoke(BatchApplied(conn.peerDeviceId, merged.added, null))
+                    }
+                    return
+                }
+                synchronized(syncLock) { state.freshSync = request.sync }
+                merged.added
+            } else {
+                history.addAllNew(verified, arrival, protectFront, onStored)
             }
             if (told) synchronized(syncLock) { state.groupId = group }
             if (fresh.isEmpty()) return
@@ -694,7 +798,10 @@ class SyncManager(
      * is told, and they make no stack: the sync they belonged to is long over. A file's bytes are still asked
      * for. [Arrival.SyncMore] leaves the item the trim spares as it is - this is not a block of its own.
      */
-    private fun handleLateAnswer(payload: String, conn: PeerLink) {
+    private fun handleLateAnswer(payload: String, conn: PeerLink) = mergeQuietly(payload, conn)
+
+    /** [handleLateAnswer]'s quiet merge, also for the answers of a sync that is not fresh - see [handleSyncAnswer]. */
+    private fun mergeQuietly(payload: String, conn: PeerLink) {
         val verified = verifiedBatch(payload) ?: return
         val fresh = history.addAllNew(verified, Arrival.SyncMore)
         if (fresh.isEmpty()) return
@@ -956,8 +1063,12 @@ class SyncManager(
         }
         val expectedNew = history.countNew(head.keys)
         var groupId: Long? = null
-        // Empty for an entry that is known, deleted here or older than all a full history keeps.
-        val stored = history.addAllNew(listOf(newest), Arrival.SyncByAge) { groupId = onHeadStored?.invoke(newest, expectedNew) }
+        // Empty for an entry that is known, deleted here or older than all a full history keeps - and for one
+        // that is not newer than everything here: such a head is ignored whole, and the batch then works on its
+        // own (see handleHistoryBatch), so an old item never comes back to the top or onto the clipboard.
+        val stored = history.addIfFresh(listOf(newest), Arrival.SyncByAge, HistoryStore.IfStale.Drop) {
+            groupId = onHeadStored?.invoke(newest, expectedNew)
+        }.added
         if (stored.isEmpty()) return
         heads[conn] = HeadState(groupId, clock())
         applyAndReport(newest)
@@ -993,16 +1104,30 @@ class SyncManager(
         // that are new AND still there after the trim (the peer still has
         // everything deleted here - those, and any older than all this
         // device keeps, are neither stored nor applied). The newest of them
-        // is the one the trim spares - after a head, the head's.
-        val arrival = if (head != null) Arrival.SyncMore else Arrival.SyncByAge
-        val fresh = history.addAllNew(verified, arrival) { stored -> onBatchStored?.invoke(stored, head?.groupId) }
+        // is the one the trim spares - after a head, the head's. Without a head, only when the newest of them
+        // is newer than everything here: otherwise the whole batch is merged quietly, by time, and nothing of
+        // it goes on the clipboard or on top (see HistoryStore.addIfFresh).
+        val onStored: (List<ClipboardEntry>) -> Unit = { stored -> onBatchStored?.invoke(stored, head?.groupId) }
+        val fresh = if (head == null) {
+            val merged = history.addIfFresh(verified, Arrival.SyncByAge, HistoryStore.IfStale.Quiet, onStored = onStored)
+            if (!merged.fresh) {
+                if (merged.added.isEmpty()) return
+                merged.added.forEach(::fetchWithoutApplying)
+                onBatchApplied?.invoke(BatchApplied(from, merged.added, null))
+                return
+            }
+            merged.added
+        } else {
+            history.addAllNew(verified, Arrival.SyncMore, onStored = onStored)
+        }
         if (fresh.isEmpty()) return
 
         // A batch is the peer's whole history, oldest and newest alike. Only
-        // the newest of what is new belongs on the clipboard - even when this
-        // device has newer items of its own: applying them in batch order
-        // left whichever came last there, not the latest copy.
-        // After a head the newest is on it already, and the rest is older.
+        // the newest of what is new belongs on the clipboard (it is newer
+        // than everything here, or the batch was merged quietly above):
+        // applying them in batch order left whichever came last there, not
+        // the latest copy. After a head the newest is on it already, and the
+        // rest is older.
         val newest = if (head != null) null else newestOf(fresh)
         var toApply: ClipboardEntry? = null
         for (entry in fresh) {
@@ -1069,7 +1194,7 @@ class SyncManager(
             }
         }
         if (fileStore.exists(payload.fileHash)) return true
-        pendingEntries[payload.fileHash] = entry
+        pendingEntries[payload.fileHash.lowercase()] = Pending(entry, clock(), clipboardGeneration())
         sendFileRequest(payload.fileHash, trustedConnections())
         return false
     }
@@ -1101,14 +1226,22 @@ class SyncManager(
      * "Transferring…" until it was evicted.
      */
     private fun requestMissingFiles(conn: PeerLink) {
-        (pendingEntries.filterValues { !history.isDeleted(it) }.keys + missingFiles())
+        // A pending entry that has left the history - deleted, or trimmed away meanwhile - waits for nothing.
+        pendingEntries.entries.removeIf { (_, pending) -> !isStillListed(pending.entry) }
+        val hashes = pendingEntries.values.mapNotNullTo(LinkedHashSet()) { FilePayload.parse(it.entry.content)?.fileHash }
+        (hashes + missingFiles())
             .filter { !fileStore.exists(it) && !incoming.isReceiving(it) }
             .forEach { sendFileRequest(it, listOf(conn)) }
     }
 
+    /** Whether [entry] is in the history and not deleted here. */
+    private fun isStillListed(entry: ClipboardEntry): Boolean =
+        !history.isDeleted(entry) && history.all().any { it.deletionKey == entry.deletionKey }
+
     /** Whether an item still waits on [fileHash]'s bytes - one just received, or an older one (see [missingFiles]). */
     private fun isWanted(fileHash: String): Boolean =
-        pendingEntries[fileHash]?.let { !history.isDeleted(it) } == true || fileHash in missingFiles()
+        pendingEntries[fileHash.lowercase()]?.let { !history.isDeleted(it.entry) } == true ||
+            missingFiles().any { it.equals(fileHash, ignoreCase = true) }
 
     /**
      * The files history entries point at whose bytes aren't here. A 0-byte
@@ -1128,10 +1261,10 @@ class SyncManager(
      * say, not that the file is empty.
      */
     private fun expectedSizeOf(fileHash: String): Long? {
-        val fromPending = pendingEntries[fileHash]?.let { FilePayload.parse(it.content) }
+        val fromPending = pendingEntries[fileHash.lowercase()]?.let { FilePayload.parse(it.entry.content) }
         val payload = fromPending ?: history.all().firstNotNullOfOrNull { entry ->
             if (entry.type != ClipboardEntry.TYPE_FILE) return@firstNotNullOfOrNull null
-            FilePayload.parse(entry.content)?.takeIf { it.fileHash == fileHash }
+            FilePayload.parse(entry.content)?.takeIf { it.fileHash.equals(fileHash, ignoreCase = true) }
         }
         return payload?.fileSize?.takeIf { it > 0 }
     }
@@ -1239,16 +1372,29 @@ class SyncManager(
 
     /**
      * A blob can become available more than one way - a completed chunk
-     * stream, or this device capturing the same file locally. Whichever it
-     * was, an entry waiting on that hash should now be applied. False when
-     * none was waiting.
+     * stream, or this device capturing the same file locally, whose hash may
+     * be spelt in the other case. Whichever it was, an entry waiting on that
+     * hash should now be applied - unless something newer has happened since
+     * it was armed: the clipboard changed meanwhile (a copy here, or another
+     * item put there), [PENDING_APPLY_LIMIT_MS] went by, or the entry left
+     * the history. A file that took an hour to arrive must not replace what
+     * the user copied in that hour; its card just stops saying it is still
+     * transferring. False when none was waiting.
      */
     fun tryFulfillPendingEntry(fileHash: String): Boolean {
-        val entry = pendingEntries.remove(fileHash) ?: return false
+        val pending = pendingEntries.remove(fileHash.lowercase()) ?: return false
+        val entry = pending.entry
         // Deleted while its bytes were still on the way: it must not land on
         // the clipboard now, and the bytes that just arrived are nobody's.
         if (history.isDeleted(entry)) {
             history.releaseBlobIfUnused(fileHash)
+            return true
+        }
+        val stale = clock() - pending.armedAt > PENDING_APPLY_LIMIT_MS ||
+            clipboardGeneration() != pending.generation ||
+            !isStillListed(entry)
+        if (stale) {
+            onFileStored?.invoke(fileHash)
             return true
         }
         onEntryApplied?.invoke(entry)
@@ -1282,12 +1428,16 @@ class SyncManager(
         /** See [requestAgain]. */
         private const val MAX_RETRIES = 3
 
+        /** How long a file armed to go on the clipboard may take to arrive and still go there - see [tryFulfillPendingEntry]. */
+        internal const val PENDING_APPLY_LIMIT_MS = 10 * 60 * 1000L
+
         /**
          * Which of the [missing] keys (in the order of the head, newest first) a head makes worth downloading,
          * in the same order: the history keeps [cap] items, so only those of the [cap] newest by time of what
-         * is here and what [missing] would add are. The first of [missing] is always wanted, though: it is the
-         * item that goes on the clipboard. A head without times cannot say, so everything it offers counts
-         * (up to [cap]).
+         * is here and what [missing] would add are - the first of [missing] too. It used to be wanted whatever
+         * its age, as the item for the clipboard, and an item older than everything kept here was then
+         * downloaded, stored and trimmed again on every connection. A head without times cannot say, so
+         * everything it offers counts (up to [cap]).
          */
         internal fun wantedKeys(
             missing: List<String>,
@@ -1303,8 +1453,7 @@ class SyncManager(
             val pool = local.map { it.deletionKey to (DotNetTimestamp.epochMillis(it.timestamp) ?: 0L) } +
                 missing.map { it to (timeOf[it] ?: 0L) }
             val inside = pool.sortedByDescending { it.second }.take(cap).mapTo(HashSet()) { it.first }
-            // Times out of order can put the first one outside the set: the total still stays within the cap.
-            return missing.filterIndexed { index, key -> index == 0 || key in inside }.take(cap)
+            return missing.filter { it in inside }.take(cap)
         }
 
         /** What [selectForRelay] picked, and how many entries it left out. */

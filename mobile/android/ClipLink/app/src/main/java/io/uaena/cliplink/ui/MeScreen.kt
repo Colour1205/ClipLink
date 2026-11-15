@@ -14,9 +14,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Visibility
-import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -47,6 +44,9 @@ import androidx.compose.ui.unit.dp
 import io.uaena.cliplink.R
 import io.uaena.cliplink.engine.LogLine
 import io.uaena.cliplink.engine.shortIdOf
+import io.uaena.cliplink.ui.icons.Icons
+import io.uaena.cliplink.ui.icons.outlined.Visibility
+import io.uaena.cliplink.ui.icons.outlined.VisibilityOff
 
 /** The passcode fields' keyboard: for a password, never corrected, learned or suggested. */
 private val PasscodeKeyboard = KeyboardOptions(

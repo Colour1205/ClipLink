@@ -5,7 +5,6 @@ import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipDescription
-import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -22,6 +21,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.lifecycle.lifecycleScope
 import io.uaena.cliplink.clipboard.ClipboardBridge
 import io.uaena.cliplink.engine.ClipLinkEngine
@@ -31,6 +31,7 @@ import io.uaena.cliplink.service.ClipLinkService
 import io.uaena.cliplink.ui.AppActions
 import io.uaena.cliplink.ui.AppState
 import io.uaena.cliplink.ui.ClipLinkApp
+import io.uaena.cliplink.ui.LocalOwnCopy
 import io.uaena.cliplink.ui.MeActions
 import io.uaena.cliplink.ui.PairViewModel
 import io.uaena.cliplink.ui.SyncedActions
@@ -58,6 +59,16 @@ class MainActivity : ComponentActivity() {
      * device's pairing QR code (see PairingLink) - until the UI has taken it up.
      */
     private var pendingPairLink by mutableStateOf<String?>(null)
+
+    /**
+     * The Me screen's keep-alive switch. Read again on every resume: the
+     * notification's Stop turns the setting off while this screen is away,
+     * and a switch seeded once went on saying "on".
+     */
+    private var keepAliveSetting by mutableStateOf(false)
+
+    /** Set by onResume: the on-open capture runs once the window has focus (see [ClipLinkEngine.captureOnOpen]). */
+    private var captureOnFocus = false
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -138,7 +149,9 @@ class MainActivity : ComponentActivity() {
             lifecycleScope.launch(Dispatchers.IO) { engine.clipboard.pruneSharedCopies() }
         }
         if (engine.deviceSettings.keepAlive) ClipLinkService.start(this)
+        keepAliveSetting = engine.deviceSettings.keepAlive
 
+        val ownCopy: (String) -> Unit = engine::copyOwnText
         setContent {
             val dynamicColor = remember { mutableStateOf(engine.deviceSettings.dynamicColor) }
 
@@ -160,103 +173,105 @@ class MainActivity : ComponentActivity() {
                 // per device id, it showed the last network's addresses for good.
                 val localAddresses = rememberLocalAddresses(engine::localAddresses)
 
-                var keepAlive by remember { mutableStateOf(engine.deviceSettings.keepAlive) }
                 var autoApply by remember { mutableStateOf(engine.deviceSettings.autoApply) }
                 var autoCapture by remember { mutableStateOf(engine.deviceSettings.autoCapture) }
                 val pairStatus by pairModel.status.collectAsState()
 
-                ClipLinkApp(
-                    state = AppState(
-                        items = items,
-                        devices = devices,
-                        connectedCount = connectedCount,
-                        discovering = discovering,
-                        ownDeviceId = ownDeviceId,
-                        deviceNameOverride = deviceNameOverride,
-                        defaultDeviceName = defaultDeviceName,
-                        // Recomputed on every recomposition, and the two name
-                        // flows collected above are what recompose it after a
-                        // rename - so the QR code never shows a stale name.
-                        pairingPayload = engine.pairingPayload(),
-                        pairingRequest = pairingRequest,
-                        hasPassphrase = hasPassphrase,
-                        passphraseBusy = passphraseBusy,
-                        tailscaleIp = tailscaleIp,
-                        keepAlive = keepAlive,
-                        autoApply = autoApply,
-                        autoCapture = autoCapture,
-                        dynamicColor = dynamicColor.value,
-                        localAddresses = localAddresses,
-                        log = log,
-                        toast = toast,
-                    ),
-                    pairStatus = pairStatus,
-                    pairLink = pendingPairLink,
-                    onPairLinkTaken = { pendingPairLink = null },
-                    initialSyncedLayout = if (engine.deviceSettings.syncedLayout == "list") SyncedLayout.List else SyncedLayout.Grid,
-                    onSyncedLayoutChange = { engine.deviceSettings.syncedLayout = if (it == SyncedLayout.List) "list" else "grid" },
-                    actions = AppActions(
-                        synced = SyncedActions(
-                            onCopy = ::copyItem,
-                            onShare = ::shareItem,
-                            onDelete = engine::deleteItem,
-                            onSyncClipboard = engine::captureAndBroadcast,
-                            onPickFile = { pickFileLauncher.launch(arrayOf("*/*")) },
-                            onExpandGroup = engine::expandGroup,
-                            onCollapseGroup = engine::collapseGroup,
-                            onOpenFile = ::openFile,
-                            onSaveFile = ::saveFile,
-                            dragClipFor = ::dragClipFor,
+                // What is copied out of an item or a device screen is ClipLink's own clip (see OwnSelectionContainer).
+                CompositionLocalProvider(LocalOwnCopy provides ownCopy) {
+                    ClipLinkApp(
+                        state = AppState(
+                            items = items,
+                            devices = devices,
+                            connectedCount = connectedCount,
+                            discovering = discovering,
+                            ownDeviceId = ownDeviceId,
+                            deviceNameOverride = deviceNameOverride,
+                            defaultDeviceName = defaultDeviceName,
+                            // Recomputed on every recomposition, and the two name
+                            // flows collected above are what recompose it after a
+                            // rename - so the QR code never shows a stale name.
+                            pairingPayload = engine.pairingPayload(),
+                            pairingRequest = pairingRequest,
+                            hasPassphrase = hasPassphrase,
+                            passphraseBusy = passphraseBusy,
+                            tailscaleIp = tailscaleIp,
+                            keepAlive = keepAliveSetting,
+                            autoApply = autoApply,
+                            autoCapture = autoCapture,
+                            dynamicColor = dynamicColor.value,
+                            localAddresses = localAddresses,
+                            log = log,
+                            toast = toast,
                         ),
-                        me = MeActions(
-                            onSetPassphrase = { passphrase ->
-                                lifecycleScope.launch { engine.setPassphrase(passphrase) }
-                            },
-                            onClearPassphrase = {
-                                engine.clearPassphrase()
-                            },
-                            onSaveTailscaleIp = engine::saveTailscaleIp,
-                            onSaveDeviceName = engine::saveDeviceName,
-                            onKeepAliveChange = { enabled ->
-                                keepAlive = enabled
-                                engine.deviceSettings.keepAlive = enabled
-                                if (enabled) ClipLinkService.start(this) else ClipLinkService.stop(this)
-                            },
-                            onAutoApplyChange = { enabled ->
-                                autoApply = enabled
-                                engine.deviceSettings.autoApply = enabled
-                            },
-                            onAutoCaptureChange = { enabled ->
-                                autoCapture = enabled
-                                engine.deviceSettings.autoCapture = enabled
-                            },
-                            onDynamicColorChange = { enabled ->
-                                dynamicColor.value = enabled
-                                engine.deviceSettings.dynamicColor = enabled
-                            },
-                            onClearHistory = engine::clearHistory,
+                        pairStatus = pairStatus,
+                        pairLink = pendingPairLink,
+                        onPairLinkTaken = { pendingPairLink = null },
+                        initialSyncedLayout = if (engine.deviceSettings.syncedLayout == "list") SyncedLayout.List else SyncedLayout.Grid,
+                        onSyncedLayoutChange = { engine.deviceSettings.syncedLayout = if (it == SyncedLayout.List) "list" else "grid" },
+                        actions = AppActions(
+                            synced = SyncedActions(
+                                onCopy = ::copyItem,
+                                onShare = ::shareItem,
+                                onDelete = engine::deleteItem,
+                                onSyncClipboard = engine::captureAndBroadcast,
+                                onPickFile = { pickFileLauncher.launch(arrayOf("*/*")) },
+                                onExpandGroup = engine::expandGroup,
+                                onCollapseGroup = engine::collapseGroup,
+                                onOpenFile = ::openFile,
+                                onSaveFile = ::saveFile,
+                                dragClipFor = ::dragClipFor,
+                            ),
+                            me = MeActions(
+                                onSetPassphrase = { passphrase ->
+                                    lifecycleScope.launch { engine.setPassphrase(passphrase) }
+                                },
+                                onClearPassphrase = {
+                                    engine.clearPassphrase()
+                                },
+                                onSaveTailscaleIp = engine::saveTailscaleIp,
+                                onSaveDeviceName = engine::saveDeviceName,
+                                onKeepAliveChange = { enabled ->
+                                    keepAliveSetting = enabled
+                                    engine.deviceSettings.keepAlive = enabled
+                                    if (enabled) ClipLinkService.start(this) else ClipLinkService.stop(this)
+                                },
+                                onAutoApplyChange = { enabled ->
+                                    autoApply = enabled
+                                    engine.deviceSettings.autoApply = enabled
+                                },
+                                onAutoCaptureChange = { enabled ->
+                                    autoCapture = enabled
+                                    engine.deviceSettings.autoCapture = enabled
+                                },
+                                onDynamicColorChange = { enabled ->
+                                    dynamicColor.value = enabled
+                                    engine.deviceSettings.dynamicColor = enabled
+                                },
+                                onClearHistory = engine::clearHistory,
+                                onCopyDeviceId = {
+                                    copyPlainText(ownDeviceId)
+                                },
+                            ),
+                            onTrust = { engine.trustDevice(it.deviceId) },
+                            onUntrust = { engine.untrustDevice(it.deviceId) },
+                            onBlock = { engine.blockDevice(it.deviceId) },
+                            onUnblock = { engine.unblockDevice(it.deviceId) },
                             onCopyDeviceId = {
-                                copyPlainText(ownDeviceId)
+                                copyPlainText(it.deviceId)
                             },
+                            onPairingScreenChange = { open ->
+                                // Opening it ends any quiet time; leaving it forgets what the last
+                                // attempt answered.
+                                if (open) engine.clearRequestQuiet() else pairModel.clear()
+                            },
+                            onPair = { raw -> pairModel.pair(raw, engine::pairWith) },
+                            onAcceptPairing = { engine.acceptPairing() },
+                            onRejectPairing = { engine.rejectPairing() },
+                            onToastShown = engine::consumeToast,
                         ),
-                        onTrust = { engine.trustDevice(it.deviceId) },
-                        onUntrust = { engine.untrustDevice(it.deviceId) },
-                        onBlock = { engine.blockDevice(it.deviceId) },
-                        onUnblock = { engine.unblockDevice(it.deviceId) },
-                        onCopyDeviceId = {
-                            copyPlainText(it.deviceId)
-                        },
-                        onPairingScreenChange = { open ->
-                            // Opening it ends any quiet time; leaving it forgets what the last
-                            // attempt answered.
-                            if (open) engine.clearRequestQuiet() else pairModel.clear()
-                        },
-                        onPair = { raw -> pairModel.pair(raw, engine::pairWith) },
-                        onAcceptPairing = { engine.acceptPairing() },
-                        onRejectPairing = { engine.rejectPairing() },
-                        onToastShown = engine::consumeToast,
-                    ),
-                )
+                    )
+                }
             }
         }
     }
@@ -279,10 +294,35 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        keepAliveSetting = engine.deviceSettings.keepAlive
         // Foregrounding is the other moment besides a cold start that deserves
         // an immediate reconnect: a backgrounded app's UDP socket can be torn
         // down by the OS without any error surfacing.
-        engine.onForeground()
+        engine.onForeground(capture = false)
+        // The capture waits for the window's focus, which comes after this:
+        // Android 10+ refuses a clipboard read before it, without a word.
+        captureOnFocus = true
+        if (hasWindowFocus()) captureOnceFocused()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && captureOnFocus) captureOnceFocused()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        captureOnFocus = false
+    }
+
+    /**
+     * Once per resume, not on every focus change: focus also comes back when
+     * the notification shade or a dialog closes, and each read of the
+     * clipboard shows the system's "pasted from your clipboard" notice.
+     */
+    private fun captureOnceFocused() {
+        captureOnFocus = false
+        engine.captureOnOpen()
     }
 
     @SuppressLint("InlinedApi")
@@ -435,9 +475,9 @@ class MainActivity : ComponentActivity() {
             is ClipboardBridge.SharePayload.Unavailable -> null
         }
 
+    /** A device id copied from a screen: ClipLink's own clip, recorded as such so it is never synced back out. */
     private fun copyPlainText(text: String) {
-        val manager = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-        manager.setPrimaryClip(ClipData.newPlainText("ClipLink", text))
+        engine.copyOwnText(text)
     }
 
     private companion object {

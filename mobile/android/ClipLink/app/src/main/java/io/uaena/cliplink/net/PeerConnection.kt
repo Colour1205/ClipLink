@@ -19,7 +19,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.BufferedOutputStream
 import java.io.OutputStream
@@ -128,10 +130,20 @@ class PeerConnection private constructor(
     override val isClosed: Boolean get() = closed.get()
 
     override suspend fun send(message: String) = withContext(Dispatchers.IO) {
+        // A large message (a picture sent to every peer at once) is encrypted
+        // and encoded one at a time across all links: each makes its own UTF-8,
+        // ciphertext and base64 copies, and N peers doing that together held N
+        // sets of them. The socket writes still run side by side.
+        val line = if (message.length >= Limits.LARGE_MESSAGE_CHARS) largeSends.withPermit { pack(message) } else pack(message)
+        writeLine(line)
+    }
+
+    /** [message] as the line that goes on the wire. */
+    private fun pack(message: String): ByteArray {
         val packed = AesGcm.encryptPacked(sessionKey, message)
         // Before the write, so its echo can't arrive ahead of it.
         if (!sessionProven.get()) echoGuard.sent(packed)
-        writeLine(B64.encodeToBytes(packed))
+        return B64.encodeToBytes(packed)
     }
 
     /**
@@ -168,12 +180,15 @@ class PeerConnection private constructor(
                     is LineReader.Line.Data -> line.bytes
                 }
                 if (bytes.isEmpty()) continue
+                // Only the size is kept for the note below: the line itself
+                // needn't stay reachable while its message waits for the handler.
+                val size = bytes.size
                 try {
                     handleLine(bytes)
                 } catch (e: OutOfMemoryError) {
                     // One message too big for the phone is that message's loss,
                     // not the connection's: nothing it held is reachable any more.
-                    onDropped?.invoke("dropped a ${bytes.size / 1024} KB message: out of memory")
+                    onDropped?.invoke("dropped a ${size / 1024} KB message: out of memory")
                 }
             }
         } catch (e: CancellationException) {
@@ -284,6 +299,9 @@ class PeerConnection private constructor(
 
     companion object {
         private const val PING_SENTINEL = "__ping__"
+
+        /** One large message encrypted at a time, across every connection - see [send]. */
+        private val largeSends = Semaphore(1)
         private const val NEWLINE = '\n'.code
 
         /**

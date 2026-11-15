@@ -12,9 +12,11 @@ import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 
 /**
- * Content-addressed blob cache, keyed by SHA-256 hex exactly as the entry
- * spells it (this device writes lowercase; Windows and iOS send uppercase).
- * Mirrors FileStore.cs / FileStore.ets.
+ * Content-addressed blob cache, keyed by SHA-256 hex. A new blob is named as
+ * the entry spells it (this device writes lowercase; Windows and iOS send
+ * uppercase), and a hash finds a blob in either case (see [path]), so the
+ * same bytes named by two devices in two cases are one file, not two that
+ * miss each other. Mirrors FileStore.cs / FileStore.ets.
  *
  * Descriptor-only by design: entry payloads carry a name/hash/size, never
  * bytes. The bytes arrive separately as chunk messages and land here.
@@ -56,11 +58,28 @@ class FileStore internal constructor(
     }
 
     private fun touch(hash: String): String {
-        synchronized(sweepLock) { touched?.add(hash) }
+        synchronized(sweepLock) { touched?.add(hash.lowercase()) }
         return hash
     }
 
-    fun path(hash: String): File = File(baseDir, touch(checked(hash)))
+    /**
+     * Where [hash]'s blob is: the file of that exact spelling, else of its
+     * lowercase, else of its uppercase - this file system tells them apart,
+     * and a file received from Windows (uppercase) is then found by the
+     * lowercase hash of the same bytes copied here, and the other way round.
+     * When none exists yet, the spelling given: new blobs are named as they
+     * arrive, so nothing already stored has to be renamed.
+     */
+    fun path(hash: String): File {
+        val given = File(baseDir, touch(checked(hash)))
+        if (given.exists()) return given
+        for (spelling in listOf(hash.lowercase(), hash.uppercase())) {
+            if (spelling == hash) continue
+            val other = File(baseDir, spelling)
+            if (other.exists()) return other
+        }
+        return given
+    }
 
     fun tempPath(hash: String): File = File(baseDir, "${touch(checked(hash))}$TEMP_SUFFIX")
 
@@ -107,16 +126,20 @@ class FileStore internal constructor(
      * not: a half-received file is never resumed, only started over, and
      * nothing is receiving yet. Anything this process has already touched is
      * spared (see [touched]). For startup, before any peer connects; runs
-     * once, later calls do nothing. Returns how many files went.
+     * once, later calls do nothing. Returns how many files went. Hashes are
+     * compared in either case, as [path] finds them: an entry that spells a
+     * hash in uppercase keeps the lowercase blob of it.
      */
     fun sweepUnreferenced(referenced: Set<String>): Int = synchronized(sweepLock) {
         val spared = touched ?: return 0
         touched = null
+        val wanted = referenced.mapTo(HashSet()) { it.lowercase() }
         val files = baseDir.listFiles() ?: return 0
         files.count { file ->
             val isTemp = file.name.endsWith(TEMP_SUFFIX)
             val hash = file.name.removeSuffix(TEMP_SUFFIX)
-            isValidHash(hash) && (isTemp || hash !in referenced) && hash !in spared && file.isFile && file.delete()
+            val key = hash.lowercase()
+            isValidHash(hash) && (isTemp || key !in wanted) && key !in spared && file.isFile && file.delete()
         }
     }
 
@@ -165,9 +188,9 @@ class FileStore internal constructor(
         const val EMPTY_FILE_HASH = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
         /**
-         * A SHA-256 in hex: 64 hex digits. Either case - Windows sends upper
-         * case, the phones lower - which the file system here keeps apart,
-         * but every device only ever names a blob the way it received it.
+         * A SHA-256 in hex: 64 hex digits. Either case - Windows and iOS
+         * send upper case, the other phones lower - which the file system
+         * here keeps apart, so [path] looks for both.
          */
         fun isValidHash(hash: String?): Boolean =
             hash != null && hash.length == 64 && hash.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }

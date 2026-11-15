@@ -18,6 +18,8 @@ import java.io.Writer
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.util.IdentityHashMap
+import java.util.UUID
 
 /**
  * The synced-item history. Mirrors HistoryAccess.cs / HistoryAccess.ets:
@@ -33,6 +35,12 @@ import java.nio.file.StandardCopyOption
  * renamed over it), a read is a field, and a history that can't be read
  * whole - corrupt, truncated, too big for the heap - comes back as however
  * much of it could be, with a note in the log, never as a crash.
+ *
+ * A big entry (an inline picture) is kept in a file of its own, written once,
+ * and the history file only points at it - see [HistoryFile]. So a change
+ * rewrites a few KB, not every picture the history holds (up to 64M
+ * characters, fsynced, under this store's lock), and a save no longer needs a
+ * second copy's worth of free space.
  *
  * Besides the item count, the history keeps at most [Limits.MAX_STORED_CHARS]
  * characters of content in all, evicting the oldest first (never the only
@@ -70,6 +78,13 @@ class HistoryStore internal constructor(
 
     /** The history in the order it was stored; replaced - never changed - by every write. Null until first needed. */
     private var cache: List<ClipboardEntry>? = null
+
+    /**
+     * The file each big entry of [cache] is kept in (see [HistoryFile]), by
+     * identity: the history's lists are rebuilt, but always of the same entry
+     * objects, so an entry written once is never written again. Under the lock.
+     */
+    private val contentFiles = IdentityHashMap<ClipboardEntry, String>()
 
     /**
      * The key of the convenience item of the last sync that brought one (see [Arrival.Sync]): the trim
@@ -133,13 +148,68 @@ class HistoryStore internal constructor(
         arrival: Arrival = Arrival.Live,
         protectFront: ((ClipboardEntry) -> Boolean)? = null,
         onStored: ((List<ClipboardEntry>) -> Unit)? = null,
-    ): List<ClipboardEntry> {
-        var history = loaded()
+    ): List<ClipboardEntry> = merge(entries, arrival, protectFront, onStored, ifStale = null).added
+
+    /**
+     * [addAllNew] for what a sync with a peer brings, which only counts as
+     * arriving now - its newest on the clipboard, its block on top, that item
+     * spared by the trim - when it is fresh: the newest entry it adds is
+     * later than everything this history held a moment before (an empty
+     * history makes anything fresh). Decided under the same lock as the merge.
+     *
+     * When it is not fresh, [ifStale] says what happens: [IfStale.Quiet]
+     * merges the new entries by time, as a late answer is - [protectFront] is
+     * not asked, [onStored] is not called, nothing is spared, and whatever is
+     * older than everything a full history keeps is dropped at once;
+     * [IfStale.Drop] stores nothing at all. An item this device trimmed, or a
+     * peer still holds from long ago, then never comes back to the top of the
+     * list or onto the clipboard.
+     */
+    @Synchronized
+    fun addIfFresh(
+        entries: List<ClipboardEntry>,
+        arrival: Arrival,
+        ifStale: IfStale,
+        protectFront: ((ClipboardEntry) -> Boolean)? = null,
+        onStored: ((List<ClipboardEntry>) -> Unit)? = null,
+    ): Merged = merge(entries, arrival, protectFront, onStored, ifStale)
+
+    /** What [addIfFresh] does with entries that are not fresh. */
+    enum class IfStale { Quiet, Drop }
+
+    /** What [addIfFresh] stored ([added], as [addAllNew] returns it), and whether it counted as fresh. */
+    class Merged(val added: List<ClipboardEntry>, val fresh: Boolean)
+
+    private fun merge(
+        entries: List<ClipboardEntry>,
+        arrival: Arrival,
+        protectFront: ((ClipboardEntry) -> Boolean)?,
+        onStored: ((List<ClipboardEntry>) -> Unit)?,
+        ifStale: IfStale?,
+    ): Merged {
+        val before = loaded()
+        var history = before
         val added = ArrayList<ClipboardEntry>()
         for (entry in entries) {
             history = history.withAdded(entry, isDeletedKey)?.also { added.add(entry) } ?: continue
         }
-        if (added.isEmpty()) return emptyList()
+        if (added.isEmpty()) return Merged(emptyList(), fresh = false)
+        val fresh = isFresh(newestOf(added), before)
+        if (ifStale != null && !fresh) {
+            if (ifStale == IfStale.Drop) return Merged(emptyList(), fresh = false)
+            return Merged(store(history, added, Arrival.SyncMore, null, null), fresh = false)
+        }
+        return Merged(store(history, added, arrival, protectFront, onStored), fresh)
+    }
+
+    /** The second half of [merge]: [history] (with [added] in it) trimmed, saved, and the survivors of [added]. */
+    private fun store(
+        history: List<ClipboardEntry>,
+        added: List<ClipboardEntry>,
+        arrival: Arrival,
+        protectFront: ((ClipboardEntry) -> Boolean)?,
+        onStored: ((List<ClipboardEntry>) -> Unit)?,
+    ): List<ClipboardEntry> {
         // What the trim must not drop. A new block ends the protection of the last one's item.
         // A convenience item that did not go to the clipboard is no new block of protection: the one that
         // did stays spared (here and after), until a newer one goes there.
@@ -165,6 +235,25 @@ class HistoryStore internal constructor(
         }
         return survivors
     }
+
+    /** Whether [candidate] is later than every entry of [history] - see [addIfFresh] and [isLater]. */
+    private fun isFresh(candidate: ClipboardEntry?, history: List<ClipboardEntry>): Boolean {
+        candidate ?: return false
+        return history.all { isLater(candidate.timestamp, it.timestamp) }
+    }
+
+    /**
+     * Whether the history is held down by [maxStoredChars] rather than by
+     * [MAX_ITEMS]: the last trim that dropped anything dropped it for the
+     * characters. A v2 sync then wants only what is newer than the oldest
+     * entry kept (see SyncManager.wantedKeys) - otherwise the pictures this
+     * history dropped for size, which the peers still hold, would count as
+     * fitting and be downloaded again on every connection, to be dropped
+     * again. Memory only: after a restart it is learned from the next trim.
+     */
+    @Volatile
+    var trimmedForSize: Boolean = false
+        private set
 
     /**
      * How an entry (or several) came to be added - see [addAllNew]. It decides whether the trim spares
@@ -223,6 +312,7 @@ class HistoryStore internal constructor(
         val keys = entries.map { it.deletionKey }
         recordDeleted(keys)
         commit(emptyList())
+        trimmedForSize = false
         entries.forEach { releaseBlob(it, emptyList()) }
         return keys
     }
@@ -297,9 +387,13 @@ class HistoryStore internal constructor(
     }
 
     private fun loadFromDisk(): List<ClipboardEntry> {
-        val read = HistoryFile.read(storage)
+        val read = HistoryFile.read(storage, contentFiles)
         if (read.skipped > 0) problem("skipped ${read.skipped} unreadable history item(s)")
         read.failure?.let { problem("couldn't read the whole history file ($it)") }
+        // Only after a whole read: content files a crash left behind (written,
+        // and the history file not yet pointing at them) go. After a read cut
+        // short, a file may be one an unread line points at.
+        if (read.failure == null) HistoryFile.sweep(storage, contentFiles)
         val source = legacy ?: return read.entries
         return migrate(source, read.entries)
     }
@@ -340,7 +434,7 @@ class HistoryStore internal constructor(
         // No blob release: these entries were all in a history a moment ago,
         // and the startup sweep deletes whatever ends up unreferenced.
         trimEntries(merged, release = false)
-        if (HistoryFile.write(storage, merged)) {
+        if (HistoryFile.write(storage, merged, contentFiles)) {
             source.remove()
             if (old.isNotEmpty()) problem("moved ${old.size} history item(s) to the new store")
         } else {
@@ -351,7 +445,7 @@ class HistoryStore internal constructor(
 
     private fun commit(entries: List<ClipboardEntry>) {
         cache = entries
-        if (!HistoryFile.write(storage, entries)) {
+        if (!HistoryFile.write(storage, entries, contentFiles)) {
             problem("couldn't save the history - it is kept in memory until a save works")
         }
     }
@@ -381,8 +475,12 @@ class HistoryStore internal constructor(
             }
             // Only the spared one is left.
             if (oldest < 0) return
+            val forSize = entries.size <= MAX_ITEMS
             val evicted = entries.removeAt(oldest)
-            if (release) releaseBlob(evicted, entries)
+            if (release) {
+                trimmedForSize = forSize
+                releaseBlob(evicted, entries)
+            }
         }
     }
 
@@ -428,8 +526,25 @@ internal class PrefsLegacyHistory(private val prefs: SharedPreferences) : Legacy
  * corrupt - costs that entry and no other, and neither writing nor reading
  * ever builds the whole history's JSON in memory: the text of one entry at a
  * time is the most either holds besides the entries themselves.
+ *
+ * An entry with more than [INLINE_MAX_CHARS] of content - a picture - is kept
+ * in a file of its own in the folder beside it (see [contentDirOf]), as the
+ * same one line of JSON, and its line here says `"ContentFile":"<name>"` in
+ * place of the content. That file is written once, when the entry is first
+ * saved, and deleted once a save no longer points at it, so a change to the
+ * history rewrites only this small file. A file with every entry inline -
+ * what builds before this wrote - reads exactly as before, and the first save
+ * splits it.
  */
 internal object HistoryFile {
+
+    /** Content up to this many characters stays in the history file itself. */
+    const val INLINE_MAX_CHARS = 64 * 1024
+
+    /** How a content file is named: random, so the name says nothing of what it holds. */
+    private val CONTENT_NAME = Regex("[0-9a-f]{32}\\.json")
+
+    private const val CONTENT_FILE_KEY = "ContentFile"
 
     class Loaded(
         val entries: List<ClipboardEntry>,
@@ -439,8 +554,14 @@ internal object HistoryFile {
         val failure: String?,
     )
 
-    /** Everything readable in [file] - empty, with no complaint, if there is no such file. */
-    fun read(file: File): Loaded {
+    /** The folder [file]'s big entries are kept in, one file each: `cliplink_history_content` for the app's. */
+    fun contentDirOf(file: File): File = File(file.parentFile, file.nameWithoutExtension + "_content")
+
+    /**
+     * Everything readable in [file] - empty, with no complaint, if there is no
+     * such file. [contentFiles] is told which file each big entry came from.
+     */
+    fun read(file: File, contentFiles: MutableMap<ClipboardEntry, String> = IdentityHashMap()): Loaded {
         if (!file.isFile) return Loaded(emptyList(), 0, null)
         val entries = ArrayList<ClipboardEntry>()
         var skipped = 0
@@ -454,7 +575,7 @@ internal object HistoryFile {
                         is LineReader.Line.TooLong -> skipped++
                         is LineReader.Line.Data -> {
                             if (line.bytes.isEmpty()) continue
-                            val entry = parseLine(line.bytes)
+                            val entry = parseLine(line.bytes, contentDirOf(file), contentFiles)
                             if (entry == null) skipped++ else entries.add(entry)
                         }
                     }
@@ -466,36 +587,113 @@ internal object HistoryFile {
         return Loaded(entries, skipped, failure)
     }
 
-    private fun parseLine(bytes: ByteArray): ClipboardEntry? = try {
-        ClipboardEntry.fromJson(JSONObject(String(bytes, Charsets.UTF_8)))
+    private fun parseLine(bytes: ByteArray, contentDir: File, contentFiles: MutableMap<ClipboardEntry, String>): ClipboardEntry? = try {
+        val json = JSONObject(String(bytes, Charsets.UTF_8))
+        if (json.has(CONTENT_FILE_KEY)) readContentFile(json, contentDir, contentFiles) else ClipboardEntry.fromJson(json)
     } catch (e: Throwable) {
         // Corrupt, or too big to hold: this entry is lost, the rest are not.
         null
     }
 
     /**
+     * The entry a `ContentFile` line points at - null if its file is missing,
+     * unreadable, or holds another entry than the line describes.
+     */
+    private fun readContentFile(ref: JSONObject, contentDir: File, contentFiles: MutableMap<ClipboardEntry, String>): ClipboardEntry? {
+        val name = ref.optString(CONTENT_FILE_KEY, "")
+        // Only a name this code makes: never a path out of the folder.
+        if (!CONTENT_NAME.matches(name)) return null
+        val described = ClipboardEntry.fromJson(ref) ?: return null
+        val bytes = FileInputStream(File(contentDir, name)).use { stream ->
+            when (val line = LineReader(stream).readLine(Limits.MAX_LINE_BYTES)) {
+                is LineReader.Line.Data -> line.bytes
+                else -> return null
+            }
+        }
+        val entry = ClipboardEntry.fromJson(JSONObject(String(bytes, Charsets.UTF_8))) ?: return null
+        val same = entry.type == described.type && entry.deviceId == described.deviceId &&
+            entry.timestamp == described.timestamp && entry.signature == described.signature
+        if (!same) return null
+        contentFiles[entry] = name
+        return entry
+    }
+
+    /**
      * Writes [entries] to [file] all at once or not at all: to a temporary
      * file beside it, flushed to disk, then renamed over it. False if that
-     * couldn't be done - the old file is then still there, untouched.
+     * couldn't be done - the old file is then still there, untouched, and so
+     * is every content file it points at.
+     *
+     * A big entry goes in a content file first, unless [contentFiles] says it
+     * has one already: written the same way, before the history file points
+     * at it. Once the history file is saved, the content files it no longer
+     * points at are deleted, and [contentFiles] forgets their entries.
      */
-    fun write(file: File, entries: List<ClipboardEntry>): Boolean {
-        val temp = File(file.parentFile, file.name + ".tmp")
+    fun write(
+        file: File,
+        entries: List<ClipboardEntry>,
+        contentFiles: MutableMap<ClipboardEntry, String> = IdentityHashMap(),
+    ): Boolean {
+        val contentDir = contentDirOf(file)
         return try {
             file.parentFile?.mkdirs()
-            FileOutputStream(temp).use { stream ->
-                val writer = OutputStreamWriter(stream, Charsets.UTF_8).buffered(64 * 1024)
+            for (entry in entries) {
+                if (entry.content.length <= INLINE_MAX_CHARS) continue
+                val known = contentFiles[entry]
+                if (known != null && File(contentDir, known).isFile) continue
+                val name = UUID.randomUUID().toString().replace("-", "") + ".json"
+                contentDir.mkdirs()
+                writeAtomically(File(contentDir, name)) { writer -> writeEntry(writer, entry) }
+                contentFiles[entry] = name
+            }
+            writeAtomically(file) { writer ->
                 for (entry in entries) {
-                    writeEntry(writer, entry)
+                    val name = if (entry.content.length > INLINE_MAX_CHARS) contentFiles[entry] else null
+                    if (name == null) writeEntry(writer, entry) else writeReference(writer, entry, name)
                     writer.write("\n")
                 }
+            }
+            sweep(file, contentFiles, keep = entries)
+            true
+        } catch (e: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Deletes the content files in [file]'s folder that no entry in [keep]
+     * points at - temporary ones and a crash's leftovers included - and has
+     * [contentFiles] forget the entries not in [keep] (by default, everything
+     * it knows). The folder goes too once nothing in it is used.
+     */
+    fun sweep(
+        file: File,
+        contentFiles: MutableMap<ClipboardEntry, String>,
+        keep: Collection<ClipboardEntry> = contentFiles.keys.toList(),
+    ) {
+        val kept = IdentityHashMap<ClipboardEntry, Unit>().apply { keep.forEach { put(it, Unit) } }
+        contentFiles.keys.retainAll { it in kept }
+        val contentDir = contentDirOf(file)
+        val names = contentDir.list() ?: return
+        val used = contentFiles.values.toHashSet()
+        for (name in names) if (name !in used) File(contentDir, name).delete()
+        if (used.isEmpty()) contentDir.delete()
+    }
+
+    /** [target] written by [body], all at once or not at all - see [write]. */
+    private fun writeAtomically(target: File, body: (Writer) -> Unit) {
+        val temp = File(target.parentFile, target.name + ".tmp")
+        try {
+            FileOutputStream(temp).use { stream ->
+                val writer = OutputStreamWriter(stream, Charsets.UTF_8).buffered(64 * 1024)
+                body(writer)
                 writer.flush()
                 stream.fd.sync()
             }
-            move(temp, file)
-            true
+            move(temp, target)
         } catch (e: Throwable) {
             temp.delete()
-            false
+            throw e
         }
     }
 
@@ -505,6 +703,21 @@ internal object HistoryFile {
         } catch (e: AtomicMoveNotSupportedException) {
             Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
         }
+    }
+
+    /** A big entry's line in the history file: everything but its content, which is in content file [name]. */
+    private fun writeReference(out: Writer, entry: ClipboardEntry, name: String) {
+        out.write("{\"$CONTENT_FILE_KEY\":")
+        writeJsonString(out, name)
+        out.write(",\"Type\":")
+        writeJsonString(out, entry.type)
+        out.write(",\"DeviceId\":")
+        writeJsonString(out, entry.deviceId)
+        out.write(",\"Timestamp\":")
+        writeJsonString(out, entry.timestamp)
+        out.write(",\"Signature\":")
+        if (entry.signature == null) out.write("null") else writeJsonString(out, entry.signature)
+        out.write("}")
     }
 
     /** [ClipboardEntry.toJson]'s text, streamed: a big entry's content is escaped as it is written, not copied first. */
@@ -574,6 +787,31 @@ internal fun newestOf(entries: List<ClipboardEntry>): ClipboardEntry? =
     entries.maxByOrNull { DotNetTimestamp.canonical(it.timestamp) }
 
 /**
+ * Whether [timestamp] is a strictly later instant than [other]. Instants, not
+ * text: "09:00:04-02:00" is an hour after "10:00:03Z" though it sorts below
+ * it, and one instant in two spellings (another offset, no zone - which
+ * counts as UTC) is not later. Within one millisecond, two spellings with the
+ * same suffix are told apart by their text, which is the .NET tick; text that
+ * isn't a time at all is compared as text.
+ */
+internal fun isLater(timestamp: String, other: String): Boolean {
+    val ours = DotNetTimestamp.epochMillis(timestamp)
+    val theirs = DotNetTimestamp.epochMillis(other)
+    if (ours == null || theirs == null) return DotNetTimestamp.canonical(timestamp) > DotNetTimestamp.canonical(other)
+    if (ours != theirs) return ours > theirs
+    val sameSuffix = zoneOf(timestamp) == zoneOf(other)
+    return sameSuffix && DotNetTimestamp.canonical(timestamp) > DotNetTimestamp.canonical(other)
+}
+
+/** The zone a timestamp is written with: "Z", "+02:00", or "" for none. */
+private fun zoneOf(timestamp: String): String = when {
+    timestamp.endsWith("Z") -> "Z"
+    timestamp.length > 6 && (timestamp[timestamp.length - 6] == '+' || timestamp[timestamp.length - 6] == '-') ->
+        timestamp.takeLast(6)
+    else -> ""
+}
+
+/**
  * [HistoryStore.add]'s decision, kept apart from the file so it is
  * unit-testable: the history with [entry] appended, or null when it isn't
  * new - already there, or deleted on this device.
@@ -605,11 +843,11 @@ internal fun ClipboardEntry.blobToRelease(remaining: List<ClipboardEntry>): Stri
     return hash.takeIf { remaining.none { it.usesBlob(hash) } }
 }
 
-// Exact, case and all: FileStore names a blob by the hash string exactly as
-// the entry spells it, on a case-sensitive filesystem - so "abc" and "ABC"
-// are two different files, and a case-insensitive match here would leave one
-// orphaned when the other spelling's entry is deleted.
-private fun ClipboardEntry.usesBlob(hash: String): Boolean = fileHash() == hash
+// In either case: FileStore finds a blob by its hash in either spelling (one
+// device sends "abc...", another "ABC..." for the same bytes), so an entry
+// that spells it the other way still uses it, and deleting one of them must
+// not take the bytes the other still shows.
+private fun ClipboardEntry.usesBlob(hash: String): Boolean = fileHash()?.equals(hash, ignoreCase = true) == true
 
 private fun ClipboardEntry.fileHash(): String? =
     if (type == ClipboardEntry.TYPE_FILE) FilePayload.parse(content)?.fileHash else null

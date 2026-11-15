@@ -11,6 +11,8 @@ import syncedRowsTest from './SyncedRows.test';
 import syncProtocolTest from './SyncProtocol.test';
 import historySyncTest from './HistorySync.test';
 import cardFooterTest from './CardFooter.test';
+import contentPrintTest from './ContentPrint.test';
+import lineChannelTest from './LineChannel.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -26,4 +28,6 @@ export default function testsuite() {
   syncProtocolTest();
   historySyncTest();
   cardFooterTest();
+  contentPrintTest();
+  lineChannelTest();
 }

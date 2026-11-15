@@ -28,9 +28,10 @@ public static class HistoryBatch
         // shows even if the batch added nothing.
         public bool HeadApplied { get; init; }
         public bool GroupChanged { get; init; }
-        // Set by BatchGroups.ApplyAnswer: the convenience item of a version 2
-        // sync that goes on the clipboard (null: none, or one was put there
-        // moments ago and this one is not newer, see BatchGroups.ApplyAnswer).
+        // Set by BatchGroups.ApplyAnswer and ApplyBatch: the convenience item
+        // that goes on the clipboard (null: none - nothing new was newer than
+        // everything here, or one was put there moments ago and this one is
+        // not newer, see BatchGroups.ApplyAnswer).
         public ClipboardEntry? Applied { get; init; }
     }
 
@@ -82,6 +83,18 @@ public static class HistoryBatch
     // result doesn't depend on how the OrderBy happens to break a tie.)
     public static ClipboardEntry? Newest(IEnumerable<ClipboardEntry> entries) =>
         entries.OrderByDescending(entry => entry.Timestamp).FirstOrDefault();
+
+    // Whether adding entry to a history with nothing protected would trim it
+    // straight away: the history is full and every entry in it is newer. (Of
+    // equal times the one listed first goes, and entry would be listed last.)
+    public static bool TrimmedAtOnce(IReadOnlyList<ClipboardEntry> history, ClipboardEntry entry, int maxItems) =>
+        history.Count >= maxItems && history.All(e => entry.Timestamp < e.Timestamp);
+
+    // The latest time in history, or null when it is empty: what an entry must
+    // be newer than to count as fresh (see BatchGroups) - newer than
+    // everything this PC already has.
+    public static DateTime? LatestTime(IReadOnlyList<ClipboardEntry> history) =>
+        history.Count == 0 ? null : history.Max(e => e.Timestamp);
 
     // Oldest-first eviction (by timestamp) down to maxItems. Returns what went.
     // The entry with the key keep is never the one that goes: the oldest of the

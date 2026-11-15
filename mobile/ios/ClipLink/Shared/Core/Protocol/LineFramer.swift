@@ -34,6 +34,11 @@ public struct LineFramer {
 
     public var bufferedByteCount: Int { buffer.count }
 
+    /// The lines `data` completes, each a slice of the buffer they arrived in -
+    /// not a copy: a history line can be tens of megabytes, and copying it out
+    /// (then keeping the grown buffer) held it two or three times over. The
+    /// part after the last newline is copied into a buffer of its own, so the
+    /// slices share nothing that is written to again.
     public mutating func append(_ data: Data) throws -> [Data] {
         var incoming = data
         if discarding {
@@ -44,10 +49,13 @@ public struct LineFramer {
         }
         buffer.append(incoming)
         var lines: [Data] = []
+        // Where the part not yet framed starts.
+        var head = buffer.startIndex
         while true {
             let cap = producedLine ? maxLineBytes : firstLineMaxBytes
-            let searchStart = buffer.startIndex + scanned
-            guard let newline = buffer[searchStart...].firstIndex(of: 0x0A) else {
+            let searchStart = head + scanned
+            guard let newline = buffer[searchStart..<buffer.endIndex].firstIndex(of: 0x0A) else {
+                if head != buffer.startIndex { buffer = Data(buffer[head..<buffer.endIndex]) }
                 scanned = buffer.count
                 if buffer.count > cap {
                     guard producedLine else { throw WireError.lineTooLong(cap) }
@@ -59,16 +67,20 @@ public struct LineFramer {
                 return lines
             }
             var end = newline
-            if end > buffer.startIndex, buffer[end - 1] == 0x0D { end -= 1 }
-            let line = buffer.subdata(in: buffer.startIndex..<end)
-            buffer.removeSubrange(buffer.startIndex...newline)
+            if end > head, buffer[end - 1] == 0x0D { end -= 1 }
+            let length = end - head
+            let line = buffer[head..<end]
+            head = newline + 1
             scanned = 0
-            if line.count > cap {
-                guard producedLine else { throw WireError.lineTooLong(cap) }
+            if length > cap {
+                guard producedLine else {
+                    buffer = Data(buffer[head..<buffer.endIndex])
+                    throw WireError.lineTooLong(cap)
+                }
                 droppedLines += 1
                 continue
             }
-            if !line.isEmpty {
+            if length > 0 {
                 producedLine = true
                 lines.append(line)
             }

@@ -15,9 +15,12 @@ struct JSONFile {
         return try? JSONSerialization.jsonObject(with: data)
     }
 
-    /// Modification date, to notice another process's writes.
-    func stamp() -> Date? {
-        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    /// Modification date and size, to notice another process's writes (the
+    /// size as well, in case two writes land within the date's resolution).
+    func stamp() -> FileStamp? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let modified = attributes[.modificationDate] as? Date else { return nil }
+        return FileStamp(modified: modified, size: (attributes[.size] as? NSNumber)?.int64Value ?? -1)
     }
 
     func write(_ object: Any) {
@@ -25,6 +28,12 @@ struct JSONFile {
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: url, options: [.atomic])
     }
+}
+
+/// What a store last saw of its file (see JSONFile.stamp).
+struct FileStamp: Equatable {
+    let modified: Date
+    let size: Int64
 }
 
 // MARK: - Cross-process lock
@@ -91,7 +100,7 @@ public final class TrustStore {
     private let file: JSONFile
     private let lock: StoreLock
     private var devices: [TrustedDevice]
-    private var stamp: Date?
+    private var stamp: FileStamp?
 
     public init(directory: URL) {
         file = JSONFile(url: directory.appendingPathComponent("trusted_devices.json"))
@@ -100,10 +109,12 @@ public final class TrustStore {
         stamp = file.stamp()
     }
 
-    /// Re-reads the file: the Share extension (a separate process) may have
-    /// changed it since this process last looked.
+    /// Re-reads the file if it changed since this process last looked: the
+    /// Share extension (a separate process) may have written it. Every return
+    /// to the foreground asks, and mostly nothing changed.
     public func reload() {
         lock.withLock {
+            guard file.stamp() != stamp else { return }
             devices = Self.load(file)
             stamp = file.stamp()
         }
@@ -234,7 +245,7 @@ public final class BlockStore {
     private let file: JSONFile
     private let lock: StoreLock
     private var devices: [BlockedDevice]
-    private var stamp: Date?
+    private var stamp: FileStamp?
 
     public init(directory: URL) {
         file = JSONFile(url: directory.appendingPathComponent("blocked_devices.json"))
@@ -243,8 +254,10 @@ public final class BlockStore {
         stamp = file.stamp()
     }
 
+    /// See TrustStore.reload.
     public func reload() {
         lock.withLock {
+            guard file.stamp() != stamp else { return }
             devices = Self.load(file)
             stamp = file.stamp()
         }
@@ -319,13 +332,17 @@ public final class FileStore {
     private let incoming: URL
     /// Human-named copies handed to share sheets / Quick Look / the Files app.
     public let exports: URL
+    /// The base64 text of big pictures, which HistoryStore keeps out of
+    /// history.json, named by the SHA-256 of that text (see HistoryStore.inlineLimit).
+    private let inline: URL
 
     public init(directory: URL) {
         root = directory.appendingPathComponent("files", isDirectory: true)
         blobs = root.appendingPathComponent("blobs", isDirectory: true)
         incoming = root.appendingPathComponent("incoming", isDirectory: true)
         exports = root.appendingPathComponent("exports", isDirectory: true)
-        for dir in [blobs, incoming, exports] {
+        inline = root.appendingPathComponent("inline", isDirectory: true)
+        for dir in [blobs, incoming, exports, inline] {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
         // Anything half-received when the app last died is unrecoverable
@@ -361,6 +378,12 @@ public final class FileStore {
 
     public func write(_ data: Data, hash: String) throws {
         try data.write(to: url(for: hash), options: [.atomic])
+    }
+
+    /// Free space for what the user wants kept (iOS counts what it would
+    /// purge for it); nil when it can't be told.
+    public func availableCapacity() -> Int64? {
+        (try? root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage
     }
 
     /// Moves (or copies, when moving isn't possible) an existing file in.
@@ -414,6 +437,52 @@ public final class FileStore {
     /// Drops one blob's human-named copies (see exportCopy).
     public func removeExport(_ hash: String) {
         try? FileManager.default.removeItem(at: exports.appendingPathComponent(Self.key(hash), isDirectory: true))
+    }
+
+    /// Drops the human-named copies of every blob not in `keys` (lowercase).
+    public func removeExports(keeping keys: Set<String>) {
+        let folders = (try? FileManager.default.contentsOfDirectory(at: exports, includingPropertiesForKeys: nil)) ?? []
+        for folder in folders where !keys.contains(folder.lastPathComponent) {
+            try? FileManager.default.removeItem(at: folder)
+        }
+    }
+
+    // MARK: Pictures kept out of history.json
+
+    public func inlineURL(for hash: String) -> URL {
+        inline.appendingPathComponent(Self.key(hash))
+    }
+
+    func hasInline(_ hash: String) -> Bool {
+        FileManager.default.fileExists(atPath: inlineURL(for: hash).path)
+    }
+
+    func writeInline(_ text: String, hash: String) throws {
+        try Data(text.utf8).write(to: inlineURL(for: hash), options: [.atomic])
+    }
+
+    /// The base64 text, exactly as the entry carried it. Nil when the file is
+    /// gone or unreadable.
+    func readInline(_ hash: String) -> String? {
+        guard let data = try? Data(contentsOf: inlineURL(for: hash), options: .mappedIfSafe) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    func deleteInline(_ hash: String) {
+        try? FileManager.default.removeItem(at: inlineURL(for: hash))
+    }
+
+    /// Drops every picture file not in `keys` (lowercase) - left by a process
+    /// that died between writing it and writing history.json - once it is
+    /// older than `age`: the other process may have just written one and be
+    /// about to save the history that names it.
+    func removeInline(keeping keys: Set<String>, olderThan age: TimeInterval) {
+        let items = (try? FileManager.default.contentsOfDirectory(at: inline, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let cutoff = Date().addingTimeInterval(-age)
+        for item in items where !keys.contains(item.lastPathComponent) {
+            let modified = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            if modified < cutoff { try? FileManager.default.removeItem(at: item) }
+        }
     }
 
     /// At most this many UTF-16 units (a .NET or Java string's length)...
@@ -484,42 +553,138 @@ public final class FileStore {
 
 // MARK: - History store
 
+/// A picture HistoryStore keeps out of history.json (see `inlineLimit`): the
+/// SHA-256 of its base64 text, which names its file in FileStore, that text's
+/// length, and the picture's content print, so it never has to be read back
+/// and decoded just to be compared.
+struct InlineRef: Equatable {
+    let hash: String
+    let length: Int
+    let print: String?
+
+    init(hash: String, length: Int, print: String?) {
+        self.hash = hash.lowercased()
+        self.length = length
+        self.print = print
+    }
+
+    init?(_ obj: [String: Any]) {
+        guard let hash = obj["Hash"] as? String, Wire.isSHA256Hex(hash) else { return nil }
+        self.init(hash: hash, length: (obj["Length"] as? NSNumber)?.intValue ?? 0, print: obj["Print"] as? String)
+    }
+
+    func jsonObject() -> [String: Any] {
+        var obj: [String: Any] = ["Hash": hash, "Length": NSNumber(value: length)]
+        if let print { obj["Print"] = print }
+        return obj
+    }
+}
+
 /// The synced-item history. Mirrors HistoryAccess.cs: 25-item cap,
 /// oldest-first eviction, file blobs released with their entries.
 public final class HistoryStore {
+    /// A picture whose base64 is longer than this is kept in a file of its own
+    /// (FileStore's inline folder), not in history.json, and held here with an
+    /// empty Content (see `withContent`). Every change rewrites history.json
+    /// whole, and the Share extension reads it whole on its tight memory budget:
+    /// with the pictures in it, that was tens of megabytes each time. Local only
+    /// - on the wire every picture still goes inline, whole.
+    static let inlineLimit = 32 * 1024
+
     private let file: JSONFile
     private let fileStore: FileStore
     private let lock: StoreLock
-    private var stamp: Date?
-    private(set) public var entries: [ClipboardEntry]
+    private var stamp: FileStamp?
+    /// Pictures kept out of history.json have an empty Content here (see `refs`).
+    private(set) public var entries: [ClipboardEntry] = [] {
+        didSet { sortedCache = nil }
+    }
+    /// The pictures kept out of history.json, by entry identity.
+    private var refs: [String: InlineRef] = [:]
+    /// `newestFirst`, until the entries change: every snapshot asks for it.
+    private var sortedCache: [ClipboardEntry]?
 
     public init(directory: URL, fileStore: FileStore) {
         self.fileStore = fileStore
         file = JSONFile(url: directory.appendingPathComponent("history.json"))
         lock = StoreLock.shared(for: directory)
-        entries = (file.read() as? [[String: Any]] ?? []).compactMap(ClipboardEntry.from)
-        stamp = file.stamp()
+        load()
     }
 
-    /// Re-reads the file (see TrustStore.reload).
+    /// Re-reads the file if it changed (see TrustStore.reload).
     public func reload() {
         lock.withLock {
-            entries = (file.read() as? [[String: Any]] ?? []).compactMap(ClipboardEntry.from)
-            stamp = file.stamp()
+            if file.stamp() != stamp { load() }
         }
+    }
+
+    /// Reads both forms: a picture inline (every older build), or in a file of
+    /// its own. An entry whose picture file is gone is left out - it could be
+    /// neither shown nor sent, and a peer that has it sends it again.
+    private func load() {
+        var loaded: [ClipboardEntry] = []
+        var found: [String: InlineRef] = [:]
+        for obj in file.read() as? [[String: Any]] ?? [] {
+            guard let entry = ClipboardEntry.from(obj) else { continue }
+            if let raw = obj["ContentRef"] as? [String: Any], entry.content.isEmpty {
+                guard let ref = InlineRef(raw), fileStore.hasInline(ref.hash) else { continue }
+                found[Self.identity(of: entry)] = ref
+            }
+            loaded.append(entry)
+        }
+        entries = loaded
+        refs = found
+        stamp = file.stamp()
     }
 
     /// Lock, catch up with the other process if it wrote meanwhile, mutate, save.
     private func mutate<T>(_ body: () -> (T, Bool)) -> T {
         lock.withLock {
-            if file.stamp() != stamp {
-                entries = (file.read() as? [[String: Any]] ?? []).compactMap(ClipboardEntry.from)
-            }
+            if file.stamp() != stamp { load() }
             let (result, changed) = body()
             if changed { save() }
             stamp = file.stamp()
             return result
         }
+    }
+
+    /// The entry as it goes on the wire: with its picture read back in, when
+    /// that is kept out of history.json; any other entry as it is. Nil when
+    /// the picture's file can't be read.
+    public func withContent(_ entry: ClipboardEntry) -> ClipboardEntry? {
+        guard entry.content.isEmpty, let ref = refs[Self.identity(of: entry)] else { return entry }
+        guard let text = fileStore.readInline(ref.hash) else { return nil }
+        var full = entry
+        full.content = text
+        return full
+    }
+
+    /// `withContent` of each, leaving out any whose picture can't be read.
+    public func withContent(_ entries: [ClipboardEntry]) -> [ClipboardEntry] {
+        entries.compactMap { withContent($0) }
+    }
+
+    /// The file holding the base64 text of an entry's picture, when it is kept
+    /// out of history.json: the UI reads (memory-maps) it from there.
+    public func inlineURL(for entry: ClipboardEntry) -> URL? {
+        guard entry.content.isEmpty, let ref = refs[Self.identity(of: entry)] else { return nil }
+        return fileStore.inlineURL(for: ref.hash)
+    }
+
+    /// ContentPrint.key of a history entry, without reading a picture kept out
+    /// of history.json back in.
+    public func contentKey(of entry: ClipboardEntry) -> String? {
+        if entry.content.isEmpty, let ref = refs[Self.identity(of: entry)] { return ref.print }
+        return ContentPrint.key(of: entry)
+    }
+
+    /// The SHA-256 (lowercase) naming every picture file the history uses.
+    var inlineHashes: Set<String> { Set(refs.values.map(\.hash)) }
+
+    /// Moves the big pictures an older build kept inline into files of their
+    /// own now, rather than with the next change.
+    public func moveBigPicturesOut() {
+        mutate { ((), entries.contains(where: Self.belongsApart)) }
     }
 
     /// Identity for dedup: who, when (canonicalised, so a Windows-trimmed copy
@@ -595,8 +760,12 @@ public final class HistoryStore {
     }
 
     /// Newest first, chronologically (not by raw string - see DotNetTimestamp).
+    /// Sorted once per change, not on every call.
     public var newestFirst: [ClipboardEntry] {
-        entries.sorted { DotNetTimestamp.isEarlier($1.timestamp, than: $0.timestamp) }
+        if let sortedCache { return sortedCache }
+        let result = entries.sorted { DotNetTimestamp.isEarlier($1.timestamp, than: $0.timestamp) }
+        sortedCache = result
+        return result
     }
 
     public var newest: ClipboardEntry? { newestFirst.first }
@@ -615,18 +784,58 @@ public final class HistoryStore {
     }
 
     /// Only drops the blob when no remaining entry still points at the same
-    /// bytes (two devices can sync the same file under two entries).
+    /// bytes (two devices can sync the same file under two entries). Its
+    /// human-named copies go with it: each is an APFS clone that keeps all the
+    /// bytes, up to 1 GB, once the blob itself is gone.
     private func releaseBlobIfUnreferenced(_ entry: ClipboardEntry) {
         guard entry.type == Wire.EntryType.file, let payload = FilePayload.parse(entry.content) else { return }
         let key = FileStore.key(payload.fileHash)
         let stillUsed = entries.contains { other in
             other.type == Wire.EntryType.file && FilePayload.parse(other.content).map { FileStore.key($0.fileHash) } == key
         }
-        if !stillUsed { fileStore.delete(payload.fileHash) }
+        if !stillUsed {
+            fileStore.delete(payload.fileHash)
+            fileStore.removeExport(payload.fileHash)
+        }
     }
 
     private func save() {
-        file.write(entries.map { $0.jsonObject() })
+        movePicturesApart()
+        file.write(entries.map { entry -> [String: Any] in
+            var obj = entry.jsonObject()
+            if entry.content.isEmpty, let ref = refs[Self.identity(of: entry)] { obj["ContentRef"] = ref.jsonObject() }
+            return obj
+        })
+    }
+
+    /// A signed picture over `inlineLimit`, still inline. (An unsigned one
+    /// stays inline: its tombstone key is made from its content.)
+    private static func belongsApart(_ entry: ClipboardEntry) -> Bool {
+        entry.type == Wire.EntryType.image && !(entry.signature ?? "").isEmpty && entry.content.utf8.count > inlineLimit
+    }
+
+    /// Before each save: every big picture still inline - a new one, or one an
+    /// older build stored - goes to a file of its own, and the files of
+    /// pictures no entry uses any more go. One that can't be written stays
+    /// inline, and is saved that way.
+    private func movePicturesApart() {
+        for index in entries.indices where Self.belongsApart(entries[index]) {
+            let entry = entries[index]
+            let hash = ContentHash.sha256Hex(Data(entry.content.utf8))
+            if !fileStore.hasInline(hash) {
+                do { try fileStore.writeInline(entry.content, hash: hash) } catch { continue }
+            }
+            refs[Self.identity(of: entry)] = InlineRef(hash: hash, length: entry.content.utf8.count, print: ContentPrint.key(of: entry))
+            entries[index].content = ""
+        }
+        let live = Set(entries.map(Self.identity(of:)))
+        let gone = refs.filter { !live.contains($0.key) }
+        guard !gone.isEmpty else { return }
+        refs = refs.filter { live.contains($0.key) }
+        let used = inlineHashes
+        for ref in gone.values where !used.contains(ref.hash) {
+            fileStore.deleteInline(ref.hash)
+        }
     }
 }
 
@@ -652,7 +861,7 @@ public final class DeletedStore {
     /// Oldest first.
     private var tombstones: [Tombstone] = []
     private var keys: Set<String> = []
-    private var stamp: Date?
+    private var stamp: FileStamp?
 
     public init(directory: URL) {
         file = JSONFile(url: directory.appendingPathComponent("deleted_entries.json"))
@@ -669,9 +878,11 @@ public final class DeletedStore {
 
     public var count: Int { tombstones.count }
 
-    /// Re-reads the file (see TrustStore.reload).
+    /// Re-reads the file if it changed (see TrustStore.reload).
     public func reload() {
-        lock.withLock { load() }
+        lock.withLock {
+            if file.stamp() != stamp { load() }
+        }
     }
 
     public func contains(_ entry: ClipboardEntry) -> Bool {

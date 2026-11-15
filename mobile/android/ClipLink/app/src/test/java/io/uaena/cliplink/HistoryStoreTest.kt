@@ -415,4 +415,202 @@ class HistoryStoreTest {
         val history = store()
         assertEquals(HistoryStore.MAX_ITEMS, history.countNew((1..500).map { "k$it" }))
     }
+
+    // ---- freshness (a sync's items only count as arriving now when they are newer than everything here) ----
+
+    @Test
+    fun `a sync newer than everything here is fresh and stored as asked`() {
+        val history = store()
+        history.addAll(listOf(entry("mine", 5)))
+        var told = 0
+        val merged = history.addIfFresh(listOf(entry("a", 3), entry("b", 9)), HistoryStore.Arrival.SyncByAge, HistoryStore.IfStale.Quiet) { told++ }
+        assertTrue(merged.fresh)
+        assertEquals(2, merged.added.size)
+        assertEquals(1, told)
+    }
+
+    @Test
+    fun `an empty history makes anything fresh`() {
+        assertTrue(store().addIfFresh(listOf(entry("a", 1)), HistoryStore.Arrival.Sync, HistoryStore.IfStale.Drop).fresh)
+    }
+
+    @Test
+    fun `a sync that is not newer is merged quietly, and the hooks are not asked`() {
+        val history = store()
+        history.addAll(listOf(entry("mine", 5)))
+        var asked = 0
+        var told = 0
+        val merged = history.addIfFresh(
+            listOf(entry("a", 3), entry("same", 5)),
+            HistoryStore.Arrival.Sync,
+            HistoryStore.IfStale.Quiet,
+            protectFront = { asked++; true },
+        ) { told++ }
+        assertFalse(merged.fresh)
+        assertEquals(2, merged.added.size)
+        assertEquals(3, history.all().size)
+        assertEquals(0, asked)
+        assertEquals(0, told)
+    }
+
+    @Test
+    fun `a stale head is dropped, not stored`() {
+        val history = store()
+        history.addAll(listOf(entry("mine", 5)))
+        val merged = history.addIfFresh(listOf(entry("old", 4)), HistoryStore.Arrival.SyncByAge, HistoryStore.IfStale.Drop)
+        assertFalse(merged.fresh)
+        assertTrue(merged.added.isEmpty())
+        assertEquals(1, history.all().size)
+    }
+
+    @Test
+    fun `a quiet merge drops at once what is older than everything a full history keeps`() {
+        val history = store()
+        history.addAll((100..124).map { entry("kept$it", it) })
+        val merged = history.addIfFresh(listOf(entry("ancient", 1)), HistoryStore.Arrival.Sync, HistoryStore.IfStale.Quiet)
+        assertFalse(merged.fresh)
+        assertTrue(merged.added.isEmpty())
+        assertEquals(25, history.all().size)
+    }
+
+    @Test
+    fun `the history knows when its characters, not its count, hold it down`() {
+        val history = store(maxStoredChars = 10)
+        assertFalse(history.trimmedForSize)
+        history.addAll(listOf(entry("aaaaaa", 1), entry("bbbbbb", 2)))
+        assertTrue(history.trimmedForSize)
+        assertEquals(1, history.all().size)
+
+        val counted = store(file = File(temp.root, "other.jsonl"))
+        counted.addAll((1..26).map { entry("e$it", it) })
+        assertFalse(counted.trimmedForSize)
+    }
+
+    // ---- big entries in files of their own -----------------------------------------------
+
+    private val contentDir: File get() = HistoryFile.contentDirOf(storage)
+
+    /** Content just over what stays inline, ending in [tail] so each one differs. */
+    private fun big(tail: String) = "x".repeat(HistoryFile.INLINE_MAX_CHARS) + tail
+
+    private fun image(content: String, n: Int) =
+        ClipboardEntry(content, ClipboardEntry.TYPE_IMAGE, "DEVICE", ts(n), "sig-img-$n")
+
+    @Test
+    fun `a big entry is kept in a file of its own and the history file points at it`() {
+        val picture = image(big("a lone \uD83D surrogate"), 1)
+        store().addAll(listOf(entry("small", 2), picture))
+
+        val lines = storage.readLines()
+        assertEquals(2, lines.size)
+        assertEquals("small", JSONObject(lines[0]).getString("Content"))
+        val ref = JSONObject(lines[1])
+        assertFalse("the content isn't in the history file", ref.has("Content"))
+        assertEquals("image", ref.getString("Type"))
+        assertEquals(listOf(ref.getString("ContentFile")), contentDir.list()!!.toList())
+
+        // And it all comes back exactly, the signed content to the letter.
+        assertEquals(listOf(entry("small", 2), picture), store().all())
+        assertTrue(problems.isEmpty())
+    }
+
+    @Test
+    fun `a big entry's file is written once, not on every change`() {
+        val history = store()
+        history.addAll(listOf(image(big("1"), 1)))
+        val file = contentDir.listFiles()!!.single()
+        assertTrue(file.setLastModified(1_000_000L))
+
+        history.addAll(listOf(entry("a", 2)))
+        history.delete(entry("a", 2))
+        history.addAll(listOf(entry("b", 3)))
+
+        assertEquals(listOf(file.name), contentDir.list()!!.toList())
+        assertEquals(1_000_000L, file.lastModified())
+    }
+
+    @Test
+    fun `a big entry's file goes with the entry, and the folder once it's empty`() {
+        val history = store()
+        val first = image(big("1"), 1)
+        val second = image(big("2"), 2)
+        history.addAll(listOf(first, second))
+        assertEquals(2, contentDir.list()!!.size)
+
+        history.delete(first)
+        assertEquals(1, contentDir.list()!!.size)
+        assertEquals(listOf(second), store().all())
+
+        history.clear()
+        assertFalse(contentDir.exists())
+        assertEquals(listOf("cliplink_history.jsonl"), storage.parentFile!!.list()!!.toList())
+    }
+
+    @Test
+    fun `an evicted big entry's file is deleted too`() {
+        val history = store()
+        history.addAll(listOf(image(big("old"), 1)))
+        history.addAll((2..26).map { entry("e$it", it) })
+        assertEquals(25, history.all().size)
+        assertFalse(contentDir.exists())
+    }
+
+    @Test
+    fun `a history file an older build wrote, everything inline, reads as before and is split on the next save`() {
+        val picture = image(big("inline"), 1)
+        val small = entry("small", 2)
+        // Exactly what builds before this one wrote: every entry's whole JSON on its line.
+        storage.parentFile!!.mkdirs()
+        storage.writeText(listOf(picture, small).joinToString("") { it.toJson().toString() + "\n" })
+
+        val history = store()
+        assertEquals(listOf(picture, small), history.all())
+        assertFalse("reading alone changes nothing", contentDir.exists())
+
+        history.addAll(listOf(entry("new", 3)))
+        assertEquals(1, contentDir.list()!!.size)
+        assertFalse(storage.readText().contains(picture.content))
+        assertEquals(listOf(picture, small, entry("new", 3)), store().all())
+        assertTrue(problems.isEmpty())
+    }
+
+    @Test
+    fun `a big entry whose file is missing or holds something else costs that entry alone`() {
+        val history = store()
+        val kept = image(big("kept"), 1)
+        val missing = image(big("missing"), 2)
+        val swapped = image(big("swapped"), 3)
+        history.addAll(listOf(kept, missing, swapped, entry("small", 4)))
+        val names = storage.readLines().map { JSONObject(it).optString("ContentFile") }
+        File(contentDir, names[1]).delete()
+        // Another entry's line in this one's file: not the entry its reference describes.
+        File(contentDir, names[2]).writeText(image(big("other"), 9).toJson().toString() + "\n")
+
+        assertEquals(listOf(kept, entry("small", 4)), store().all())
+        assertTrue(problems.any { it.contains("skipped 2") })
+    }
+
+    @Test
+    fun `a reference can't point out of its folder`() {
+        storage.parentFile!!.mkdirs()
+        File(storage.parentFile, "secret.json").writeText(image(big("s"), 1).toJson().toString() + "\n")
+        val escape = JSONObject().put("ContentFile", "../secret.json").put("Type", "image")
+            .put("DeviceId", "DEVICE").put("Timestamp", ts(1)).put("Signature", "sig-img-1")
+        storage.writeText(escape.toString() + "\n")
+
+        assertTrue(store().all().isEmpty())
+        assertTrue(problems.any { it.contains("skipped 1") })
+    }
+
+    @Test
+    fun `content files a crash left behind are swept when the history is read`() {
+        store().addAll(listOf(image(big("1"), 1)))
+        val orphan = File(contentDir, "0123456789abcdef0123456789abcdef.json").apply { writeText("{}\n") }
+        val temp = File(contentDir, "fedcba9876543210fedcba9876543210.json.tmp").apply { writeText("{") }
+
+        assertEquals(1, store().all().size)
+        assertFalse(orphan.exists())
+        assertFalse(temp.exists())
+        assertEquals(1, contentDir.list()!!.size)
+    }
 }

@@ -1,27 +1,81 @@
 // Step 8 of the build order in ../../../../README.md: full sync.
 // Mirrors windows/ClipLink/Engine/Storage/HistoryAccess.cs — same 25-item cap,
 // oldest-first eviction, same file-blob cleanup on eviction for file-type
-// entries. Preferences only stores flat ValueType entries, so (same
-// tradeoff as TrustStore.ets) the whole history is kept as one
-// JSON-serialized array under a single key.
+// entries. The whole history is one JSON array, in a file of its own (see
+// HISTORY_FILE). It used to be a single Preferences value, which is capped
+// at 16 MB: pictures are inline, so a few screenshots went over it, and from
+// then on nothing saved.
 
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
+import fs from '@ohos.file.fs';
+import { util } from '@kit.ArkTS';
 import { ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
 import { FileStore, isEmptyFile, isValidFileHash } from './FileStore';
 import { FilePayload } from './FilePayload';
 import { DeletedEntries, entryKey } from './DeletedEntries';
 import { MergeResult, mergeBatch, trimOldest } from './HistoryBatch';
 
+// Where builds up to 2.1.2 kept the history: read once, by the first start
+// of a newer build, then deleted (see migrateFromPreferences).
 const PREFERENCES_NAME = 'cliplink_history';
 const HISTORY_KEY = 'entries';
+// The history now, under filesDir: written whole to HISTORY_FILE + '.tmp',
+// then renamed over it, so a crash mid-write leaves the last good copy.
+const HISTORY_FILE = 'cliplink_history.json';
+const TEMP_SUFFIX = '.tmp';
 export const MAX_HISTORY_ITEMS = 25;
+
+const textEncoder = util.TextEncoder.create('utf-8');
+
+function exists(path: string): boolean {
+  try {
+    return fs.accessSync(path);
+  } catch (e) {
+    return false;
+  }
+}
+
+function parseEntries(json: string): ClipboardEntry[] {
+  try {
+    const parsed: ClipboardEntry[] = JSON.parse(json) as ClipboardEntry[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    // corrupt - regenerate rather than crash, same policy
+    // HistoryAccess.cs/TrustStore.cs use on the Windows side
+    return [];
+  }
+}
+
+// Writes the whole of `text` to `path` through a temp file and a rename.
+async function writeFileAtomically(path: string, text: string): Promise<void> {
+  const temp: string = path + TEMP_SUFFIX;
+  const bytes: Uint8Array = textEncoder.encodeInto(text);
+  const file: fs.File = await fs.open(temp, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+  try {
+    // A write may take only part: the rest goes on at the file position
+    // reached (WriteOptions.offset is where in the file, not in the buffer).
+    let written: number = 0;
+    while (written < bytes.byteLength) {
+      const whole: boolean = written === 0 && bytes.byteOffset === 0 && bytes.buffer.byteLength === bytes.byteLength;
+      const rest: ArrayBuffer = whole ? bytes.buffer as ArrayBuffer
+        : bytes.buffer.slice(bytes.byteOffset + written, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+      const wrote: number = await fs.write(file.fd, rest, { offset: written });
+      if (wrote <= 0) throw new Error('nothing written');
+      written += wrote;
+    }
+    await fs.fsync(file.fd);
+  } finally {
+    await fs.close(file);
+  }
+  await fs.rename(temp, path);
+}
 
 export class HistoryAccess {
   private fileStore: FileStore;
   private deleted: DeletedEntries = new DeletedEntries();
   // Every read-modify-write of the history runs one at a time. Each yields
-  // at getPreferences/flush, so an add that read the old list before a
+  // at the file's read and write, so an add that read the old list before a
   // clear wrote [] could write it back afterwards - resurrecting cleared
   // entries whose file blobs had already been deleted.
   private chain: Promise<void> = Promise.resolve();
@@ -30,16 +84,38 @@ export class HistoryAccess {
   // items are around 10 MB - and parsing it on every read cost the UI
   // thread 15 ms a time: a peer's history batch, which adds each of its 25
   // items in turn, re-parsed it 25 times (0.4 s, measured) the moment the
-  // peer connected.
+  // peer connected. When a save fails it is ahead of the file (see
+  // saveHistory).
   private cached: ClipboardEntry[] | null = null;
   // The key of the item the last sync put on the clipboard and on top of the
   // list: the trim does not drop it while it is set (the oldest other item
   // goes instead). Memory only: it ends with the app, and when a newer item
   // arrives (a live one, or another sync's).
   private protectedKey: string | null = null;
+  // Told the keys (entryKey) of entries the cap pushed out, once they are out
+  // of the saved history: the list drops their cards as it does deleted ones
+  // (a card past the cap had lost its file, and nothing would fetch it again).
+  private evictedCallback: ((keys: string[]) => void) | null = null;
+  // Told when the history could not be written (see saveHistory).
+  private saveFailedCallback: ((message: string) => void) | null = null;
+  // The first read, while it is under way: a second caller waits for it
+  // rather than reading (and migrating) again.
+  private loading: Promise<ClipboardEntry[]> | null = null;
 
   constructor(fileStore: FileStore) {
     this.fileStore = fileStore;
+  }
+
+  onEvicted(callback: (keys: string[]) => void): void {
+    this.evictedCallback = callback;
+  }
+
+  onSaveFailed(callback: (message: string) => void): void {
+    this.saveFailedCallback = callback;
+  }
+
+  private reportEvicted(evicted: ClipboardEntry[]): void {
+    if (evicted.length > 0) this.evictedCallback?.(evicted.map((e: ClipboardEntry) => entryKey(e)));
   }
 
   private serialized<T>(work: () => Promise<T>): Promise<T> {
@@ -48,38 +124,95 @@ export class HistoryAccess {
     return result;
   }
 
-  private async getPrefs(context: common.UIAbilityContext): Promise<preferences.Preferences> {
-    return preferences.getPreferences(context, PREFERENCES_NAME);
-  }
-
   // A copy of the list, as last saved: a caller may sort or add to it
   // without touching what the next caller reads.
   async getHistory(context: common.UIAbilityContext): Promise<ClipboardEntry[]> {
     return (await this.loadHistory(context)).slice();
   }
 
+  private historyPath(context: common.UIAbilityContext): string {
+    return `${context.filesDir}/${HISTORY_FILE}`;
+  }
+
   private async loadHistory(context: common.UIAbilityContext): Promise<ClipboardEntry[]> {
     if (this.cached !== null) return this.cached;
-    const prefs = await this.getPrefs(context);
-    const json = prefs.getSync(HISTORY_KEY, '[]') as string;
-    let entries: ClipboardEntry[];
-    try {
-      entries = JSON.parse(json) as ClipboardEntry[];
-    } catch (e) {
-      // corrupt preferences value — regenerate rather than crash, same
-      // policy HistoryAccess.cs/TrustStore.cs use on the Windows side
-      entries = [];
+    if (this.loading === null) {
+      this.loading = this.readHistory(context);
     }
-    // Another read may have finished while this one waited for the store.
+    const entries: ClipboardEntry[] = await this.loading;
+    // A save may have set it meanwhile.
     if (this.cached === null) this.cached = entries;
     return this.cached;
   }
 
+  private async readHistory(context: common.UIAbilityContext): Promise<ClipboardEntry[]> {
+    const path: string = this.historyPath(context);
+    if (exists(path)) {
+      let entries: ClipboardEntry[] = [];
+      try {
+        entries = parseEntries(await fs.readText(path));
+      } catch (e) {
+        // unreadable - as a corrupt one
+      }
+      // A start that stopped after writing the file and before deleting
+      // the old store (see migrateFromPreferences) finishes the job now.
+      if (exists(`${context.preferencesDir}/${PREFERENCES_NAME}`)) {
+        await this.deleteOldStore(context);
+      }
+      return entries;
+    }
+    return this.migrateFromPreferences(context, path);
+  }
+
+  // The first start of a build that keeps the history in a file: what the
+  // old Preferences value holds is written to the file, and only once that
+  // write has worked is the old store deleted - a start cut short before
+  // then reads the old value again next time. Nothing in the entries
+  // changes: pictures stay inline, at full quality.
+  private async migrateFromPreferences(context: common.UIAbilityContext, path: string): Promise<ClipboardEntry[]> {
+    let json: string = '[]';
+    try {
+      const prefs: preferences.Preferences = await preferences.getPreferences(context, PREFERENCES_NAME);
+      json = prefs.getSync(HISTORY_KEY, '[]') as string;
+    } catch (e) {
+      return [];
+    }
+    const entries: ClipboardEntry[] = parseEntries(json);
+    if (entries.length === 0) {
+      await this.deleteOldStore(context);
+      return entries;
+    }
+    try {
+      // The text as stored: it is a JSON array already.
+      await writeFileAtomically(path, json);
+    } catch (e) {
+      // Kept in the old store for the next start to try again.
+      this.saveFailedCallback?.(`could not move the history to its own file (${e})`);
+      return entries;
+    }
+    await this.deleteOldStore(context);
+    return entries;
+  }
+
+  private async deleteOldStore(context: common.UIAbilityContext): Promise<void> {
+    try {
+      await preferences.deletePreferences(context, PREFERENCES_NAME);
+    } catch (e) {
+      // left for the next start
+    }
+  }
+
+  // A write that fails (the disk full, say) leaves the history as it was on
+  // disk, but the list in memory moves on: what was added is listed and the
+  // app carries on, and the next save writes everything again. It is logged,
+  // not thrown - throwing left an item already sent to peers off the list here.
   private async saveHistory(context: common.UIAbilityContext, entries: ClipboardEntry[]): Promise<void> {
     this.cached = entries;
-    const prefs = await this.getPrefs(context);
-    prefs.putSync(HISTORY_KEY, JSON.stringify(entries));
-    await prefs.flush();
+    try {
+      await writeFileAtomically(this.historyPath(context), JSON.stringify(entries));
+    } catch (e) {
+      this.saveFailedCallback?.(`could not save the history (${e})`);
+    }
   }
 
   // Timestamps compare in canonical form so a trimmed and an untrimmed
@@ -98,11 +231,13 @@ export class HistoryAccess {
     return this.deleted.contains(context, entryKey(entry));
   }
 
-  // Returns true only if the entry was genuinely new (not a duplicate) -
-  // matches HistoryAccess.cs's addToHistory return contract, which callers
-  // rely on to decide whether to also apply/re-broadcast an entry. A deleted
-  // entry counts as not new: checked in here too, not just by the caller, so
-  // one that passed that check just before its delete ran stays deleted.
+  // Returns true only if the entry was genuinely new (not a duplicate) and is
+  // in the history now - matches HistoryAccess.cs's addToHistory return
+  // contract, which callers rely on to decide whether to also apply and list
+  // an entry. A deleted entry counts as not new: checked in here too, not just
+  // by the caller, so one that passed that check just before its delete ran
+  // stays deleted. So does one older than everything the full history keeps,
+  // which the trim drops again at once (a peer whose clock is behind).
   addToHistory(context: common.UIAbilityContext, entry: ClipboardEntry): Promise<boolean> {
     return this.serialized(async (): Promise<boolean> => {
       if (await this.deleted.contains(context, entryKey(entry))) {
@@ -115,10 +250,16 @@ export class HistoryAccess {
       entries.push(entry);
       // A live item is the newest arrival: what an earlier sync spared is
       // trimmed by the normal rule from here on.
+      const spared: string | null = this.protectedKey;
       this.protectedKey = null;
-      await this.trimToLimit(entries);
-      await this.saveHistory(context, entries);
-      return true;
+      const evicted: ClipboardEntry[] = await this.trimToLimit(entries);
+      const kept: boolean = entries.includes(entry);
+      // Dropped again at once, so it arrived after nothing: what was spared
+      // stays spared.
+      if (!kept) this.protectedKey = spared;
+      if (kept || evicted.length > 1) await this.saveHistory(context, entries);
+      this.reportEvicted(evicted.filter((e: ClipboardEntry) => e !== entry));
+      return kept;
     });
   }
 
@@ -135,7 +276,8 @@ export class HistoryAccess {
   // newest new entry, before the trim: only if it says yes is the entry the
   // front (the result's `front`) and spared.
   addBatch(context: common.UIAbilityContext, candidates: ClipboardEntry[], newFront: boolean = false,
-    frontOk: (entry: ClipboardEntry) => boolean = (entry: ClipboardEntry): boolean => true): Promise<MergeResult> {
+    frontOk: (entry: ClipboardEntry, localNewest: string | null) => boolean =
+      (entry: ClipboardEntry, localNewest: string | null): boolean => true): Promise<MergeResult> {
     return this.serialized(async (): Promise<MergeResult> => {
       const gone: Set<string> = new Set<string>();
       for (const entry of candidates) {
@@ -152,6 +294,7 @@ export class HistoryAccess {
       for (const evicted of result.evicted) {
         this.releaseBlobIfUnused(evicted, entries);
       }
+      this.reportEvicted(result.evicted);
       return result;
     });
   }
@@ -174,10 +317,12 @@ export class HistoryAccess {
   // same as Windows. Compared in canonical form, which is fixed-width, so text
   // order is time order. The entry a sync spared (protectedKey) is not the one
   // that goes.
-  private async trimToLimit(entries: ClipboardEntry[]): Promise<void> {
-    for (const oldest of trimOldest(entries, MAX_HISTORY_ITEMS, (entry: ClipboardEntry) => this.isProtected(entry))) {
+  private async trimToLimit(entries: ClipboardEntry[]): Promise<ClipboardEntry[]> {
+    const evicted: ClipboardEntry[] = trimOldest(entries, MAX_HISTORY_ITEMS, (entry: ClipboardEntry) => this.isProtected(entry));
+    for (const oldest of evicted) {
       this.releaseBlobIfUnused(oldest, entries);
     }
+    return evicted;
   }
 
   // Entries come from peers too, so their FileHash is only a blob to
@@ -198,6 +343,13 @@ export class HistoryAccess {
     return payload !== null ? payload.FileHash : null;
   }
 
+  // Whether an entry points at the blob for `hash`, whatever the case of
+  // either: senders differ (iOS sends uppercase), one blob serves both.
+  private usesBlob(entry: ClipboardEntry, hash: string): boolean {
+    const own: string | null = this.fileHashOf(entry);
+    return own !== null && own.toLowerCase() === hash.toLowerCase();
+  }
+
   private releaseBlob(entry: ClipboardEntry): void {
     const hash = this.fileHashOf(entry);
     if (hash !== null) {
@@ -210,7 +362,7 @@ export class HistoryAccess {
   // `remaining` points at it any more.
   private releaseBlobIfUnused(entry: ClipboardEntry, remaining: ClipboardEntry[]): void {
     const hash = this.fileHashOf(entry);
-    if (hash !== null && !remaining.some(e => this.fileHashOf(e) === hash)) {
+    if (hash !== null && !remaining.some(e => this.usesBlob(e, hash))) {
       this.fileStore.delete(hash);
     }
   }
@@ -256,7 +408,7 @@ export class HistoryAccess {
   deleteFileIfUnused(context: common.UIAbilityContext, hash: string): Promise<void> {
     return this.serialized(async (): Promise<void> => {
       const entries = await this.getHistory(context);
-      if (!entries.some(e => this.fileHashOf(e) === hash)) {
+      if (!entries.some(e => this.usesBlob(e, hash))) {
         this.fileStore.delete(hash);
       }
     });

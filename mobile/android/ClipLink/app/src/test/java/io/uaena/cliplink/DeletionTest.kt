@@ -146,15 +146,16 @@ class DeletionTest {
     }
 
     @Test
-    fun `a hash spelled in the other case is a different blob`() {
-        // FileStore names each blob by the hash exactly as the entry spells
-        // it, on a case-sensitive filesystem: these are two files, and
-        // deleting either entry must release its own rather than orphan it.
+    fun `a hash spelled in the other case is the same blob`() {
+        // FileStore finds a blob by its hash in either case (Windows sends
+        // "ABC...", the same file copied here hashes to "abc..."), so the
+        // other spelling's entry still uses it: deleting one keeps the bytes.
         val hash = "abc123".repeat(10) + "abcd"
         val lower = fileEntry(hash, "2026-09-26T10:00:00.0000001Z")
         val upper = fileEntry(hash.uppercase(), "2026-09-26T11:00:00.0000001Z")
 
-        assertEquals(hash, lower.blobToRelease(listOf(upper)))
-        assertEquals(hash.uppercase(), upper.blobToRelease(listOf(lower)))
+        assertNull(lower.blobToRelease(listOf(upper)))
+        assertNull(upper.blobToRelease(listOf(lower)))
+        assertEquals(hash.uppercase(), upper.blobToRelease(emptyList()))
     }
 }

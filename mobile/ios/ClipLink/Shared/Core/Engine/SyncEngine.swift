@@ -163,6 +163,18 @@ public final class SyncEngine {
     var unansweredRetries: [String: Int] = [:]
     /// Hashes whose completed download is being hash-checked right now.
     var verifying: Set<String> = []
+    /// Files we're waiting on that don't fit in the free space (or whose
+    /// bytes couldn't be written): not asked for, and their streams go by,
+    /// until the app comes back to the foreground or a new link comes up -
+    /// otherwise the whole file was streamed again and again for nothing.
+    /// Shown on the card.
+    var needsSpace: Set<String> = []
+    /// For each file we're waiting on, the peers whose copy failed the hash
+    /// check, and how often: one that failed `maxBadCopies` times isn't asked
+    /// for it again until it connects anew (its copy is corrupt).
+    var badCopies: [String: [String: Int]] = [:]
+    /// Free space reported to `hasRoom` instead of the volume's (tests).
+    var capacityOverride: Int64?
     /// What arrived since the app started, and which entries came in together in
     /// one history batch or sync (memory only; see BatchGroupTracker). Pruned
     /// against history whenever a snapshot is built.
@@ -184,6 +196,25 @@ public final class SyncEngine {
     /// for the whole engine: a second one that is not newer and comes within 90
     /// seconds stays off it (see `shouldApplyConvenience`). Memory only.
     var lastConvenience: AppliedConvenience?
+    /// Each history entry's content print (ContentPrint.key), by identity: a
+    /// picture's means decoding megabytes, and the list asks on every snapshot.
+    /// Memory only, pruned with the snapshot.
+    var contentKeys: [String: String?] = [:]
+    /// What the list shows of each history entry that never changes (see
+    /// EntryFacts), by identity: worked out on every snapshot it re-ran
+    /// regexes over whole texts and re-parsed every timestamp. Memory only,
+    /// pruned with the snapshot.
+    var entryFacts: [String: EntryFacts] = [:]
+    /// The entries this process signed and stored itself: all a short-lived
+    /// sender (the Share extension) sends a version 1 peer as its history
+    /// (see sendHistoryBatch). Memory only.
+    var storedHere: Set<String> = []
+    /// How often the user changed the clipboard (copied elsewhere, or tapped
+    /// Copy here), as the app last reported it, and how many entries were
+    /// meant for the clipboard so far: a file that goes there once its bytes
+    /// are here does not if either moved on meanwhile (see PendingFile).
+    var clipboardGeneration = 0
+    var lastApplySerial = 0
 
     /// Bumped by every foreground/background transition: a teardown still
     /// waiting out its grace period checks it and stands down if the app came
@@ -221,6 +252,18 @@ public final class SyncEngine {
         systemDeviceName = settings["system_device_name"] as? String ?? ""
         passphraseKey = secrets.data(for: Self.passphraseSecretKey)
         cachedProof = passphraseKey.map { PassphraseAuth.proof(key: $0, deviceId: ownId) }
+        // Human-named copies of files that left the history before builds that
+        // drop them with their blob (HistoryStore.releaseBlobIfUnreferenced).
+        // The app's node only: the Share extension leaves the store to it.
+        if !config.sendOnly {
+            files.removeExports(keeping: referencedFileKeys())
+            // Picture files no saved history names (a process died between
+            // the two writes), and the big pictures an older build kept in
+            // history.json, which go to files of their own - on the queue, not
+            // in the app's launch.
+            files.removeInline(keeping: history.inlineHashes, olderThan: 10 * 60)
+            queue.async { [history] in history.moveBigPicturesOut() }
+        }
         observeExternalChanges()
     }
 
@@ -277,18 +320,28 @@ public final class SyncEngine {
     func externalChange() {
         queue.async { [self] in
             guard running, tickTimer != nil else { return }
-            let known = Set(history.entries.map(HistoryStore.identity(of:)))
-            reloadFromDisk()
-            let added = history.entries.filter { !known.contains(HistoryStore.identity(of: $0)) }
-            for entry in added.sorted(by: { DotNetTimestamp.isEarlier($0.timestamp, than: $1.timestamp) }) where entry.deviceId == ownId {
-                batchGroups.registerLive(HistoryStore.identity(of: entry))
-                let json = Envelope(type: Wire.MessageType.entry, payload: entry.jsonString()).jsonString()
-                for link in links.values { link.send(json) }
-                if entry.type == Wire.EntryType.file, let payload = FilePayload.parse(entry.content), files.exists(payload.fileHash) {
-                    for link in links.values { streamFile(hash: payload.fileHash, to: link) }
-                }
-                log("sent \(entry.type) shared from another app to \(links.count) peer(s)")
+            reloadAndSendNewOwnEntries()
+        }
+    }
+
+    /// Reloads what the other process may have written and sends the entries
+    /// of our own that came with it to every link that is up: a link carries
+    /// a head (or history) only when it starts, so without this a peer that
+    /// stayed connected would not see them until it reconnects.
+    func reloadAndSendNewOwnEntries() {
+        let known = Set(history.entries.map(HistoryStore.identity(of:)))
+        reloadFromDisk()
+        let added = history.entries.filter { !known.contains(HistoryStore.identity(of: $0)) }
+        for entry in added.sorted(by: { DotNetTimestamp.isEarlier($0.timestamp, than: $1.timestamp) }) where entry.deviceId == ownId {
+            // A big picture comes back from its own file: it goes inline.
+            guard let full = history.withContent(entry) else { continue }
+            batchGroups.registerLive(HistoryStore.identity(of: entry))
+            let json = Envelope(type: Wire.MessageType.entry, payload: full.jsonString()).jsonString()
+            for link in links.values { link.send(json) }
+            if entry.type == Wire.EntryType.file, let payload = FilePayload.parse(entry.content), files.exists(payload.fileHash) {
+                for link in links.values { streamFile(hash: payload.fileHash, to: link) }
             }
+            log("sent \(entry.type) shared from another app to \(links.count) peer(s)")
         }
     }
 
@@ -309,10 +362,14 @@ public final class SyncEngine {
                 startNetworking()
             } else if tickTimer == nil || reconnectTimer == nil {
                 // Came back during the grace period: sockets and timers were
-                // already stopped, the links are still up.
-                reloadFromDisk()
+                // already stopped, the links are still up. The Share extension
+                // may have stored items meanwhile without handing them over
+                // (no live marker): they go over those links now.
+                reloadAndSendNewOwnEntries()
                 startTimers()
             }
+            // The user may have freed space meanwhile.
+            retryFilesThatNeededSpace()
             foregroundAt = Date()
             kick(reason: "foreground")
             schedulePublish()
@@ -808,17 +865,69 @@ public final class SyncEngine {
     /// sync version 2 is told to delete it too (an older one keeps its copy; the
     /// ones offline learn from our next history_head). Its file blob goes too,
     /// unless another remaining item has the same bytes.
+    ///
+    /// The card is every entry with that content (the list shows one card per
+    /// content, see StackPlanner.rows): they all go, or a hidden twin would
+    /// show up as the deleted item coming back.
     public func deleteItem(id: String) {
         queue.async { [self] in
             guard let entry = history.entries.first(where: { HistoryStore.identity(of: $0) == id }) else {
                 schedulePublish() // already gone: just refresh the list
                 return
             }
-            deleted.add([entry])
-            removeFromHistory([entry])
-            broadcastDeletion(of: [entry])
+            let doomed = twins(of: entry)
+            deleted.add(doomed)
+            removeFromHistory(doomed)
+            broadcastDeletion(of: doomed)
             schedulePublish()
         }
+    }
+
+    /// `entry` and every other history entry with the same content.
+    func twins(of entry: ClipboardEntry) -> [ClipboardEntry] {
+        guard let key = contentKey(of: entry) else { return [entry] }
+        let id = HistoryStore.identity(of: entry)
+        return [entry] + history.entries.filter { HistoryStore.identity(of: $0) != id && contentKey(of: $0) == key }
+    }
+
+    /// ContentPrint.key, kept by identity (see `contentKeys`).
+    func contentKey(of entry: ClipboardEntry) -> String? {
+        let id = HistoryStore.identity(of: entry)
+        if let known = contentKeys[id] { return known }
+        // A picture kept out of history.json has its print stored with it.
+        let key = history.contentKey(of: entry)
+        contentKeys[id] = .some(key)
+        return key
+    }
+
+    /// The prints of what every device already has, for a share or a drop
+    /// (sync-dedupe-spec 1.4): newest(`count`) of the history as it is now,
+    /// before the share starts. Completion on the main queue.
+    public func makeSendFilter(newest count: Int, completion: @escaping (SendFilter) -> Void) {
+        queue.async { [self] in
+            let newest = ContentPrint.newest(history.entries, count: count, timestamp: { $0.timestamp })
+            let filter = SendFilter(prints: Set(newest.compactMap { contentKey(of: $0) }))
+            DispatchQueue.main.async { completion(filter) }
+        }
+    }
+
+    /// The prints of every history entry, and of newest(`count`), for the
+    /// app's check of a clipboard capture (sync-dedupe-spec 1.3) - as the
+    /// history is once the work already queued is done. The app's snapshot can
+    /// be a moment behind: items the Share extension stored come in with the
+    /// reload on coming back, and an item just sent is in the history before
+    /// the list. Completion on the main queue.
+    public func contentPrints(newest count: Int, completion: @escaping (_ all: Set<String>, _ newest: Set<String>) -> Void) {
+        queue.async { [self] in
+            let all = Set(history.entries.compactMap { contentKey(of: $0) })
+            let newest = Set(ContentPrint.newest(history.entries, count: count, timestamp: { $0.timestamp }).compactMap { contentKey(of: $0) })
+            DispatchQueue.main.async { completion(all, newest) }
+        }
+    }
+
+    /// The app's count of the user's own clipboard changes, whenever it moves.
+    public func noteClipboardGeneration(_ generation: Int) {
+        queue.async { [self] in clipboardGeneration = generation }
     }
 
     /// The user opened a stack in the Synced list: its items are ordinary cards
@@ -950,8 +1059,11 @@ public final class SyncEngine {
         var s = EngineSnapshot()
         s.ownDeviceId = ownId
         let ordered = history.newestFirst
+        let alive = Set(ordered.map(HistoryStore.identity(of:)))
         // Deleted, cleared or cut by the 25-item cap: a block shrinks with its members.
-        if !batchGroups.blocks.isEmpty { batchGroups.prune(keeping: Set(ordered.map(HistoryStore.identity(of:)))) }
+        if !batchGroups.blocks.isEmpty { batchGroups.prune(keeping: alive) }
+        if contentKeys.count > alive.count { contentKeys = contentKeys.filter { alive.contains($0.key) } }
+        if entryFacts.count > alive.count { entryFacts = entryFacts.filter { alive.contains($0.key) } }
         s.items = ordered.map(makeItem)
         s.blocks = batchGroups.blocks
         s.devices = buildDeviceRows()
@@ -986,18 +1098,34 @@ public final class SyncEngine {
     }
 
     private func makeItem(_ entry: ClipboardEntry) -> SyncedItem {
-        let payload = entry.type == Wire.EntryType.file ? FilePayload.parse(entry.content) : nil
+        let id = HistoryStore.identity(of: entry)
+        let facts: EntryFacts
+        if let known = entryFacts[id] {
+            facts = known
+        } else {
+            facts = EntryFacts(
+                kind: SyncedItem.kind(for: entry),
+                filePayload: entry.type == Wire.EntryType.file ? FilePayload.parse(entry.content) : nil,
+                date: DotNetTimestamp.date(entry.timestamp)
+            )
+            entryFacts[id] = facts
+        }
+        let payload = facts.filePayload
         let isOwn = entry.deviceId == ownId
-        return SyncedItem(
-            id: HistoryStore.identity(of: entry),
+        var item = SyncedItem(
+            id: id,
             entry: entry,
             isOwn: isOwn,
-            kind: SyncedItem.kind(for: entry),
+            kind: facts.kind,
             filePayload: payload,
             fileAvailable: payload.map { files.exists($0.fileHash) } ?? (entry.type != Wire.EntryType.file),
-            date: DotNetTimestamp.date(entry.timestamp),
-            sourceLabel: isOwn ? "This device" : displayName(for: entry.deviceId)
+            date: facts.date,
+            sourceLabel: isOwn ? "This device" : displayName(for: entry.deviceId),
+            contentKey: contentKey(of: entry)
         )
+        item.inlineURL = history.inlineURL(for: entry)
+        item.needsSpace = payload.map { needsSpace.contains(FileStore.key($0.fileHash)) } ?? false
+        return item
     }
 
     private func buildDeviceRows() -> [DeviceRow] {
@@ -1068,6 +1196,14 @@ struct Backoff {
     var until: Date
 }
 
+/// What the list shows of a history entry that only depends on the entry
+/// itself (see SyncEngine.entryFacts).
+struct EntryFacts {
+    let kind: SyncedItem.Kind
+    let filePayload: FilePayload?
+    let date: Date?
+}
+
 struct PendingPairing {
     let link: PeerLink
     let address: String?
@@ -1077,6 +1213,34 @@ struct PendingPairing {
 struct PendingFile {
     var entry: ClipboardEntry
     var apply: Bool
+    /// When it was set to go on the clipboard, the user's clipboard generation
+    /// then, and its place among the entries meant for the clipboard (see
+    /// SyncEngine.clipboardGeneration): bytes that land more than `applyLimit`
+    /// later, after the user changed the clipboard, or after a newer entry was
+    /// meant for it, only finish its card - they must not replace something
+    /// newer there.
+    var armedAt: Date? = nil
+    var armedGeneration = 0
+    var armedSerial = 0
+
+    static let applyLimit: TimeInterval = 10 * 60
+
+    func mayApply(now: Date, generation: Int, serial: Int) -> Bool {
+        guard apply, let armedAt else { return false }
+        return armedGeneration == generation && armedSerial == serial && now.timeIntervalSince(armedAt) <= Self.applyLimit
+    }
+}
+
+/// What a share or drop must not sign again, because every device already has
+/// it (see SyncEngine.makeSendFilter). Each item sent joins it, so two items
+/// of one share with the same content go out once. Touched on the engine
+/// queue only, one send at a time.
+public final class SendFilter {
+    var prints: Set<String>
+
+    init(prints: Set<String>) {
+        self.prints = prints
+    }
 }
 
 /// One file streaming, or waiting its turn to stream, to one peer (see
@@ -1092,13 +1256,15 @@ final class IncomingTransfer {
     let fileName: String
     let total: Int64
     let owner: ObjectIdentifier
+    /// The sending peer, for counting bad copies (see SyncEngine.badCopies).
+    let peerId: String
     let url: URL
     let handle: FileHandle
     var nextIndex = 0
     var received: Int64 = 0
     var lastProgressPublish = Date.distantPast
 
-    init?(wireHash: String, fileName: String, total: Int64, owner: ObjectIdentifier, url: URL) {
+    init?(wireHash: String, fileName: String, total: Int64, owner: ObjectIdentifier, peerId: String, url: URL) {
         try? FileManager.default.removeItem(at: url)
         guard FileManager.default.createFile(atPath: url.path, contents: nil),
               let handle = try? FileHandle(forWritingTo: url)
@@ -1107,6 +1273,7 @@ final class IncomingTransfer {
         self.fileName = fileName
         self.total = total
         self.owner = owner
+        self.peerId = peerId
         self.url = url
         self.handle = handle
     }
