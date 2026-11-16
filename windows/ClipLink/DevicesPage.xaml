@@ -154,11 +154,6 @@
             </Grid>
         </ScrollViewer>
 
-        <!-- The devices behind one that is opening or closing: drawn here
-             blurred and dimmed as it grows over them (CardZoom: they are
-             hidden meanwhile, never faded). -->
-        <Border x:Name="ListBackdrop" Grid.Row="1" Visibility="Collapsed" IsHitTestVisible="False" />
-
         <!-- One device in full: every address it can be reached at, and the rest
              of what is known about it. Laid out like an item on the Synced page
              (actions, then cards, then the facts).

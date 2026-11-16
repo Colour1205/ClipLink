@@ -9,14 +9,14 @@ namespace ClipLink;
 
 // A card zooming into its full view, and the full view zooming back onto its
 // card - a Synced item or a device, the same on both pages (ZoomMorph has the
-// shape of it). The list stays on screen behind it all the way, blurred and
-// dimmed as the view grows over it and back into focus as it shrinks; it is
-// never faded out, and never left blank behind the card.
+// shape of it). The list stays on screen behind it all the way, just as it
+// is - not blurred, not dimmed (the user found both looked bad on Windows), and
+// never faded out or left blank behind the card.
 //
 // It runs on the compositor: one number, P (0 on the card, 1 the full view),
 // is animated, and everything else - the view's scale, place, height and
-// corners, how far its content rides down, the list's blur and dim, a flying
-// picture - follows P by expressions, so it all moves on the one curve.
+// corners, how far its content rides down, a flying picture - follows P by
+// expressions, so it all moves on the one curve.
 //
 // What it works on, laid out over each other where the list is:
 //   view      the full view, laid out at its own size (it scales and moves)
@@ -25,8 +25,6 @@ namespace ClipLink;
 //             the page shows through, as before)
 //   content   inside it, over the fill: what fades in after the card's picture
 //   cover     inside it, over the content: holds the card's picture of itself
-//   list      the cards: hidden while the zoom runs, drawn blurred instead
-//   backdrop  between the list and the view: holds the blurred list and the dim
 //   flying    in a Canvas laid out where the view is, over it: a picture card's
 //             picture (null on a page without pictures)
 internal sealed class CardZoom
@@ -52,11 +50,7 @@ internal sealed class CardZoom
     // most of the way at once, then a gentle settle.
     private static readonly TimeSpan Duration = TimeSpan.FromMilliseconds(350);
 
-    // The list's blur at full strength: Direct2D's standard deviation, in
-    // DIPs - about the phones' 24 vp blur radius.
-    private const float BlurAmount = 12;
-
-    private readonly FrameworkElement view, fill, content, list, backdrop, cover;
+    private readonly FrameworkElement view, fill, content, cover;
     private readonly Image? flying;
     private readonly Compositor compositor;
     private readonly CompositionPropertySet zoom;
@@ -69,26 +63,18 @@ internal sealed class CardZoom
     // its card).
     private Action? landing;
     private readonly List<Visual> hidden = new();
-    // The blurred list and the dim over it, made once.
-    private ContainerVisual? behind;
-    private SpriteVisual? blurred, dim;
-    private CompositionEffectBrush? blur;
-    private CompositionVisualSurface? listSurface;
-    private bool blurFailed;
     // The card's live picture of itself over the view, made per zoom and let
     // go of (disposed, not left to the collector) as soon as it is not shown:
     // a live surface keeps drawing the card for as long as it exists.
     private SpriteVisual? coverSprite;
     private CompositionVisualSurface? coverSurface;
 
-    public CardZoom(FrameworkElement view, FrameworkElement fill, FrameworkElement content, FrameworkElement list,
-        FrameworkElement backdrop, FrameworkElement cover, Image? flying)
+    public CardZoom(FrameworkElement view, FrameworkElement fill, FrameworkElement content, FrameworkElement cover,
+        Image? flying)
     {
         this.view = view;
         this.fill = fill;
         this.content = content;
-        this.list = list;
-        this.backdrop = backdrop;
         this.cover = cover;
         this.flying = flying;
         compositor = VisualOf(view).Compositor;
@@ -280,82 +266,17 @@ internal sealed class CardZoom
         return expression;
     }
 
-    // The fill under the view, and the list blurred and dimmed by P: the list
-    // itself is hidden and drawn again, live, through a blur (its opacity
-    // never changes: nothing fades). If the blur cannot be made, the list
-    // stays as it is under the dim alone.
+    // The fill under the view. The list behind is left as it is.
     private void Show()
     {
         var f = VisualOf(fill);
         f.StopAnimation("Opacity");
         f.Opacity = 1;
         fill.Visibility = Visibility.Visible;
-        backdrop.Visibility = Visibility.Visible;
-        MakeBehind();
-        dim!.StartAnimation("Opacity", Expr("d * z.P", ("d", 1 - ZoomMorph.BackdropBrightness)));
-        BlurList();
-        ElementCompositionPreview.SetElementChildVisual(backdrop, behind);
-    }
-
-    // The list's blurred copy, at its size (again once a list shown only just
-    // now has been laid out: Bind).
-    private void BlurList()
-    {
-        var size = new Vector2((float)list.ActualWidth, (float)list.ActualHeight);
-        if (blur != null && blurred != null && listSurface != null && size.X > 0 && size.Y > 0)
-        {
-            listSurface.SourceSize = size;
-            blurred.Size = size;
-            // Drawn where the list is: the surface leaves out a Translation
-            // the list has on top of its layout (Nudge).
-            blurred.Offset = VisualOf(list).Properties.TryGetVector3("Translation", out var nudge) == CompositionGetValueStatus.Succeeded ? nudge : Vector3.Zero;
-            blurred.IsVisible = true;
-            blur.StartAnimation("Blur.BlurAmount", Expr("a * z.P", ("a", BlurAmount)));
-            VisualOf(list).Opacity = 0;
-        }
-        else if (blurred != null)
-        {
-            blurred.IsVisible = false;
-        }
-    }
-
-    private void MakeBehind()
-    {
-        if (behind != null) return;
-        behind = compositor.CreateContainerVisual();
-        behind.RelativeSizeAdjustment = Vector2.One;
-        dim = compositor.CreateSpriteVisual();
-        dim.Brush = compositor.CreateColorBrush(Microsoft.UI.Colors.Black);
-        dim.RelativeSizeAdjustment = Vector2.One;
-        dim.Opacity = 0;
-        if (!blurFailed)
-        {
-            try
-            {
-                var effect = new GaussianBlur { Name = "Blur", Source = new CompositionEffectSourceParameter("list") };
-                blur = compositor.CreateEffectFactory(effect, new[] { "Blur.BlurAmount" }).CreateBrush();
-                listSurface = compositor.CreateVisualSurface();
-                listSurface.SourceVisual = VisualOf(list);
-                blur.SetSourceParameter("list", compositor.CreateSurfaceBrush(listSurface));
-                blurred = compositor.CreateSpriteVisual();
-                blurred.Brush = blur;
-                behind.Children.InsertAtBottom(blurred);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[app] list blur failed: {ex.Message}");
-                blurFailed = true;
-                blur = null;
-                blurred = null;
-                listSurface = null;
-            }
-        }
-        behind.Children.InsertAtTop(dim);
     }
 
     private void Bind(Plan plan, bool opening)
     {
-        BlurList();
         double pageW = view.ActualWidth, pageH = view.ActualHeight;
         var card = plan.Card ?? ZoomMorph.VanishCard(pageW, pageH);
         double s0 = ZoomMorph.StartScale(card, pageW);
@@ -570,7 +491,7 @@ internal sealed class CardZoom
     }
 
     // Everything back at rest: the view at its own place and size, unclipped,
-    // the fill (unless it is let go of next), the blur and the cover gone, the
+    // the fill (unless it is let go of next) and the cover gone, the
     // pictures shown again.
     private void Reset(bool keepFill = false)
     {
@@ -595,10 +516,6 @@ internal sealed class CardZoom
             c.StopAnimation("Translation");
             c.Properties.InsertVector3("Translation", Vector3.Zero);
 
-            dim?.StopAnimation("Opacity");
-            blur?.StopAnimation("Blur.BlurAmount");
-            VisualOf(list).Opacity = 1;
-            backdrop.Visibility = Visibility.Collapsed;
             if (!keepFill)
             {
                 var f = VisualOf(fill);
