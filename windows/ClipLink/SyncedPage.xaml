@@ -348,12 +348,10 @@
         <!-- One item in full - the phones' item screen: all of the text
              (selectable), the image as big as fits, and every action. The
              tapped card zooms into it, and it back onto the card (CardZoom):
-             DetailFill covers the cards while it does, DetailCover holds the
-             card's picture of itself. -->
+             ListBackdrop draws the cards around it while it does, DetailCover
+             holds the card's picture of itself. -->
+        <Border x:Name="ListBackdrop" Grid.Row="1" Visibility="Collapsed" IsHitTestVisible="False" />
         <Grid x:Name="DetailZoom" Grid.Row="1" Visibility="Collapsed">
-            <Border x:Name="DetailFill" Visibility="Collapsed" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
-                <Border Background="{ThemeResource LayerFillColorDefaultBrush}" />
-            </Border>
             <ScrollViewer x:Name="DetailView" SizeChanged="DetailView_SizeChanged">
                 <Grid Margin="{StaticResource PageContentMargin}">
                     <Grid.ColumnDefinitions>

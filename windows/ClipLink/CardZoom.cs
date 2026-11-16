@@ -9,9 +9,17 @@ namespace ClipLink;
 
 // A card zooming into its full view, and the full view zooming back onto its
 // card - a Synced item or a device, the same on both pages (ZoomMorph has the
-// shape of it). The list stays on screen behind it all the way, just as it
+// shape of it). The list stays on screen around it all the way, just as it
 // is - not blurred, not dimmed (the user found both looked bad on Windows), and
 // never faded out or left blank behind the card.
+//
+// Nothing solid is put behind the growing view to keep the list from showing
+// through it: a solid colour never matched, since the cards and the page are
+// see-through over the window's Mica (it showed a flat grey, unlike the card
+// it grew from). Instead the list is drawn again, live, everywhere but where
+// the view is - four strips around it, cut to its edge as it grows - and the
+// list itself is hidden meanwhile. Inside the view there is only the window's
+// own backdrop, as there is under a card and under the page.
 //
 // It runs on the compositor: one number, P (0 on the card, 1 the full view),
 // is animated, and everything else - the view's scale, place, height and
@@ -20,11 +28,10 @@ namespace ClipLink;
 //
 // What it works on, laid out over each other where the list is:
 //   view      the full view, laid out at its own size (it scales and moves)
-//   fill      inside it, under the content: the page's own colour, so the
-//             view covers the list while it zooms (shown only then: at rest
-//             the page shows through, as before)
-//   content   inside it, over the fill: what fades in after the card's picture
+//   content   inside it: what fades in after the card's picture
 //   cover     inside it, over the content: holds the card's picture of itself
+//   list      the cards: hidden while the zoom runs, drawn around the view
+//   backdrop  under the view, where the list is: holds the list drawn around it
 //   flying    in a Canvas laid out where the view is, over it: a picture card's
 //             picture (null on a page without pictures)
 internal sealed class CardZoom
@@ -50,7 +57,7 @@ internal sealed class CardZoom
     // most of the way at once, then a gentle settle.
     private static readonly TimeSpan Duration = TimeSpan.FromMilliseconds(350);
 
-    private readonly FrameworkElement view, fill, content, cover;
+    private readonly FrameworkElement view, content, list, backdrop, cover;
     private readonly Image? flying;
     private readonly Compositor compositor;
     private readonly CompositionPropertySet zoom;
@@ -68,13 +75,20 @@ internal sealed class CardZoom
     // a live surface keeps drawing the card for as long as it exists.
     private SpriteVisual? coverSprite;
     private CompositionVisualSurface? coverSurface;
+    // The list drawn around the view (above it, below it, left and right of
+    // it), made once, and whether the strips follow a zoom now.
+    private ContainerVisual? around;
+    private SpriteVisual[] strips = Array.Empty<SpriteVisual>();
+    private CompositionVisualSurface? listSurface;
+    private bool stripsBound;
 
-    public CardZoom(FrameworkElement view, FrameworkElement fill, FrameworkElement content, FrameworkElement cover,
-        Image? flying)
+    public CardZoom(FrameworkElement view, FrameworkElement content, FrameworkElement list, FrameworkElement backdrop,
+        FrameworkElement cover, Image? flying)
     {
         this.view = view;
-        this.fill = fill;
         this.content = content;
+        this.list = list;
+        this.backdrop = backdrop;
         this.cover = cover;
         this.flying = flying;
         compositor = VisualOf(view).Compositor;
@@ -266,13 +280,105 @@ internal sealed class CardZoom
         return expression;
     }
 
-    // The fill under the view. The list behind is left as it is.
+    // The list hidden and drawn around the view instead. Until a zoom has
+    // placed the strips (a close held while the page finds the card), the view
+    // is at full size and covers it all: no strips at all.
     private void Show()
     {
-        var f = VisualOf(fill);
-        f.StopAnimation("Opacity");
-        f.Opacity = 1;
-        fill.Visibility = Visibility.Visible;
+        MakeAround();
+        backdrop.Visibility = Visibility.Visible;
+        if (!stripsBound) foreach (var strip in strips) strip.IsVisible = false;
+        VisualOf(list).Opacity = 0;
+    }
+
+    private void MakeAround()
+    {
+        if (around != null) return;
+        around = compositor.CreateContainerVisual();
+        around.RelativeSizeAdjustment = Vector2.One;
+        listSurface = compositor.CreateVisualSurface();
+        listSurface.SourceVisual = VisualOf(list);
+        var brush = compositor.CreateSurfaceBrush(listSurface);
+        strips = new SpriteVisual[4];
+        for (int i = 0; i < strips.Length; i++)
+        {
+            strips[i] = compositor.CreateSpriteVisual();
+            strips[i].Brush = brush;
+            strips[i].Clip = compositor.CreateInsetClip();
+            strips[i].IsVisible = false;
+            around.Children.InsertAtTop(strips[i]);
+        }
+        ElementCompositionPreview.SetElementChildVisual(backdrop, around);
+    }
+
+    // The strips follow the view's edge by P: the view's place and size on
+    // screen are the same sums Bind gives its Translation, Scale and clip. The
+    // list, the view and the backdrop are laid out at one place (the same
+    // row), so only a Translation the list has on top of that (Nudge) moves
+    // its picture. Going back to a card that is gone, the list is shown whole
+    // and the view fades over it.
+    private void BindStrips(ZoomMorph.Rect? card, Vector2 offset, double pageW, double s0, double h0, double h1)
+    {
+        var size = new Vector2((float)list.ActualWidth, (float)list.ActualHeight);
+        if (card is not { } c || listSurface == null || size.X <= 0 || size.Y <= 0)
+        {
+            foreach (var strip in strips) strip.IsVisible = false;
+            stripsBound = false;
+            VisualOf(list).Opacity = 1;
+            return;
+        }
+        listSurface.SourceSize = size;
+        var at = VisualOf(list).Properties.TryGetVector3("Translation", out var nudge) == CompositionGetValueStatus.Succeeded ? nudge : Vector3.Zero;
+        (string, double)[] scalars =
+        {
+            ("cx", c.X), ("cy", c.Y), ("ox", offset.X), ("oy", offset.Y), ("w", pageW), ("s0", s0),
+            ("h0", h0), ("h1", h1), ("lx", at.X), ("ly", at.Y), ("W", size.X), ("H", size.Y),
+        };
+        // The view's edges, on the strip's own picture of the list.
+        const string s = "(s0 + (1 - s0) * z.P)";
+        const string left = "(cx + (ox - cx) * z.P - lx)";
+        const string top = "(cy + (oy - cy) * z.P - ly)";
+        const string right = $"({left} + w * {s})";
+        const string bottom = $"({top} + (h0 + (h1 - h0) * z.P) * {s})";
+        // Above, below, left of and right of the view: (left, top, right, bottom) insets.
+        string[][] insets =
+        {
+            new[] { "0", "0", "0", $"Max(0, H - {top})" },
+            new[] { "0", $"Max(0, {bottom})", "0", "0" },
+            new[] { "0", $"Max(0, {top})", $"Max(0, W - {left})", $"Max(0, H - {bottom})" },
+            new[] { $"Max(0, {right})", $"Max(0, {top})", "0", $"Max(0, H - {bottom})" },
+        };
+        string[] names = { "LeftInset", "TopInset", "RightInset", "BottomInset" };
+        for (int i = 0; i < strips.Length; i++)
+        {
+            var strip = strips[i];
+            strip.Size = size;
+            strip.Offset = at;
+            var clip = (InsetClip)strip.Clip;
+            for (int e = 0; e < names.Length; e++)
+            {
+                if (insets[i][e] == "0")
+                {
+                    clip.StopAnimation(names[e]);
+                    SetInset(clip, names[e], 0f);
+                }
+                else clip.StartAnimation(names[e], Expr(insets[i][e], scalars));
+            }
+            strip.IsVisible = true;
+        }
+        stripsBound = true;
+        VisualOf(list).Opacity = 0;
+    }
+
+    private static void SetInset(InsetClip clip, string name, float value)
+    {
+        switch (name)
+        {
+            case "LeftInset": clip.LeftInset = value; break;
+            case "TopInset": clip.TopInset = value; break;
+            case "RightInset": clip.RightInset = value; break;
+            default: clip.BottomInset = value; break;
+        }
     }
 
     private void Bind(Plan plan, bool opening)
@@ -295,6 +401,7 @@ internal sealed class CardZoom
         var outline = compositor.CreateRoundedRectangleGeometry();
         outline.StartAnimation("Size", Expr("Vector2(w, h0 + (h1 - h0) * z.P)",
             ("w", pageW), ("h0", ZoomMorph.StartHeight(card, pageW)), ("h1", pageH)));
+        BindStrips(plan.Card, plan.Offset, pageW, s0, ZoomMorph.StartHeight(card, pageW), pageH);
         const string radius = "(r0 + (r1 - r0) * z.P)";
         outline.StartAnimation("CornerRadius", Expr($"Vector2({radius}, {radius})",
             ("r0", ZoomMorph.StartRadius(card, pageW)), ("r1", ZoomMorph.PageRadius)));
@@ -432,36 +539,9 @@ internal sealed class CardZoom
             if (run != generation) return;
             var done = landing;
             landing = null;
-            Reset(keepFill: opening);
+            Reset();
             done?.Invoke();
-            if (opening) LetFillGo();
         };
-    }
-
-    // Opened, the list put away under it: the fill goes too, quickly, rather
-    // than at once - it is the page's colour without the window's own Mica
-    // tint, which shows through again once it has gone.
-    private void LetFillGo()
-    {
-        try
-        {
-            var f = VisualOf(fill);
-            var batch = compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
-            Fade(f, 1f, 0f, 150, 0);
-            batch.End();
-            int run = generation;
-            batch.Completed += (_, _) =>
-            {
-                if (run != generation) return;
-                fill.Visibility = Visibility.Collapsed;
-                f.Opacity = 1;
-            };
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[app] card zoom failed: {ex.Message}");
-            fill.Visibility = Visibility.Collapsed;
-        }
     }
 
     private void DropCover()
@@ -491,9 +571,8 @@ internal sealed class CardZoom
     }
 
     // Everything back at rest: the view at its own place and size, unclipped,
-    // the fill (unless it is let go of next) and the cover gone, the
-    // pictures shown again.
-    private void Reset(bool keepFill = false)
+    // the list drawn as itself again, the cover gone, the pictures shown again.
+    private void Reset()
     {
         try
         {
@@ -516,13 +595,15 @@ internal sealed class CardZoom
             c.StopAnimation("Translation");
             c.Properties.InsertVector3("Translation", Vector3.Zero);
 
-            if (!keepFill)
+            foreach (var strip in strips)
             {
-                var f = VisualOf(fill);
-                f.StopAnimation("Opacity");
-                f.Opacity = 1;
-                fill.Visibility = Visibility.Collapsed;
+                strip.IsVisible = false;
+                if (strip.Clip is InsetClip clip)
+                    foreach (var name in new[] { "LeftInset", "TopInset", "RightInset", "BottomInset" }) clip.StopAnimation(name);
             }
+            stripsBound = false;
+            VisualOf(list).Opacity = 1;
+            backdrop.Visibility = Visibility.Collapsed;
             DropCover();
 
             if (flying != null)

@@ -26,7 +26,7 @@ public sealed partial class DevicesPage : Page
     public DevicesPage()
     {
         InitializeComponent();
-        zoom = new CardZoom(DetailZoom, DetailFill, DetailView, DetailCover, null);
+        zoom = new CardZoom(DetailZoom, DetailView, DeviceList, ListBackdrop, DetailCover, null);
         EngineBanner.Track(StatusBanner, host);
         WheelScroll.Attach(DeviceList);
         WheelScroll.Attach(PairView);

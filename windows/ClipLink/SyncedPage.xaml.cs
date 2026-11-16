@@ -38,7 +38,7 @@ public sealed partial class SyncedPage : Page
     public SyncedPage()
     {
         InitializeComponent();
-        zoom = new CardZoom(DetailZoom, DetailFill, DetailView, DetailCover, FlyingPicture);
+        zoom = new CardZoom(DetailZoom, DetailView, Cards, ListBackdrop, DetailCover, FlyingPicture);
         Cards.ItemsSource = host.History;
         EngineBanner.Track(StatusBanner, host);
         WheelScroll.Attach(DetailView);
