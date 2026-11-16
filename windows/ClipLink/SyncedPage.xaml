@@ -22,8 +22,9 @@
         <DataTemplate x:Key="ImageContent" x:DataType="local:HistoryCard">
             <StackPanel>
                 <Grid HorizontalAlignment="Left" Visibility="{x:Bind ShowsPicture, Mode=OneWay}">
-                    <!-- Rounded corners: the image is the border's background. -->
-                    <Border Width="{x:Bind ThumbnailWidth, Mode=OneWay}" Height="{x:Bind ThumbnailHeight, Mode=OneWay}"
+                    <!-- Rounded corners: the image is the border's background.
+                         (CardPicture: it flies on its own when the card opens.) -->
+                    <Border x:Name="CardPicture" Width="{x:Bind ThumbnailWidth, Mode=OneWay}" Height="{x:Bind ThumbnailHeight, Mode=OneWay}"
                             CornerRadius="4" BorderThickness="1"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                             Visibility="{x:Bind HasThumbnail, Mode=OneWay}">
@@ -82,8 +83,9 @@
             <Grid>
                 <!-- As wide as the card, as high as the image, whole (the
                      height is set in code; a very tall one is fitted into
-                     a capped box, never cropped). -->
-                <Border CornerRadius="4" BorderThickness="1"
+                     a capped box, never cropped). CardPicture: it flies on
+                     its own when the card opens. -->
+                <Border x:Name="CardPicture" CornerRadius="4" BorderThickness="1"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                         Visibility="{x:Bind HasThumbnail, Mode=OneWay}"
                         SizeChanged="GridThumb_SizeChanged">
@@ -161,7 +163,8 @@
                 <Grid>
                     <!-- Dragged into another app or a folder, it carries the
                          item (not the stack's handle: that opens the stack). -->
-                    <Border Style="{StaticResource CardBorder}" Padding="16,10,8,14"
+                    <!-- CardFace: the card itself, which zooms into the full view. -->
+                    <Border x:Name="CardFace" Style="{StaticResource CardBorder}" Padding="16,10,8,14"
                             Margin="{x:Bind StackCardMargin, Mode=OneWay}"
                             CanDrag="True" DragStarting="Card_DragStarting" DropCompleted="Item_DropCompleted"
                             AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}">
@@ -208,7 +211,7 @@
         <DataTemplate x:Key="GridCard" x:DataType="local:HistoryCard">
             <ItemContainer CornerRadius="4" AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}">
                 <Grid>
-                    <Border Style="{StaticResource CardBorder}" Padding="12,12,6,6"
+                    <Border x:Name="CardFace" Style="{StaticResource CardBorder}" Padding="12,12,6,6"
                             Margin="{x:Bind StackCardMargin, Mode=OneWay}"
                             CanDrag="True" DragStarting="Card_DragStarting" DropCompleted="Item_DropCompleted"
                             AutomationProperties.Name="{x:Bind AutomationName, Mode=OneWay}">
@@ -342,69 +345,89 @@
                        Text="Copy something on this PC or on one of your paired devices, and it shows up here." />
         </StackPanel>
 
-        <!-- One item in full - the phones' item screen: all of the text
-             (selectable), the image as big as fits, and every action. -->
-        <ScrollViewer x:Name="DetailView" Grid.Row="1" Visibility="Collapsed" SizeChanged="DetailView_SizeChanged">
-            <Grid Margin="{StaticResource PageContentMargin}">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" MaxWidth="{StaticResource PageMaxWidth}" />
-                </Grid.ColumnDefinitions>
-                <StackPanel>
-                    <controls:WrapPanel Orientation="Horizontal" HorizontalSpacing="8" VerticalSpacing="8">
-                        <Button x:Name="DetailCopy" Style="{StaticResource AccentButtonStyle}" MinWidth="96"
-                                ToolTipService.ToolTip="Copy to this PC's clipboard" Click="DetailCopy_Click">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <SymbolIcon Symbol="Copy" />
-                                <TextBlock Text="Copy" />
-                            </StackPanel>
-                        </Button>
-                        <Button x:Name="DetailOpen" MinWidth="96" Click="DetailOpen_Click">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <SymbolIcon Symbol="OpenFile" />
-                                <TextBlock Text="Open" />
-                            </StackPanel>
-                        </Button>
-                        <Button x:Name="DetailShowInFolder" Click="DetailShowInFolder_Click">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <SymbolIcon Symbol="Folder" />
-                                <TextBlock Text="Show in folder" />
-                            </StackPanel>
-                        </Button>
-                        <Button x:Name="DetailDelete" MinWidth="96" Click="DetailDelete_Click">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <SymbolIcon Symbol="Delete" />
-                                <TextBlock Text="Delete" />
-                            </StackPanel>
-                        </Button>
-                    </controls:WrapPanel>
+        <!-- The cards behind an item that is opening or closing: drawn here
+             blurred and dimmed as it grows over them (CardZoom: they are
+             hidden meanwhile, never faded). -->
+        <Border x:Name="ListBackdrop" Grid.Row="1" Visibility="Collapsed" IsHitTestVisible="False" />
 
-                    <!-- The card a tapped one grows into (see SyncedPage.ShowDetail). -->
-                    <Border x:Name="DetailCard" Style="{StaticResource CardBorder}" Margin="0,12,0,0">
-                        <Grid x:Name="DetailContent">
-                            <!-- Plain read-only text: select some of it, or Copy for all. -->
-                            <TextBlock x:Name="DetailText"
-                                       Style="{StaticResource BodyTextBlockStyle}"
-                                       TextWrapping="Wrap"
-                                       IsTextSelectionEnabled="True"
-                                       AutomationProperties.Name="Text"
+        <!-- One item in full - the phones' item screen: all of the text
+             (selectable), the image as big as fits, and every action. The
+             tapped card zooms into it, and it back onto the card (CardZoom):
+             DetailFill covers the cards while it does, DetailCover holds the
+             card's picture of itself. -->
+        <Grid x:Name="DetailZoom" Grid.Row="1" Visibility="Collapsed">
+            <Border x:Name="DetailFill" Visibility="Collapsed" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
+                <Border Background="{ThemeResource LayerFillColorDefaultBrush}" />
+            </Border>
+            <ScrollViewer x:Name="DetailView" SizeChanged="DetailView_SizeChanged">
+                <Grid Margin="{StaticResource PageContentMargin}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" MaxWidth="{StaticResource PageMaxWidth}" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <controls:WrapPanel Orientation="Horizontal" HorizontalSpacing="8" VerticalSpacing="8">
+                            <Button x:Name="DetailCopy" Style="{StaticResource AccentButtonStyle}" MinWidth="96"
+                                    ToolTipService.ToolTip="Copy to this PC's clipboard" Click="DetailCopy_Click">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <SymbolIcon Symbol="Copy" />
+                                    <TextBlock Text="Copy" />
+                                </StackPanel>
+                            </Button>
+                            <Button x:Name="DetailOpen" MinWidth="96" Click="DetailOpen_Click">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <SymbolIcon Symbol="OpenFile" />
+                                    <TextBlock Text="Open" />
+                                </StackPanel>
+                            </Button>
+                            <Button x:Name="DetailShowInFolder" Click="DetailShowInFolder_Click">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <SymbolIcon Symbol="Folder" />
+                                    <TextBlock Text="Show in folder" />
+                                </StackPanel>
+                            </Button>
+                            <Button x:Name="DetailDelete" MinWidth="96" Click="DetailDelete_Click">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <SymbolIcon Symbol="Delete" />
+                                    <TextBlock Text="Delete" />
+                                </StackPanel>
+                            </Button>
+                        </controls:WrapPanel>
+
+                        <!-- The item, in a card as it was in the list. -->
+                        <Border x:Name="DetailCard" Style="{StaticResource CardBorder}" Margin="0,12,0,0">
+                            <Grid x:Name="DetailContent">
+                                <!-- Plain read-only text: select some of it, or Copy for all. -->
+                                <TextBlock x:Name="DetailText"
+                                           Style="{StaticResource BodyTextBlockStyle}"
+                                           TextWrapping="Wrap"
+                                           IsTextSelectionEnabled="True"
+                                           AutomationProperties.Name="Text"
+                                           Visibility="Collapsed" />
+                                <Image x:Name="DetailImage"
+                                       Stretch="Uniform"
+                                       HorizontalAlignment="Center" MaxHeight="640"
+                                       AutomationProperties.Name="Synced image"
+                                       CanDrag="True" DragStarting="Detail_DragStarting" DropCompleted="Item_DropCompleted"
                                        Visibility="Collapsed" />
-                            <Image x:Name="DetailImage"
-                                   Stretch="Uniform"
-                                   HorizontalAlignment="Center" MaxHeight="640"
-                                   AutomationProperties.Name="Synced image"
-                                   CanDrag="True" DragStarting="Detail_DragStarting" DropCompleted="Item_DropCompleted"
-                                   Visibility="Collapsed" />
-                            <ContentControl x:Name="DetailFile"
-                                            ContentTemplate="{StaticResource FileContent}"
-                                            HorizontalContentAlignment="Stretch" IsTabStop="False"
-                                            CanDrag="True" DragStarting="Detail_DragStarting" DropCompleted="Item_DropCompleted"
-                                            Visibility="Collapsed" />
-                        </Grid>
-                    </Border>
-                    <TextBlock x:Name="DetailFacts" Style="{StaticResource CaptionSecondary}" TextWrapping="Wrap" Margin="1,8,0,0" />
-                </StackPanel>
-            </Grid>
-        </ScrollViewer>
+                                <ContentControl x:Name="DetailFile"
+                                                ContentTemplate="{StaticResource FileContent}"
+                                                HorizontalContentAlignment="Stretch" IsTabStop="False"
+                                                CanDrag="True" DragStarting="Detail_DragStarting" DropCompleted="Item_DropCompleted"
+                                                Visibility="Collapsed" />
+                            </Grid>
+                        </Border>
+                        <TextBlock x:Name="DetailFacts" Style="{StaticResource CaptionSecondary}" TextWrapping="Wrap" Margin="1,8,0,0" />
+                    </StackPanel>
+                </Grid>
+            </ScrollViewer>
+            <Border x:Name="DetailCover" IsHitTestVisible="False" />
+        </Grid>
+
+        <!-- A picture card's picture, flying between the card and its place in
+             the full view (CardZoom). -->
+        <Canvas Grid.Row="1" IsHitTestVisible="False">
+            <Image x:Name="FlyingPicture" Stretch="Fill" Visibility="Collapsed" />
+        </Canvas>
 
         <!-- While something is dragged over the page: the cards under
              Windows' own in-app acrylic, and what letting go does. -->

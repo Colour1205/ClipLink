@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Runtime.InteropServices.WindowsRuntime;
 using ClipboardDaemon.Engine;
 using Microsoft.UI.Xaml;
@@ -25,6 +26,7 @@ public sealed partial class DevicesPage : Page
     public DevicesPage()
     {
         InitializeComponent();
+        zoom = new CardZoom(DetailZoom, DetailFill, DetailView, DeviceList, ListBackdrop, DetailCover, null);
         EngineBanner.Track(StatusBanner, host);
         WheelScroll.Attach(DeviceList);
         WheelScroll.Attach(PairView);
@@ -44,6 +46,7 @@ public sealed partial class DevicesPage : Page
             host.NearbyDevices.CollectionChanged -= Devices_Changed;
             host.BlockedDevices.CollectionChanged -= Devices_Changed;
             CloseDetail();
+            zoom.Finish(); // one still closing
             ShowPairView(false);
         };
         QrCard.SizeChanged += (_, e) => LayOutQrCard(e.NewSize.Width);
@@ -53,7 +56,7 @@ public sealed partial class DevicesPage : Page
     {
         if (detailKey != null)
         {
-            CloseDetail();
+            CloseDetail(animate: true);
             args.Handled = true;
             return;
         }
@@ -73,6 +76,9 @@ public sealed partial class DevicesPage : Page
     {
         if (open != pairViewOpen)
         {
+            // A device still zooming back is put away first: the list it was
+            // landing on is about to be hidden under the pairing view.
+            if (open) zoom.Finish();
             pairViewOpen = open;
             DeviceList.Visibility = ListTitle.Visibility = AddDeviceButton.Visibility = open ? Visibility.Collapsed : Visibility.Visible;
             PairView.Visibility = PairTitle.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
@@ -370,33 +376,131 @@ public sealed partial class DevicesPage : Page
 
     private void ShowDetail(DeviceRow row)
     {
+        // Already open, or opening (a second click on it).
+        if (detailKey == row.PublicKey) return;
+        // One still closing is put away at once: the list takes taps while a
+        // device closes, and the one tapped opens now.
+        zoom.Finish();
+        // The tapped card zooms into the detail view, as a Synced card does:
+        // where it is, is taken now, while the list is still showing.
+        var face = MotionPreference.Enabled ? CardOf(row.PublicKey) : null;
+        var at = CardZoom.WindowRect(face);
+        var listWas = CardZoom.LayoutOrigin(DeviceList);
         detailKey = row.PublicKey;
-        ListTitle.Visibility = AddDeviceButton.Visibility = DeviceList.Visibility = Visibility.Collapsed;
-        DetailTitle.Visibility = DetailView.Visibility = Visibility.Visible;
+        // The header is the device's at once (nothing slides in). The list stays
+        // on screen behind the card that grows, until the detail covers it.
+        ListTitle.Visibility = AddDeviceButton.Visibility = Visibility.Collapsed;
+        DetailTitle.Visibility = DetailZoom.Visibility = Visibility.Visible;
         RefreshDetail();
         DetailView.ChangeView(null, 0, null, disableAnimation: true);
+        if (face == null || at is not { } from || !ZoomIn(face, from, listWas)) DeviceList.Visibility = Visibility.Collapsed;
         // Keyboard users land on the first action.
         DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
             () => (DetailTrust.Visibility == Visibility.Visible ? DetailTrust : DetailBlock).Focus(FocusState.Programmatic));
     }
 
-    // Back to the list.
-    private void CloseDetail()
+    // Back to the list: the detail zooms back onto its card (not when it is
+    // the page being left or the device that went away). The list is back at
+    // once and takes taps while it does: a device tapped meanwhile opens at once.
+    private void CloseDetail(bool animate = false)
     {
-        if (detailKey == null) return;
+        if (detailKey is not { } key) return;
+        bool zoomBack = animate && MotionPreference.Enabled && !pairViewOpen && DetailZoom.ActualWidth > 0;
+        // (Before the list is shown: an open still running would put it away as it ends.)
+        if (!zoomBack) zoom.Finish();
         detailKey = null;
         if (detailRow != null) detailRow.PropertyChanged -= DetailRow_Changed;
         detailRow = null;
-        DetailTitle.Visibility = DetailView.Visibility = Visibility.Collapsed;
+        var viewWas = CardZoom.LayoutOrigin(DetailZoom);
+        DetailTitle.Visibility = Visibility.Collapsed;
         if (!pairViewOpen)
         {
             ListTitle.Visibility = AddDeviceButton.Visibility = DeviceList.Visibility = Visibility.Visible;
+        }
+        CardZoom.Nudge(DeviceList, Vector2.Zero);
+        if (zoomBack)
+        {
+            zoom.Hold(() => DetailZoom.Visibility = Visibility.Collapsed);
+            ZoomBack(key, viewWas);
+        }
+        else
+        {
+            DetailZoom.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    // ---- a card zooming into the detail view, and back -------------------------------
+
+    private CardZoom zoom = null!;
+
+    // A device card's first line is this far in from its top (its content's
+    // padding), for the detail's first line to ride there as it zooms.
+    private const double CardInset = 12;
+
+    // The card on screen for a device, if it has one.
+    private FrameworkElement? CardOf(string key)
+    {
+        if (FindRow(key) is not { } row) return null;
+        foreach (var list in new[] { PairedList, NearbyList, BlockedList })
+        {
+            if (list.ContainerFromItem(row) is DependencyObject container && CardZoom.FindNamed(container, "CardFace") is { } face) return face;
+        }
+        return null;
+    }
+
+    // Starts the zoom out of the card, the detail now laid out over the list.
+    // False when there is none.
+    private bool ZoomIn(FrameworkElement face, ZoomMorph.Rect at, Vector2 listWas)
+    {
+        try
+        {
+            UpdateLayout();
+            var origin = CardZoom.LayoutOrigin(DetailZoom);
+            // The list stays where it was, though the header above it may have
+            // changed height.
+            CardZoom.Nudge(DeviceList, listWas - CardZoom.LayoutOrigin(DeviceList));
+            var plan = new CardZoom.Plan(CardZoom.Relative(at, origin), face, CardInset, Vector2.Zero, null);
+            bool zooming = zoom.Open(plan, () =>
+            {
+                // Covered by the detail now.
+                DeviceList.Visibility = Visibility.Collapsed;
+                CardZoom.Nudge(DeviceList, Vector2.Zero);
+            });
+            if (zooming) return true;
+        }
+        catch (Exception ex)
+        {
+            // Only the movement is lost.
+            Console.WriteLine($"[app] card zoom failed: {ex.Message}");
+        }
+        CardZoom.Nudge(DeviceList, Vector2.Zero);
+        return false;
+    }
+
+    // Shrinks the held detail back onto the device's card, once the list has
+    // been laid out again (its cards are all made: it is not virtualized).
+    // viewWas: where the detail was in the window before the header changed back.
+    private void ZoomBack(string key, Vector2 viewWas)
+    {
+        try
+        {
+            UpdateLayout();
+            var origin = CardZoom.LayoutOrigin(DetailZoom);
+            var face = CardOf(key);
+            ZoomMorph.Rect? at = CardZoom.WindowRect(face) is { } rect ? CardZoom.Relative(rect, origin) : null;
+            // Not on screen (gone): toward the middle, fading.
+            zoom.Shrink(new CardZoom.Plan(at, at != null ? face : null, CardInset, viewWas - origin, null));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[app] card zoom failed: {ex.Message}");
+            zoom.Finish();
         }
     }
 
     private void DetailTitle_ItemClicked(BreadcrumbBar sender, BreadcrumbBarItemClickedEventArgs args)
     {
-        if (args.Index == 0) CloseDetail();
+        if (args.Index == 0) CloseDetail(animate: true);
     }
 
     // A row can move between the lists (trusted, blocked) - a new row - or go
