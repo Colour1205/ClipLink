@@ -158,12 +158,10 @@
              of what is known about it. Laid out like an item on the Synced page
              (actions, then cards, then the facts).
              The tapped card zooms into it, and it back onto the card
-             (CardZoom): DetailFill covers the list while it does, DetailCover
-             holds the card's picture of itself. -->
+             (CardZoom): ListBackdrop draws the list around it while it does,
+             DetailCover holds the card's picture of itself. -->
+        <Border x:Name="ListBackdrop" Grid.Row="1" Visibility="Collapsed" IsHitTestVisible="False" />
         <Grid x:Name="DetailZoom" Grid.Row="1" Visibility="Collapsed">
-            <Border x:Name="DetailFill" Visibility="Collapsed" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
-                <Border Background="{ThemeResource LayerFillColorDefaultBrush}" />
-            </Border>
             <ScrollViewer x:Name="DetailView">
                 <Grid Margin="{StaticResource PageContentMargin}">
                     <Grid.ColumnDefinitions>
