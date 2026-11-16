@@ -14,6 +14,13 @@ struct SyncedView: View {
     /// to the other column (iOS 15 tears the link down with its row).
     @State private var detailID = ""
     @State private var detailActive = false
+    /// The detail screen has started to close (see SyncedScreenWatcher): the
+    /// list clears behind the shrinking card while the link is still active.
+    @State private var detailLeaving = false
+    /// A card tapped while the open screen is still closing: it opens as soon
+    /// as that screen is gone. Changing detailID under the closing screen
+    /// would swap its content and send its zoom into the wrong card.
+    @State private var queuedID: String?
     /// A card's Delete, waiting for the same confirmation the detail screen
     /// asks for: a deleted item stays deleted (peers don't send it back).
     /// Asked here, not on the card: the dialog must outlive the context menu.
@@ -49,6 +56,9 @@ struct SyncedView: View {
         store.value.items.map(\.id) + store.value.blocks.map(\.id)
     }
     private var actions: SyncedItemActions { SyncedItemActions(model: model, haptics: settings.haptics) }
+    /// The list goes soft behind the detail screen while it is open, from the
+    /// tap to the close: it is on screen behind the zoom both ways.
+    private var zoomBackdrop: Bool { detailActive && !detailLeaving && SyncedZoom.available }
 
     var body: some View {
         NavigationView {
@@ -66,7 +76,11 @@ struct SyncedView: View {
                 .onPreferenceChange(SyncedCardFrames.self) { revealLaidOut($0) }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { SyncedDock() }
+            // Behind a card zooming into its screen the list stays, blurred
+            // and a little darker, the dock with it (see SyncedZoom).
+            .modifier(SyncedZoomBlur(shown: zoomBackdrop, reduceMotion: reduceMotion))
             .pageBackground(glow: settings.bottomGlow, accent: settings.accentTheme.color)
+            .modifier(SyncedZoomVeil(shown: zoomBackdrop, reduceMotion: reduceMotion))
             .navigationTitle("Synced")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) { layoutToggle }
@@ -74,12 +88,23 @@ struct SyncedView: View {
             .background(
                 NavigationLink(
                     destination: ItemDetailView(itemID: detailID)
-                        .modifier(SyncedZoomDestination(id: detailID, namespace: cardZoom)),
+                        .modifier(SyncedZoomDestination(id: detailID, namespace: cardZoom) { shown in
+                            detailLeaving = !shown
+                            // A close given up (a drag let go): no card waits for it.
+                            if shown { queuedID = nil }
+                        }),
                     isActive: $detailActive
                 ) {
                     EmptyView()
                 }
             )
+            .onChange(of: detailActive) { active in
+                guard !active, let next = queuedID else { return }
+                queuedID = nil
+                // After this update: a push in the same one as the pop's end
+                // can be lost.
+                DispatchQueue.main.async { show(next) }
+            }
             .confirmationDialog(
                 "Delete this item?",
                 isPresented: Binding(
@@ -317,9 +342,20 @@ struct SyncedView: View {
         .accessibilityLabel(isGrid ? "List View" : "Grid View")
     }
 
+    /// Nothing waits for an animation: a card tapped while the last screen is
+    /// still closing opens the moment it has gone (see queuedID).
     private func open(_ item: SyncedItem) {
         Haptics.tap(settings.haptics)
-        detailID = item.id
+        if detailActive && detailLeaving {
+            queuedID = item.id
+            return
+        }
+        show(item.id)
+    }
+
+    private func show(_ id: String) {
+        detailID = id
+        detailLeaving = false
         detailActive = true
     }
 }

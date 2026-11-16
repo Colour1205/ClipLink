@@ -1,8 +1,8 @@
 package io.uaena.cliplink.ui
 
+import android.view.RoundedCorner
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -11,8 +11,15 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.plus
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -25,15 +32,24 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalTextToolbar
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.uaena.cliplink.engine.DeviceRow
@@ -142,11 +158,79 @@ fun ClipLinkApp(
     val detail = detailKey?.let { key -> items.firstOrNull { it.key == key } }
     val deviceDetail = deviceDetailId?.let { id -> state.devices.firstOrNull { it.deviceId == id } }
 
+    // An open item or device is not a page of its own: its card zooms into
+    // it, over the page it was on, which stays on screen behind it (see
+    // CardZoom). Every card that can be opened says where it is here.
+    val zoomSources = remember { ZoomSources() }
+    val zoom = remember(scope) { CardZoom(scope, zoomSources) }
+    val reduceMotion = rememberReduceMotion()
+    val density = LocalDensity.current
+    val view = LocalView.current
+    SideEffect {
+        zoom.reduceMotion = reduceMotion
+        zoom.density = density
+        zoom.screenCorner = {
+            view.rootWindowInsets?.getRoundedCorner(RoundedCorner.POSITION_TOP_LEFT)?.radius ?: 0
+        }
+    }
+
+    fun openItem(keyed: KeyedItem) {
+        detailKey = keyed.key
+        zoom.open(itemZoomKey(keyed.key))
+    }
+
+    // The list has the screen back at once: the view shrinking back into its
+    // card takes no touches, and the back gesture is the list's again.
+    //
+    // Text selected in the view lets go as it starts to close (see
+    // OwnSelectionContainer), and its Copy bar goes here, now, rather than a
+    // frame later with the selection: that bar is a window of its own over
+    // the list, and while it was on its way out it swallowed the tap meant
+    // for the card under it.
+    val textToolbar = LocalTextToolbar.current
+    fun closeItem(gone: Boolean = false) {
+        textToolbar.hide()
+        detailKey = null
+        zoom.close(gone)
+    }
+
+    fun openDevice(device: DeviceRow) {
+        deviceDetailId = device.deviceId
+        zoom.open(deviceZoomKey(device.deviceId))
+    }
+
+    fun closeDevice(gone: Boolean = false) {
+        textToolbar.hide()
+        deviceDetailId = null
+        zoom.close(gone)
+    }
+
+    // An item open when the Activity was rebuilt (a rotation) shows again as
+    // it was, with no zoom - once the list holds it, which at a cold start is
+    // a moment after the first frame. One that leaves the list while it is
+    // open (deleted on another device) closes, toward the middle: its card is
+    // gone.
+    LaunchedEffect(detailKey, detail != null) {
+        val key = detailKey ?: return@LaunchedEffect
+        if (detail != null) {
+            if (zoom.shown != itemZoomKey(key)) zoom.showAtRest(itemZoomKey(key))
+        } else if (zoom.shown == itemZoomKey(key)) {
+            closeItem(gone = true)
+        }
+    }
+
     // A device that left the list while its screen was open (a discovered one
     // that went quiet, or one just removed that was never heard): close the
     // screen, and forget the id so it cannot jump open if the device returns.
-    LaunchedEffect(deviceDetailId, deviceDetail) {
-        if (deviceDetailId != null && deviceDetail == null) deviceDetailId = null
+    LaunchedEffect(deviceDetailId, deviceDetail != null) {
+        val id = deviceDetailId ?: return@LaunchedEffect
+        if (deviceDetail != null) {
+            if (zoom.shown != deviceZoomKey(id)) zoom.showAtRest(deviceZoomKey(id))
+        } else if (zoom.shown == deviceZoomKey(id)) {
+            closeDevice(gone = true)
+        } else {
+            deviceDetailId = null
+        }
     }
 
     // Tells the caller when the pairing screen opens and when it closes, whichever
@@ -171,6 +255,7 @@ fun ClipLinkApp(
         scanning = false
         detailKey = null
         deviceDetailId = null
+        zoom.drop()
         pairing = true
         actions.onPair(link)
         onPairLinkTaken()
@@ -183,187 +268,233 @@ fun ClipLinkApp(
         }
     }
 
-    BackHandler(enabled = scanning || detail != null || deviceDetail != null || pairing) {
+    BackHandler(enabled = scanning || detailKey != null || deviceDetailId != null || pairing) {
         when {
             scanning -> scanning = false
-            detail != null -> detailKey = null
-            deviceDetail != null -> deviceDetailId = null
+            detailKey != null -> closeItem()
+            deviceDetailId != null -> closeDevice()
             else -> pairing = false
         }
     }
 
-    Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        bottomBar = {
-            // Hidden on the sub-screens: they are full-screen tasks with their
-            // own back affordance, and a tab tapped while one is open would
-            // change nothing on screen.
-            if (detail == null && deviceDetail == null && !pairing && !scanning) {
-                ShortNavigationBar {
-                    Tab.entries.forEach { entry ->
-                        ShortNavigationBarItem(
-                            selected = tab == entry,
-                            onClick = { tab = entry },
-                            icon = {
-                                Icon(
-                                    if (tab == entry) entry.selectedIcon else entry.icon,
-                                    contentDescription = entry.label,
-                                )
-                            },
-                            label = {
-                                Text(
-                                    entry.label,
-                                    fontWeight = if (tab == entry) FontWeight.SemiBold else FontWeight.Normal,
-                                )
-                            },
-                        )
-                    }
-                }
-            }
-        },
-        // contentWindowInsets is deliberately left at its default (systemBars)
-        // so these padding values actually describe the safe area: top is the
-        // status bar, bottom is the navigation bar or the tab bar, whichever
-        // is taller. Each screen then feeds them to its scrollable as CONTENT
-        // padding rather than wrapping itself in Modifier.padding - which is
-        // what makes lists scroll BEHIND the bars while their first and last
-        // items still clear them. Zeroing this out drops the status-bar offset
-        // and the first row renders under the clock.
-    ) { padding ->
-        Box(Modifier.fillMaxSize()) {
-            // Springs from the expressive motion scheme, never a raw tween -
-            // reaching for a tween here is exactly how a UI quietly stops
-            // feeling expressive while still compiling. Read out here because
-            // transitionSpec is not itself a @Composable lambda.
-            val enterScale = MaterialTheme.motionScheme.defaultSpatialSpec<Float>()
-            val enterFade = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
-            val exitFade = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
+    // Open: an item's or a device's full view covers the page.
+    val viewOpen = detailKey != null || deviceDetailId != null
+    // Hidden on the pairing and scanning screens: they are full-screen tasks
+    // with their own back affordance. Under an open item or device it stays,
+    // covered (and blurred on the way): taking it away would move the list
+    // under the card as it opens.
+    val tabBarShown = !pairing && !scanning
+    var tabBarHeight by remember { mutableIntStateOf(0) }
 
-            // A card opening into its full view (and the view closing back into
-            // the card) is the card itself changing shape, not a page coming
-            // in: see cardMorph. The two screens only cross-fade around it.
-            SharedTransitionLayout {
-            AnimatedContent(
-                targetState = Screen.of(scanning, detail != null, deviceDetail != null, pairing, tab),
-                transitionSpec = {
-                    if (setOf(initialState, targetState) == setOf(Screen.Synced, Screen.Detail)) {
-                        fadeIn(enterFade) togetherWith fadeOut(exitFade) using SizeTransform(clip = false)
-                    } else {
-                        (fadeIn(enterFade) + scaleIn(enterScale, initialScale = 0.96f)) togetherWith
-                            (fadeOut(exitFade) + scaleOut(exitFade, targetScale = 1.02f)) using
-                            SizeTransform(clip = false)
+    // The page the open views zoom over. The snackbar is above them all: a
+    // view's own Copy says it was done.
+    Box(
+        Modifier
+            .fillMaxSize()
+            .onPlaced { zoom.host = it },
+    ) {
+        CompositionLocalProvider(LocalZoomSources provides zoomSources) {
+            Scaffold(
+                modifier = Modifier
+                    .zoomBackdrop(zoom, with(density) { BACKDROP_BLUR.toPx() })
+                    // Under an open view, nothing of the page is there to be read out.
+                    .then(if (viewOpen) Modifier.clearAndSetSemantics { } else Modifier),
+                bottomBar = {
+                    if (tabBarShown) {
+                        ShortNavigationBar(Modifier.onSizeChanged { tabBarHeight = it.height }) {
+                            Tab.entries.forEach { entry ->
+                                ShortNavigationBarItem(
+                                    selected = tab == entry,
+                                    onClick = {
+                                        // Tapped while a view shrinks back into its
+                                        // card: that card is leaving with its page.
+                                        if (zoom.closing) zoom.drop()
+                                        tab = entry
+                                    },
+                                    icon = {
+                                        Icon(
+                                            if (tab == entry) entry.selectedIcon else entry.icon,
+                                            contentDescription = entry.label,
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            entry.label,
+                                            fontWeight = if (tab == entry) FontWeight.SemiBold else FontWeight.Normal,
+                                        )
+                                    },
+                                )
+                            }
+                        }
                     }
                 },
-                label = "screen",
-            ) { screen ->
-                CompositionLocalProvider(LocalCardMorph provides CardMorph(this@SharedTransitionLayout, this@AnimatedContent)) {
-                saveableStateHolder.SaveableStateProvider(screen.name) {
-                    when (screen) {
-                        Screen.Detail -> detail?.let { opened ->
-                            // The live copy: a file that finishes arriving while
-                            // it's open is shown as arrived - its picture too.
-                            val item = opened.item
-                            DetailScreen(
-                                item = item,
-                                key = opened.key,
-                                senderName = deviceNames[item.entry.deviceId],
-                                contentPadding = padding,
-                                onBack = { detailKey = null },
-                                onCopy = { actions.synced.onCopy(item) },
-                                onShare = { actions.synced.onShare(item) },
-                                onDelete = {
-                                    actions.synced.onDelete(item)
-                                    detailKey = null
-                                },
-                            )
+                // contentWindowInsets is deliberately left at its default (systemBars)
+                // so these padding values actually describe the safe area: top is the
+                // status bar, bottom is the navigation bar or the tab bar, whichever
+                // is taller. Each screen then feeds them to its scrollable as CONTENT
+                // padding rather than wrapping itself in Modifier.padding - which is
+                // what makes lists scroll BEHIND the bars while their first and last
+                // items still clear them. Zeroing this out drops the status-bar offset
+                // and the first row renders under the clock.
+            ) { padding ->
+                Box(Modifier.fillMaxSize()) {
+                    // Springs from the expressive motion scheme, never a raw tween -
+                    // reaching for a tween here is exactly how a UI quietly stops
+                    // feeling expressive while still compiling. Read out here because
+                    // transitionSpec is not itself a @Composable lambda.
+                    val enterScale = MaterialTheme.motionScheme.defaultSpatialSpec<Float>()
+                    val enterFade = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
+                    val exitFade = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
+
+                    // An open item or device is not one of these: its card zooms into
+                    // it over the page (see ZoomOverlay below).
+                    AnimatedContent(
+                        targetState = Screen.of(scanning, pairing, tab),
+                        transitionSpec = {
+                            (fadeIn(enterFade) + scaleIn(enterScale, initialScale = 0.96f)) togetherWith
+                                (fadeOut(exitFade) + scaleOut(exitFade, targetScale = 1.02f)) using
+                                SizeTransform(clip = false)
+                        },
+                        label = "screen",
+                    ) { screen ->
+                        saveableStateHolder.SaveableStateProvider(screen.name) {
+                            when (screen) {
+                                Screen.Pairing -> PairScreen(
+                                    payload = state.pairingPayload,
+                                    status = pairStatus,
+                                    contentPadding = padding,
+                                    onBack = { pairing = false },
+                                    onPair = actions.onPair,
+                                    onScan = { scanning = true },
+                                )
+
+                                Screen.Scan -> ScanScreen(
+                                    contentPadding = padding,
+                                    onBack = { scanning = false },
+                                    onResult = { text ->
+                                        scanning = false
+                                        actions.onPair(text)
+                                    },
+                                    onUnavailable = { message ->
+                                        scanning = false
+                                        scope.launch { snackbarHostState.showSnackbar(message) }
+                                    },
+                                )
+
+                                Screen.Synced -> SyncedScreen(
+                                    items = items,
+                                    deviceNames = deviceNames,
+                                    connectedCount = state.connectedCount,
+                                    discovering = state.discovering,
+                                    contentPadding = padding,
+                                    onOpen = ::openItem,
+                                    actions = actions.synced,
+                                    layout = syncedLayout,
+                                    onLayoutChange = {
+                                        syncedLayout = it
+                                        onSyncedLayoutChange(it)
+                                    },
+                                )
+
+                                Screen.Devices -> DevicesScreen(
+                                    devices = state.devices,
+                                    contentPadding = padding,
+                                    onOpen = ::openDevice,
+                                    onTrust = actions.onTrust,
+                                    onUntrust = actions.onUntrust,
+                                    onBlock = actions.onBlock,
+                                    onUnblock = actions.onUnblock,
+                                    onAdd = { pairing = true },
+                                )
+
+                                Screen.Me -> MeScreen(
+                                    state = MeState(
+                                        ownDeviceId = state.ownDeviceId,
+                                        deviceNameOverride = state.deviceNameOverride,
+                                        defaultDeviceName = state.defaultDeviceName,
+                                        hasPassphrase = state.hasPassphrase,
+                                        passphraseBusy = state.passphraseBusy,
+                                        tailscaleIp = state.tailscaleIp,
+                                        keepAlive = state.keepAlive,
+                                        autoApply = state.autoApply,
+                                        autoCapture = state.autoCapture,
+                                        dynamicColor = state.dynamicColor,
+                                        localAddresses = state.localAddresses,
+                                        log = state.log,
+                                    ),
+                                    actions = actions.me,
+                                    contentPadding = padding,
+                                )
+                            }
                         }
-
-                        Screen.DeviceDetail -> deviceDetail?.let { opened ->
-                            DeviceDetailScreen(
-                                device = opened,
-                                contentPadding = padding,
-                                onBack = { deviceDetailId = null },
-                                onTrust = { actions.onTrust(opened) },
-                                onUntrust = { actions.onUntrust(opened) },
-                                onBlock = { actions.onBlock(opened) },
-                                onUnblock = { actions.onUnblock(opened) },
-                                onCopyId = { actions.onCopyDeviceId(opened) },
-                            )
-                        }
-
-                        Screen.Pairing -> PairScreen(
-                            payload = state.pairingPayload,
-                            status = pairStatus,
-                            contentPadding = padding,
-                            onBack = { pairing = false },
-                            onPair = actions.onPair,
-                            onScan = { scanning = true },
-                        )
-
-                        Screen.Scan -> ScanScreen(
-                            contentPadding = padding,
-                            onBack = { scanning = false },
-                            onResult = { text ->
-                                scanning = false
-                                actions.onPair(text)
-                            },
-                            onUnavailable = { message ->
-                                scanning = false
-                                scope.launch { snackbarHostState.showSnackbar(message) }
-                            },
-                        )
-
-                        Screen.Synced -> SyncedScreen(
-                            items = items,
-                            deviceNames = deviceNames,
-                            connectedCount = state.connectedCount,
-                            discovering = state.discovering,
-                            contentPadding = padding,
-                            onOpen = { detailKey = it.key },
-                            actions = actions.synced,
-                            layout = syncedLayout,
-                            onLayoutChange = {
-                                syncedLayout = it
-                                onSyncedLayoutChange(it)
-                            },
-                        )
-
-                        Screen.Devices -> DevicesScreen(
-                            devices = state.devices,
-                            contentPadding = padding,
-                            onOpen = { deviceDetailId = it.deviceId },
-                            onTrust = actions.onTrust,
-                            onUntrust = actions.onUntrust,
-                            onBlock = actions.onBlock,
-                            onUnblock = actions.onUnblock,
-                            onAdd = { pairing = true },
-                        )
-
-                        Screen.Me -> MeScreen(
-                            state = MeState(
-                                ownDeviceId = state.ownDeviceId,
-                                deviceNameOverride = state.deviceNameOverride,
-                                defaultDeviceName = state.defaultDeviceName,
-                                hasPassphrase = state.hasPassphrase,
-                                passphraseBusy = state.passphraseBusy,
-                                tailscaleIp = state.tailscaleIp,
-                                keepAlive = state.keepAlive,
-                                autoApply = state.autoApply,
-                                autoCapture = state.autoCapture,
-                                dynamicColor = state.dynamicColor,
-                                localAddresses = state.localAddresses,
-                                log = state.log,
-                            ),
-                            actions = actions.me,
-                            contentPadding = padding,
-                        )
                     }
-                }
-                }
-            }
-            }
 
+                }
+            }
         }
+
+        ZoomDim(zoom)
+
+        // The open item or device, zoomed from its card. The live copy, looked
+        // up by key: a file that finishes arriving while it's open is shown as
+        // arrived - its picture too. Kept from the last time it was found
+        // while it closes after leaving the list.
+        val systemBars = WindowInsets.systemBars.asPaddingValues()
+        val lastShown = remember { arrayOfNulls<Any>(1) }
+        ZoomOverlay(zoom, page = MaterialTheme.colorScheme.background) { shown ->
+            if (shown.startsWith(ITEM_ZOOM_PREFIX)) {
+                val key = shown.removePrefix(ITEM_ZOOM_PREFIX)
+                val opened = items.firstOrNull { it.key == key }?.also { lastShown[0] = it }
+                    ?: (lastShown[0] as? KeyedItem)?.takeIf { it.key == key }
+                opened?.let {
+                    val item = it.item
+                    DetailScreen(
+                        item = item,
+                        key = it.key,
+                        senderName = deviceNames[item.entry.deviceId],
+                        contentPadding = systemBars,
+                        onBack = { closeItem() },
+                        onCopy = { actions.synced.onCopy(item) },
+                        onShare = { actions.synced.onShare(item) },
+                        onDelete = {
+                            actions.synced.onDelete(item)
+                            closeItem(gone = true)
+                        },
+                    )
+                }
+            } else {
+                val id = shown.removePrefix(DEVICE_ZOOM_PREFIX)
+                val opened = state.devices.firstOrNull { it.deviceId == id }?.also { lastShown[0] = it }
+                    ?: (lastShown[0] as? DeviceRow)?.takeIf { it.deviceId == id }
+                opened?.let { device ->
+                    DeviceDetailScreen(
+                        device = device,
+                        contentPadding = systemBars,
+                        onBack = { closeDevice() },
+                        onTrust = { actions.onTrust(device) },
+                        onUntrust = { actions.onUntrust(device) },
+                        onBlock = { actions.onBlock(device) },
+                        onUnblock = { actions.onUnblock(device) },
+                        onCopyId = { actions.onCopyDeviceId(device) },
+                    )
+                }
+            }
+        }
+
+        // Where the Scaffold would put it: above the tab bar while that is
+        // what's at the bottom, else just above the system's navigation bar.
+        SnackbarHost(
+            snackbarHostState,
+            Modifier
+                .align(Alignment.BottomCenter)
+                .then(
+                    if (tabBarShown && !viewOpen) {
+                        Modifier.padding(bottom = with(density) { tabBarHeight.toDp() })
+                    } else {
+                        Modifier.windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))
+                    },
+                ),
+        )
     }
 
     // A modal over whatever is open - not a page of its own. (With the app out
@@ -378,19 +509,15 @@ fun ClipLinkApp(
 }
 
 private enum class Screen {
-    Scan, Detail, DeviceDetail, Pairing, Synced, Devices, Me;
+    Scan, Pairing, Synced, Devices, Me;
 
     companion object {
         fun of(
             scanning: Boolean,
-            hasDetail: Boolean,
-            hasDeviceDetail: Boolean,
             pairing: Boolean,
             tab: Tab,
         ): Screen = when {
             scanning -> Scan
-            hasDetail -> Detail
-            hasDeviceDetail -> DeviceDetail
             pairing -> Pairing
             tab == Tab.Devices -> Devices
             tab == Tab.Me -> Me

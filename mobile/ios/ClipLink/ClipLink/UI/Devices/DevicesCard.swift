@@ -16,6 +16,8 @@ struct DevicesCard: View {
     let transparency: Double
     let onOpen: () -> Void
     let onRename: () -> Void
+    /// The Devices tab's namespace for the card's zoom into its screen.
+    var zoom: Namespace.ID? = nil
 
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -69,6 +71,9 @@ struct DevicesCard: View {
             .opacity(pressed ? 0.92 : 1)
             .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.75), value: pressed)
             .devicesBlockedAppearance(blocked)
+            // The whole card zooms into the device's screen, the same zoom as
+            // a Synced card's (the ⋯ menu and Trust stay buttons of their own).
+            .modifier(SyncedZoomSource(id: row.deviceId, namespace: zoom))
             .contentShape(.contextMenuPreview, shape)
             .contextMenu { items }
             .swipeActions(edge: .trailing, allowsFullSwipe: false) { swipe }

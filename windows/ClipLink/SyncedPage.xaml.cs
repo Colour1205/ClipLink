@@ -38,6 +38,7 @@ public sealed partial class SyncedPage : Page
     public SyncedPage()
     {
         InitializeComponent();
+        zoom = new CardZoom(DetailZoom, DetailFill, DetailView, Cards, ListBackdrop, DetailCover, FlyingPicture);
         Cards.ItemsSource = host.History;
         EngineBanner.Track(StatusBanner, host);
         WheelScroll.Attach(DetailView);
@@ -70,6 +71,7 @@ public sealed partial class SyncedPage : Page
         Unloaded += (_, _) =>
         {
             ShowList();
+            zoom.Finish(); // one still closing
             ShowDropHint(false);
         };
         // New items arrive at the top: the view must stay where it is, not
@@ -118,6 +120,9 @@ public sealed partial class SyncedPage : Page
     {
         bool grid = ViewSwitch.SelectedIndex == 1;
         if (ViewSwitch.SelectedIndex < 0 || Cards.ItemTemplate == Resources[grid ? "GridCard" : "ListCard"]) return;
+        // An item still zooming back is put away first: the card it was
+        // landing on is about to be laid out somewhere else.
+        zoom.Finish();
         ShowAsGrid(grid);
         App.Settings.SyncedGridView = grid;
         App.Settings.Save();
@@ -425,9 +430,15 @@ public sealed partial class SyncedPage : Page
 
     private void ShowDetail(HistoryCard card)
     {
-        // The card that is tapped grows into the full view (and back): where it
-        // is, is taken now, while the list is still showing.
-        var morph = MorphSourceOf(card);
+        // Already open, or opening (a second click on it).
+        if (detail == card) return;
+        // A card still closing is put away at once: the cards take taps while
+        // one closes, and the one tapped opens now.
+        zoom.Finish();
+        // The tapped card zooms into the full view (and back): where it is, is
+        // taken now, while the list is still showing.
+        var source = ZoomSourceOf(card);
+        var cardsWere = CardZoom.LayoutOrigin(Cards);
         if (detail != null) detail.PropertyChanged -= Detail_PropertyChanged;
         detail = card;
         card.PropertyChanged += Detail_PropertyChanged;
@@ -436,11 +447,13 @@ public sealed partial class SyncedPage : Page
         ShowDetailContent(card);
         UpdateDetail();
 
-        ListTitle.Visibility = ListSubtitle.Visibility = ViewSwitch.Visibility = Cards.Visibility = PasscodeTip.Visibility = Visibility.Collapsed;
+        // The header is the item's at once (nothing slides in). The cards stay
+        // on screen behind the card that grows, until the full view covers them.
+        ListTitle.Visibility = ListSubtitle.Visibility = ViewSwitch.Visibility = PasscodeTip.Visibility = Visibility.Collapsed;
         EmptyState.Visibility = Visibility.Collapsed;
-        DetailTitle.Visibility = DetailOrigin.Visibility = DetailView.Visibility = Visibility.Visible;
+        DetailTitle.Visibility = DetailOrigin.Visibility = DetailZoom.Visibility = Visibility.Visible;
         DetailView.ChangeView(null, 0, null, disableAnimation: true);
-        GrowIntoDetail(morph);
+        if (source is not { } from || !ZoomIn(card, from, cardsWere)) Cards.Visibility = Visibility.Collapsed;
         // Keyboard users land on the first action.
         DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
             () => (DetailCopy.Visibility == Visibility.Visible ? DetailCopy : DetailDelete).Focus(FocusState.Programmatic));
@@ -472,29 +485,54 @@ public sealed partial class SyncedPage : Page
         }
     }
 
-    // Back to the cards: the full view shrinks back into its card (not when it
-    // is the page being left, or the card that is gone).
+    // Back to the cards: the full view zooms back onto its card (toward the
+    // middle, fading, when the card is not on screen; not at all when it is
+    // the page being left or the item that was deleted). The cards are back at
+    // once and take taps while it does: one tapped meanwhile opens at once.
     private void ShowList(bool animate = false)
     {
         if (detail is not { } card) return;
-        var morph = animate && host.History.Contains(card) ? PrepareMorph(CloseMorphKey, card, DetailCard) : null;
+        bool zoomBack = animate && MotionPreference.Enabled && DetailZoom.ActualWidth > 0;
+        // (Before the cards are shown: an open still running would put them away as it ends.)
+        if (!zoomBack) zoom.Finish();
         card.PropertyChanged -= Detail_PropertyChanged;
         detail = null;
-        DetailText.Text = "";
-        DetailImage.Source = null;
-        DetailFile.Content = null;
+        var viewWas = CardZoom.LayoutOrigin(DetailZoom);
 
-        DetailTitle.Visibility = DetailOrigin.Visibility = DetailView.Visibility = Visibility.Collapsed;
+        DetailTitle.Visibility = DetailOrigin.Visibility = Visibility.Collapsed;
         ListTitle.Visibility = ListSubtitle.Visibility = ViewSwitch.Visibility = Cards.Visibility = PasscodeTip.Visibility = Visibility.Visible;
+        CardZoom.Nudge(Cards, Vector2.Zero);
         EmptyState.Visibility = host.HistoryIsEmpty ? Visibility.Visible : Visibility.Collapsed;
-        if (morph != null) StartMorphBack(morph, card);
+        if (zoomBack)
+        {
+            closingCard = card;
+            zoom.Hold(PutDetailAway);
+            ZoomBack(card, viewWas, retry: true);
+        }
+        else
+        {
+            PutDetailAway();
+        }
         DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => Cards.Focus(FocusState.Programmatic));
     }
 
-    // ---- a card growing into the full view, and back --------------------------------
+    // The full view gone, and what it showed let go.
+    private void PutDetailAway()
+    {
+        closingCard = null;
+        DetailZoom.Visibility = Visibility.Collapsed;
+        DetailText.Text = "";
+        DetailImage.Source = null;
+        DetailFile.Content = null;
+    }
 
-    private const string CloseMorphKey = "cardClose";
-    private static readonly TimeSpan MorphDuration = TimeSpan.FromMilliseconds(250);
+    // ---- a card zooming into the full view, and back --------------------------------
+
+    private CardZoom zoom = null!;
+    // The card the full view is zooming back onto, until it is there.
+    private HistoryCard? closingCard;
+
+    private bool IsGrid => Cards.ItemTemplate == Resources["GridCard"];
 
     // The list's element for a card, if it has one on screen (the list only
     // makes elements for the cards near the view).
@@ -505,120 +543,108 @@ public sealed partial class SyncedPage : Page
         return index < 0 ? null : repeater.TryGetElement(index) as FrameworkElement;
     }
 
-    // Takes the picture of what is about to grow or shrink. Null when there
-    // is nothing to animate (animations are off, the card is not on screen).
-    private ConnectedAnimation? PrepareMorph(string key, HistoryCard card, FrameworkElement? source = null)
+    // The tapped card, where it is in the window, and its picture if it shows
+    // one. Null when there is nothing to zoom from (animations are off, the
+    // card is not on screen).
+    private (FrameworkElement Face, ZoomMorph.Rect At, FrameworkElement? Picture, ZoomMorph.Rect? PictureAt)? ZoomSourceOf(HistoryCard card)
     {
-        if (!MotionPreference.Enabled) return null;
+        if (!MotionPreference.Enabled || ElementOf(card) is not { } element) return null;
+        var face = CardZoom.FindNamed(element, "CardFace") ?? element;
+        if (CardZoom.WindowRect(face) is not { } at) return null;
+        var picture = card.ShowsPicture && card.HasThumbnail ? CardZoom.FindNamed(face, "CardPicture") : null;
+        var pictureAt = CardZoom.WindowRect(picture);
+        return (face, at, pictureAt != null ? picture : null, pictureAt);
+    }
+
+    // Starts the zoom out of the card, the full view now laid out over the
+    // cards. False when there is none.
+    private bool ZoomIn(HistoryCard card, (FrameworkElement Face, ZoomMorph.Rect At, FrameworkElement? Picture, ZoomMorph.Rect? PictureAt) from, Vector2 cardsWere)
+    {
         try
         {
-            source ??= ElementOf(card);
-            if (source is not { ActualWidth: > 0, ActualHeight: > 0 }) return null;
-            var service = ConnectedAnimationService.GetForCurrentView();
-            // Strongly easing out: most of the way at once, then a long, gentle settle.
-            service.DefaultDuration = MorphDuration;
-            service.DefaultEasingFunction = ElementCompositionPreview.GetElementVisual(this).Compositor
-                .CreateCubicBezierEasingFunction(new Vector2(0.05f, 0.7f), new Vector2(0.1f, 1f));
-            var animation = service.PrepareToAnimate(key, source);
-            animation.Configuration = new BasicConnectedAnimationConfiguration();
-            return animation;
+            // Laid out now (twice: the picture's height follows the view's,
+            // set when that is first known), so where things are is known.
+            UpdateLayout();
+            UpdateLayout();
+            var origin = CardZoom.LayoutOrigin(DetailZoom);
+            // The cards stay where they were, though the header above them
+            // may have changed height.
+            CardZoom.Nudge(Cards, cardsWere - CardZoom.LayoutOrigin(Cards));
+            var flight = FlightOf(card, from.Picture, from.PictureAt, origin, Vector2.Zero);
+            var plan = new CardZoom.Plan(CardZoom.Relative(from.At, origin), from.Face, (from.Face as Border)?.Padding.Top ?? 0, Vector2.Zero, flight);
+            bool zooming = zoom.Open(plan, () =>
+            {
+                // Covered by the full view now.
+                Cards.Visibility = Visibility.Collapsed;
+                CardZoom.Nudge(Cards, Vector2.Zero);
+            });
+            if (zooming) return true;
         }
         catch (Exception ex)
         {
             // Only the movement is lost.
-            Console.WriteLine($"[app] card morph failed: {ex.Message}");
-            return null;
+            Console.WriteLine($"[app] card zoom failed: {ex.Message}");
         }
+        CardZoom.Nudge(Cards, Vector2.Zero);
+        return false;
     }
 
-    // Where the tapped card is in the window, taken while the list still shows
-    // it. Null when there is nothing to animate (animations are off, the card
-    // is not on screen).
-    private Windows.Foundation.Rect? MorphSourceOf(HistoryCard card)
+    // Shrinks the held full view back onto the card, once the cards have been
+    // laid out again. viewWas: where the view was in the window before the
+    // header changed back.
+    private void ZoomBack(HistoryCard card, Vector2 viewWas, bool retry)
     {
-        if (!MotionPreference.Enabled || ElementOf(card) is not { ActualWidth: > 0, ActualHeight: > 0 } element) return null;
         try
         {
-            return element.TransformToVisual(null).TransformBounds(new Windows.Foundation.Rect(0, 0, element.ActualWidth, element.ActualHeight));
+            UpdateLayout();
+            var origin = CardZoom.LayoutOrigin(DetailZoom);
+            bool there = host.History.Contains(card);
+            var element = there ? ElementOf(card) : null;
+            if (element == null && there && retry)
+            {
+                // The list makes its elements once it knows what is in view: after this pass.
+                DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+                {
+                    if (closingCard == card && detail == null) ZoomBack(card, viewWas, retry: false);
+                });
+                return;
+            }
+            var face = element != null ? CardZoom.FindNamed(element, "CardFace") ?? element : null;
+            ZoomMorph.Rect? at = CardZoom.WindowRect(face) is { } rect ? CardZoom.Relative(rect, origin) : null;
+            var offset = viewWas - origin;
+            CardZoom.Flight? flight = null;
+            if (at != null && face != null && card.ShowsPicture && card.HasThumbnail && CardZoom.FindNamed(face, "CardPicture") is { } picture)
+            {
+                flight = FlightOf(card, picture, CardZoom.WindowRect(picture), origin, offset);
+            }
+            // Not on screen (gone, or moved out of view): toward the middle, fading.
+            zoom.Shrink(new CardZoom.Plan(at, at != null ? face : null, (face as Border)?.Padding.Top ?? 0, offset, flight));
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[app] card morph failed: {ex.Message}");
+            Console.WriteLine($"[app] card zoom failed: {ex.Message}");
+            zoom.Finish();
+        }
+    }
+
+    // A picture card's picture, flying between the card and the full view's
+    // own picture (which must be laid out). origin: where the full view is laid
+    // out in the window; offset: where it rests from there.
+    private CardZoom.Flight? FlightOf(HistoryCard card, FrameworkElement? picture, ZoomMorph.Rect? pictureAt, Vector2 origin, Vector2 offset)
+    {
+        if (picture == null || pictureAt is not { } at || card.Thumbnail is not { } thumbnail
+            || DetailImage.Visibility != Visibility.Visible || CardZoom.RectIn(DetailImage, DetailZoom) is not { } place)
+        {
             return null;
         }
-    }
-
-    // The card grows into the full view: the full view's card starts at the
-    // tapped card's place and size and opens out to its own, its content fading
-    // in at its real size. Not a picture of it stretched from one shape to the
-    // other (a connected animation): a long text, tall in a narrow card and
-    // wide in the full view, came out squashed and smeared that way. The
-    // buttons stay where they are.
-    private void GrowIntoDetail(Windows.Foundation.Rect? from)
-    {
-        if (from is not { } source) return;
-        try
-        {
-            // Laid out now, so the card's place and size are known.
-            DetailView.UpdateLayout();
-            if (DetailCard is not { ActualWidth: > 0, ActualHeight: > 0 }) return;
-            var to = DetailCard.TransformToVisual(null).TransformBounds(new Windows.Foundation.Rect(0, 0, DetailCard.ActualWidth, DetailCard.ActualHeight));
-            var visual = ElementCompositionPreview.GetElementVisual(DetailCard);
-            var compositor = visual.Compositor;
-            // Strongly easing out: most of the way at once, then a long, gentle settle.
-            var ease = compositor.CreateCubicBezierEasingFunction(new Vector2(0.05f, 0.7f), new Vector2(0.1f, 1f));
-
-            // Its outline, rounded as a card is: from the tapped card's size to its own...
-            var outline = compositor.CreateRoundedRectangleGeometry();
-            float radius = (float)DetailCard.CornerRadius.TopLeft;
-            outline.CornerRadius = new Vector2(radius, radius);
-            outline.Size = new Vector2((float)to.Width, (float)to.Height);
-            visual.Clip = compositor.CreateGeometricClip(outline);
-            var grow = compositor.CreateVector2KeyFrameAnimation();
-            grow.InsertKeyFrame(0f, new Vector2((float)source.Width, (float)source.Height));
-            grow.InsertKeyFrame(1f, new Vector2((float)to.Width, (float)to.Height), ease);
-            grow.Duration = MorphDuration;
-
-            // ...and from the tapped card's place to its own.
-            ElementCompositionPreview.SetIsTranslationEnabled(DetailCard, true);
-            var move = compositor.CreateVector3KeyFrameAnimation();
-            move.InsertKeyFrame(0f, new Vector3((float)(source.X - to.X), (float)(source.Y - to.Y), 0));
-            move.InsertKeyFrame(1f, Vector3.Zero, ease);
-            move.Duration = MorphDuration;
-
-            var batch = compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
-            outline.StartAnimation("Size", grow);
-            visual.StartAnimation("Translation", move);
-            FadeIn(DetailContent, 40, 180);
-            FadeIn(DetailFacts, 80, 170);
-            batch.End();
-            // Unclipped once there: a picture that loads in later must not be
-            // cut to the size the card had when it opened.
-            batch.Completed += (_, _) => visual.Clip = null;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[app] card morph failed: {ex.Message}");
-        }
-    }
-
-    // The full view shrinks into the card's place in the list, once the list
-    // has been laid out again.
-    private void StartMorphBack(ConnectedAnimation animation, HistoryCard card)
-    {
-        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
-        {
-            try
-            {
-                Cards.UpdateLayout();
-                if (ElementOf(card) is { } element) animation.TryStart(element);
-                else animation.Cancel();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[app] card morph failed: {ex.Message}");
-            }
-        });
+        // Inside the thumbnail's 1 px line.
+        var inner = new ZoomMorph.Rect(at.X - origin.X + 1, at.Y - origin.Y + 1, Math.Max(1, at.W - 2), Math.Max(1, at.H - 2));
+        double ratio = card.PixelWidth > 0 && card.PixelHeight > 0 ? (double)card.PixelWidth / card.PixelHeight : place.W / place.H;
+        // The grid's card fits its picture whole into its box; the list's
+        // crops it to its box, which is what the flying picture does too.
+        var from = IsGrid ? ZoomMorph.Contain(inner, ratio) : inner;
+        var to = place with { X = place.X + offset.X, Y = place.Y + offset.Y };
+        return new CardZoom.Flight(from, to, thumbnail, ZoomMorph.CardRadius - 1, picture, DetailImage);
     }
 
     private void DetailTitle_ItemClicked(BreadcrumbBar sender, BreadcrumbBarItemClickedEventArgs args)

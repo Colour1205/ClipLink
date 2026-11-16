@@ -65,6 +65,7 @@ import { unixMillis } from '../networking/SyncProtocol';
 import { BatchApplied, HeadApplied, SyncApplied } from '../networking/HistorySync';
 import { StackBadge, StackChrome, StackedCard } from '../stack/StackedCard';
 import { fileExtensionLabel, fileGlyphKind } from '../stack/CardFooter';
+import { PICTURE_SIDE_VP, PictureFlight, ZoomMorph, ZoomRect, containRect, contentShift, lerp, picturePlace, startScale, zoomHeight, zoomRadius, zoomRect, zoomScale } from '../stack/ZoomMorph';
 import { BatchGroupTracker, BatchMember, BatchPlan, StackMotion, StackRow, buildRows, dissolveGroup, foldTwins, hiddenCount, placeBatch, placeQuiet, revealAnimates, settleGroup, staggerDelayMs, startInsetFraction, startPeekVp, twinIds } from '../stack/SyncedRows';
 import { connection } from '@kit.NetworkKit';
 import { signEntry, ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
@@ -398,6 +399,13 @@ const CARD_PRESS_SCALE: number = 0.95;
 // back without greying it out.
 const DETAIL_BACKDROP_BLUR_VP: number = 24;
 const DETAIL_BACKDROP_BRIGHTNESS: number = 0.85;
+// The ids of the pages a card zooms over (see domRect): a card's place is
+// measured from the top-left of its tab's page.
+const SYNCED_PANE_DOM_ID: string = 'syncedPane';
+// Slows the zoom down this many times, for checking it frame by frame on a
+// phone (snapshot_display is far slower than a frame). 1 to ship.
+const ZOOM_TEST_SLOW: number = 1;
+const DEVICES_PANE_DOM_ID: string = 'devicesPane';
 // The Devices split: the device list on the left takes this share, the
 // selected device's detail the rest.
 const DEVICES_LIST_PANE_FRACTION: number = 0.42;
@@ -831,18 +839,34 @@ struct Index {
   @State settingPassphrase: boolean = false;
   @State scanStatus: string = '';
   // Which synced item (by id) is open in the full-screen detail view - a tap
-  // (not long-press) sets this, and geometryTransition morphs the tapped
-  // card into the detail view using this same id, "一镜到底" style (see
-  // openItemDetail/itemDetailView below). File entries never set this (no
-  // meaningful full-screen preview for them) - tapping one just plays the
-  // shared clickEffect() feedback every card gets, per request.
+  // (not long-press) sets this, and the tapped card zooms into the detail
+  // view (see openItemDetail/zoomFrame below).
   @State selectedItemId: string = '';
   // How far the list behind the one-column item preview is blurred and
   // dimmed: 0 not at all, 1 fully (DETAIL_BACKDROP_*). It changes in the same
-  // animateTo as the preview's push and pop (openItemDetail/closeItemDetail),
-  // so it moves with the card's morph; it is 1 exactly while 'itemDetail' is
-  // on syncedNavStack.
+  // animateTo as the preview's zoom (openItemDetail/closeItemDetail), so it
+  // moves with the card; it is 1 exactly while 'itemDetail' is open.
   @State detailBackdrop: number = 0;
+  // The same for the device list behind an open device (openDeviceDetail).
+  @State deviceBackdrop: number = 0;
+  // The zooms the item preview and a device's detail open and close with (see
+  // ZoomMorph and zoomFrame). Separate, so one tab's closing zoom can never
+  // be taken over by the other's opening one.
+  @State itemZoom: ZoomMorph = new ZoomMorph();
+  // The item the preview was opened on, kept while it closes: deleting the
+  // open item (here or by a peer) takes it out of syncedItems before the close
+  // starts, and the preview must still have something to shrink away.
+  @State zoomedItem: SyncedItem | null = null;
+  @State deviceZoom: ZoomMorph = new ZoomMorph();
+  // Each zoom's picture of the tapped card (and of its picture, if it has one),
+  // by 'item'/'device' and 'itemPic'. Kept out of @State: a PixelMap must
+  // reach Image as itself, not behind an observing proxy. ZoomMorph's
+  // snapVersion is what rebuilds the view when one changes.
+  private zoomShots: Map<string, imageKit.PixelMap> = new Map<string, imageKit.PixelMap>();
+  // The page height each tab's zoom fills, beside syncedPaneWidthVp and
+  // devicesPaneWidthVp.
+  private syncedPaneHeightVp: number = 0;
+  private devicesPaneHeightVp: number = 0;
   // List vs 2-column WaterFlow grid for the Synced tab - toggled by the
   // title bar's menu icon (see syncedTitleBar). The choice is kept across
   // launches (read in aboutToAppear, written by the toggle).
@@ -1586,7 +1610,7 @@ struct Index {
       }
     } else if (tab === 1) {
       if (this.devicesNavStack.size() > 1) {
-        if (onScreen) this.closeDeviceDetail(); else this.devicesNavStack.pop(false);
+        if (onScreen) this.closeDeviceDetail(); else this.dropDeviceDetail();
       }
     } else if (this.meScreen !== 'main') {
       // Left by the tab bar, so no jump back to the tab pairing was opened from.
@@ -3330,13 +3354,6 @@ struct Index {
     return selected !== undefined ? selected : this.syncedItems[0];
   }
 
-  // The geometryTransition id of a card and of its preview. Empty in the split
-  // layout, where both are on screen at once and there is no push to morph:
-  // an empty id takes part in no shared transition.
-  gtId(itemId: string): string {
-    return this.isSplitLayout() ? '' : itemId;
-  }
-
   // The outline that marks the card whose item the split's preview shows.
   // Every card in the split carries the same 2vp border and only its colour
   // changes (transparent when it is not the selected one): a border that came
@@ -3501,12 +3518,8 @@ struct Index {
     }
   }
 
-  // Tapping (not long-pressing) a text/image card morphs it into a
-  // full-screen detail view via geometryTransition - the "一镜到底"
-  // continuous-shot pattern from transitions-collection's
-  // ListLongTakeTransition sample: the state change that swaps which view
-  // is rendered has to happen INSIDE animateTo (not a .transition()
-  // modifier alone) for the geometry interpolation to actually run.
+  // Tapping (not long-pressing) a card zooms it into a full-screen detail
+  // view (see openItemDetail).
   // Only meaningful for 'file' entries - a real 'image' entry already
   // carries its bytes inline as base64 (see itemDetailView/syncedItemCard).
   // Returns a file:// URI ArkUI's Image can load directly (same
@@ -3740,29 +3753,47 @@ struct Index {
     // In the split layout the preview is already on screen beside the cards:
     // selecting is all it takes.
     if (this.isSplitLayout()) return;
-    // Per Huawei's own Navigation shared-element-transition guide
-    // (arkts-navigation-animation#共享元素转场): the push call itself must run
-    // inside animateTo, and pushPath's own default transition must be
-    // disabled (the `false` argument) so it doesn't layer on top of the
-    // geometryTransition-driven animation and produce a broken double
-    // animation. The list behind blurs and dims in the same closure, so it
-    // runs on the morph's own curve and the two arrive together.
-    this.getUIContext().animateTo(this.detailMotion(), () => {
-      this.syncedNavStack.pushPath({ name: 'itemDetail' }, false);
-      this.detailBackdrop = 1;
-    });
+    // A card tapped while the last one is still closing (its page takes no
+    // touches by then, see ZoomMorph.closing): that page goes at once.
+    if (this.syncedNavStack.size() > 1) this.syncedNavStack.pop(false);
+    this.zoomedItem = item;
+    // The card zooms into the preview (see zoomFrame), pushed with its own
+    // transition off: the zoom is the transition. The list behind blurs and
+    // dims on the zoom's own curve, so the two arrive together.
+    this.prepareZoom(this.itemZoom, 'item', this.cardDomId(item.id), SYNCED_PANE_DOM_ID,
+      this.syncedPaneWidthVp, this.syncedPaneHeightVp, this.isPictureItem(item) ? this.pictureFlight(item) : null);
+    this.syncedNavStack.pushPath({ name: 'itemDetail' }, false);
+    this.openZoom(this.itemZoom, (shown: number) => { this.detailBackdrop = shown; });
   }
 
-  // The reverse: the card morphs back into its place while the list behind
-  // comes back into focus, again in one closure on one curve. Pops only while
-  // the preview is actually on the stack - a second back or a stale caller
-  // must never pop 'syncedList' itself and leave the tab empty - but clears
-  // the blur either way, so the list can never be left stuck behind it.
+  // The reverse: the preview shrinks back onto its card while the list behind
+  // comes back into focus, and goes once it is there. Pops only while the
+  // preview is actually on the stack - a second back or a stale caller must
+  // never pop 'syncedList' itself and leave the tab empty - but clears the
+  // blur either way, so the list can never be left stuck behind it.
   closeItemDetail(): void {
-    this.getUIContext().animateTo(this.detailMotion(), () => {
-      if (this.syncedNavStack.size() > 1) this.syncedNavStack.pop(false);
-      this.detailBackdrop = 0;
-    });
+    if (this.syncedNavStack.size() <= 1) {
+      this.dropItemDetail();
+      return;
+    }
+    // A second back while it closes: it is already on its way.
+    if (this.itemZoom.closing) return;
+    const item: SyncedItem | undefined = this.syncedItems.find(i => i.id === this.selectedItemId);
+    this.imageZoomScale = 1;
+    this.imageOffsetX = 0;
+    this.imageOffsetY = 0;
+    // Back onto the card that shows it: its own, or - when the same content
+    // came in again while it was open - the newer twin's, which is the one
+    // the list draws (see foldTwins).
+    const cardId: string = item !== undefined ? this.drawnTwinOf(item.id) : '';
+    this.closeZoom(this.itemZoom, 'item', cardId.length > 0 ? this.cardDomId(cardId) : '', SYNCED_PANE_DOM_ID,
+      this.syncedPaneWidthVp, this.syncedPaneHeightVp,
+      item !== undefined && this.isPictureItem(item) ? this.pictureFlight(item, cardId) : null,
+      (shown: number) => { this.detailBackdrop = shown; },
+      () => {
+        if (this.syncedNavStack.size() > 1) this.syncedNavStack.pop(false);
+        this.zoomedItem = null;
+      });
   }
 
   // Closes the preview with no animation, for when nobody is watching (its tab
@@ -3771,6 +3802,290 @@ struct Index {
   private dropItemDetail(): void {
     if (this.syncedNavStack.size() > 1) this.syncedNavStack.pop(false);
     this.detailBackdrop = 0;
+    this.endZoom(this.itemZoom, 'item');
+    this.zoomedItem = null;
+  }
+
+  // The id of the card the list draws for this item's content: its own, else
+  // the first of its twins that has a card on screen. '' when none does.
+  private drawnTwinOf(itemId: string): string {
+    const ids: string[] = twinIds<SyncedItem>(this.syncedItems, itemId, syncedItemKey);
+    const ordered: string[] = [itemId, ...ids.filter((id: string) => id !== itemId)];
+    for (const id of ordered) {
+      if (this.domRect(this.cardDomId(id), SYNCED_PANE_DOM_ID) !== null) return id;
+    }
+    return '';
+  }
+
+  // The item the preview shows: the open one, or while it closes the one it
+  // was opened on, even if that has been deleted meanwhile (see zoomedItem).
+  private detailItems(): SyncedItem[] {
+    const live: SyncedItem[] = this.syncedItems.filter(i => i.id === this.selectedItemId);
+    if (live.length > 0) return live;
+    if (this.itemZoom.closing && this.zoomedItem !== null) return [this.zoomedItem];
+    return [];
+  }
+
+  // Whether an item shows as a picture (a picture, or a file that is one).
+  private isPictureItem(item: SyncedItem): boolean {
+    return item.type === 'image' || this.imagePreviewUri(item) !== null;
+  }
+
+  private pictureSrc(item: SyncedItem): string {
+    return item.type === 'image' ? `data:image/png;base64,${item.content}` : this.imagePreviewUri(item) as string;
+  }
+
+  // Where a picture card's picture flies from, and where to: the grid card's
+  // picture, fitted whole into its box, or the list card's square chip; and
+  // the preview's own place for it (detailPicturePlace).
+  private pictureFlight(item: SyncedItem, cardItemId: string = item.id): PictureFlight {
+    const ratio: number = this.pictureRatio(item);
+    const grid: boolean = this.syncedViewMode !== 'list';
+    return new PictureFlight(this.cardPicDomId(cardItemId), this.cardPartDomId(cardItemId), ratio, grid,
+      grid ? (ratio >= 1 / 3 ? 12 : 0) : 44 / 3.2, this.detailPicturePlace(item));
+  }
+
+  // Where the one-column preview draws a picture (see picturePlace): between
+  // its title bar and the tab pill, on the Synced page.
+  private detailPicturePlace(item: SyncedItem): ZoomRect {
+    return picturePlace(this.pictureRatio(item), this.syncedPaneWidthVp, this.syncedPaneHeightVp,
+      this.detailContentTop(), this.bottomInsetVp + this.TAB_PILL_CLEARANCE);
+  }
+
+  // Where a full view's content starts: below the status bar and its title bar.
+  private detailContentTop(): number {
+    return this.topInsetVp + this.TITLE_BAR_HEIGHT + 8;
+  }
+
+  // Where a component is, by its id, on the page: in vp, from the top-left of
+  // the component with id pageId. Null when either cannot be found.
+  private domRect(id: string, pageId: string): ZoomRect | null {
+    try {
+      const ui: UIContext = this.getUIContext();
+      const utils = ui.getComponentUtils();
+      const info = utils.getRectangleById(id);
+      const page = utils.getRectangleById(pageId);
+      if (info.size.width <= 0 || info.size.height <= 0) return null;
+      return zoomRect(ui.px2vp(info.windowOffset.x - page.windowOffset.x), ui.px2vp(info.windowOffset.y - page.windowOffset.y),
+        ui.px2vp(info.size.width), ui.px2vp(info.size.height));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // A picture of a component as it is on screen, or undefined.
+  private shotOf(id: string): imageKit.PixelMap | undefined {
+    try {
+      return this.getUIContext().getComponentSnapshot().getSync(id);
+    } catch (e) {
+      return undefined;
+    }
+  }
+
+  private setShot(key: string, shot: imageKit.PixelMap | undefined): void {
+    const old: imageKit.PixelMap | undefined = this.zoomShots.get(key);
+    // Let go a moment later, not now: the page that shows it may still be
+    // drawn for a frame (a card tapped while the last one closes replaces its
+    // shot in the same tap that takes its page away).
+    if (old !== undefined && old !== shot) setTimeout(() => { void old.release(); }, 1000);
+    if (shot === undefined) this.zoomShots.delete(key); else this.zoomShots.set(key, shot);
+  }
+
+  // Puts a zoom on the tapped card, before its full view is pushed: measures
+  // the card and the page, and takes the card's picture of itself (without its
+  // picture, which flies on its own). A card that cannot be measured opens
+  // with no zoom - the full view is just there, as it is in the split.
+  private prepareZoom(z: ZoomMorph, key: string, cardId: string, pageId: string, pageW: number, pageH: number,
+    flight: PictureFlight | null): void {
+    const card: ZoomRect | null = this.domRect(cardId, pageId);
+    z.run++;
+    z.closing = false;
+    z.pageW = pageW;
+    z.pageH = pageH;
+    z.contentTop = this.detailContentTop();
+    z.vanish = false;
+    if (card === null || pageW <= 0 || pageH <= 0) {
+      this.setShot(key, undefined);
+      this.setShot(`${key}Pic`, undefined);
+      z.flying = false;
+      z.p = 1;
+      z.fade = 1;
+      z.cover = 0;
+      z.moving = false;
+      z.shown = 1;
+      z.active = false;
+      z.snapVersion++;
+      return;
+    }
+    z.card = card;
+    // A picture card's picture of itself is its footer only: the picture is
+    // the one flying, and a second, smaller copy of it growing under it and
+    // fading is just what it must not look like.
+    const partId: string = flight !== null ? flight.partId : cardId;
+    const part: ZoomRect | null = flight !== null ? this.domRect(partId, pageId) : card;
+    z.part = part !== null ? zoomRect(part.x - card.x, part.y - card.y, part.w, part.h) : zoomRect(0, 0, card.w, card.h);
+    this.setShot(key, part !== null ? this.shotOf(partId) : undefined);
+    z.flying = false;
+    // The tapped card's own picture, never one kept from a zoom before it.
+    this.setShot(`${key}Pic`, undefined);
+    if (flight !== null) this.aimFlight(z, key, flight, pageId);
+    z.moving = true;
+    z.shown = 1;
+    z.p = 0;
+    z.fade = 0;
+    z.cover = 1;
+    z.active = true;
+    z.snapVersion++;
+  }
+
+  // Where the picture flies between, measured now (the card may have moved
+  // since the zoom opened).
+  private aimFlight(z: ZoomMorph, key: string, flight: PictureFlight, pageId: string): void {
+    const pic: ZoomRect | null = this.domRect(flight.picId, pageId);
+    if (pic === null) {
+      z.flying = false;
+      return;
+    }
+    // The grid card fits its picture whole into its box (ImageFit.Contain); the
+    // list card's chip crops it to a square, which is what the flying picture
+    // does too while its box is square (ImageFit.Cover).
+    z.picFrom = flight.contained ? containRect(pic, flight.ratio) : pic;
+    z.picRadiusFrom = flight.radius;
+    z.picTo = flight.place;
+    if (!this.zoomShots.has(`${key}Pic`)) this.setShot(`${key}Pic`, this.shotOf(flight.picId));
+    z.flying = true;
+  }
+
+  // Opens a zoom prepared by prepareZoom: one frame at the card first, so the
+  // full view is drawn where it starts, then the zoom on the preview's spring
+  // with the full view's content fading in over the card's picture of itself.
+  private openZoom(z: ZoomMorph, backdrop: (shown: number) => void): void {
+    if (!z.active) {
+      this.getUIContext().animateTo(this.detailMotion(), () => { backdrop(1); });
+      return;
+    }
+    const run: number = z.run;
+    setTimeout(() => {
+      // Gone back already, or another card tapped: that one runs instead.
+      if (z.run !== run) return;
+      const motion: AnimateParam = this.detailMotion();
+      // The picture lands: the preview's own takes over from the flying one.
+      motion.onFinish = () => {
+        if (z.run !== run) return;
+        z.flying = false;
+        z.moving = false;
+      };
+      this.getUIContext().animateTo(motion, () => {
+        z.p = 1;
+        backdrop(1);
+      });
+      // The card's text goes first, the view's comes in after it (see
+      // ZoomMorph.fade).
+      const slow: number = ZOOM_TEST_SLOW;
+      this.getUIContext().animateTo({ duration: 110 * slow, curve: Curve.Sharp }, () => { z.cover = 0; });
+      this.getUIContext().animateTo({ duration: 170 * slow, delay: 70 * slow, curve: Curve.Sharp }, () => { z.fade = 1; });
+    }, 24);
+  }
+
+  // Closes a zoom: the full view shrinks back onto its card, its content
+  // fading out near the end so the card's picture of itself is what lands,
+  // then gone() takes the page away. A card that is gone (or was never
+  // measured) has nowhere to go back to: the full view shrinks toward the
+  // middle and fades instead.
+  private closeZoom(z: ZoomMorph, key: string, cardId: string, pageId: string, pageW: number, pageH: number,
+    flight: PictureFlight | null, backdrop: (shown: number) => void, gone: () => void): void {
+    const card: ZoomRect | null = cardId.length > 0 ? this.domRect(cardId, pageId) : null;
+    z.run++;
+    const run: number = z.run;
+    z.closing = true;
+    // From the page as it is now (the window may have been resized while it
+    // was open), in vp again for the way down.
+    if (pageW > 0 && pageH > 0) {
+      z.pageW = pageW;
+      z.pageH = pageH;
+    }
+    z.contentTop = this.detailContentTop();
+    z.moving = true;
+    z.shown = 1;
+    if (card !== null && z.active) {
+      z.card = card;
+      z.vanish = false;
+      // The card's picture of itself taken again, now: it may not be the card
+      // the zoom opened from (a newer twin, or another item chosen in the split
+      // while the window was wide), and it is what the close lands as.
+      const partId: string = flight !== null ? flight.partId : cardId;
+      const part: ZoomRect | null = flight !== null ? this.domRect(partId, pageId) : card;
+      z.part = part !== null ? zoomRect(part.x - card.x, part.y - card.y, part.w, part.h) : zoomRect(0, 0, card.w, card.h);
+      this.setShot(key, part !== null ? this.shotOf(partId) : undefined);
+      this.setShot(`${key}Pic`, undefined);
+      if (flight !== null) this.aimFlight(z, key, flight, pageId); else z.flying = false;
+      z.snapVersion++;
+    } else {
+      z.card = zoomRect(z.pageW * 0.3, z.pageH * 0.35, z.pageW * 0.4, z.pageH * 0.3);
+      z.vanish = true;
+      z.flying = false;
+      z.active = true;
+    }
+    const motion: AnimateParam = this.detailMotion();
+    motion.onFinish = () => {
+      // Only if this close ran to the end: a card tapped meanwhile has
+      // opened a zoom of its own.
+      if (z.run !== run) return;
+      gone();
+      this.endZoom(z, key);
+    };
+    this.getUIContext().animateTo(motion, () => {
+      z.p = 0;
+      backdrop(0);
+    });
+    // The reverse of the open: the view's content goes, then the card's
+    // picture of itself comes back for it to land as.
+    const slow: number = ZOOM_TEST_SLOW;
+    this.getUIContext().animateTo({ duration: 110 * slow, curve: Curve.Sharp }, () => { z.fade = 0; });
+    this.getUIContext().animateTo({ duration: 140 * slow, delay: 80 * slow, curve: Curve.Sharp }, () => { z.cover = 1; });
+  }
+
+  // The list was scrolled while a zoom closes over it: the card is no longer
+  // where the zoom is heading, so it fades out where it is instead of landing
+  // on whatever card has moved into that spot.
+  private abandonClose(z: ZoomMorph, key: string, gone: () => void): void {
+    if (!z.closing) return;
+    z.run++;
+    const run: number = z.run;
+    this.getUIContext().animateTo({
+      duration: 120,
+      curve: Curve.Sharp,
+      onFinish: () => {
+        if (z.run !== run) return;
+        gone();
+        this.endZoom(z, key);
+        if (key === 'item') this.zoomedItem = null;
+      },
+    }, () => { z.shown = 0; });
+  }
+
+  private abandonItemClose(): void {
+    this.abandonClose(this.itemZoom, 'item', () => { if (this.syncedNavStack.size() > 1) this.syncedNavStack.pop(false); });
+  }
+
+  private abandonDeviceClose(): void {
+    this.abandonClose(this.deviceZoom, 'device', () => { if (this.devicesNavStack.size() > 1) this.devicesNavStack.pop(false); });
+  }
+
+  // Puts a zoom back at rest, with its pictures let go.
+  private endZoom(z: ZoomMorph, key: string): void {
+    z.active = false;
+    z.flying = false;
+    z.vanish = false;
+    z.p = 1;
+    z.fade = 1;
+    z.cover = 0;
+    z.closing = false;
+    z.moving = false;
+    z.shown = 1;
+    this.setShot(key, undefined);
+    this.setShot(`${key}Pic`, undefined);
+    z.snapVersion++;
   }
 
   // What the preview opens and closes on. With the system's reduce-animations
@@ -3778,6 +4093,7 @@ struct Index {
   // reduce-motion paths here (showSynced, rowTransition); the list still
   // blurs and clears, just quickly.
   private detailMotion(): AnimateParam {
+    if (ZOOM_TEST_SLOW > 1) return { duration: 400 * ZOOM_TEST_SLOW, curve: Curve.EaseInOut };
     if (this.reduceMotion) return { duration: 150, curve: Curve.EaseInOut };
     return { curve: curves.interpolatingSpring(0, 1, 328, 36) };
   }
@@ -3987,15 +4303,31 @@ struct Index {
     this.openDeviceId = deviceId;
     // In the split the detail is already on screen: selecting is enough.
     if (this.isSplitLayout()) return;
-    this.getUIContext().animateTo({ curve: curves.interpolatingSpring(0, 1, 328, 36) }, () => {
-      this.devicesNavStack.pushPath({ name: 'deviceDetail' }, false);
-    });
+    if (this.devicesNavStack.size() > 1) this.devicesNavStack.pop(false);
+    // The same zoom as a Synced card's, with the device list behind blurred
+    // and dimmed like the Synced list (see openItemDetail).
+    this.prepareZoom(this.deviceZoom, 'device', this.deviceCardDomId(deviceId), DEVICES_PANE_DOM_ID,
+      this.devicesPaneWidthVp, this.devicesPaneHeightVp, null);
+    this.devicesNavStack.pushPath({ name: 'deviceDetail' }, false);
+    this.openZoom(this.deviceZoom, (shown: number) => { this.deviceBackdrop = shown; });
   }
 
   closeDeviceDetail(): void {
-    this.getUIContext().animateTo({ curve: curves.interpolatingSpring(0, 1, 328, 36) }, () => {
-      this.devicesNavStack.pop(false);
-    });
+    if (this.devicesNavStack.size() <= 1) {
+      this.dropDeviceDetail();
+      return;
+    }
+    if (this.deviceZoom.closing) return;
+    this.closeZoom(this.deviceZoom, 'device', this.deviceCardDomId(this.openDeviceId), DEVICES_PANE_DOM_ID,
+      this.devicesPaneWidthVp, this.devicesPaneHeightVp, null,
+      (shown: number) => { this.deviceBackdrop = shown; },
+      () => { if (this.devicesNavStack.size() > 1) this.devicesNavStack.pop(false); });
+  }
+
+  private dropDeviceDetail(): void {
+    if (this.devicesNavStack.size() > 1) this.devicesNavStack.pop(false);
+    this.deviceBackdrop = 0;
+    this.endZoom(this.deviceZoom, 'device');
   }
 
   private syncedItemFor(entry: ClipboardEntry, fromPeer: boolean, groupId: string = '', blockId: string = groupId): SyncedItem {
@@ -4209,9 +4541,31 @@ struct Index {
 
   // An id for a row's component, to find where it is (see rectOf).
   private rowDomId(itemId: string): string {
+    return `syncedRow${this.idHash(itemId)}`;
+  }
+
+  private idHash(text: string): number {
     let h: number = 0;
-    for (let i = 0; i < itemId.length; i++) h = (h * 31 + itemId.charCodeAt(i)) | 0;
-    return `syncedRow${h}`;
+    for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0;
+    return h;
+  }
+
+  // Ids for a card, its picture and the rest of a picture card (its footer),
+  // to measure and picture them for the zoom (see prepareZoom).
+  private cardDomId(itemId: string): string {
+    return `syncedCard${this.idHash(itemId)}`;
+  }
+
+  private cardPicDomId(itemId: string): string {
+    return `syncedPic${this.idHash(itemId)}`;
+  }
+
+  private cardPartDomId(itemId: string): string {
+    return `syncedPart${this.idHash(itemId)}`;
+  }
+
+  private deviceCardDomId(deviceId: string): string {
+    return `deviceCard${this.idHash(deviceId)}`;
   }
 
   private setMotion(next: RevealMotion): void {
@@ -4790,7 +5144,11 @@ struct Index {
   @Builder
   syncedItemCard(item: SyncedItem, chrome: StackChrome) {
     Row({ space: 12 }) {
-      this.typeChip(item, 44)
+      // In a Stack only to carry the id a picture's flight starts from.
+      Stack() {
+        this.typeChip(item, 44)
+      }
+      .id(this.cardPicDomId(item.id))
 
       Column({ space: 3 }) {
         // A picture is its own content (the thumbnail beside it), so no
@@ -4845,6 +5203,9 @@ struct Index {
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
+      // A picture card's zoom pictures only this, not its picture (see
+      // prepareZoom).
+      .id(this.cardPartDomId(item.id))
     }
     .width('100%')
     .padding({ left: 12, right: 12, top: 12, bottom: 12 + this.stackHandleRoom(item.id) })
@@ -4860,10 +5221,9 @@ struct Index {
     // example of pairing clip(true) with borderRadius.
     .clip(true)
     .border(this.cardSelectBorder(item.id))
-    // Shared id with itemDetailView below - this is what makes the card
-    // visually morph into the full-screen view instead of just cutting
-    // between them ("一镜到底"). Not in the split layout (see gtId).
-    .geometryTransition(this.gtId(item.id), { follow: true })
+    // Measured and pictured for the zoom into the full-screen view (see
+    // prepareZoom).
+    .id(this.cardDomId(item.id))
     // Pressed, the card shrinks a little, as clickEffect would. Drawn here, not by
     // clickEffect: a card whose menu opens under the finger never hears it lift,
     // and clickEffect's press stayed on until the menu closed (see pressScaleFor).
@@ -4970,7 +5330,7 @@ struct Index {
     .alignItems(HorizontalAlign.Start)
     .clip(true)
     .border(this.cardSelectBorder(item.id))
-    .geometryTransition(this.gtId(item.id), { follow: true })
+    .id(this.cardDomId(item.id))
     .scale(this.pressScaleFor(item.id))
     .onTouch((event: TouchEvent) => { this.cardTouch(item.id, event); })
     .onClick(() => { if (this.endsLongPress(item.id)) return; tapHaptic(); this.activateItem(item); })
@@ -5073,7 +5433,7 @@ struct Index {
     .alignItems(HorizontalAlign.Start)
     .clip(true)
     .border(this.cardSelectBorder(item.id))
-    .geometryTransition(this.gtId(item.id), { follow: true })
+    .id(this.cardDomId(item.id))
     .scale(this.pressScaleFor(item.id))
     .onTouch((event: TouchEvent) => { this.cardTouch(item.id, event); })
     .onClick(() => { if (this.endsLongPress(item.id)) return; tapHaptic(); this.activateItem(item); })
@@ -5120,6 +5480,7 @@ struct Index {
           .objectFit(ImageFit.Contain)
           .autoResize(true) // see typeChip
           .borderRadius(12)
+          .id(this.cardPicDomId(item.id))
         // The picture is the content, so no name or caption under it - a file
         // with nothing to preview keeps its name (see syncedGridFileCard).
         // The standard footer. The 4 of padding on top of the card's 8 puts
@@ -5129,6 +5490,7 @@ struct Index {
         }
         .width('100%')
         .padding({ left: 4, right: 4, bottom: 4 })
+        .id(this.cardPartDomId(item.id))
       }
       .width('100%')
       .padding({ left: 8, right: 8, top: 8, bottom: 8 + this.stackHandleRoom(item.id) })
@@ -5139,11 +5501,10 @@ struct Index {
       // this card can never bleed into its WaterFlow neighbor.
       .clip(true)
       .border(this.cardSelectBorder(item.id))
-      // Same shared-id morph, click/drag/long-press wiring as
-      // syncedItemCard - only one of the two card variants is ever
-      // mounted for a given item at a time (list XOR grid mode), so
-      // reusing item.id here doesn't conflict with the other variant.
-      .geometryTransition(this.gtId(item.id), { follow: true })
+      // Same zoom, click/drag/long-press wiring as syncedItemCard - only one
+      // of the two card variants is ever mounted for a given item at a time
+      // (list XOR grid mode), so the ids never clash.
+      .id(this.cardDomId(item.id))
       .scale(this.pressScaleFor(item.id))
       .onTouch((event: TouchEvent) => { this.cardTouch(item.id, event); })
       .onClick(() => { if (this.endsLongPress(item.id)) return; tapHaptic(); this.activateItem(item); })
@@ -5182,9 +5543,8 @@ struct Index {
     }
   }
 
-  // Full-screen "one shot" detail view for a tapped text/image card - see
-  // openItemDetail/closeItemDetail and the geometryTransition id shared
-  // with syncedItemCard above. Takes the item directly as a parameter
+  // Full-screen detail view for a tapped card - see openItemDetail/
+  // closeItemDetail and zoomFrame, which zooms it out of the card. Takes the item directly as a parameter
   // rather than looking it up via a getter inside the @Builder - a getter
   // call from inside a @Builder is what was actually producing the blank
   // black screen (the caller already has the item in hand from the same
@@ -5210,45 +5570,82 @@ struct Index {
       .gesture(
         GestureGroup(GestureMode.Parallel,
           PinchGesture()
-            .onActionStart(() => { this.imageZoomBase = this.imageZoomScale; })
-            .onActionUpdate((event: GestureEvent) => {
-              this.imageZoomScale = Math.max(1, Math.min(4, this.imageZoomBase * event.scale));
-            }),
-          // offsetX/offsetY are relative to THIS gesture's start, same
-          // reasoning as the pinch scale handling above - onActionStart
-          // snapshots the running offset so each new drag adds on top of
-          // where the last one left off instead of resetting to it.
+            .onActionStart(() => { this.pinchStart(); })
+            .onActionUpdate((event: GestureEvent) => { this.pinchUpdate(event); }),
           PanGesture()
-            .onActionStart(() => {
-              this.imageOffsetBaseX = this.imageOffsetX;
-              this.imageOffsetBaseY = this.imageOffsetY;
-            })
-            .onActionUpdate((event: GestureEvent) => {
-              // Only meaningful once zoomed in - at 1x the image already
-              // fills the frame, and panning it here would just be a
-              // confusing swipe that goes nowhere (this is also what makes
-              // it safe to have Tabs.scrollable(false) above: panning an
-              // unzoomed image is a no-op, not a competing gesture).
-              if (this.imageZoomScale <= 1) return;
-              // offsetX/offsetY come back in real screen vp, but translate()
-              // is applied to THIS node's own (pre-scale) coordinate space -
-              // once .scale() is also active, the same requested translate
-              // paints as visibly less screen movement the higher the scale
-              // goes (exactly the "faster at low zoom, slower at high zoom"
-              // reported). Multiplying the raw offset by the current scale
-              // is what cancels that out and keeps the point under the
-              // finger actually under the finger at any zoom level.
-              this.imageOffsetX = this.imageOffsetBaseX + event.offsetX * this.imageZoomScale;
-              this.imageOffsetY = this.imageOffsetBaseY + event.offsetY * this.imageZoomScale;
-            })
-            .onActionEnd(() => {
-              if (this.imageZoomScale <= 1) {
-                this.imageOffsetX = 0;
-                this.imageOffsetY = 0;
-              }
-            })
+            .onActionStart(() => { this.panStart(); })
+            .onActionUpdate((event: GestureEvent) => { this.panUpdate(event); })
+            .onActionEnd(() => { this.panEnd(); })
         )
       )
+  }
+
+  // The one-column preview's picture: at the place the zoom's flying picture
+  // lands on (detailPicturePlace), so the two are the same picture in the same
+  // place when one hands over to the other. Hidden while the picture flies.
+  @Builder
+  placedImage(src: string, place: ZoomRect) {
+    Image(src)
+      .position({ x: place.x, y: place.y })
+      .width(place.w)
+      .height(place.h)
+      .objectFit(ImageFit.Contain)
+      .borderRadius(20)
+      .opacity(this.itemZoom.flying ? 0 : 1)
+      .scale({ x: this.imageZoomScale, y: this.imageZoomScale })
+      .translate({ x: this.imageOffsetX, y: this.imageOffsetY })
+      .gesture(
+        GestureGroup(GestureMode.Parallel,
+          PinchGesture()
+            .onActionStart(() => { this.pinchStart(); })
+            .onActionUpdate((event: GestureEvent) => { this.pinchUpdate(event); }),
+          PanGesture()
+            .onActionStart(() => { this.panStart(); })
+            .onActionUpdate((event: GestureEvent) => { this.panUpdate(event); })
+            .onActionEnd(() => { this.panEnd(); })
+        )
+      )
+  }
+
+  private pinchStart(): void {
+    this.imageZoomBase = this.imageZoomScale;
+  }
+
+  private pinchUpdate(event: GestureEvent): void {
+    this.imageZoomScale = Math.max(1, Math.min(4, this.imageZoomBase * event.scale));
+  }
+
+  // offsetX/offsetY are relative to THIS gesture's start, same reasoning as
+  // the pinch scale handling above - panStart snapshots the running offset so
+  // each new drag adds on top of where the last one left off instead of
+  // resetting to it.
+  private panStart(): void {
+    this.imageOffsetBaseX = this.imageOffsetX;
+    this.imageOffsetBaseY = this.imageOffsetY;
+  }
+
+  private panUpdate(event: GestureEvent): void {
+    // Only meaningful once zoomed in - at 1x the image already fills the
+    // frame, and panning it here would just be a confusing swipe that goes
+    // nowhere (this is also what makes it safe to have Tabs.scrollable(false)
+    // above: panning an unzoomed image is a no-op, not a competing gesture).
+    if (this.imageZoomScale <= 1) return;
+    // offsetX/offsetY come back in real screen vp, but translate() is applied
+    // to THIS node's own (pre-scale) coordinate space - once .scale() is also
+    // active, the same requested translate paints as visibly less screen
+    // movement the higher the scale goes (exactly the "faster at low zoom,
+    // slower at high zoom" reported). Multiplying the raw offset by the
+    // current scale is what cancels that out and keeps the point under the
+    // finger actually under the finger at any zoom level.
+    this.imageOffsetX = this.imageOffsetBaseX + event.offsetX * this.imageZoomScale;
+    this.imageOffsetY = this.imageOffsetBaseY + event.offsetY * this.imageZoomScale;
+  }
+
+  private panEnd(): void {
+    if (this.imageZoomScale <= 1) {
+      this.imageOffsetX = 0;
+      this.imageOffsetY = 0;
+    }
   }
 
   // The back button and Copy/Share live in the HDS title bar (see
@@ -5261,9 +5658,23 @@ struct Index {
   @Builder
   itemDetailView(item: SyncedItem) {
     Stack({ alignContent: Alignment.TopStart }) {
-      if (item.type === 'image' || this.imagePreviewUri(item) !== null) {
+      if (this.isPictureItem(item) && !this.isSplitLayout()) {
+        // Placed, not centred by a Column: where the picture is must be known
+        // before it is laid out, for the zoom's picture to fly to it.
+        Stack({ alignContent: Alignment.TopStart }) {
+          this.placedImage(this.pictureSrc(item), this.detailPicturePlace(item))
+          Text(this.bylineText(item))
+            .fontSize(12)
+            .fontColor($r('sys.color.font_secondary'))
+            .textAlign(TextAlign.Center)
+            .width(Math.max(0, this.syncedPaneWidthVp - 2 * PICTURE_SIDE_VP))
+            .position({ x: PICTURE_SIDE_VP, y: this.detailPicturePlace(item).y + this.detailPicturePlace(item).h + 16 })
+        }
+        .width('100%')
+        .height('100%')
+      } else if (this.isPictureItem(item)) {
         Column({ space: 16 }) {
-          this.zoomableImage(item.type === 'image' ? `data:image/png;base64,${item.content}` : this.imagePreviewUri(item) as string)
+          this.zoomableImage(this.pictureSrc(item))
           Text(this.bylineText(item)).fontSize(12).fontColor($r('sys.color.font_secondary'))
         }
         .width('100%')
@@ -5317,14 +5728,122 @@ struct Index {
     // Plain - no bottom glow on the full-bleed preview.
     .backgroundColor($r('sys.color.background_primary'))
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-    // Content component gets geometryTransition, per Huawei's Navigation
-    // FAQ ("给内容组件设置geometryTransition属性，不要设置到NavDestination上") -
-    // NOT the NavDestination wrapping it in syncedPageMap. id must match
-    // syncedItemCard's exactly (item.id) for the morph to connect the two.
-    .geometryTransition(this.gtId(item.id), { follow: true })
     .transition(TransitionEffect.OPACITY)
   }
 
+
+  // The zoom by its key. zoomFrame reads it through this, not as a parameter:
+  // a @Builder's parameters are passed by value, so a change to one made by
+  // the open's animateTo never reached the view, and it stayed on the card.
+  private zoomOf(key: string): ZoomMorph {
+    return key === 'device' ? this.deviceZoom : this.itemZoom;
+  }
+
+  // A card's zoom into its full view (see ZoomMorph): the full view, laid out
+  // at the page's size and scaled down onto the card, cut to a rounded shape
+  // that is the card's at the start and the page's at the end, so its text
+  // grows with it instead of being uncovered; the card's picture of itself
+  // over it, fading out as the view's own content fades in; and a picture
+  // card's picture, flying from the card to the view's place for it (both
+  // fitted the same way, so it is one picture moving, not two crossfading).
+  // At rest - open, or a card that could not be measured - it is just the
+  // full view.
+  @Builder
+  zoomFrame(key: string, item: SyncedItem | null, deviceId: string, fill: ResourceColor) {
+    Stack({ alignContent: Alignment.TopStart }) {
+      // The page is see-through (a DIALOG destination, so the list stays on
+      // screen behind it), and so are its touches: a long press on the
+      // preview's text reached the card under it and dragged that, so text
+      // could not be selected. Under everything it shows, this stops them
+      // while it is open - the preview's own content is above it and still
+      // gets them - and lets them through while it closes (see
+      // ZoomMorph.closing).
+      Column()
+        .width('100%')
+        .height('100%')
+        .hitTestBehavior(this.zoomOf(key).closing ? HitTestMode.None : HitTestMode.Block)
+      Stack({ alignContent: Alignment.TopStart }) {
+        Stack() {
+          if (item !== null) {
+            this.itemDetailView(item)
+          } else {
+            this.deviceDetailView(deviceId)
+          }
+        }
+        .width(this.zoomOf(key).moving ? this.zoomOf(key).pageW : '100%')
+        .height(this.zoomOf(key).moving ? this.zoomOf(key).pageH : '100%')
+        .opacity(this.zoomOf(key).fade)
+        // A picture's preview stays put (its picture is the one flying);
+        // anything else rides on the card's top while the zoom is small.
+        .translate({ y: item !== null && this.isPictureItem(item) ? 0 : contentShift(this.zoomOf(key)) })
+        // A picture card's own surface, under its footer's picture of itself:
+        // that picture has no background, and without this the card would
+        // take the page's colour the moment it is tapped (black in dark mode,
+        // solid with card transparency on).
+        if (item !== null && this.zoomOf(key).moving && this.isPictureItem(item)) {
+          Column()
+            .position({ x: 0, y: 0 })
+            .width(this.zoomOf(key).card.w / startScale(this.zoomOf(key)))
+            .height(this.zoomOf(key).card.h / startScale(this.zoomOf(key)))
+            .backgroundColor(this.cardFillFor(item.id))
+            .opacity(this.zoomOf(key).cover)
+            .hitTestBehavior(HitTestMode.Transparent)
+        }
+        // Only while it moves: at rest the view's own content is all there is,
+        // and a see-through picture left over it kept its text from being
+        // selected.
+        if (this.zoomOf(key).moving && this.zoomOf(key).snapVersion > 0 && this.zoomShots.has(key)) {
+          Image(this.zoomShots.get(key) as imageKit.PixelMap)
+            .objectFit(ImageFit.Fill)
+            .position({ x: this.zoomOf(key).part.x / startScale(this.zoomOf(key)), y: this.zoomOf(key).part.y / startScale(this.zoomOf(key)) })
+            .width(this.zoomOf(key).part.w / startScale(this.zoomOf(key)))
+            .height(this.zoomOf(key).part.h / startScale(this.zoomOf(key)))
+            .opacity(this.zoomOf(key).cover)
+            .hitTestBehavior(HitTestMode.Transparent)
+        }
+      }
+      .width(this.zoomOf(key).moving ? this.zoomOf(key).pageW : '100%')
+      .height(this.zoomOf(key).moving ? zoomHeight(this.zoomOf(key)) : '100%')
+      .backgroundColor(fill)
+      .borderRadius(this.zoomOf(key).active ? zoomRadius(this.zoomOf(key)) : 0)
+      .clip(true)
+      .scale({ x: zoomScale(this.zoomOf(key)), y: zoomScale(this.zoomOf(key)), centerX: 0, centerY: 0 })
+      .offset({ x: lerp(this.zoomOf(key).card.x, 0, this.zoomOf(key).p), y: lerp(this.zoomOf(key).card.y, 0, this.zoomOf(key).p) })
+      .opacity(this.zoomOf(key).vanish ? this.zoomOf(key).p : 1)
+      // Only while the zoom moves, like the card's picture of itself: nothing
+      // may be left over the preview at rest, where it would take its touches
+      // (pinch, pan). Its first frames on the way back show the card's
+      // picture of its picture (under it) while it decodes again.
+      if (item !== null && this.zoomOf(key).moving && this.isPictureItem(item)) {
+        Stack() {
+          // The card's picture as it was on screen, under the decoded one,
+          // for the frames before that is ready.
+          if (this.zoomOf(key).snapVersion > 0 && this.zoomShots.has(`${key}Pic`)) {
+            Image(this.zoomShots.get(`${key}Pic`) as imageKit.PixelMap)
+              .width('100%')
+              .height('100%')
+              .objectFit(ImageFit.Cover)
+          }
+          Image(this.pictureSrc(item))
+            .width('100%')
+            .height('100%')
+            .objectFit(ImageFit.Cover)
+        }
+        .position({ x: lerp(this.zoomOf(key).picFrom.x, this.zoomOf(key).picTo.x, this.zoomOf(key).p), y: lerp(this.zoomOf(key).picFrom.y, this.zoomOf(key).picTo.y, this.zoomOf(key).p) })
+        .width(lerp(this.zoomOf(key).picFrom.w, this.zoomOf(key).picTo.w, this.zoomOf(key).p))
+        .height(lerp(this.zoomOf(key).picFrom.h, this.zoomOf(key).picTo.h, this.zoomOf(key).p))
+        .borderRadius(lerp(this.zoomOf(key).picRadiusFrom, 20, this.zoomOf(key).p))
+        .clip(true)
+        .opacity(this.zoomOf(key).flying ? 1 : 0)
+        .hitTestBehavior(HitTestMode.Transparent)
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .opacity(this.zoomOf(key).shown)
+    // Closing, it takes no touches: they go to the list under it.
+    .hitTestBehavior(this.zoomOf(key).closing ? HitTestMode.None : HitTestMode.Default)
+  }
 
   // Height of the HDS title bar in HdsNavDestinationTitleMode.MINI (fixed
   // at 56vp per the enum's own doc), BELOW the status bar. Content starts
@@ -5623,7 +6142,7 @@ struct Index {
   //    title bar (now the HDS one - see hdsTitleBar), instead of each
   //    screen positioning its own floating button with its own offsets.
   // 2. geometryTransition (the "一镜到底" shared-element morph the list card
-  //    and detail view already relied on) is ONLY supported between two
+  //    and detail view relied on before the zoom replaced it) is ONLY supported between two
   //    NavDestinations - a transition between Navigation's NavBar and a
   //    NavDestination is explicitly NOT supported by the system
   //    (arkts-navigation-faq). Since the back button has to live in a real
@@ -5769,11 +6288,22 @@ struct Index {
       .brightness(1 - (1 - DETAIL_BACKDROP_BRIGHTNESS) * this.detailBackdrop)
     } else if (name === 'itemDetail') {
       HdsNavDestination() {
-        if (this.syncedItems.find(i => i.id === this.selectedItemId)) {
-          this.itemDetailView(this.syncedItems.find(i => i.id === this.selectedItemId) as SyncedItem)
-        }
+        // Through a ForEach of one keyed by the item, not straight into the
+        // builder (see syncedPreviewPane): a card tapped while the last one is
+        // still closing gets this same page back, and a builder keeps the item
+        // it was first handed - the new card opened showing the old one.
+        ForEach(this.detailItems(), (item: SyncedItem) => {
+          this.zoomFrame('item', item, '', $r('sys.color.background_primary'))
+        }, (item: SyncedItem) => item.id)
       }
       .titleBar(this.detailTitleBar(this.selectedItemId))
+      // Its title bar is there from the tap, all at once (no slide), and goes
+      // the moment it closes, as the page stops taking touches (see
+      // ZoomMorph.closing).
+      .hideTitleBar(this.itemZoom.closing, false)
+      // Closing, the page lets touches through to the list (open, zoomFrame's
+      // bottom layer stops them).
+      .hitTestBehavior(this.itemZoom.closing ? HitTestMode.None : HitTestMode.Default)
       .titleMode(HdsNavDestinationTitleMode.MINI)
       .bindToScrollable([this.detailScroller])
       // The HDS bar's own back button, rather than a custom one. Its tap
@@ -5781,7 +6311,7 @@ struct Index {
       // (deliberately no backIcon.action as well - the HDS reference
       // advises against setting both), so either one goes through the
       // animateTo-wrapped pop in closeItemDetail instead of a plain
-      // default pop that would skip the geometryTransition morph.
+      // default pop that would skip the zoom.
       .hideBackButton(false)
       .onBackPressed(() => { this.closeItemDetail(); return true; })
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
@@ -5798,10 +6328,10 @@ struct Index {
       // own system transition (API 13+) never plays: the push and pop pass
       // false. Being DIALOG also means the list gets no onShown/onHidden, and
       // nothing here listens for them.
-      // The page stays transparent; what covers the list once the morph ends
-      // is itemDetailView's opaque surface, which IS the card's fill grown to
-      // full screen. Making that see-through would take away the shape that
-      // morphs, and leave the text, picture and PDF previews over the cards.
+      // The page stays transparent; what covers the list once the zoom ends
+      // is zoomFrame's opaque surface, the card grown to full screen. Making
+      // that see-through would take away the shape that zooms, and leave the
+      // text, picture and PDF previews over the cards.
       .mode(NavDestinationMode.DIALOG)
       .backgroundColor(Color.Transparent)
     }
@@ -5988,6 +6518,7 @@ struct Index {
         .contentEndOffset(this.bottomInsetVp + this.SYNCED_BOTTOM_CLEARANCE)
         // alwaysEnabled: a List only bounces by default once it's taller
         // than the screen, so a short list felt dead.
+        .onScrollStart(() => { this.abandonItemClose(); })
         .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })        // Per Huawei's "如何实现沉浸式页面" FAQ: this is the component whose
         // own background/content should actually draw behind the status
         // bar (unlike the title row below, which stays clear via
@@ -6067,6 +6598,7 @@ struct Index {
         // this the grid view felt visually inconsistent with the list
         // view's bounce feedback at the scroll ends. alwaysEnabled so a
         // grid shorter than the screen still bounces.
+        .onScrollStart(() => { this.abandonItemClose(); })
         .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })        // See the List branch's identical comment above.
         .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
       }
@@ -6119,7 +6651,11 @@ struct Index {
     .linearGradient(this.bottomGlow())
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-    .onAreaChange((oldValue: Area, newValue: Area) => { this.syncedPaneWidthVp = Number(newValue.width); })
+    .onAreaChange((oldValue: Area, newValue: Area) => {
+      this.syncedPaneWidthVp = Number(newValue.width);
+      this.syncedPaneHeightVp = Number(newValue.height);
+    })
+    .id(SYNCED_PANE_DOM_ID)
   }
 
   @Builder
@@ -6223,6 +6759,7 @@ struct Index {
     .scale(this.pressScaleFor(this.deviceCardKey(deviceId)))
     // Anywhere on the card opens the device; its own buttons and menu take their taps first.
     .border(this.deviceSelectBorder(deviceId))
+    .id(this.deviceCardDomId(deviceId))
     .onTouch((event: TouchEvent) => { this.cardTouch(this.deviceCardKey(deviceId), event); })
     .onClick(() => { if (this.endsLongPress(this.deviceCardKey(deviceId))) return; tapHaptic(); this.openDeviceDetail(deviceId); })
     // The three dots' menu, on a long press of the card as well (the same
@@ -6489,13 +7026,18 @@ struct Index {
     .width(LayoutPolicy.matchParent)
     .height(LayoutPolicy.matchParent)
     .padding({ left: 16, right: 16 })
+    .onScrollStart(() => { this.abandonDeviceClose(); })
     // Usually only 1-3 devices, so without alwaysEnabled it never bounced.
     .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })    // See syncedListContent's note - page backdrop the card token pairs with.
     .backgroundColor($r('sys.color.background_secondary'))
     .linearGradient(this.bottomGlow())
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-    .onAreaChange((oldValue: Area, newValue: Area) => { this.devicesPaneWidthVp = Number(newValue.width); })
+    .onAreaChange((oldValue: Area, newValue: Area) => {
+      this.devicesPaneWidthVp = Number(newValue.width);
+      this.devicesPaneHeightVp = Number(newValue.height);
+    })
+    .id(DEVICES_PANE_DOM_ID)
   }
 
   // Bottom-right "+" on the Devices tab: the primary thing you come to
@@ -6539,11 +7081,22 @@ struct Index {
       .bindToScrollable([this.devicesScroller])
       .hideBackButton(true)
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+      // Behind an open device the list stays on screen, blurred and dimmed,
+      // like the Synced list behind an item (see syncedPageMap).
+      .blur(this.getUIContext().vp2px(DETAIL_BACKDROP_BLUR_VP) * this.deviceBackdrop)
+      .brightness(1 - (1 - DETAIL_BACKDROP_BRIGHTNESS) * this.deviceBackdrop)
     } else if (name === 'deviceDetail') {
       HdsNavDestination() {
-        this.deviceDetailView(this.openDeviceId)
+        // Keyed by the device, as the item preview is by its item.
+        ForEach([this.openDeviceId], (deviceId: string) => {
+          this.zoomFrame('device', null, deviceId, $r('sys.color.background_secondary'))
+        }, (deviceId: string) => deviceId)
       }
       .titleBar(this.hdsTitleBar('', false, []))
+      .hideTitleBar(this.deviceZoom.closing, false)
+      // Closing, the page lets touches through to the list (open, zoomFrame's
+      // bottom layer stops them).
+      .hitTestBehavior(this.deviceZoom.closing ? HitTestMode.None : HitTestMode.Default)
       .titleMode(HdsNavDestinationTitleMode.MINI)
       .bindToScrollable([this.deviceDetailScroller])
       // The HDS bar's own back button, as on the item preview: its tap and the
@@ -6552,6 +7105,10 @@ struct Index {
       .hideBackButton(false)
       .onBackPressed(() => { this.closeDeviceDetail(); return true; })
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+      // DIALOG, so the device list stays on screen behind the zoom (see the
+      // 'itemDetail' destination).
+      .mode(NavDestinationMode.DIALOG)
+      .backgroundColor(Color.Transparent)
     }
   }
 

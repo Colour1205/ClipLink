@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -43,7 +44,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.ToggleButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -502,7 +505,7 @@ internal fun SyncedCard(
     // are here: such a card is an image card, footer included. Until then, and
     // for any other file, it is a file card.
     val thumbnail = if (item.type == ClipboardEntry.TYPE_FILE) {
-        rememberFileThumbnail(item, if (compact) 480 else 900)
+        rememberFileThumbnail(item, if (compact) GRID_PICTURE_EDGE else LIST_PICTURE_EDGE)
     } else {
         null
     }
@@ -526,10 +529,17 @@ internal fun SyncedCard(
         springMotion(0.25f, 0.9f),
         label = "cardPress",
     )
-    // The card as it looks, for the lifted picture of its menu and the one a
-    // drag out of the app carries.
+    // The card as it looks, for the lifted picture of its menu, the one a
+    // drag out of the app carries, and the one its zoom into the full view
+    // starts as.
     val picture = rememberGraphicsLayer()
     val placed = remember { arrayOfNulls<LayoutCoordinates>(1) }
+    val zoomSource = rememberZoomSource(itemZoomKey(keyed.key))
+    val cardColor = MaterialTheme.colorScheme.surfaceContainerLow
+    SideEffect {
+        zoomSource?.layer = picture
+        zoomSource?.color = cardColor
+    }
     // The menu: open, or closing (its picture going back down) once `open` is false.
     var menu by remember { mutableStateOf<OpenMenu?>(null) }
     // What a drag out of the app would carry, got ready when the menu opens.
@@ -587,12 +597,14 @@ internal fun SyncedCard(
 
     Surface(
         shape = RoundedCornerShape(CARD_RADIUS),
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        color = cardColor,
         modifier = modifier
             .fillMaxWidth()
-            // Tapped, the card grows into the item's full view.
-            .cardMorph(keyed.key)
-            .onPlaced { placed[0] = it }
+            // Tapped, the card zooms into the item's full view from here (see CardZoom).
+            .onPlaced {
+                placed[0] = it
+                zoomSource?.coordinates = it
+            }
             .graphicsLayer {
                 scaleX = pressScale
                 scaleY = pressScale
@@ -625,11 +637,11 @@ internal fun SyncedCard(
         Box {
             Column(Modifier.padding(16.dp)) {
                 when {
-                    item.type == ClipboardEntry.TYPE_IMAGE -> ImagePreview(keyed.key, item, compact)
+                    item.type == ClipboardEntry.TYPE_IMAGE -> ImagePreview(keyed.key, item, compact, zoomSource)
                     // The picture alone: its name is no part of the card, as an
                     // inline image has none (talkback still reads it).
-                    thumbnail != null -> PreviewImage(thumbnail, item.filePayload?.fileName ?: "Synced image")
-                    item.type == ClipboardEntry.TYPE_FILE -> FileRow(item, style)
+                    thumbnail != null -> PreviewImage(thumbnail, item.filePayload?.fileName ?: "Synced image", zoomSource)
+                    item.type == ClipboardEntry.TYPE_FILE -> if (compact) FileTile(item, style) else FileRow(item, style)
                     else -> Text(
                         // Only what the card can show: Text measures all it is
                         // given, and a multi-megabyte copy is one entry.
@@ -650,13 +662,20 @@ internal fun SyncedCard(
 
                 Spacer(Modifier.height(14.dp))
                 Row(
-                    Modifier.fillMaxWidth(),
+                    // As tall as the chip makes it, with the chip or without.
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = FOOTER_MIN_HEIGHT),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     // In grid view the chip drops its label and sits beside the
-                    // timestamp instead of taking a line of its own.
-                    TypeChip(style, showLabel = !compact)
+                    // timestamp instead of taking a line of its own. A grid
+                    // file card has none: its tile on top already says what it
+                    // is, and the two together looked cluttered.
+                    if (!(compact && item.type == ClipboardEntry.TYPE_FILE && thumbnail == null)) {
+                        TypeChip(style, showLabel = !compact)
+                    }
                     // The time, then the sender's name (its short id while none
                     // is known) for an item from another device - the same
                     // line on every phone app. Grid cards are narrow: the name
@@ -741,9 +760,9 @@ private data class OpenMenu(val snapshot: ImageBitmap, val bounds: Rect, val ope
 private const val DRAG_CLIP_WAIT_MS = 300L
 
 @Composable
-private fun ImagePreview(key: String, item: SyncedItem, compact: Boolean) {
+private fun ImagePreview(key: String, item: SyncedItem, compact: Boolean, zoomSource: ZoomSource?) {
     // Decoded off the main thread, and a failure remembered (see ImageCache).
-    when (val image = rememberInlineImage(key, item.entry.content, if (compact) 480 else 900)) {
+    when (val image = rememberInlineImage(key, item.entry.content, if (compact) GRID_PICTURE_EDGE else LIST_PICTURE_EDGE)) {
         ImageState.Loading -> Box(
             Modifier
                 .fillMaxWidth()
@@ -757,7 +776,7 @@ private fun ImagePreview(key: String, item: SyncedItem, compact: Boolean) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        is ImageState.Ready -> PreviewImage(image.bitmap, "Synced image")
+        is ImageState.Ready -> PreviewImage(image.bitmap, "Synced image", zoomSource)
     }
 }
 
@@ -765,10 +784,15 @@ private fun ImagePreview(key: String, item: SyncedItem, compact: Boolean) {
  * A card's picture: as wide as the card and as tall as the picture is, whole,
  * never cropped. One taller than [MAX_PICTURE_HEIGHT_RATIO] times its width
  * (a very long screenshot) gets a box of that height and is fitted into it.
+ * Told to [zoomSource], so the picture can fly from here into the full view.
  */
 @Composable
-private fun PreviewImage(bitmap: ImageBitmap, contentDescription: String) {
+private fun PreviewImage(bitmap: ImageBitmap, contentDescription: String, zoomSource: ZoomSource?) {
     val ratio = (bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1)).coerceAtLeast(1f / MAX_PICTURE_HEIGHT_RATIO)
+    SideEffect { zoomSource?.picture = bitmap }
+    DisposableEffect(zoomSource, bitmap) {
+        onDispose { if (zoomSource?.picture === bitmap) zoomSource.picture = null }
+    }
     Image(
         bitmap = bitmap,
         contentDescription = contentDescription,
@@ -776,11 +800,61 @@ private fun PreviewImage(bitmap: ImageBitmap, contentDescription: String) {
         modifier = Modifier
             .fillMaxWidth()
             .aspectRatio(ratio)
-            .clip(RoundedCornerShape(16.dp)),
+            .clip(RoundedCornerShape(CARD_PICTURE_RADIUS))
+            .onPlaced { zoomSource?.pictureCoordinates = it },
     )
 }
 
-private const val MAX_PICTURE_HEIGHT_RATIO = 3f
+internal const val MAX_PICTURE_HEIGHT_RATIO = 3f
+
+/** A card picture's corners. */
+internal val CARD_PICTURE_RADIUS = 16.dp
+
+/** The longest side a card's picture is decoded to, in the grid and in the list. */
+internal const val GRID_PICTURE_EDGE = 480
+internal const val LIST_PICTURE_EDGE = 900
+
+/** A card footer's height: what its type chip makes it, so a footer without one is no shorter. */
+private val FOOTER_MIN_HEIGHT = 24.dp
+
+/**
+ * A file with no picture to show, as its card in the grid: a tile saying it
+ * is a file on top, then its whole name, extension and all, then its size.
+ * The list's card ([FileRow]) puts the tile beside the name; a grid card is
+ * too narrow for that to leave the name room.
+ */
+@Composable
+private fun FileTile(item: SyncedItem, style: TypeStyle) {
+    val payload = item.filePayload
+    Column {
+        Box(
+            Modifier
+                .size(36.dp)
+                .background(style.container, RoundedCornerShape(11.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(style.icon, contentDescription = null, tint = style.onContainer, modifier = Modifier.size(20.dp))
+        }
+        Spacer(Modifier.height(10.dp))
+        Text(
+            payload?.fileName ?: "File",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = when {
+                !item.fileAvailable -> "Transferring…"
+                payload != null -> formatSize(payload.fileSize)
+                else -> ""
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
 
 /** A file with no picture to show - any file but an image one whose bytes are here and decoded - as its card. */
 @Composable

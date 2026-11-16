@@ -1,5 +1,6 @@
 package io.uaena.cliplink.ui
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -33,8 +34,15 @@ fun OwnSelectionContainer(modifier: Modifier = Modifier, content: @Composable ()
     val copy = LocalOwnCopy.current
     val platform = LocalClipboard.current
     val clipboard = remember(copy, platform) { if (copy == null) platform else OwnClipboard(platform, copy) }
+    // A full view shrinking back into its card lets go of what was selected in
+    // it. The selection's handles and its Copy bar are windows of their own,
+    // not part of the view: they stayed where they were, over the list the
+    // view had handed the screen back to, until it had gone - and took the
+    // taps meant for the cards under them. (A Box lays the text out as the
+    // container does, one child over another from the top start.)
+    val letGo = LocalZoomView.current?.zoom?.closing == true
     CompositionLocalProvider(LocalClipboard provides clipboard) {
-        SelectionContainer(modifier) { content() }
+        if (letGo) Box(modifier) { content() } else SelectionContainer(modifier) { content() }
     }
 }
 

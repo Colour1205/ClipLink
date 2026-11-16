@@ -30,6 +30,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -37,7 +38,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -243,12 +248,29 @@ private fun DeviceCard(
     }
     val primary = if (blocked) BlockedOnCardColor else colors.onSurface
     val secondary = if (blocked) BlockedMutedColor else colors.onSurfaceVariant
+    val cardColor = if (blocked) BlockedCardColor else colors.surfaceContainerLow
+
+    // Tapped, the card zooms into the device's full view from here, as a
+    // Synced card does into an item's (see CardZoom): its place, and its
+    // picture of itself, recorded as it draws.
+    val zoomSource = rememberZoomSource(deviceZoomKey(device.deviceId))
+    val picture = rememberGraphicsLayer()
+    SideEffect {
+        zoomSource?.layer = picture
+        zoomSource?.color = cardColor
+    }
 
     Surface(
         onClick = onOpen,
-        shape = RoundedCornerShape(26.dp),
-        color = if (blocked) BlockedCardColor else colors.surfaceContainerLow,
-        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(CARD_RADIUS),
+        color = cardColor,
+        modifier = Modifier
+            .fillMaxWidth()
+            .onPlaced { zoomSource?.coordinates = it }
+            .drawWithContent {
+                picture.record { this@drawWithContent.drawContent() }
+                drawLayer(picture)
+            },
     ) {
         Column(Modifier.padding(start = 16.dp, top = 16.dp, end = 6.dp, bottom = 16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {

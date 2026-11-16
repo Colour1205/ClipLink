@@ -275,19 +275,92 @@ struct SyncedCardButtonStyle: ButtonStyle {
 }
 
 /// iOS 18's zoom: the card grows into the item's screen and shrinks back into
-/// it when that closes (HarmonyOS' card-to-detail morph). Earlier systems, or
-/// an SDK without it, keep the push.
+/// it when that closes (HarmonyOS' card-to-detail morph). The system scales
+/// the whole screen from the card's frame, so its text grows with it instead
+/// of being uncovered. Earlier systems, or an SDK without it, keep the push.
+/// A device card zooms into its screen the same way (see DevicesView).
 struct SyncedZoomSource: ViewModifier {
     let id: String
     let namespace: Namespace.ID?
+    /// The card's corners: the zoom starts (and a close ends) with them.
+    /// Without a clip shape the system takes the card's frame as a plain
+    /// rectangle, and the card's rounded fill showed sharp corners at the
+    /// start of the zoom and at the end of a close.
+    var radius: CGFloat = Theme.cardRadius
 
     func body(content: Content) -> some View {
         #if compiler(>=6.0)
         if #available(iOS 18.0, *), let namespace {
-            return AnyView(content.matchedTransitionSource(id: id, in: namespace))
+            let corners = RoundedRectangle(cornerRadius: radius, style: .continuous)
+            return AnyView(content.matchedTransitionSource(id: id, in: namespace) { source in
+                source.clipShape(corners)
+            })
         }
         #endif
         return AnyView(content)
+    }
+}
+
+/// Behind a card zooming into its screen, and shrinking back, the list stays
+/// on screen, blurred and a little darker - never faded (HarmonyOS'
+/// DETAIL_BACKDROP_*). Only with the zoom: a push slides the list away, and
+/// a list blurring as it slides would only look smeared.
+enum SyncedZoom {
+    /// iOS 18's zoom is there (see SyncedZoomSource).
+    static var available: Bool {
+        #if compiler(>=6.0)
+        if #available(iOS 18.0, *) { return true }
+        #endif
+        return false
+    }
+
+    /// 24 pt leaves the cards as soft shapes with no readable text, like the
+    /// system's materials.
+    static let backdropBlur: CGFloat = 24
+    /// A 15% black veil: HarmonyOS' brightness of 0.85, enough to push the
+    /// list back without greying it out.
+    static let backdropVeil: Double = 0.15
+
+    /// HarmonyOS' spring for its zoom (stiffness 328, damping 36), so the
+    /// list goes soft as the card grows; with Reduce Motion a short ease, as
+    /// the other reduce-motion paths here, the list still blurring and clearing.
+    static func motion(reduceMotion: Bool) -> Animation {
+        reduceMotion
+            ? .easeInOut(duration: 0.15)
+            : .interpolatingSpring(mass: 1, stiffness: 328, damping: 36, initialVelocity: 0)
+    }
+}
+
+/// The list's blur behind the zoom (see SyncedZoom). On the scrolling list
+/// itself, not on the page: the page's background then shows at its blurred
+/// edges, and the blur is never larger than the screen.
+struct SyncedZoomBlur: ViewModifier {
+    /// A card's screen is open (or opening, or not yet closed).
+    let shown: Bool
+    let reduceMotion: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .blur(radius: shown ? SyncedZoom.backdropBlur : 0)
+            .animation(SyncedZoom.motion(reduceMotion: reduceMotion), value: shown)
+    }
+}
+
+/// The list's veil behind the zoom (see SyncedZoom): over the whole page,
+/// background included, as HarmonyOS darkens all of it. It never takes a touch.
+struct SyncedZoomVeil: ViewModifier {
+    let shown: Bool
+    let reduceMotion: Bool
+
+    func body(content: Content) -> some View {
+        content.overlay {
+            Color.black
+                .opacity(shown ? SyncedZoom.backdropVeil : 0)
+                .animation(SyncedZoom.motion(reduceMotion: reduceMotion), value: shown)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
     }
 }
 
@@ -295,13 +368,66 @@ struct SyncedZoomSource: ViewModifier {
 struct SyncedZoomDestination: ViewModifier {
     let id: String
     let namespace: Namespace.ID
+    /// Told false the moment the screen starts to close (see
+    /// SyncedScreenWatcher) and true if it comes back, so the list behind
+    /// clears as the card shrinks, not once it has landed.
+    var onShown: ((Bool) -> Void)? = nil
 
     func body(content: Content) -> some View {
         #if compiler(>=6.0)
         if #available(iOS 18.0, *) {
-            return AnyView(content.navigationTransition(.zoom(sourceID: id, in: namespace)))
+            let zoomed = content.navigationTransition(.zoom(sourceID: id, in: namespace))
+            if let onShown {
+                return AnyView(zoomed.background(SyncedScreenWatcher(onShown: onShown)))
+            }
+            return AnyView(zoomed)
         }
         #endif
         return AnyView(content)
+    }
+}
+
+/// When the screen it sits on starts to go, and comes back. The link's
+/// binding only says the screen is gone, which may be once the close has
+/// finished; UIKit's viewWillDisappear comes as it starts - a back tap, or a
+/// swipe or drag back beginning (viewWillAppear again if that is given up).
+/// A child of the screen's hosting controller, so it is told what the screen
+/// is told. If it ever is not, the list just clears when the binding does.
+struct SyncedScreenWatcher: UIViewControllerRepresentable {
+    let onShown: (Bool) -> Void
+
+    func makeUIViewController(context: Context) -> Watcher { Watcher() }
+
+    func updateUIViewController(_ watcher: Watcher, context: Context) {
+        watcher.onShown = onShown
+    }
+
+    final class Watcher: UIViewController {
+        var onShown: ((Bool) -> Void)?
+
+        override func loadView() {
+            let view = UIView()
+            view.backgroundColor = .clear
+            view.isUserInteractionEnabled = false
+            view.isAccessibilityElement = false
+            self.view = view
+        }
+
+        override func viewWillAppear(_ animated: Bool) {
+            super.viewWillAppear(animated)
+            report(true)
+        }
+
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            report(false)
+        }
+
+        /// After the call: a push can make it while SwiftUI is still
+        /// updating, and state must not change in the middle of that.
+        private func report(_ shown: Bool) {
+            guard let onShown else { return }
+            DispatchQueue.main.async { onShown(shown) }
+        }
     }
 }

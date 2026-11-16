@@ -7,7 +7,8 @@
        history_head that comes first (HistoryHead.cs, BatchGroups.cs), and the
        version 2 sync: handshake, head, requests and where items are placed
        (HandshakeMessage.cs, KeysMessage.cs, SyncRequests.cs, Wire.cs), and how content
-       is recognised whoever copied it (ContentPrint.cs, LastWrite.cs). Run with
+       is recognised whoever copied it (ContentPrint.cs, LastWrite.cs), and the
+       arithmetic of a card zooming into its full view (ZoomMorph.cs). Run with
        `dotnet test windows\ClipLink.Tests`. ClipLink.csproj is a WinUI exe,
        which a test project can't sensibly reference, so the source files are
        linked in (not copied) instead - which is also why these files must stay
@@ -50,6 +51,7 @@
     <Compile Include="..\ClipLink\Engine\Networking\Wire.cs" Link="Engine\Wire.cs" />
     <Compile Include="..\ClipLink\Engine\Networking\FileChunkMessage.cs" Link="Engine\FileChunkMessage.cs" />
     <Compile Include="..\ClipLink\BatchGrouping.cs" Link="BatchGrouping.cs" />
+    <Compile Include="..\ClipLink\ZoomMorph.cs" Link="ZoomMorph.cs" />
   </ItemGroup>
 
 </Project>

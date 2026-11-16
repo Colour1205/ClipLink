@@ -13,6 +13,7 @@ import historySyncTest from './HistorySync.test';
 import cardFooterTest from './CardFooter.test';
 import contentPrintTest from './ContentPrint.test';
 import lineChannelTest from './LineChannel.test';
+import zoomMorphTest from './ZoomMorph.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -30,4 +31,5 @@ export default function testsuite() {
   cardFooterTest();
   contentPrintTest();
   lineChannelTest();
+  zoomMorphTest();
 }

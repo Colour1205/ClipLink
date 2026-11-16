@@ -33,6 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -72,9 +73,13 @@ fun DetailScreen(
     } else {
         null
     }
+    // Until the full-size picture is decoded, the card's own (already in the
+    // cache): the picture's place is there from the first frame, for the
+    // picture flying in from the card to land on, and there is no spinner.
+    val cardPicture = remember(key, item.file) { cardPictureOf(key, item) }
     val picture = when (item.type) {
-        ClipboardEntry.TYPE_IMAGE -> (inlineImage as? ImageState.Ready)?.bitmap
-        ClipboardEntry.TYPE_FILE -> rememberFileThumbnail(item, DETAIL_IMAGE_EDGE)
+        ClipboardEntry.TYPE_IMAGE -> (inlineImage as? ImageState.Ready)?.bitmap ?: cardPicture
+        ClipboardEntry.TYPE_FILE -> rememberFileThumbnail(item, DETAIL_IMAGE_EDGE) ?: cardPicture
         else -> null
     }
     // An image file wears the image glyph once its picture is up, as on its card.
@@ -82,12 +87,11 @@ fun DetailScreen(
     var menuOpen by remember { mutableStateOf(false) }
     var confirmingDelete by remember { mutableStateOf(false) }
 
+    // Drawn on the page the card it was opened from zooms into (see
+    // ZoomOverlay), which is also what gives it its background.
     Column(
         modifier
             .fillMaxSize()
-            // The card it was opened from grows into this, and this shrinks back into it.
-            .cardMorph(key)
-            .background(MaterialTheme.colorScheme.background)
             .padding(
                 top = contentPadding.calculateTopPadding(),
                 bottom = contentPadding.calculateBottomPadding(),
@@ -96,6 +100,7 @@ fun DetailScreen(
         Row(
             Modifier
                 .fillMaxWidth()
+                .zoomBar()
                 .padding(start = 4.dp, end = 4.dp, top = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -145,7 +150,9 @@ fun DetailScreen(
                     .padding(
                         start = if (direction == LayoutDirection.Ltr) left else right,
                         end = if (direction == LayoutDirection.Ltr) right else left,
-                    ),
+                    )
+                    .zoomPicture()
+                    .zoomBody(),
             ) {
                 ZoomableImage(
                     bitmap = picture,
@@ -156,6 +163,7 @@ fun DetailScreen(
             Column(
                 Modifier
                     .fillMaxWidth()
+                    .zoomBody()
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             ) {
                 if (payload != null) {
@@ -189,6 +197,7 @@ fun DetailScreen(
             Column(
                 Modifier
                     .weight(1f)
+                    .zoomBody()
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = 16.dp, vertical = 12.dp),
             ) {
@@ -301,6 +310,7 @@ fun DetailScreen(
         Row(
             Modifier
                 .fillMaxWidth()
+                .zoomBody()
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -336,3 +346,11 @@ fun DetailScreen(
  * a single decode here is allowed to cost (the cache's budget is 24 MB).
  */
 private const val DETAIL_IMAGE_EDGE = 2400
+
+/** The picture the item's card shows, if it is in the cache: a list card's, or else a grid card's. */
+private fun cardPictureOf(key: String, item: SyncedItem): ImageBitmap? = when (item.type) {
+    ClipboardEntry.TYPE_IMAGE ->
+        ImageCache.cachedBase64(key, LIST_PICTURE_EDGE) ?: ImageCache.cachedBase64(key, GRID_PICTURE_EDGE)
+    ClipboardEntry.TYPE_FILE -> item.file?.let { ImageCache.cached(it, LIST_PICTURE_EDGE) ?: ImageCache.cached(it, GRID_PICTURE_EDGE) }
+    else -> null
+}

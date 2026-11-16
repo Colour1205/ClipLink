@@ -49,7 +49,8 @@ import io.uaena.cliplink.ui.icons.outlined.ContentCopy
  * reached at, and the rest of what is known about it.
  *
  * Laid out like the item preview - Back, a chip, a menu on top; scrolling
- * cards; the actions at the bottom - and opened and closed the same way.
+ * cards; the actions at the bottom - and opened and closed the same way: its
+ * card zooms into it, over the list blurred behind (see CardZoom).
  */
 @Composable
 fun DeviceDetailScreen(
@@ -94,6 +95,7 @@ fun DeviceDetailScreen(
         Row(
             Modifier
                 .fillMaxWidth()
+                .zoomBar()
                 .padding(start = 4.dp, end = 4.dp, top = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -120,6 +122,7 @@ fun DeviceDetailScreen(
         Column(
             Modifier
                 .weight(1f)
+                .zoomBody()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -230,6 +233,7 @@ fun DeviceDetailScreen(
         Row(
             Modifier
                 .fillMaxWidth()
+                .zoomBody()
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically,
