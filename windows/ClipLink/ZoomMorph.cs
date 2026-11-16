@@ -28,10 +28,6 @@ internal static class ZoomMorph
     public const double CardRadius = 4;
     public const double PageRadius = 8;
 
-    // The list behind, at full strength: dimmed to this brightness (a black
-    // layer of 1 - this over it) as well as blurred. Never faded.
-    public const double BackdropBrightness = 0.85;
-
     public static double Lerp(double from, double to, double p) => from + (to - from) * p;
 
     public static Rect Lerp(Rect from, Rect to, double p) =>

@@ -345,11 +345,6 @@
                        Text="Copy something on this PC or on one of your paired devices, and it shows up here." />
         </StackPanel>
 
-        <!-- The cards behind an item that is opening or closing: drawn here
-             blurred and dimmed as it grows over them (CardZoom: they are
-             hidden meanwhile, never faded). -->
-        <Border x:Name="ListBackdrop" Grid.Row="1" Visibility="Collapsed" IsHitTestVisible="False" />
-
         <!-- One item in full - the phones' item screen: all of the text
              (selectable), the image as big as fits, and every action. The
              tapped card zooms into it, and it back onto the card (CardZoom):
