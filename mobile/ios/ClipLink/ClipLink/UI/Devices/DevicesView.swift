@@ -17,10 +17,21 @@ struct DevicesView: View {
     /// to another section - trusting a nearby device does exactly that.
     @State private var detailID = ""
     @State private var detailActive = false
+    /// A device card zooms into its screen like a Synced card (see
+    /// SyncedZoomSource), with the list blurred and dimmed behind it.
+    @Namespace private var deviceZoom
+    /// The device's screen has started to close (see SyncedScreenWatcher).
+    @State private var detailLeaving = false
+    /// A card tapped while a device's screen is still closing: it opens as
+    /// soon as that screen is gone (as on the Synced tab).
+    @State private var queuedID: String?
 
     /// For the actions only, not watched.
     private var model: AppModel { AppModel.shared }
     private var actions: DeviceActions { DeviceActions(model: model, haptics: settings.haptics) }
+    /// The list goes soft behind a device's screen while it is open, as the
+    /// Synced list does behind an item's (see SyncedZoom).
+    private var zoomBackdrop: Bool { detailActive && !detailLeaving && SyncedZoom.available }
 
     var body: some View {
         NavigationView {
@@ -30,6 +41,7 @@ struct DevicesView: View {
                     .onAppear { applyDebugHooks(proxy) }
                     #endif
             }
+            .modifier(SyncedZoomVeil(shown: zoomBackdrop, reduceMotion: reduceMotion))
             .navigationTitle("Devices")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -133,15 +145,32 @@ struct DevicesView: View {
                     .devicesCardRow()
             }
         }
+        // On the list, under the page's background (see SyncedZoomBlur).
+        .modifier(SyncedZoomBlur(shown: zoomBackdrop, reduceMotion: reduceMotion))
         .mePage(glow: settings.bottomGlow, accent: settings.accentTheme.color)
         .refreshable {
             await DevicesRefresh.run(model)
         }
         .background(
-            NavigationLink(destination: DeviceDetailView(deviceId: detailID), isActive: $detailActive) {
+            NavigationLink(
+                destination: DeviceDetailView(deviceId: detailID)
+                    .modifier(SyncedZoomDestination(id: detailID, namespace: deviceZoom) { shown in
+                        detailLeaving = !shown
+                        // A close given up (a drag let go): no card waits for it.
+                        if shown { queuedID = nil }
+                    }),
+                isActive: $detailActive
+            ) {
                 EmptyView()
             }
         )
+        .onChange(of: detailActive) { active in
+            guard !active, let next = queuedID else { return }
+            queuedID = nil
+            // After this update: a push in the same one as the pop's end
+            // can be lost.
+            DispatchQueue.main.async { show(next) }
+        }
         // A device appearing, disappearing, being blocked or trusted moves
         // its row with a spring; a status change (connected, offline) never
         // reorders anything - the engine's order is deliberate.
@@ -159,7 +188,8 @@ struct DevicesView: View {
             accent: settings.accentTheme.fill,
             transparency: settings.cardTransparency,
             onOpen: { open(row) },
-            onRename: { renaming = actions.renameTarget(row) }
+            onRename: { renaming = actions.renameTarget(row) },
+            zoom: deviceZoom
         )
         .devicesCardRow()
     }
@@ -171,9 +201,20 @@ struct DevicesView: View {
         model.pairingPresented = true
     }
 
+    /// Nothing waits for an animation: a card tapped while the last screen is
+    /// still closing opens the moment it has gone (see queuedID).
     private func open(_ row: DeviceRow) {
         Haptics.tap(settings.haptics)
-        detailID = row.deviceId
+        if detailActive && detailLeaving {
+            queuedID = row.deviceId
+            return
+        }
+        show(row.deviceId)
+    }
+
+    private func show(_ id: String) {
+        detailID = id
+        detailLeaving = false
         detailActive = true
     }
 
