@@ -39,6 +39,14 @@
 
   --device-shadow: 0 22px 50px -18px rgba(20, 16, 14, 0.45);
 
+  /* Motion: nothing moves at a constant speed. Springs start quick, overshoot a
+     little and settle (--spring about 12% with a small dip back, --spring-soft
+     about 5%, for colour and blur). Exits pull back slightly before they go. */
+  --spring: linear(0, 0.17, 0.344, 0.511, 0.662, 0.792, 0.899, 0.982, 1.044, 1.086, 1.11, 1.121, 1.122, 1.115, 1.102, 1.087, 1.071, 1.054, 1.039, 1.026, 1.014, 1.005, 0.999, 0.994, 0.991, 0.989, 0.988, 0.989, 0.99, 0.991, 0.993, 0.994, 0.996, 0.997, 1);
+  --spring-soft: linear(0, 0.122, 0.251, 0.378, 0.498, 0.608, 0.706, 0.789, 0.86, 0.917, 0.962, 0.996, 1.021, 1.038, 1.049, 1.054, 1.056, 1.054, 1.051, 1.046, 1.04, 1.034, 1.028, 1.023, 1.018, 1.013, 1.01, 1.006, 1.004, 1.002, 1, 0.999, 0.998, 0.998, 1);
+  --exit: cubic-bezier(0.36, 0, 0.66, -0.56);
+  --wave: cubic-bezier(0.65, 0, 0.35, 1);
+
   --r-sm: 12px;
   --r: 20px;
   --r-lg: 28px;
@@ -73,6 +81,10 @@
 
     --device-shadow: 0 22px 50px -18px rgba(0, 0, 0, 0.8);
   }
+}
+/* Browsers without linear() easing get the nearest cubic curves. */
+@supports not (transition-timing-function: linear(0, 1)) {
+  :root { --spring: cubic-bezier(0.34, 1.56, 0.64, 1); --spring-soft: cubic-bezier(0.34, 1.25, 0.64, 1); }
 }
 :root[data-theme="dark"] {
   --bg: #101113; --surface: #1b1c1f; --text: #f1f1f3; --muted: #a9adb5;
@@ -173,7 +185,7 @@ code { background: var(--accent-soft); padding: 1px 7px; border-radius: 7px; fon
 .brand { display: flex; align-items: center; gap: 10px; color: var(--text); text-decoration: none; font-weight: 700; font-size: 1.12rem; letter-spacing: -0.01em; }
 .brand img { width: 32px; height: 32px; border-radius: 9px; }
 .nav { margin-left: auto; display: flex; align-items: center; gap: 2px; flex-wrap: nowrap; white-space: nowrap; }
-.nav a { color: var(--text); text-decoration: none; padding: 8px 13px; border-radius: 999px; font-size: 0.95rem; transition: background 0.2s; }
+.nav a { color: var(--text); text-decoration: none; padding: 8px 13px; border-radius: 999px; font-size: 0.95rem; transition: background 0.35s var(--spring-soft); }
 .nav a:hover { background: var(--accent-soft); }
 .nav .lang { margin-left: 6px; padding-left: 15px; border-radius: 0 999px 999px 0; border-left: 1px solid var(--line-strong); font-weight: 600; }
 
@@ -182,7 +194,7 @@ code { background: var(--accent-soft); padding: 1px 7px; border-radius: 7px; fon
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   min-height: 48px; padding: 12px 26px; border-radius: 999px; font: inherit; font-weight: 650; font-size: 1rem;
-  text-decoration: none; color: var(--text); cursor: pointer; transition: background-color 0.2s;
+  text-decoration: none; color: var(--text); cursor: pointer; transition: background-color 0.35s var(--spring-soft);
 }
 .btn:not(.primary):hover { background-color: var(--glass-strong); }
 .btn.primary { background: var(--accent); color: var(--accent-ink); border: 1px solid transparent; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22); }
@@ -196,10 +208,10 @@ h1 { font-size: clamp(2.5rem, 5vw, 3.9rem); line-height: 1.05; margin: 0 0 18px;
 .lead { font-size: 1.22rem; color: var(--muted); margin: 0 0 32px; max-width: 26em; text-wrap: balance; }
 .hero-note { margin: 18px 0 0; font-size: 0.92rem; color: var(--muted); }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 0 0 30px; padding: 0; }
-.chip { display: inline-block; padding: 6px 15px; border-radius: 999px; font-size: 0.92rem; font-weight: 600; color: var(--text); text-decoration: none; box-shadow: inset 0 1px 0 var(--glass-rim); transition: background-color 0.2s; }
+.chip { display: inline-block; padding: 6px 15px; border-radius: 999px; font-size: 0.92rem; font-weight: 600; color: var(--text); text-decoration: none; box-shadow: inset 0 1px 0 var(--glass-rim); transition: background-color 0.35s var(--spring-soft); }
 .chip:hover { background-color: var(--glass-strong); }
 /* A platform tag jumps to its row; the row then glows briefly. */
-.dl:target { animation: picked 1.6s ease-out; }
+.dl:target { animation: picked 1.6s var(--spring-soft); }
 @keyframes picked { from { background-color: color-mix(in srgb, var(--accent) 22%, transparent); } }
 .chip span { font-weight: 400; color: var(--muted); }
 
@@ -237,7 +249,7 @@ section { padding: 72px 0; position: relative; }
 .trust-diagram { margin: 0; padding: 28px 24px; text-align: center; }
 .trust-diagram svg { display: block; width: 100%; height: auto; max-width: 340px; margin: 0 auto; }
 .trust-diagram .dev { fill: none; stroke: var(--muted); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
-.trust-diagram .link path { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 2 7; stroke-linecap: round; animation: flow 1.6s linear infinite; }
+.trust-diagram .link path { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 2 7; stroke-linecap: round; animation: flow 1.8s var(--wave) infinite; }
 @keyframes flow { to { stroke-dashoffset: -18; } }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
@@ -276,11 +288,11 @@ summary::-webkit-details-marker { display: none; }
 .faq-list summary { font-weight: 650; display: flex; justify-content: space-between; gap: 18px; }
 .faq-list summary::after {
   content: ""; flex: none; width: 9px; height: 9px; margin: 0.45em 4px 0 0;
-  border: solid var(--muted); border-width: 0 2px 2px 0; rotate: 45deg; transition: rotate 0.2s;
+  border: solid var(--muted); border-width: 0 2px 2px 0; rotate: 45deg; transition: rotate 0.5s var(--spring);
 }
 .faq-list details[open] summary::after { rotate: -135deg; margin-top: 0.7em; }
 .faq-list details p { color: var(--muted); margin: 10px 0 0; max-width: 62ch; }
-.faq-list details[open] p { animation: answer-in 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.faq-list details[open] p { animation: answer-in 0.5s var(--spring); }
 @keyframes answer-in { from { opacity: 0; filter: blur(6px); transform: translateY(-4px); } }
 
 /* "Get app": a button that turns into its own menu. Closed, it is a pill like the
@@ -293,7 +305,7 @@ summary::-webkit-details-marker { display: none; }
   position: absolute; z-index: 10; top: 0; left: 0; right: 0;
   border-radius: 24px; background: var(--accent); color: var(--accent-ink);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
-  transition: background-color 0.22s ease, color 0.22s ease, border-radius 0.22s ease, box-shadow 0.22s ease;
+  transition: background-color 0.35s var(--spring-soft), color 0.35s var(--spring-soft), border-radius 0.5s var(--spring), box-shadow 0.35s var(--spring-soft);
 }
 .pick-head {
   position: relative; display: flex; align-items: center; justify-content: center;
@@ -303,7 +315,7 @@ summary::-webkit-details-marker { display: none; }
 .pick-chev {
   position: absolute; right: 18px; top: 50%; width: 16px; height: 16px; margin-top: -8px;
   fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
-  transition: rotate 0.22s ease;
+  transition: rotate 0.5s var(--spring);
 }
 .pick[open]:not(.closing) {
   border-radius: 22px; background: var(--surface); color: var(--text);
@@ -316,22 +328,25 @@ summary::-webkit-details-marker { display: none; }
 /* While it changes shape, what is inside blurs through the change: the title
    blurs as its colour flips, and the choices come into focus as they appear
    (and go out of focus as they leave, see site.js). */
-.pick[open] .pick-head span, .pick.closing .pick-head span { animation: pick-swap 0.26s ease; }
+.pick[open] .pick-head span, .pick.closing .pick-head span { animation: pick-swap 0.34s var(--spring-soft); }
 .pick.closing .pick-head span { animation-name: pick-swap-back; }
 @keyframes pick-swap { 40% { filter: blur(4px); opacity: 0.6; } }
 @keyframes pick-swap-back { 40% { filter: blur(4px); opacity: 0.6; } }
-.pick[open] .pick-menu { animation: pick-grow 0.26s cubic-bezier(0.2, 0.8, 0.2, 1); }
-.pick[open] .pick-menu a { animation: pick-focus 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) backwards; }
+/* Two one-line choices: 2 x 44px + 2px gap + 6px padding, as rendered. */
+.pick { --menu-h: 95px; }
+.pick[open] .pick-menu { animation: pick-grow 0.55s var(--spring); }
+.pick[open] .pick-menu a { animation: pick-focus 0.5s var(--spring) backwards; }
 .pick[open] .pick-menu a + a { animation-delay: 0.04s; }
-.pick.closing .pick-menu { animation: pick-shrink 0.2s ease-in forwards; }
-.pick.closing .pick-menu a { animation: pick-unfocus 0.16s ease-in forwards; }
-@keyframes pick-grow { from { max-height: 0; } to { max-height: 120px; } }
-@keyframes pick-shrink { from { max-height: 120px; } to { max-height: 0; padding-bottom: 0; } }
+.pick.closing .pick-menu { animation: pick-shrink 0.2s var(--exit) forwards; }
+.pick.closing .pick-menu a { animation: pick-unfocus 0.16s var(--exit) forwards; }
+@keyframes pick-grow { from { height: 0; } to { height: var(--menu-h, auto); } }
+@keyframes pick-shrink { from { height: var(--menu-h, auto); } to { height: 0; padding-bottom: 0; } }
 @keyframes pick-focus { from { opacity: 0; filter: blur(8px); transform: translateY(-6px); } }
 @keyframes pick-unfocus { to { opacity: 0; filter: blur(8px); transform: translateY(-4px); } }
 .pick-menu a {
   display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 8px 14px; border-radius: 16px;
   color: var(--text); text-decoration: none; font-weight: 600; font-size: 0.95rem;
+  transition: background-color 0.3s var(--spring-soft);
 }
 .pick-menu a:hover { background: var(--accent-soft); }
 .pick-menu svg { flex: none; width: 16px; height: 16px; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
@@ -396,7 +411,7 @@ summary::-webkit-details-marker { display: none; }
 .showcase.is-stack .frame {
   grid-area: 1 / 1; align-self: start; width: 100%; margin: 0;
   transform-origin: 50% 0; user-select: none; -webkit-user-select: none;
-  transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), filter 0.4s, opacity 0.4s;
+  transition: transform 0.55s var(--spring), filter 0.45s var(--spring-soft), opacity 0.45s var(--spring-soft);
   will-change: transform, filter;
 }
 .showcase.is-stack .frame img { pointer-events: none; -webkit-user-drag: none; }
@@ -423,7 +438,7 @@ summary::-webkit-details-marker { display: none; }
 .stack-dot::before {
   content: ""; position: absolute; left: 50%; top: 50%; width: 10px; height: 10px; margin: -5px 0 0 -5px;
   border-radius: 50%; background: var(--muted); opacity: 0.45;
-  transition: width 0.25s, margin 0.25s, opacity 0.25s, background 0.25s;
+  transition: width 0.45s var(--spring), margin 0.45s var(--spring), opacity 0.3s var(--spring-soft), background 0.3s var(--spring-soft);
 }
 .stack-dot[aria-current="true"]::before { width: 26px; margin-left: -13px; border-radius: 999px; background: var(--accent); opacity: 1; }
 .stack-hint { text-align: center; color: var(--muted); font-size: 0.9rem; margin: 2px 0 0; }
