@@ -305,12 +305,13 @@ summary::-webkit-details-marker { display: none; }
 
 /* "Get app": a button that turns into its own menu. Closed, it is a pill like the
    other download buttons, with a chevron at its right edge. Open, the same shape
-   grows downward, goes solid, and holds the choices under its title. It sits in
-   a slot of a button's height, so opening it covers the rows below instead of
-   pushing them down. */
+   grows from its centre, up and down at once, goes solid, and holds the choices
+   under its title. It sits in a slot of a button's height and stays centred on
+   it (top 50%, moved up by half its own height), so it covers the rows around it
+   instead of pushing them. */
 .pick-slot { position: relative; width: 100%; height: 48px; }
 .pick {
-  position: absolute; z-index: 10; top: 0; left: 0; right: 0;
+  position: absolute; z-index: 10; top: 50%; left: 0; right: 0; transform: translateY(-50%);
   border-radius: 24px; background: var(--accent); color: var(--accent-ink);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
   transition: background-color 0.35s var(--spring-soft), color 0.35s var(--spring-soft), border-radius 0.5s var(--spring), box-shadow 0.35s var(--spring-soft);
