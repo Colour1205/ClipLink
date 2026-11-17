@@ -123,7 +123,7 @@
       active = (active + 1) % count;
       leaving = old; // it flies off to the left, then waits at the back
       clearTimeout(leaveTimer);
-      leaveTimer = setTimeout(function () { leaving = -1; render(); }, 450);
+      leaveTimer = setTimeout(function () { leaving = -1; render(); }, 560);
       render();
     }
 
@@ -205,7 +205,43 @@
     sync();
   }
 
-  // ---- 3. Point the download buttons at the newest release's files. ----
+  // ---- 3. The "Get app" menu: a <details>, so it works without this script.
+  // Here it also closes on a click elsewhere, on Escape, and after a choice. ----
+  // Closing plays the opening backwards (the choices blur out, the shape
+  // shrinks back to the pill) before the <details> actually closes.
+  var picks = document.querySelectorAll('details.pick');
+  var still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function closePick(menu, refocus) {
+    if (!menu.open || menu.classList.contains('closing')) return;
+    var done = function () {
+      menu.classList.remove('closing');
+      menu.open = false;
+      if (refocus) menu.querySelector('summary').focus();
+    };
+    if (still) { done(); return; }
+    menu.classList.add('closing');
+    setTimeout(done, 200);
+  }
+  Array.prototype.forEach.call(picks, function (menu) {
+    menu.querySelector('summary').addEventListener('click', function (event) {
+      if (menu.open) { event.preventDefault(); closePick(menu, false); }
+    });
+  });
+  if (picks.length) {
+    document.addEventListener('click', function (event) {
+      Array.prototype.forEach.call(picks, function (menu) {
+        if (!menu.open) return;
+        var inMenu = menu.contains(event.target);
+        if (!inMenu || event.target.closest('.pick-menu a')) closePick(menu, false);
+      });
+    });
+    document.addEventListener('keydown', function (event) {
+      if (event.key !== 'Escape') return;
+      Array.prototype.forEach.call(picks, function (menu) { closePick(menu, true); });
+    });
+  }
+
+  // ---- 4. Point the download buttons at the newest release's files. ----
   // Without this (or if GitHub can't be reached) they keep their fallback link
   // to the Releases page, and a platform with no file yet stays "coming soon".
   var buttons = document.querySelectorAll('[data-asset]');
@@ -215,6 +251,14 @@
 
   function megabytes(bytes) {
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  // "Version 2.2.3, 41.2 MB" (or "版本 2.2.3，41.2 MB" on the Chinese pages).
+  function versionLine(tag, bytes) {
+    var number = String(tag).replace(/^v/i, '');
+    return /^zh/i.test(document.documentElement.lang)
+      ? '版本 ' + number + '，' + megabytes(bytes)
+      : 'Version ' + number + ', ' + megabytes(bytes);
   }
 
   fetch('https://api.github.com/repos/' + REPO + '/releases?per_page=10', {
@@ -234,9 +278,9 @@
           if (!asset || String(asset.browser_download_url).indexOf('https://github.com/') !== 0) continue;
           button.href = asset.browser_download_url;
           button.removeAttribute('aria-disabled');
-          button.textContent = button.getAttribute('data-label-ready') || button.textContent;
+          if (button.hasAttribute('data-label-ready')) button.textContent = button.getAttribute('data-label-ready');
           var version = button.closest('.dl') && button.closest('.dl').querySelector('.js-version');
-          if (version) version.textContent = published[i].tag_name + ' · ' + megabytes(asset.size);
+          if (version) version.textContent = versionLine(published[i].tag_name, asset.size);
           break;
         }
       });
