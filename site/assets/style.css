@@ -143,7 +143,7 @@ code { background: var(--accent-soft); padding: 1px 7px; border-radius: 7px; fon
 /* ---- the glass ----
    A clear, blurred pane: a light sheen from the top, a lit top edge and a soft
    shadow. No grain: on dark it read as asphalt. */
-.glass, details, .callout, .btn:not(.primary), .chip, .site-header .wrap {
+.glass, .callout, .btn:not(.primary), .chip, .site-header .wrap {
   background-color: var(--glass);
   background-image: var(--glass-sheen);
   border: 1px solid var(--glass-edge);
@@ -154,10 +154,10 @@ code { background: var(--accent-soft); padding: 1px 7px; border-radius: 7px; fon
 .glass { border-radius: var(--r-lg); }
 
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .glass, details, .callout, .btn:not(.primary), .chip, .site-header .wrap { background-color: var(--glass-strong); }
+  .glass, .callout, .btn:not(.primary), .chip, .site-header .wrap { background-color: var(--glass-strong); }
 }
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
-  .glass, details, .callout, .btn:not(.primary), .chip, .site-header .wrap {
+  .glass, .callout, .btn:not(.primary), .chip, .site-header .wrap {
     background-color: var(--surface); background-image: none;
     -webkit-backdrop-filter: none; backdrop-filter: none;
   }
@@ -269,23 +269,41 @@ section { padding: 72px 0; position: relative; }
 #faq .wrap { display: grid; grid-template-columns: 3fr 8fr; gap: 48px; align-items: start; }
 #faq h2 { position: sticky; top: 104px; }
 .faq-list { padding: 6px 30px; }
-.faq-list details {
-  background: none; border: 0; box-shadow: none; border-radius: 0;
-  -webkit-backdrop-filter: none; backdrop-filter: none;
-  padding: 18px 0; margin: 0;
-}
+.faq-list details { padding: 18px 0; margin: 0; }
 .faq-list details + details { border-top: 1px solid var(--line); }
-summary { cursor: pointer; font-weight: 650; list-style: none; display: flex; justify-content: space-between; gap: 18px; }
+summary { list-style: none; cursor: pointer; }
 summary::-webkit-details-marker { display: none; }
-summary::after {
+.faq-list summary { font-weight: 650; display: flex; justify-content: space-between; gap: 18px; }
+.faq-list summary::after {
   content: ""; flex: none; width: 9px; height: 9px; margin: 0.45em 4px 0 0;
   border: solid var(--muted); border-width: 0 2px 2px 0; rotate: 45deg; transition: rotate 0.2s;
 }
-details[open] summary::after { rotate: -135deg; margin-top: 0.7em; }
-details p { color: var(--muted); margin: 10px 0 0; max-width: 62ch; }
+.faq-list details[open] summary::after { rotate: -135deg; margin-top: 0.7em; }
+.faq-list details p { color: var(--muted); margin: 10px 0 0; max-width: 62ch; }
 
-/* Plain <details> outside the FAQ list (none today) still look like glass. */
-details { border-radius: var(--r); padding: 18px 24px; margin-bottom: 12px; }
+/* "Get app": a button with a chevron that grows into a menu. The button's lower
+   corners square off and the menu unfolds under it at the same width, so the
+   two read as one shape. */
+.pick { position: relative; width: 100%; }
+.pick summary { width: 100%; gap: 10px; transition: border-radius 0.2s ease, background-color 0.2s; }
+.pick-chev { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: rotate 0.2s ease; }
+.pick[open] summary { border-radius: 24px 24px 8px 8px; }
+.pick[open] .pick-chev { rotate: 180deg; }
+.pick-menu {
+  position: absolute; z-index: 10; top: calc(100% + 4px); left: 0; right: 0;
+  display: grid; padding: 6px; border-radius: 8px 8px 22px 22px;
+  background: var(--glass-strong); border: 1px solid var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--glass-rim), var(--glass-shadow);
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+  transform-origin: top center; animation: pick-open 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes pick-open { from { opacity: 0; transform: translateY(-8px) scaleY(0.6); } }
+.pick-menu a {
+  display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 8px 14px; border-radius: 14px;
+  color: var(--text); text-decoration: none; font-weight: 600; font-size: 0.95rem;
+}
+.pick-menu a:hover { background: var(--accent-soft); }
+.pick-menu svg { flex: none; width: 16px; height: 16px; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
 /* ---- prose pages ---- */
 .prose { max-width: 48em; padding-top: 48px; padding-bottom: 72px; }
@@ -320,7 +338,7 @@ details { border-radius: var(--r); padding: 18px 24px; margin-bottom: 12px; }
 /* ---- phones ---- */
 @media (max-width: 620px) {
   body { font-size: 16px; }
-  .glass, details, .callout, .btn:not(.primary), .chip, .site-header .wrap { --glass-blur: blur(18px) saturate(160%); }
+  .glass, .callout, .btn:not(.primary), .chip, .site-header .wrap { --glass-blur: blur(18px) saturate(160%); }
   .hero { padding: 24px 0 80px; }
   .lead { font-size: 1.1rem; }
   .cta .btn { flex: 1 1 100%; }

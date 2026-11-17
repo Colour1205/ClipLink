@@ -43,3 +43,4 @@ Radii are 12, 20 and 28px. Buttons and the header are pills. Sections are 72px a
 - **Download list:** one panel with a row per platform. Your own platform's row is tinted and gets a "This device" badge.
 - **FAQ:** one panel, questions split by hairlines, with a chevron that turns.
 - **Links:** links to other sites open in a new tab (`target="_blank" rel="noopener"`). Download buttons stay in the page, since they fetch a file.
+- **Choice button:** when a platform has more than one way to get it (Android: APK or Google Play), the row has one "Get app" button with a chevron. It is a `<details>`, so it works without script; opening it squares off the button's lower corners and unfolds a menu under it at the same width. Menu items carry an icon for what they do (download, or opens another site).

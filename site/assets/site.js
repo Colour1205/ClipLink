@@ -205,7 +205,28 @@
     sync();
   }
 
-  // ---- 3. Point the download buttons at the newest release's files. ----
+  // ---- 3. The "Get app" menu: a <details>, so it works without this script.
+  // Here it also closes on a click elsewhere, on Escape, and after a choice. ----
+  var picks = document.querySelectorAll('details.pick');
+  if (picks.length) {
+    document.addEventListener('click', function (event) {
+      Array.prototype.forEach.call(picks, function (menu) {
+        if (!menu.open) return;
+        var inMenu = menu.contains(event.target);
+        if (!inMenu || event.target.closest('.pick-menu a')) menu.open = false;
+      });
+    });
+    document.addEventListener('keydown', function (event) {
+      if (event.key !== 'Escape') return;
+      Array.prototype.forEach.call(picks, function (menu) {
+        if (!menu.open) return;
+        menu.open = false;
+        menu.querySelector('summary').focus();
+      });
+    });
+  }
+
+  // ---- 4. Point the download buttons at the newest release's files. ----
   // Without this (or if GitHub can't be reached) they keep their fallback link
   // to the Releases page, and a platform with no file yet stays "coming soon".
   var buttons = document.querySelectorAll('[data-asset]');
@@ -242,7 +263,7 @@
           if (!asset || String(asset.browser_download_url).indexOf('https://github.com/') !== 0) continue;
           button.href = asset.browser_download_url;
           button.removeAttribute('aria-disabled');
-          button.textContent = button.getAttribute('data-label-ready') || button.textContent;
+          if (button.hasAttribute('data-label-ready')) button.textContent = button.getAttribute('data-label-ready');
           var version = button.closest('.dl') && button.closest('.dl').querySelector('.js-version');
           if (version) version.textContent = versionLine(published[i].tag_name, asset.size);
           break;
