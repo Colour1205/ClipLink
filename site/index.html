@@ -81,29 +81,43 @@
       <div class="wrap">
         <h2>Features</h2>
         <div class="feature-panel">
+          <div class="feature-grid">
           <div class="feature">
-            <h3>On your local network</h3>
-            <p>Devices on the same Wi-Fi find each other and connect directly.</p>
+            <div class="feature-t">
+              <h3>On your local network</h3>
+              <p>Devices on the same Wi-Fi find each other and connect directly.</p>
+            </div>
           </div>
           <div class="feature">
-            <h3>Files up to 1&nbsp;GB</h3>
-            <p>Text, pictures and real files, not links.</p>
+            <div class="feature-t">
+              <h3>Files up to 1&nbsp;GB</h3>
+              <p>Text, pictures and real files, not links.</p>
+            </div>
           </div>
           <div class="feature">
-            <h3>The last 25 items</h3>
-            <p>Kept on every device. Delete one and it's gone everywhere.</p>
+            <div class="feature-t">
+              <h3>The last 25 items</h3>
+              <p>Kept on every device. Delete one and it's gone everywhere.</p>
+            </div>
           </div>
           <div class="feature">
-            <h3>Pair once with a QR code</h3>
-            <p>Scan the code on your other device. After that they find each other on their own.</p>
+            <div class="feature-t">
+              <h3>Pair once with a QR code</h3>
+              <p>Scan the code on your other device. After that they find each other on their own.</p>
+            </div>
           </div>
           <div class="feature">
-            <h3>Encrypted between your devices</h3>
-            <p>Only devices you paired can read what you copy. No account and no server.</p>
+            <div class="feature-t">
+              <h3>Encrypted between your devices</h3>
+              <p>Only devices you paired can read what you copy. No account and no server.</p>
+            </div>
           </div>
           <div class="feature">
-            <h3>Away from home too</h3>
-            <p>Pair by address over a VPN such as Tailscale.</p>
+            <div class="feature-t">
+              <h3>Away from home too</h3>
+              <p>Pair by address over a VPN such as Tailscale.</p>
+            </div>
+          </div>
           </div>
         </div>
       </div>
@@ -117,23 +131,23 @@
           <p>A device can't read or send anything until you pair with it and choose <strong>Trust</strong>.</p>
         </div>
         <figure class="trust-diagram">
-          <svg viewBox="0 0 360 260" aria-hidden="true" focusable="false">
+          <svg viewBox="-14 0 360 260" aria-hidden="true" focusable="false">
             <g class="link">
-              <path d="M146 62L244 58"/>
-              <path d="M92 112V160"/>
-              <path d="M270 100V156"/>
-              <path d="M146 198L236 200"/>
-              <path d="M146 96L236 166"/>
-              <path d="M244 94L146 166"/>
+              <path d="M125 62L223 58"/>
+              <path d="M71 112L115 160"/>
+              <path d="M249 100L293 156"/>
+              <path d="M169 198L259 200"/>
+              <path d="M125 96L259 166"/>
+              <path d="M223 94L169 166"/>
             </g>
             <g class="dev">
-              <rect x="40" y="28" width="104" height="66" rx="7"/>
-              <path d="M28 104h128l-8 9H36z"/>
-              <rect x="250" y="16" width="42" height="80" rx="9"/>
-              <path d="M265 24h12"/>
-              <rect x="40" y="166" width="104" height="62" rx="6"/>
-              <path d="M92 228v12M74 242h36"/>
-              <rect x="240" y="160" width="62" height="84" rx="8"/>
+              <rect x="19" y="28" width="104" height="66" rx="7"/>
+              <path d="M7 104h128l-8 9H15z"/>
+              <rect x="229" y="16" width="42" height="80" rx="9"/>
+              <path d="M244 24h12"/>
+              <rect x="63" y="166" width="104" height="62" rx="6"/>
+              <path d="M115 228v12M97 242h36"/>
+              <rect x="263" y="160" width="62" height="84" rx="8"/>
             </g>
           </svg>
           <figcaption class="visually-hidden">A laptop, a phone, a desktop and a tablet, each connected directly to all the others.</figcaption>
@@ -147,72 +161,69 @@
           <h2>Download</h2>
           <p id="how">Install it on each device, then pair them once with a QR code.</p>
         </div>
-        <div class="dl-card">
-        <nav class="dl-tabs" aria-label="Platforms"><a class="dl-tab" href="#dl-windows" data-for="windows">Windows</a><a class="dl-tab" href="#dl-android" data-for="android">Android</a><a class="dl-tab" href="#dl-harmonyos" data-for="harmonyos">HarmonyOS</a><a class="dl-tab" href="#dl-ios" data-for="ios">iOS <span>soon</span></a></nav>
-        <div class="downloads">
+        <div class="dl-row">
           <div class="dl" id="dl-windows" data-platform="windows">
-            <div class="dl-head">
-              <h3>Windows</h3>
-              <span class="badge" data-stage="beta">Beta</span>
-              <span class="badge badge-yours" hidden>This device</span>
-            </div>
-            <div class="dl-info">
+            <div class="dl-in">
+              <div class="dl-head">
+                <h3>Windows</h3>
+                <span class="badge" data-stage="beta">Beta</span>
+                <span class="badge badge-yours" hidden>This device</span>
+              </div>
               <p class="meta">Windows 10 or later. <span class="js-version">Installer</span></p>
               <p class="note">Not code-signed yet: choose <strong>More info</strong>, then <strong>Run anyway</strong>.</p>
-            </div>
-            <div class="dl-actions">
-              <a class="btn primary" data-asset="windows" data-label-ready="Download installer" href="https://github.com/Colour1205/ClipLink/releases">Download installer</a>
+              <div class="dl-actions">
+                <a class="btn primary" data-asset="windows" data-label-ready="Download installer" href="https://github.com/Colour1205/ClipLink/releases">Download installer</a>
+              </div>
             </div>
           </div>
           <div class="dl" id="dl-android" data-platform="android">
-            <div class="dl-head">
-              <h3>Android</h3>
-              <span class="badge" data-stage="alpha">Alpha</span>
-              <span class="badge badge-yours" hidden>This device</span>
-            </div>
-            <div class="dl-info">
+            <div class="dl-in">
+              <div class="dl-head">
+                <h3>Android</h3>
+                <span class="badge" data-stage="alpha">Alpha</span>
+                <span class="badge badge-yours" hidden>This device</span>
+              </div>
               <p class="meta">Android 12 or later. <span class="js-version">Version 2.0.0, APK file</span></p>
               <p class="note">Android asks you to allow the install the first time.</p>
-            </div>
-            <div class="dl-actions">
-              <div class="pick-slot"><details class="pick">
-                <summary class="pick-head"><span>Get app</span><svg class="pick-chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></summary>
-                <div class="pick-menu">
-                  <a data-asset="android" href="https://github.com/Colour1205/ClipLink/releases/download/v2.0.0/ClipLink-2.0.0.apk"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8M4.5 7 8 10.5 11.5 7M3 13.5h10"/></svg><span>Download APK</span></a>
-                  <a href="https://play.google.com/apps/testing/io.uaena.cliplink" target="_blank" rel="noopener"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5M11.5 9.5v4h-9v-9h4"/></svg><span>Google Play alpha</span></a>
-                </div>
-              </details></div>
+              <div class="dl-actions">
+                <div class="pick-slot"><details class="pick">
+                  <summary class="pick-head"><span>Get app</span><svg class="pick-chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></summary>
+                  <div class="pick-menu">
+                    <a data-asset="android" href="https://github.com/Colour1205/ClipLink/releases/download/v2.0.0/ClipLink-2.0.0.apk"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8M4.5 7 8 10.5 11.5 7M3 13.5h10"/></svg><span>Download APK</span></a>
+                    <a href="https://play.google.com/apps/testing/io.uaena.cliplink" target="_blank" rel="noopener"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5M11.5 9.5v4h-9v-9h4"/></svg><span>Google Play alpha</span></a>
+                  </div>
+                </details></div>
+              </div>
             </div>
           </div>
           <div class="dl" id="dl-harmonyos" data-platform="harmonyos">
-            <div class="dl-head">
-              <h3>HarmonyOS</h3>
-              <span class="badge" data-stage="release">Release</span>
-              <span class="badge badge-yours" hidden>This device</span>
-            </div>
-            <div class="dl-info">
+            <div class="dl-in">
+              <div class="dl-head">
+                <h3>HarmonyOS</h3>
+                <span class="badge" data-stage="release">Release</span>
+                <span class="badge badge-yours" hidden>This device</span>
+              </div>
               <p class="meta">HarmonyOS 7. Version 2.1.0.</p>
               <p class="note">Syncs while the app is open.</p>
-            </div>
-            <div class="dl-actions">
-              <a class="btn primary" href="https://appgallery.huawei.com/app/detail?id=io.uaena.cliplink" target="_blank" rel="noopener">Get it on AppGallery</a>
+              <div class="dl-actions">
+                <a class="btn primary" href="https://appgallery.huawei.com/app/detail?id=io.uaena.cliplink" target="_blank" rel="noopener">Get it on AppGallery</a>
+              </div>
             </div>
           </div>
           <div class="dl" id="dl-ios" data-platform="ios">
-            <div class="dl-head">
-              <h3>iOS</h3>
-              <span class="badge" data-stage="soon">Not out yet</span>
-              <span class="badge badge-yours" hidden>This device</span>
-            </div>
-            <div class="dl-info">
+            <div class="dl-in">
+              <div class="dl-head">
+                <h3>iOS</h3>
+                <span class="badge" data-stage="soon">Not out yet</span>
+                <span class="badge badge-yours" hidden>This device</span>
+              </div>
               <p class="meta">iPhone and iPad, iOS 15 or later.</p>
               <p class="note">TestFlight beta first.</p>
-            </div>
-            <div class="dl-actions">
-              <span class="dl-pending">Coming soon</span>
+              <div class="dl-actions">
+                <span class="dl-pending">Coming soon</span>
+              </div>
             </div>
           </div>
-        </div>
         </div>
         <p class="fine">Older versions are on the <a href="https://github.com/Colour1205/ClipLink/releases" target="_blank" rel="noopener">releases page</a>.</p>
       </div>

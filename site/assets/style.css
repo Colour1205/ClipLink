@@ -214,9 +214,6 @@ h1 { font-size: clamp(2.5rem, 5vw, 3.9rem); line-height: 1.05; margin: 0 0 18px;
 .chips { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 0 0 30px; padding: 0; }
 .chip { display: inline-block; padding: 6px 15px; border-radius: 999px; font-size: 0.92rem; font-weight: 600; color: var(--text); text-decoration: none; box-shadow: inset 0 1px 0 var(--glass-rim); transition: background-color 0.56s var(--spring-soft); }
 .chip:hover { background-color: var(--glass-strong); }
-/* A platform tag jumps to its row; the row then glows briefly. */
-.dl:target { animation: picked 2.56s var(--spring-soft); }
-@keyframes picked { from { background-color: color-mix(in srgb, var(--accent) 22%, transparent); } }
 .chip span { font-weight: 400; color: var(--muted); }
 
 .art-stage { position: relative; }
@@ -242,7 +239,6 @@ section { padding: 72px 0; position: relative; }
 .frame figcaption span { display: block; font-weight: 400; font-size: 0.86rem; color: var(--muted); }
 
 /* Features: one panel, plain text inside, no icons. */
-.feature-panel { display: grid; grid-template-columns: repeat(3, 1fr); gap: 34px 44px; padding: 40px 44px; }
 .feature h3 { margin: 0 0 6px; font-size: 1.08rem; }
 .feature p { margin: 0; color: var(--muted); font-size: 0.97rem; }
 
@@ -257,22 +253,11 @@ section { padding: 72px 0; position: relative; }
 @keyframes flow { to { stroke-dashoffset: -18; } }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
-/* Download: setup text, then one panel with a row per platform. */
+/* Download: setup text, then a tile per platform (see the staircase below). */
 .download-intro { max-width: 44em; margin-bottom: 26px; }
 .download-intro h2 { margin-bottom: 12px; }
 .download-intro p { margin: 0; color: var(--muted); }
-.downloads { padding: 8px; }
-.dl { display: grid; grid-template-columns: 12rem 1fr 13.5rem; gap: 8px 28px; align-items: center; padding: 20px 22px; position: relative; border-radius: calc(var(--r-lg) - 8px); }
-.dl-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
-.dl-head h3 { margin: 0; font-size: 1.2rem; }
-.dl-info p { margin: 0; }
-.dl .meta { font-size: 0.95rem; }
-.dl .note { font-size: 0.88rem; color: var(--muted); margin-top: 2px; }
-.dl-actions { display: flex; }
-.dl-actions .btn, .dl-pending { width: 100%; }
 .dl-pending { display: inline-flex; align-items: center; justify-content: center; min-height: 48px; border-radius: 999px; border: 1px dashed var(--line-strong); color: var(--muted); font-weight: 600; }
-.dl .note a { color: inherit; }
-.dl.is-yours { background: var(--accent-soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
 .badge { font-size: 0.74rem; font-weight: 700; letter-spacing: 0.02em; padding: 3px 10px; border-radius: 999px; line-height: 1.5; white-space: nowrap; }
 .badge[data-stage="release"] { background: var(--text); color: var(--bg); }
 .badge[data-stage="beta"], .badge[data-stage="alpha"] { border: 1px solid var(--line-strong); color: var(--muted); }
@@ -306,13 +291,13 @@ summary::-webkit-details-marker { display: none; }
 .pick {
   position: absolute; z-index: 10; top: 50%; left: 0; right: 0; transform: translateY(-50%);
   color: var(--accent-ink); isolation: isolate;
-  transition: color 0.56s var(--spring-soft);
+  transition: color 0.42s var(--spring-soft);
 }
 .pick::before {
   content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
   transform: skewX(var(--skew)); border-radius: var(--slant-r);
   background: var(--accent); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
-  transition: background-color 0.56s var(--spring-soft), box-shadow 0.56s var(--spring-soft);
+  transition: background-color 0.42s var(--spring-soft), box-shadow 0.42s var(--spring-soft);
 }
 .pick-head {
   position: relative; display: flex; align-items: center; justify-content: center;
@@ -322,7 +307,7 @@ summary::-webkit-details-marker { display: none; }
 .pick-chev {
   position: absolute; right: 18px; top: 50%; width: 16px; height: 16px; margin-top: -8px;
   fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
-  transition: rotate 0.8s var(--spring);
+  transition: rotate 0.44s var(--spring);
 }
 .pick[open]:not(.closing) { color: var(--text); }
 .pick[open]:not(.closing)::before { background: var(--surface); box-shadow: 0 0 0 1px var(--line-strong), var(--glass-shadow); }
@@ -333,17 +318,20 @@ summary::-webkit-details-marker { display: none; }
 /* While it changes shape, what is inside blurs through the change: the title
    blurs as its colour flips, and the choices come into focus as they appear
    (and go out of focus as they leave, see site.js). */
-.pick[open] .pick-head span, .pick.closing .pick-head span { animation: pick-swap 0.54s var(--spring-soft); }
-.pick.closing .pick-head span { animation-name: pick-swap-back; }
+.pick[open] .pick-head span { animation: pick-swap 0.42s var(--spring-soft); }
+.pick.closing .pick-head span { animation: pick-swap-back 0.2s var(--exit); }
 @keyframes pick-swap { 40% { filter: blur(4px); opacity: 0.6; } }
 @keyframes pick-swap-back { 40% { filter: blur(4px); opacity: 0.6; } }
 /* Two one-line choices: 2 x 44px + 2px gap + 6px padding, as rendered. */
 .pick { --menu-h: 95px; }
-.pick[open] .pick-menu { animation: pick-grow 0.88s var(--spring); }
-.pick[open] .pick-menu a { animation: pick-focus 0.8s var(--spring) backwards; }
-.pick[open] .pick-menu a + a { animation-delay: 0.04s; }
+.pick[open] .pick-menu { animation: pick-grow 0.44s var(--spring); }
+.pick[open] .pick-menu a { animation: pick-focus 0.42s var(--spring) backwards; }
+.pick[open] .pick-menu a + a { animation-delay: 0.03s; }
 .pick.closing .pick-menu { animation: pick-shrink 0.2s var(--exit) forwards; }
 .pick.closing .pick-menu a { animation: pick-unfocus 0.16s var(--exit) forwards; }
+/* Closing is quicker than opening: the colour and the chevron go back in 0.2 s,
+   the time site.js waits before it really closes the <details>. */
+.pick.closing, .pick.closing::before, .pick.closing .pick-chev { transition-duration: 0.2s; }
 @keyframes pick-grow { from { height: 0; } to { height: var(--menu-h, auto); } }
 @keyframes pick-shrink { from { height: var(--menu-h, auto); } to { height: 0; padding-bottom: 0; } }
 @keyframes pick-focus { from { opacity: 0; filter: blur(8px); transform: translateY(-6px); } }
@@ -380,12 +368,8 @@ summary::-webkit-details-marker { display: none; }
   .hero .wrap { grid-template-columns: 1fr; gap: 44px; }
   .art-stage { max-width: 560px; width: 100%; margin: 0 auto; }
   .shot-phone { right: -10px; width: 30%; }
-  .feature-panel { grid-template-columns: 1fr 1fr; padding: 34px; }
   #security .wrap { grid-template-columns: 1fr; gap: 32px; }
   .trust-diagram { max-width: 460px; }
-  .dl { grid-template-columns: 1fr 13.5rem; }
-  .dl-info { grid-column: 1 / -1; grid-row: 2; }
-  .dl-actions { grid-column: 2; grid-row: 1; }
   #faq .wrap { grid-template-columns: 1fr; gap: 6px; }
   #faq h2 { position: static; }
 }
@@ -401,10 +385,6 @@ summary::-webkit-details-marker { display: none; }
   section { padding: 56px 0; }
   #screens { padding-top: 40px; }
   .shelf { padding: 24px 12px 18px; }
-  .feature-panel { grid-template-columns: 1fr; gap: 24px; padding: 26px 22px; }
-  .dl { grid-template-columns: 1fr; padding: 18px 16px; }
-  .dl-info, .dl-actions { grid-column: 1; grid-row: auto; }
-  .dl-actions { margin-top: 6px; }
   .faq-list { padding: 4px 20px; }
   .nav a:not(.lang):not(.keep) { display: none; }
   .site-footer .grow { margin-left: 0; }
@@ -696,12 +676,12 @@ summary::-webkit-details-marker { display: none; }
 .btn { white-space: nowrap; padding: 11px 28px; min-height: 46px; }
 
 /* Slanted shapes: a skewed ::before behind upright content. */
-:is(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram, .dl-card) {
+:is(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram, .dl) {
   position: relative; isolation: isolate;
   background: none; border: 0; box-shadow: none; border-radius: 0;
 }
-:is(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram, .dl-card):hover { background: none; }
-:where(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram, .dl-card)::before {
+:is(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram, .dl):hover { background: none; }
+:where(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram, .dl)::before {
   content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
   transform: skewX(var(--skew));
   background-color: var(--glass); background-image: var(--glass-sheen);
@@ -717,11 +697,8 @@ summary::-webkit-details-marker { display: none; }
 .hero .chip:hover::before { background-color: var(--glass-strong); border-color: var(--line-strong); }
 :is(.hero .btn.primary, .hero .chip):focus-visible { outline: none; }
 :is(.hero .btn.primary, .hero .chip):focus-visible::before { outline: 2px solid var(--text); outline-offset: 3px; }
-/* A slanted panel's sides lean out by tan(18deg) x its height, so the text sits further in. */
-.feature-panel { padding: 40px 96px; }
-.trust-diagram { padding: 30px 76px; }
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
-  :where(.hero .chip, .feature-panel, .trust-diagram)::before { background-color: var(--surface); background-image: none; }
+  :where(.hero .chip, .feature-panel, .trust-diagram, .dl)::before { background-color: var(--surface); background-image: none; }
 }
 
 /* ---- the top bar: full width, straight, the one pane that really blurs ---- */
@@ -755,46 +732,6 @@ html { scroll-padding-top: 78px; }
 .nav a:hover::after { transform: scaleX(1); }
 .nav .lang { margin-left: 0; padding-left: 16px; border-left: 0; border-radius: 0; }
 
-/* ---- Download: one card, tabs on top, the chosen platform below ---- */
-/* The card leans like the Features panel. Its tab dividers lean at the same
-   angle, so they run parallel to its sides, and the chosen tab is filled
-   between its two dividers: the tabs read as cells of the one shape. Inside,
-   the button and badges stay straight. */
-.dl-card { margin: 0 6px; }
-.dl-tabs { display: flex; flex-wrap: wrap; margin: 0; padding: 0 30px; border-bottom: 1px solid var(--line); }
-.dl-tab {
-  position: relative; isolation: isolate; padding: 15px 24px; color: var(--muted); font-weight: 600; text-decoration: none;
-  transition: color 0.56s var(--spring-soft);
-}
-.dl-tab span { font-weight: 400; }
-.dl-tab + .dl-tab::before {
-  content: ""; position: absolute; left: 0; top: 30%; bottom: 30%;
-  border-left: 1px solid var(--line-strong); transform: skewX(var(--skew));
-}
-.dl-tab:hover { color: var(--text); }
-.dl-tab[aria-current="true"] { color: var(--accent); }
-.dl-tab::after {
-  content: ""; position: absolute; inset: 0 0 -1px; z-index: -1;
-  transform: skewX(var(--skew)); border-bottom: 2px solid transparent;
-  transition: background-color 0.56s var(--spring-soft), border-color 0.56s var(--spring-soft);
-}
-.dl-tab:hover::after { background-color: color-mix(in srgb, var(--text) 5%, transparent); }
-.dl-tab[aria-current="true"]::after { background-color: var(--accent-soft); border-bottom-color: var(--accent); }
-.downloads { display: block; padding: 0; }
-.downloads .dl { display: none; }
-.downloads:not(.js-tabs):not(:has(.dl:target)) .dl:first-child, .downloads:not(.js-tabs) .dl:target { display: grid; }
-.downloads.js-tabs .dl { display: none; }
-.downloads.js-tabs .dl.is-active { display: grid; animation: dl-in 0.8s var(--spring); }
-@keyframes dl-in { from { opacity: 0; filter: blur(6px); transform: translateY(6px); } }
-.dl { grid-template-columns: 11rem minmax(0, 1fr) auto; gap: 8px 32px; padding: 26px 40px 26px 60px; }
-.dl.is-yours { background: none; box-shadow: none; }
-.dl-head { gap: 8px; }
-.dl-actions .btn, .dl-actions .pick-slot, .dl-pending { width: auto; min-width: 13rem; }
-/* Get app: straight like the other buttons; its menu items fill edge to edge. */
-.pick::before { transform: none; border-radius: 0; }
-.pick-menu a { padding: 8px 14px; }
-.pick-menu a::before { transform: none; border-radius: 0; inset: 0; }
-
 /* ---- FAQ: plain list ---- */
 .faq-list { padding: 0; }
 .faq-list details { padding: 18px 0; }
@@ -805,7 +742,7 @@ html { scroll-padding-top: 78px; }
    a soft light that follows it. ::after is a ring the width of the border (the
    mask cuts its middle out); site.js sets --rx/--ry in the shape's own leaning
    frame and --ro (how lit), only for a mouse or pen. */
-:where(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram, .dl-card)::after {
+:where(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram, .dl)::after {
   content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
   transform: skewX(var(--skew));
   border: 1.5px solid transparent;
@@ -818,9 +755,6 @@ html { scroll-padding-top: 78px; }
 }
 
 /* ---- tablets and phones ---- */
-@media (max-width: 960px) {
-  .dl { grid-template-columns: minmax(0, 1fr) auto; }
-}
 @media (max-width: 620px) {
   .site-header .wrap { min-height: 58px; padding: 0 16px; }
   body { padding-top: 58px; }
@@ -829,19 +763,199 @@ html { scroll-padding-top: 78px; }
   .nav a::after { left: 12px; right: 12px; }
   .hero .chip { padding: 5px 11px; }
   .hero .btn.primary { padding: 11px 26px; }
-  /* Tall shapes on a narrow screen would lean too far: here the panels stand
-     straight, and only the short hero button and tags keep the slant. */
-  .feature-panel { padding: 26px 24px; }
-  .trust-diagram { padding: 24px; }
-  :is(.feature-panel, .trust-diagram, .dl-card)::before, :is(.feature-panel, .trust-diagram, .dl-card)::after { transform: none; }
-  .dl-card { margin: 0; }
-  .dl-tabs { padding: 0 8px; }
-  .dl-tab { padding: 13px 12px; font-size: 0.92rem; }
-  .dl-tab::after { left: 10px; right: 10px; }
-  .dl { grid-template-columns: minmax(0, 1fr); padding: 22px 20px; }
-  .dl-actions .btn, .dl-actions .pick-slot, .dl-pending { width: 100%; min-width: 0; }
 }
 @media (max-width: 400px) {
   .site-header .wrap { padding: 0 10px; }
   .nav a { padding: 7px 10px; }
+}
+
+/* ================= content follows the lean ================= */
+
+/* Inside a slanted shape the content leans with it. The shape's glass is a skewed
+   ::before; inside it, one box is skewed the same way and each piece of text in
+   it is skewed back. The words stay upright, but each block's centre moves along
+   the lean by tan(18deg) x its distance from the box's middle, so lower blocks
+   step right and higher ones step left: column lines run parallel to the sides,
+   padding is the same distance from the slanted side at every height, and a fill
+   is a cell of the shape. (A block of height h stands up around its middle, so
+   its corners move tan(18deg) x h/2 at most: the padding is bigger than that.) */
+:root {
+  --unskew: skewX(calc(-1 * var(--skew)));
+  --t: 0.3249; /* tan(18deg) */
+}
+
+/* ---- Features: a leaning lattice of six cells ---- */
+/* A leaning panel's corners stick out tan(18deg) x half its height past its box;
+   where the window leaves less room than that beside the content, it moves in. */
+.feature-panel { display: block; padding: 0; margin-inline: clamp(0px, calc(48px - (100vw - var(--max)) / 2), 48px); }
+/* The cells tile the panel: their lines run from side to side and top to bottom,
+   so every cell is a piece of the parallelogram and the second row starts
+   tan(18deg) x the row's height further right, right along the panel's side.
+   Each cell's words stand up as one block, so its title and text stay aligned. */
+.feature-grid {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 0; transform: skewX(var(--skew));
+}
+.feature { padding: 32px 34px 34px; }
+.feature:nth-child(3n + 1) { padding-left: 52px; }
+.feature:nth-child(3n) { padding-right: 52px; }
+.feature:nth-child(n + 4) { border-top: 1px solid var(--line); }
+.feature:not(:nth-child(3n + 1)) { border-left: 1px solid var(--line); }
+/* The title and the text each stand up on their own, so the text starts a step
+   further along the lean than the title (like the lines in a download tile), and
+   neither block's corner reaches far toward the slanted lines. */
+.feature-t > * { transform: var(--unskew); }
+.feature p { text-wrap: pretty; }
+/* With a mouse, the cell under it lights up: a piece of the panel's shape. */
+.feature { transition: background-color 0.56s var(--spring-soft); }
+@media (hover: hover) and (pointer: fine) {
+  .feature:hover { background-color: color-mix(in srgb, var(--accent) 7%, transparent); }
+}
+
+/* ---- Privacy: the devices stand along the lean (see the drawing's coordinates) ---- */
+/* Like the Features panel, it moves in where the window leaves less room than
+   its lean beside the content, so its outer corner is never cut off. */
+.trust-diagram { padding: 30px 36px; margin-right: clamp(0px, calc(48px - (100vw - var(--max)) / 2), 48px); }
+.trust-diagram svg { max-width: 380px; }
+
+/* ---- Download: four leaning tiles side by side, a staircase ---- */
+/* Each platform is its own short leaning tile, so there are no wide empty
+   wedges at the ends of one big card. A download tile is tall, so what is
+   inside follows its lean: each line of content starts further right the lower
+   it is, along the tile's edge. The row is inset so its first and last corners
+   sit on the content edges. */
+.dl-row { --dl-h: 310px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-rows: minmax(var(--dl-h), auto); gap: 16px; margin: 0 calc(var(--t) * var(--dl-h) / 2); }
+.dl { display: flex; padding: 26px; scroll-margin-top: 190px; }
+.dl-in { flex: 1; min-width: 0; display: flex; flex-direction: column; transform: skewX(var(--skew)); }
+.dl-in > * { transform: var(--unskew); }
+.dl-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 12px; }
+.dl-head h3 { flex: 1 0 100%; margin: 0 0 2px; font-size: 1.32rem; line-height: 1.25; }
+/* Every badge the same height (some have no border of their own), so the
+   lines below them start at the same height in all four tiles. */
+.dl-head .badge:not([data-stage="beta"]):not([data-stage="alpha"]) { border: 1px solid transparent; }
+.dl .meta { margin: 0; font-size: 0.95rem; line-height: 1.5; }
+.dl .note { margin: 6px 0 0; font-size: 0.88rem; line-height: 1.5; color: var(--muted); }
+.dl .meta, .dl .note { text-wrap: pretty; }
+.dl .note a { color: inherit; }
+.dl-actions { margin-top: auto; padding-top: 20px; display: flex; }
+.dl-actions .btn, .dl-actions .pick-slot, .dl-pending { width: 100%; min-width: 0; padding-left: 10px; padding-right: 10px; }
+/* A button never reaches past its tile's slanted side: if its label does not
+   fit (a narrow window, a wider system font), it takes two lines. */
+.dl-actions .btn { white-space: normal; text-align: center; line-height: 1.25; }
+.dl-pending { min-height: 46px; }
+.pick-head { padding: 0 38px; }
+.pick-chev { right: 14px; }
+/* Get app: straight like the other buttons; its menu items fill edge to edge. */
+.pick::before { transform: none; border-radius: 0; }
+.pick-menu a { padding: 8px 14px; }
+.pick-menu a::before { transform: none; border-radius: 0; inset: 0; }
+/* The tile's menu is as narrow as its button, so a choice may take two lines;
+   where the browser can, the menu grows to its real height instead of a fixed one. */
+.dl .pick-menu a { gap: 8px; padding: 8px 10px; font-size: 0.92rem; line-height: 1.35; }
+@supports (interpolate-size: allow-keywords) {
+  .dl .pick { interpolate-size: allow-keywords; --menu-h: auto; }
+}
+/* The visitor's own platform: tinted, with an accent top edge. */
+.dl.is-yours::before {
+  background-color: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  box-shadow: inset 0 3px 0 var(--accent), var(--glass-shadow);
+}
+/* Not out yet: an outline only. */
+.dl[data-platform="ios"]::before { background: none; border: 1px dashed var(--line-strong); box-shadow: none; }
+.dl[data-platform="ios"] h3 { color: var(--muted); }
+/* A platform tag jumps to its tile; the tile's glass glows briefly. */
+.dl:target::before { animation: picked-glass 2.56s var(--spring-soft); }
+@keyframes picked-glass { from { background-color: color-mix(in srgb, var(--accent) 26%, transparent); } }
+/* Only the visitor's own platform gets the solid button; the others are glass,
+   so the eye goes to the one that fits. Without a match, all stay solid. */
+.dl-row:has(.is-yours) .dl:not(.is-yours) .dl-actions .btn.primary {
+  color: var(--text); background-color: var(--glass); background-image: var(--glass-sheen);
+  border: 1px solid var(--line-strong); box-shadow: inset 0 1px 0 var(--glass-rim);
+}
+.dl-row:has(.is-yours) .dl:not(.is-yours) .dl-actions .btn.primary:hover { background-color: var(--glass-strong); }
+.dl-row:has(.is-yours) .dl:not(.is-yours) .pick:not([open]) { color: var(--text); }
+.dl-row:has(.is-yours) .dl:not(.is-yours) .pick:not([open])::before {
+  background-color: var(--glass); background-image: var(--glass-sheen);
+  box-shadow: inset 0 0 0 1px var(--line-strong), inset 0 1px 0 var(--glass-rim);
+}
+.dl-row:has(.is-yours) .dl:not(.is-yours) .pick:not([open]):hover::before { background-color: var(--glass-strong); }
+
+/* ---- narrow laptops and tablets: the download tiles make a 2 x 2 staircase ---- */
+/* Four across, a tile below about 1120px is too narrow for its button. */
+@media (max-width: 1120px) {
+  .dl-row {
+    --dl-h: 300px; --row-h: calc(2 * var(--dl-h) + 16px);
+    grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 18px;
+    margin: 0 calc(var(--t) * var(--row-h) / 2);
+    transform: skewX(var(--skew));
+  }
+  .dl-row > .dl { transform: var(--unskew); }
+}
+/* ---- tablets: two feature columns; the privacy pane under its text ---- */
+@media (max-width: 960px) {
+  .feature-panel { margin-inline: 66px; }
+  .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .feature:nth-child(n) { padding: 28px 28px 30px; }
+  .feature:nth-child(2n + 1) { padding-left: 40px; }
+  .feature:nth-child(2n) { padding-right: 40px; }
+  .feature:nth-child(n) { border-left: 0; border-top: 0; }
+  .feature:nth-child(n + 3) { border-top: 1px solid var(--line); }
+  .feature:nth-child(2n) { border-left: 1px solid var(--line); }
+  /* Alone under the text, the pane is moved in by its lean, so its top left
+     corner stays on the content edge. */
+  .trust-diagram { margin: 0 0 0 56px; }
+}
+/* Below 820px the Features panel stands straight (leaning, it would push far
+   past the text or squeeze it). */
+@media (max-width: 820px) {
+  .feature-panel { padding: 0; margin-inline: 0; }
+  .feature-grid { padding: 4px 6px; }
+  .feature:nth-child(n) { padding: 24px 24px 26px; }
+  .feature-panel::before, .feature-panel::after, .feature-grid, .feature-t > * { transform: none; }
+}
+
+/* ---- narrow tablets and phones: the download tiles stack ---- */
+/* Two across, a tile below 760px is too narrow for its button, so the tiles
+   stack; tall and wide, they stand straight while their (short) buttons take
+   the lean instead, like the hero's Download button. */
+@media (max-width: 760px) {
+  .dl-row { margin: 0; grid-template-columns: minmax(0, 1fr); grid-auto-rows: auto; gap: 12px; transform: none; }
+  .dl-row > .dl { transform: none; }
+  .dl { padding: 20px 20px 22px; scroll-margin-top: 90px; }
+  .dl::before, .dl::after, .dl-in, .dl-in > * { transform: none; }
+  .dl-head h3 { flex: 0 1 auto; margin: 0 4px 0 0; }
+  .dl .meta, .dl .note { max-width: 32em; }
+  .dl-actions { padding-top: 16px; }
+  .dl-actions .btn.primary { position: relative; isolation: isolate; background: none; border: 0; box-shadow: none; }
+  .dl-actions .btn.primary::before {
+    content: ""; position: absolute; inset: 0; z-index: -1; transform: skewX(var(--skew));
+    background: var(--accent); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+    transition: background-color 0.56s var(--spring-soft);
+  }
+  .dl-actions .btn.primary:hover::before { background: var(--accent-hover); }
+  .dl-actions .btn, .dl-actions .pick-slot, .dl-pending { margin: 0 8px; width: calc(100% - 16px); }
+  /* The closed Get app button leans like the others; opened, it grows into a
+     menu and stands straight as it does, so its choices sit in a plain box. */
+  .pick::before { transform: skewX(var(--skew)); transition: transform 0.44s var(--spring), background-color 0.42s var(--spring-soft), box-shadow 0.42s var(--spring-soft); }
+  .pick[open]:not(.closing)::before { transform: none; }
+  .dl-pending { position: relative; isolation: isolate; border: 0; }
+  .dl-pending::before { content: ""; position: absolute; inset: 0; z-index: -1; border: 1px dashed var(--line-strong); transform: skewX(var(--skew)); }
+  .dl-row:has(.is-yours) .dl:not(.is-yours) .dl-actions .btn.primary { background: none; border: 0; box-shadow: none; }
+  .dl-row:has(.is-yours) .dl:not(.is-yours) .dl-actions .btn.primary::before {
+    background-color: var(--glass); background-image: var(--glass-sheen);
+    box-shadow: inset 0 0 0 1px var(--line-strong), inset 0 1px 0 var(--glass-rim);
+  }
+  .dl-row:has(.is-yours) .dl:not(.is-yours) .dl-actions .btn.primary:hover::before { background-color: var(--glass-strong); }
+}
+
+/* ---- phones ---- */
+/* Tall shapes on a narrow screen would lean too far: the privacy pane stands
+   straight too. */
+@media (max-width: 620px) {
+  .feature-grid { grid-template-columns: minmax(0, 1fr); padding: 6px 22px; }
+  .feature:nth-child(n) { border-left: 0; border-top: 0; padding: 20px 2px; }
+  .feature:nth-child(n + 2) { border-top: 1px solid var(--line); }
+  .trust-diagram { padding: 24px; margin: 0; }
+  .trust-diagram::before, .trust-diagram::after { transform: none; }
 }

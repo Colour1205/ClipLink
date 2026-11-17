@@ -81,29 +81,43 @@
       <div class="wrap">
         <h2>功能</h2>
         <div class="feature-panel">
+          <div class="feature-grid">
           <div class="feature">
-            <h3>局域网直连</h3>
-            <p>同一个 Wi-Fi 下的设备会自动找到对方，直接连接。</p>
+            <div class="feature-t">
+              <h3>局域网直连</h3>
+              <p>同一个 Wi-Fi 下的设备会自动找到对方，直接连接。</p>
+            </div>
           </div>
           <div class="feature">
-            <h3>文件最大 1&nbsp;GB</h3>
-            <p>文字、图片和文件都能传，文件就是文件，不是链接。</p>
+            <div class="feature-t">
+              <h3>文件最大 1&nbsp;GB</h3>
+              <p>文字、图片和文件都能传，文件就是文件，不是链接。</p>
+            </div>
           </div>
           <div class="feature">
-            <h3>最近 25 条</h3>
-            <p>每台设备都有。删掉一条，所有设备上都删掉。</p>
+            <div class="feature-t">
+              <h3>最近 25 条</h3>
+              <p>每台设备都有。删掉一条，所有设备上都删掉。</p>
+            </div>
           </div>
           <div class="feature">
-            <h3>扫码配对一次</h3>
-            <p>扫一下另一台设备的二维码，之后它们会自己找到对方。</p>
+            <div class="feature-t">
+              <h3>扫码配对一次</h3>
+              <p>扫一下另一台设备的二维码，之后它们会自己找到对方。</p>
+            </div>
           </div>
           <div class="feature">
-            <h3>设备之间加密</h3>
-            <p>只有配对过的设备能读到你复制的内容，不用账号，也没有服务器。</p>
+            <div class="feature-t">
+              <h3>设备之间加密</h3>
+              <p>只有配对过的设备能读到你复制的内容，不用账号，也没有服务器。</p>
+            </div>
           </div>
           <div class="feature">
-            <h3>不在家也能用</h3>
-            <p>通过 Tailscale 这类 VPN 按地址配对。</p>
+            <div class="feature-t">
+              <h3>不在家也能用</h3>
+              <p>通过 Tailscale 这类 VPN 按地址配对。</p>
+            </div>
+          </div>
           </div>
         </div>
       </div>
@@ -117,23 +131,23 @@
           <p>没配对、没点<strong>信任</strong>的设备，什么都读不到，也发不过来。</p>
         </div>
         <figure class="trust-diagram">
-          <svg viewBox="0 0 360 260" aria-hidden="true" focusable="false">
+          <svg viewBox="-14 0 360 260" aria-hidden="true" focusable="false">
             <g class="link">
-              <path d="M146 62L244 58"/>
-              <path d="M92 112V160"/>
-              <path d="M270 100V156"/>
-              <path d="M146 198L236 200"/>
-              <path d="M146 96L236 166"/>
-              <path d="M244 94L146 166"/>
+              <path d="M125 62L223 58"/>
+              <path d="M71 112L115 160"/>
+              <path d="M249 100L293 156"/>
+              <path d="M169 198L259 200"/>
+              <path d="M125 96L259 166"/>
+              <path d="M223 94L169 166"/>
             </g>
             <g class="dev">
-              <rect x="40" y="28" width="104" height="66" rx="7"/>
-              <path d="M28 104h128l-8 9H36z"/>
-              <rect x="250" y="16" width="42" height="80" rx="9"/>
-              <path d="M265 24h12"/>
-              <rect x="40" y="166" width="104" height="62" rx="6"/>
-              <path d="M92 228v12M74 242h36"/>
-              <rect x="240" y="160" width="62" height="84" rx="8"/>
+              <rect x="19" y="28" width="104" height="66" rx="7"/>
+              <path d="M7 104h128l-8 9H15z"/>
+              <rect x="229" y="16" width="42" height="80" rx="9"/>
+              <path d="M244 24h12"/>
+              <rect x="63" y="166" width="104" height="62" rx="6"/>
+              <path d="M115 228v12M97 242h36"/>
+              <rect x="263" y="160" width="62" height="84" rx="8"/>
             </g>
           </svg>
           <figcaption class="visually-hidden">笔记本、手机、台式机和平板，每台都和其他设备直接相连。</figcaption>
@@ -147,72 +161,69 @@
           <h2>下载</h2>
           <p id="how">每台设备装上 ClipLink，扫一次二维码配对就行。</p>
         </div>
-        <div class="dl-card">
-        <nav class="dl-tabs" aria-label="平台"><a class="dl-tab" href="#dl-windows" data-for="windows">Windows</a><a class="dl-tab" href="#dl-android" data-for="android">Android</a><a class="dl-tab" href="#dl-harmonyos" data-for="harmonyos">鸿蒙</a><a class="dl-tab" href="#dl-ios" data-for="ios">iOS <span>开发中</span></a></nav>
-        <div class="downloads">
+        <div class="dl-row">
           <div class="dl" id="dl-windows" data-platform="windows">
-            <div class="dl-head">
-              <h3>Windows</h3>
-              <span class="badge" data-stage="beta">测试版</span>
-              <span class="badge badge-yours" hidden>这台设备</span>
-            </div>
-            <div class="dl-info">
+            <div class="dl-in">
+              <div class="dl-head">
+                <h3>Windows</h3>
+                <span class="badge" data-stage="beta">测试版</span>
+                <span class="badge badge-yours" hidden>这台设备</span>
+              </div>
               <p class="meta">Windows 10 或更高版本。<span class="js-version">安装程序</span></p>
               <p class="note">还没有代码签名：点“更多信息”，再点“仍要运行”。</p>
-            </div>
-            <div class="dl-actions">
-              <a class="btn primary" data-asset="windows" data-label-ready="下载安装程序" href="https://github.com/Colour1205/ClipLink/releases">下载安装程序</a>
+              <div class="dl-actions">
+                <a class="btn primary" data-asset="windows" data-label-ready="下载安装程序" href="https://github.com/Colour1205/ClipLink/releases">下载安装程序</a>
+              </div>
             </div>
           </div>
           <div class="dl" id="dl-android" data-platform="android">
-            <div class="dl-head">
-              <h3>Android</h3>
-              <span class="badge" data-stage="alpha">Alpha</span>
-              <span class="badge badge-yours" hidden>这台设备</span>
-            </div>
-            <div class="dl-info">
+            <div class="dl-in">
+              <div class="dl-head">
+                <h3>Android</h3>
+                <span class="badge" data-stage="alpha">Alpha</span>
+                <span class="badge badge-yours" hidden>这台设备</span>
+              </div>
               <p class="meta">Android 12 或更高版本。<span class="js-version">2.0.0 版，APK 文件</span></p>
               <p class="note">第一次安装时，系统会让你允许安装。</p>
-            </div>
-            <div class="dl-actions">
-              <div class="pick-slot"><details class="pick">
-                <summary class="pick-head"><span>获取应用</span><svg class="pick-chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></summary>
-                <div class="pick-menu">
-                  <a data-asset="android" href="https://github.com/Colour1205/ClipLink/releases/download/v2.0.0/ClipLink-2.0.0.apk"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8M4.5 7 8 10.5 11.5 7M3 13.5h10"/></svg><span>下载 APK</span></a>
-                  <a href="https://play.google.com/apps/testing/io.uaena.cliplink" target="_blank" rel="noopener"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5M11.5 9.5v4h-9v-9h4"/></svg><span>Google Play Alpha 测试</span></a>
-                </div>
-              </details></div>
+              <div class="dl-actions">
+                <div class="pick-slot"><details class="pick">
+                  <summary class="pick-head"><span>获取应用</span><svg class="pick-chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></summary>
+                  <div class="pick-menu">
+                    <a data-asset="android" href="https://github.com/Colour1205/ClipLink/releases/download/v2.0.0/ClipLink-2.0.0.apk"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8M4.5 7 8 10.5 11.5 7M3 13.5h10"/></svg><span>下载 APK</span></a>
+                    <a href="https://play.google.com/apps/testing/io.uaena.cliplink" target="_blank" rel="noopener"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5M11.5 9.5v4h-9v-9h4"/></svg><span>Google Play Alpha 测试</span></a>
+                  </div>
+                </details></div>
+              </div>
             </div>
           </div>
           <div class="dl" id="dl-harmonyos" data-platform="harmonyos">
-            <div class="dl-head">
-              <h3>鸿蒙</h3>
-              <span class="badge" data-stage="release">正式版</span>
-              <span class="badge badge-yours" hidden>这台设备</span>
-            </div>
-            <div class="dl-info">
+            <div class="dl-in">
+              <div class="dl-head">
+                <h3>鸿蒙</h3>
+                <span class="badge" data-stage="release">正式版</span>
+                <span class="badge badge-yours" hidden>这台设备</span>
+              </div>
               <p class="meta">HarmonyOS 7。2.1.0 版。</p>
               <p class="note">应用打开时同步。</p>
-            </div>
-            <div class="dl-actions">
-              <a class="btn primary" href="https://appgallery.huawei.com/app/detail?id=io.uaena.cliplink" target="_blank" rel="noopener">在华为应用市场获取</a>
+              <div class="dl-actions">
+                <a class="btn primary" href="https://appgallery.huawei.com/app/detail?id=io.uaena.cliplink" target="_blank" rel="noopener">在华为应用市场获取</a>
+              </div>
             </div>
           </div>
           <div class="dl" id="dl-ios" data-platform="ios">
-            <div class="dl-head">
-              <h3>iOS</h3>
-              <span class="badge" data-stage="soon">还没发布</span>
-              <span class="badge badge-yours" hidden>这台设备</span>
-            </div>
-            <div class="dl-info">
+            <div class="dl-in">
+              <div class="dl-head">
+                <h3>iOS</h3>
+                <span class="badge" data-stage="soon">还没发布</span>
+                <span class="badge badge-yours" hidden>这台设备</span>
+              </div>
               <p class="meta">iPhone 和 iPad，iOS 15 或更高版本。</p>
               <p class="note">先上 TestFlight 测试版。</p>
-            </div>
-            <div class="dl-actions">
-              <span class="dl-pending">即将推出</span>
+              <div class="dl-actions">
+                <span class="dl-pending">即将推出</span>
+              </div>
             </div>
           </div>
-        </div>
         </div>
         <p class="fine">旧版本在 GitHub 的<a href="https://github.com/Colour1205/ClipLink/releases" target="_blank" rel="noopener">发布页面</a>。</p>
       </div>
