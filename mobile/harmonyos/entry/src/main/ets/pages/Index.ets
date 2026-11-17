@@ -51,6 +51,7 @@ import {
 } from '../storage/ContentPrint';
 import { MAX_HISTORY_ITEMS } from '../storage/HistoryAccess';
 import { safeFileName } from '../storage/FileNames';
+import { pictureCacheFolder, pictureFileName } from '../storage/PictureNames';
 import { SHARED_IN_EVENT, SharedIn, enqueueShares, intakePicked, removeQuietly, takePendingShares } from '../share/ShareIntake';
 import { entryKey } from '../storage/DeletedEntries';
 import { Discovery, PeerBeacon, sameBeacon } from '../networking/Discovery';
@@ -70,7 +71,7 @@ import { fileExtensionLabel, fileGlyphKind } from '../stack/CardFooter';
 import { PICTURE_SIDE_VP, PictureFlight, ZoomMorph, ZoomRect, containRect, contentShift, lerp, picturePlace, startScale, zoomHeight, zoomRadius, zoomRect, zoomScale } from '../stack/ZoomMorph';
 import { BatchGroupTracker, BatchMember, BatchPlan, StackMotion, StackRow, buildRows, dissolveGroup, foldTwins, hiddenCount, placeBatch, placeQuiet, revealAnimates, settleGroup, staggerDelayMs, startInsetFraction, startPeekVp, twinIds } from '../stack/SyncedRows';
 import { connection } from '@kit.NetworkKit';
-import { signEntry, ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
+import { signEntry, ClipboardEntry, canonicalTimestamp, entryNameOf } from '../crypto/Signing';
 import { ApplyResult } from '../clipboard/ClipboardApply';
 import { resCount, resText } from '../i18n/Strings';
 import socket from '@ohos.net.socket';
@@ -258,6 +259,10 @@ interface SyncedItem extends BatchMember {
   // What its content is (storage/ContentPrint.ets's contentKey), null for
   // none: the list shows one card per content (see SyncedRows.foldTwins).
   contentKey: string | null;
+  // A picture's original name as its entry carries it (the entry's Name, see
+  // entryNameOf), or null when it has none: what Save and Open suggest, after
+  // pictureFileName has made it safe.
+  pictureName: string | null;
 }
 
 // A card's content key, for foldTwins and twinIds.
@@ -462,17 +467,6 @@ function mimeTypeForFileName(fileName: string): string {
 interface PictureFile {
   name: string;
   bytes: ArrayBuffer;
-}
-
-// The extension that matches what a picture's bytes really are (their first
-// bytes), so a saved or opened file is not a JPEG named .png. PNG otherwise,
-// which is what every platform sends for a copied picture.
-function pictureExtension(bytes: Uint8Array): string {
-  if (bytes.length >= 3 && bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) return 'jpg';
-  if (bytes.length >= 4 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return 'gif';
-  if (bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
-    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return 'webp';
-  return 'png';
 }
 
 function utdForFileName(fileName: string): string {
@@ -3468,7 +3462,7 @@ struct Index {
         return;
       }
       fileName = picture.name;
-      uri = this.writePictureToCache(context, picture);
+      uri = this.writePictureToCache(context, item.id, picture);
     } else {
       let payload: FilePayload;
       try {
@@ -3621,9 +3615,10 @@ struct Index {
   }
 
   // A picture item saved as a file, through the same document picker as a
-  // file (not to the gallery). A picture carries no name of its own (a
-  // screenshot never had one), so the picker suggests one built from where and
-  // when it was copied, with the extension of what the bytes really are.
+  // file (not to the gallery). The picker suggests the picture's original name
+  // when the copy had one, and otherwise one built from where and when it was
+  // copied (a screenshot never had a name), always with the extension of what
+  // the bytes really are (see pictureFileOf).
   private async savePictureToDocuments(item: SyncedItem): Promise<void> {
     const picture: PictureFile | null = this.pictureFileOf(item);
     if (picture === null) {
@@ -3647,8 +3642,10 @@ struct Index {
     }
   }
 
-  // A picture item's bytes and the file name to give them: "Image from
-  // <device> <date> <time>.<png|jpg|gif|webp>", in the current language.
+  // A picture item's bytes and the file name to give them: the picture's
+  // original name when its entry carries a usable one, else "Image from
+  // <device> <date> <time>" in the current language, either way with
+  // .png, .jpg, .gif or .webp from the bytes (see storage/PictureNames.ets).
   // null when the item's content is not a picture.
   private pictureFileOf(item: SyncedItem): PictureFile | null {
     try {
@@ -3659,9 +3656,8 @@ struct Index {
       const pad = (n: number): string => (n < 10 ? '0' : '') + n;
       const stamp: string = isNaN(when.getTime()) ? item.time.replace(':', '.')
         : `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())} ${pad(when.getHours())}.${pad(when.getMinutes())}`;
-      const ext: string = pictureExtension(decoded);
       const base: string = this.str($r('app.string.image_save_name'), this.sourceLabelFor(item.deviceId), stamp);
-      return { name: safeFileName(`${base}.${ext}`, `image.${ext}`), bytes: bytes };
+      return { name: pictureFileName(item.pictureName, decoded, base), bytes: bytes };
     } catch (e) {
       return null;
     }
@@ -3669,9 +3665,17 @@ struct Index {
 
   // Writes a picture to the cache under its name and returns its file URI, for
   // the previewer or another app to open. null if it could not be written.
-  private writePictureToCache(context: common.UIAbilityContext, picture: PictureFile): string | null {
+  // Each item gets a folder of its own (see pictureCacheFolder), so another
+  // picture with the same name never overwrites a file that is still open.
+  // Folders from pictures opened more than an hour ago are removed on the way,
+  // so the copies do not pile up; the one being written is kept whatever its age.
+  private writePictureToCache(context: common.UIAbilityContext, itemKey: string, picture: PictureFile): string | null {
     try {
-      const dir = `${context.cacheDir}/opened`;
+      const root = `${context.cacheDir}/opened`;
+      if (!fs.accessSync(root)) fs.mkdirSync(root);
+      const folder: string = pictureCacheFolder(itemKey);
+      this.removeOldOpenedPictures(root, folder);
+      const dir = `${root}/${folder}`;
       if (!fs.accessSync(dir)) fs.mkdirSync(dir);
       const path = `${dir}/${picture.name}`;
       const file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
@@ -3683,6 +3687,32 @@ struct Index {
       return fileUri.getUriFromPath(path);
     } catch (e) {
       return null;
+    }
+  }
+
+  // Removes what the "opened" folder holds from more than an hour ago except
+  // the folder `keep`: older pictures' folders, and the loose files earlier
+  // builds wrote straight into it. Anything that cannot be removed now is left
+  // for the next time (or for the system, which may clear the cache).
+  private removeOldOpenedPictures(root: string, keep: string): void {
+    const cutoff: number = Date.now() / 1000 - 60 * 60;
+    let names: string[] = [];
+    try {
+      names = fs.listFileSync(root);
+    } catch (e) {
+      return;
+    }
+    for (const name of names) {
+      if (name === keep) continue;
+      const path: string = `${root}/${name}`;
+      try {
+        const stat = fs.statSync(path);
+        if (stat.mtime > cutoff) continue;
+        if (stat.isDirectory()) fs.rmdirSync(path);
+        else fs.unlinkSync(path);
+      } catch (e) {
+        // Left for the next time.
+      }
     }
   }
 
@@ -4652,6 +4682,7 @@ struct Index {
       stamp: canonicalTimestamp(entry.Timestamp),
       expected: 0,
       contentKey: contentKey(entry),
+      pictureName: entryNameOf(entry),
     };
   }
 
@@ -4741,6 +4772,7 @@ struct Index {
       stamp: item.stamp,
       expected,
       contentKey: item.contentKey,
+      pictureName: item.pictureName,
     };
   }
 

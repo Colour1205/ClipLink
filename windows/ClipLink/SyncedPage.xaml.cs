@@ -974,7 +974,8 @@ public sealed partial class SyncedPage : Page
                 var bitmap = await data.GetBitmapAsync();
                 using var stream = await bitmap.OpenReadAsync();
                 byte[] png = await ToPngAsync(stream);
-                await Task.Run(() => host.Engine.ShareImage(png));
+                string? name = await DroppedImageNameAsync(data);
+                await Task.Run(() => host.Engine.ShareImage(png, name));
             }
             else
             {
@@ -1082,6 +1083,28 @@ public sealed partial class SyncedPage : Page
             Console.WriteLine($"[app] couldn't tell where the pointer is: {ex.Message}");
             return false;
         }
+    }
+
+    // A picture dragged from a browser also brings its HTML (an <img src>) or
+    // its address, which can say its original name (see ImageName), as a
+    // copied one does. The address is asked only when the HTML holds no
+    // picture, and only counts with a picture's extension, because it can be
+    // the link the picture was in. Null when neither gives a name, or either
+    // can't be read: the name is a nicety, never a reason not to send the
+    // picture.
+    private static async Task<string?> DroppedImageNameAsync(DataPackageView data)
+    {
+        try
+        {
+            string? html = data.Contains(StandardDataFormats.Html) ? await data.GetHtmlFormatAsync() : null;
+            if (ImageName.FromHtml(html, out bool decided) is string fromHtml) return fromHtml;
+            if (!decided && data.Contains(StandardDataFormats.WebLink)) return ImageName.FromPictureUrl((await data.GetWebLinkAsync()).OriginalString);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[app] couldn't read a dropped picture's name: {ex.GetType().Name}: {ex.Message}");
+        }
+        return null;
     }
 
     // A dropped picture comes in whatever form the app had it (often a

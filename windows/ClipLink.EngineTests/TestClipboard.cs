@@ -19,7 +19,7 @@ public class ClipboardSync
     private readonly LastWrite lastWrite = new();
     private uint sequence = 1;
 
-    public event Action<(string content, string type, string? sourceFilePath)>? ClipboardChanged;
+    public event Action<(string content, string type, string? sourceFilePath, string? name)>? ClipboardChanged;
     public event Action<IReadOnlyList<(string content, string path)>>? FilesCopied;
 
     public ClipboardSync(FileStore fileStore, string label)
@@ -68,7 +68,22 @@ public class ClipboardSync
             already = lastWrite.Holds(print);
             lastWrite.Classified(new[] { print });
         }
-        if (!already) ClipboardChanged?.Invoke((text, "text", null));
+        if (!already) ClipboardChanged?.Invoke((text, "text", null, null));
+    }
+
+    // The user copied this picture (PNG bytes) on this PC, with the original
+    // name the copy said (or null, as for a screenshot).
+    public void CopyImage(byte[] png, string? name)
+    {
+        string print = ContentPrint.Image(png);
+        bool already;
+        lock (gate)
+        {
+            sequence++;
+            already = lastWrite.Holds(print);
+            lastWrite.Classified(new[] { print });
+        }
+        if (!already) ClipboardChanged?.Invoke((Convert.ToBase64String(png), "image", null, name));
     }
 
     // The user copied these files on this PC (each one's FilePayload JSON and path).

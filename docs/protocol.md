@@ -136,7 +136,7 @@ After the handshake, every message is an **envelope**, a small piece of JSON tha
 
 The heartbeat is not an envelope. It is the text `__ping__`, encrypted like any other line, and the receiver does not treat it as data.
 
-**An entry** has five fields:
+**An entry** has five fields, and a picture can have a sixth:
 
 | Field | What it holds |
 | --- | --- |
@@ -145,8 +145,18 @@ The heartbeat is not an envelope. It is the text `__ping__`, encrypted like any 
 | `DeviceId` | The device that made it |
 | `Timestamp` | When it was made, in UTC, like `2026-10-13T14:20:05.1230000Z` |
 | `Signature` | The maker's signature (Base64) |
+| `Name` | Optional, for `image` only: the picture's original name, as a suggested file name (see below). Left out when it is not known |
 
-The signature is over the text `Content:Type:DeviceId:Timestamp`, with the timestamp written as above. A receiver accepts an entry only if the signature is valid and the maker is a device it trusts.
+The signature is over the text `Content:Type:DeviceId:Timestamp`, with the timestamp written as above. A receiver accepts an entry only if the signature is valid and the maker is a device it trusts. `Name` is not part of the signature.
+
+**A picture's name.** A picture copied as a picture has no name of its own. A screenshot has only pixels. But when you use "Copy image" in a browser, or in some other apps, the clipboard also says where the picture came from. So the Windows app looks, in this order, at the file it came from (a one-file `CF_HDROP`, `FileNameW`, `FileName`), a virtual file (`FileGroupDescriptorW`), the copied HTML (`HTML Format`, when the copied part holds exactly one `<img>`) and the address (`UniformResourceLocatorW`, `UniformResourceLocator`). It asks the address only when the HTML holds no `<img>` at all, and uses it only when its last part ends in a picture's extension (such as `.png`, `.jpg` or `.webp`), because next to a picture's HTML, or for a linked picture, the address can be the page's or the link's. It takes the last part of the path or address, decoded, without the query or fragment. It skips `data:` and `blob:` addresses and names without a letter, and cuts the name to a safe length. It leaves the extension out, since it always sends the picture as PNG. So `<img src="https://example.com/a/after-like.png?x=1">` gives `"Name":"after-like"`. A picture dropped on the window gets its name the same way.
+
+- **Optional.** A sender leaves the field out when it does not know a name, so an entry without one is exactly what older builds send. It is only for `image`. A receiver ignores it on any other type, and does not store or pass it on there (Windows reads it as no name on a `text` or `file` entry; HarmonyOS drops it).
+- **Not signed, and why that is fine.** The signature covers only `Content:Type:DeviceId:Timestamp`, so adding the field changed nothing for older builds and the key stays the signature. The name is only a suggested file name. It travels like every message, inside the encrypted session, from a device that proved who it is in the handshake. A device that relays the entry could change or drop it, but it cannot change the picture.
+- **Untrusted text.** A receiver treats `Name` like a received `FileName`: it keeps only a safe last part, with no folders, no control characters or invisible characters that disguise a name, no half characters (a surrogate without its pair), nothing Windows refuses in a file name, not a reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `COM1`–`COM9`, `LPT1`–`LPT9`, and `COM`/`LPT` with a superscript ¹, ² or ³), and not too long. If nothing usable is left, it uses its own name, such as "Image from <device> <date time>". It never takes the extension from `Name`. It picks the extension from the picture's bytes, and replaces any picture extension the name has.
+- **Stored and passed on.** The name stays with the entry: in history on disk, in `history_batch` answers and in the `Newest` entry of a version 1 `history_head`. Windows and HarmonyOS keep it across a restart and pass it on. Windows cleans an incoming name before it keeps it. An incoming `Name` that is not a string, or a string that is not valid text (an escaped surrogate without its pair such as `"\ud800"`, or bytes that are not UTF-8), counts as no name on Windows and never costs the entry or the rest of a `history_batch`. A device that keeps a name still never stores or sends one with half characters, because a JSON reader may refuse the whole message over such a string.
+- **Duplicates, deletes and keys do not change.** The key is still the signature. The same entry with and without a name is the same entry, and is kept once (whichever copy came first).
+- **Older builds.** Every build reads only the entry fields it knows, so an entry with a name works unchanged on all of them. Windows (System.Text.Json) skips properties it does not know. Android (`ClipboardEntry.fromJson`, `org.json`) and iOS (`ClipboardEntry.from` in `WireModels.swift`) read the five fields by name and rebuild the entry, so they drop the name when they store or relay the entry. HarmonyOS 2.2 and older keep the parsed object as it came (`JSON.parse`), so they may store and relay the name untouched, but never read it.
 
 **Removing a device.** A device that is removed sends `unpair` over the encrypted link. A receiver that trusts the sender drops it from its trust list, closes the connection and stops reconnecting to it. A receiver that does not trust the sender does nothing. Only a device can say this about itself, since the message arrives over its own proven connection and changes only whether the receiver trusts that device.
 
@@ -324,6 +334,7 @@ When the Windows app connects out, it can tell "that address is this PC" from a 
 | Deleted keys sent in a head | 500 (a device remembers up to 2000) |
 | A request nobody answers | Dropped after 90 seconds |
 | A name | 64 characters |
+| A picture's `Name` (Windows) | 80 characters and 160 bytes of UTF-8. Cut, never refused |
 | A file | 1 GB |
 | File chunks sent and not yet acknowledged (`file-ack`) | 8 (2 MiB of file). No ack for 30 seconds: the sender gives the stream up. Nothing new for 45 seconds: the receiver does too |
 | Lines waiting to be read on HarmonyOS, once a device is trusted | 128 MB behind the line being read next (which is not counted, so one line up to the line limit still gets through), then the connection is closed |

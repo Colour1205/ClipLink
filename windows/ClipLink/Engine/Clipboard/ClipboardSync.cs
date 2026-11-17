@@ -72,8 +72,10 @@ public class ClipboardSync
 
     // Text or a picture copied here that ClipLink hasn't written or seen
     // already. (Whether it is just the newest history item again is the
-    // engine's to say.) Raised on the watcher thread.
-    public event Action<(string content, string type, string? sourceFilePath)>? ClipboardChanged;
+    // engine's to say.) name: a picture's original name, when the copy said
+    // one (see ReadImageName); null for text and for a picture without one.
+    // Raised on the watcher thread.
+    public event Action<(string content, string type, string? sourceFilePath, string? name)>? ClipboardChanged;
 
     // Files copied here (Explorer), the same way: each one's FilePayload as
     // JSON, and its path to read the bytes from when streaming to peers. At
@@ -196,6 +198,7 @@ public class ClipboardSync
         // clipboard; a picture is encoded once it's closed again, so the app
         // that copied it isn't kept waiting meanwhile.
         System.Drawing.Image? image = null;
+        string? imageName = null;
         string? text = null;
         List<string>? paths = null;
         bool audio = false;
@@ -208,6 +211,7 @@ public class ClipboardSync
             {
                 image = ReadBitmap();
                 if (image == null) return false;
+                imageName = ReadImageName();
             }
             else if (Win32Clipboard.Has(Win32Clipboard.CF_UNICODETEXT))
             {
@@ -231,7 +235,7 @@ public class ClipboardSync
             using (image) imageBytes = PngOf(image).ToArray();
             if (IsNew(new[] { ContentPrint.Image(imageBytes) }))
             {
-                ClipboardChanged?.Invoke((Convert.ToBase64String(imageBytes), "image", null));
+                ClipboardChanged?.Invoke((Convert.ToBase64String(imageBytes), "image", null, imageName));
             }
         }
         else if (text != null)
@@ -240,7 +244,7 @@ public class ClipboardSync
             // read could get a newer copy, sent now and then again next time.)
             if (IsNew(new[] { ContentPrint.Text(text) }))
             {
-                ClipboardChanged?.Invoke((text, "text", null));
+                ClipboardChanged?.Invoke((text, "text", null, null));
             }
         }
         else if (paths != null)
@@ -263,6 +267,47 @@ public class ClipboardSync
     {
         nint bitmap = Win32Clipboard.GetBitmap();
         return bitmap == 0 ? null : System.Drawing.Image.FromHbitmap(bitmap);
+    }
+
+    // The copied picture's original name (clipboard open), from the other
+    // formats the app that copied it put next to the bitmap - see ImageName:
+    // the file it came from (a one-file CF_HDROP, "FileNameW", "FileName"),
+    // a virtual file ("FileGroupDescriptorW"), its HTML ("HTML Format") or
+    // its address ("UniformResourceLocatorW", "UniformResourceLocator"), in
+    // that order, the first that gives a usable name. The address is asked
+    // only when the HTML holds no picture, and only counts with a picture's
+    // extension (ImageName.FromPictureUrl): next to HTML with a picture it is
+    // the page's or a link's address. Null for a screenshot, which has only
+    // pixels. Never throws: a name is a nicety, and a format that can't be
+    // read must not cost the picture.
+    private static string? ReadImageName()
+    {
+        const int MaxPathChars = 32 * 1024;
+        bool htmlDecided = false;
+        Func<string?>[] readers =
+        {
+            () => Win32Clipboard.Has(Win32Clipboard.CF_HDROP) && Win32Clipboard.GetFiles() is { Count: 1 } files ? ImageName.Suggest(files[0]) : null,
+            () => ImageName.Suggest(Win32Clipboard.GetUnicodeText(Win32Clipboard.FileNameWFormat, MaxPathChars)),
+            () => ImageName.Suggest(Win32Clipboard.GetAnsiText(Win32Clipboard.FileNameFormat, MaxPathChars)),
+            () => Win32Clipboard.GetBytes(Win32Clipboard.FileGroupDescriptorWFormat, 64 * 1024) is byte[] descriptor ? ImageName.FromFileGroupDescriptorW(descriptor) : null,
+            // One byte more than FromHtmlBytes takes, so HTML that is too big
+            // is seen to be, rather than cut short and searched anyway.
+            () => Win32Clipboard.GetBytes(Win32Clipboard.HtmlFormat, ImageName.MaxHtmlBytes + 1) is byte[] html ? ImageName.FromHtmlBytes(html, out htmlDecided) : null,
+            () => htmlDecided ? null : ImageName.FromPictureUrl(Win32Clipboard.GetUnicodeText(Win32Clipboard.UrlWFormat, MaxPathChars)),
+            () => htmlDecided ? null : ImageName.FromPictureUrl(Win32Clipboard.GetAnsiText(Win32Clipboard.UrlFormat, MaxPathChars)),
+        };
+        foreach (var read in readers)
+        {
+            try
+            {
+                if (read() is string name) return name;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[clip] couldn't read a copied picture's name: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+        return null;
     }
 
     // Whether a copy is new, as far as the clipboard goes (the spec's 1.3,

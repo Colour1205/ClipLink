@@ -691,14 +691,15 @@ public sealed partial class ClipLinkEngine
     }
 
     // A picture dropped on ClipLink's window (PNG bytes), as ShareText: an
-    // "image" entry, as a copied one is.
-    public void ShareImage(byte[] png)
+    // "image" entry, as a copied one is. name: its original name, when what
+    // was dropped said one (see ImageName); null otherwise.
+    public void ShareImage(byte[] png, string? name = null)
     {
         RequireStores();
         if (png.Length == 0) return;
         Console.WriteLine($"[share] dropped image ({png.Length} bytes) - {connectionsByDeviceId.Count} peer(s) connected");
         if (SkipNewest(new[] { png }, ContentPrint.Image).Count == 0) return;
-        PublishLocal(Convert.ToBase64String(png), "image", null, "dropped");
+        PublishLocal(Convert.ToBase64String(png), "image", null, "dropped", name);
     }
 
     // ---- helpers -----------------------------------------------------
