@@ -629,14 +629,19 @@ summary::-webkit-details-marker { display: none; }
 .trio .frame .chip { font-size: 0.95rem; }
 
 @media (max-width: 620px) {
-  .hero { padding: 16px 0 40px; }
-  /* the phone moves down over the window's right edge */
-  .demo { aspect-ratio: 100 / 122; --wt: 0cqw; --ww: 92cqw; --wp: 1.2cqw; --pl: 61cqw; --pt: 39cqw; --pw: 39cqw; --pb: 1cqw; }
+  .hero { padding: 12px 0 36px; }
+  /* On a phone the title, tags and download button come first, so they are on
+     the first screen, and the demo below is compact: the window takes most of
+     the width and the phone overlaps its right edge, a little lower. */
+  .hero .wrap { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .hero-copy { order: -1; }
+  .demo { aspect-ratio: 100 / 70; --wt: 0cqw; --ww: 76cqw; --wp: 1.2cqw; --pl: 71cqw; --pt: 10cqw; --pw: 27cqw; --pb: 0.9cqw; }
   .demo-screen { border-radius: 2cqw; }
   .demo-win { border-radius: 3.2cqw; }
   .demo-ring { box-shadow: inset 0 0 0 1.5px var(--accent); }
-  .hero-copy { margin-top: 24px; }
+  .hero-copy { margin: 0 0 26px; }
   .hero-copy h1 { margin-bottom: 14px; }
+  .hero-row { gap: 14px; }
   .hero-row .chips { gap: 5px; flex-wrap: nowrap; }
   .hero-row .chip { padding: 5px 9px; font-size: 0.8rem; white-space: nowrap; }
   .hero-row .cta .btn { flex: 0 0 auto; }
