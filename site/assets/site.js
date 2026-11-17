@@ -217,6 +217,14 @@
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   }
 
+  // "Version 2.2.3, 41.2 MB" (or "版本 2.2.3，41.2 MB" on the Chinese pages).
+  function versionLine(tag, bytes) {
+    var number = String(tag).replace(/^v/i, '');
+    return /^zh/i.test(document.documentElement.lang)
+      ? '版本 ' + number + '，' + megabytes(bytes)
+      : 'Version ' + number + ', ' + megabytes(bytes);
+  }
+
   fetch('https://api.github.com/repos/' + REPO + '/releases?per_page=10', {
     headers: { Accept: 'application/vnd.github+json' }
   })
@@ -236,7 +244,7 @@
           button.removeAttribute('aria-disabled');
           button.textContent = button.getAttribute('data-label-ready') || button.textContent;
           var version = button.closest('.dl') && button.closest('.dl').querySelector('.js-version');
-          if (version) version.textContent = published[i].tag_name + ' · ' + megabytes(asset.size);
+          if (version) version.textContent = versionLine(published[i].tag_name, asset.size);
           break;
         }
       });
