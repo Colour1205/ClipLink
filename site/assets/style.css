@@ -679,7 +679,7 @@ summary::-webkit-details-marker { display: none; }
    upright. The shared look uses :where() so any one shape can override it. --skew is the lean, the same
    everywhere; on phones the layout keeps shapes short instead of leaning less. The live demo's window and phone are
    real screens and stay square. */
-:root { --skew: -18deg; --slant-r: 0; }
+:root { --skew: 18deg; --slant-r: 0; }
 
 :is(.site-header .wrap, .chip, .btn, .feature-panel, .trust-diagram, .dl, .faq-list details, .dl-pending, .callout, .badge) {
   position: relative; isolation: isolate;
@@ -794,3 +794,37 @@ summary::-webkit-details-marker { display: none; }
 /* Each leaning row is its own layer, so a row with the Get app menu open is lifted
    above the rows under it, or they would cover the menu. */
 .dl:has(.pick[open]) { z-index: 5; }
+
+/* ================= FAQ: plain list ================= */
+
+/* No glass: questions split by thin lines. */
+.faq-list { gap: 0; }
+.faq-list details { padding: 18px 0; }
+.faq-list details::before { display: none; }
+.faq-list details + details { border-top: 1px solid var(--line); }
+
+/* ================= Download: one platform at a time ================= */
+
+/* Leaning platform tabs over one short leaning panel that shows the chosen
+   platform. Without the script the first platform shows, or the one a link
+   points at (#dl-android); site.js then opens the visitor's own platform and
+   switches with a tap. */
+.dl-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; }
+.dl-tabs .chip { padding: 8px 22px; }
+.dl-tabs .chip[aria-current="true"] { color: var(--accent); }
+.dl-tabs .chip[aria-current="true"]::before {
+  background-color: var(--accent-soft); background-image: none;
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.downloads { display: block; }
+.downloads .dl { display: none; }
+.downloads:not(:has(.dl:target)) .dl:first-child, .downloads .dl:target { display: grid; }
+.downloads.js-tabs .dl { display: none; }
+.downloads.js-tabs .dl.is-active { display: grid; animation: dl-in 0.5s var(--spring); }
+@keyframes dl-in { from { opacity: 0; filter: blur(6px); transform: translateY(6px); } }
+.dl { padding: 26px 56px; }
+.dl.is-yours::before { background-color: var(--glass); border-color: var(--glass-edge); }
+@media (max-width: 620px) {
+  .dl-tabs .chip { padding: 7px 14px; font-size: 0.88rem; }
+  .dl { padding: 22px 52px; }
+}

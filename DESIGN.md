@@ -26,11 +26,11 @@ The accent is a deeper cut of the app icon's salmon (`#e09068`). No purple or bl
 
 ## Glass
 
-Every glass shape leans: a parallelogram drawn by `::before` with `transform: skewX(var(--skew))` behind the element's own content, so text, icons and screenshots stay upright. `--skew` is -18deg everywhere, phones included, and the corners are sharp (`--slant-r: 0`). Tall shapes would push their corners far past the text, so on phones the layout keeps shapes short instead: each feature is its own leaning bar rather than one tall panel. The live demo's window and phone are real screens and stay square.
+Every glass shape leans: a parallelogram drawn by `::before` with `transform: skewX(var(--skew))` behind the element's own content, so text, icons and screenshots stay upright. `--skew` is 18deg (leaning left, like \) everywhere, phones included, and the corners are sharp (`--slant-r: 0`). Tall shapes would push their corners far past the text, so on phones the layout keeps shapes short instead: each feature is its own leaning bar rather than one tall panel. The live demo's window and phone are real screens and stay square.
 
 The glass itself: a `--glass` tint, a `--glass-sheen` gradient from the top, a lit top edge (`inset 0 1px 0 --glass-rim`), a soft shadow. Only the header has a real `backdrop-filter` blur, because only the header floats over content; don't add `backdrop-filter` to panels (it cost most of each scrolled frame and looked the same). With reduced transparency or more contrast, glass becomes `--surface`.
 
-Shapes that lean: the header bar (its links split by slanted rules), buttons, platform tags, badges, the features panel, the privacy diagram's pane, one bar per download row and per FAQ question, the Get app menu, and the callout on the policy pages.
+Shapes that lean: the header bar (its links split by slanted rules), buttons, platform tags, badges, the features panel, the privacy diagram's pane, the download platform tabs and the one download panel, the Get app menu, and the callout on the policy pages.
 
 ## Type
 
@@ -44,8 +44,8 @@ Radii are 12, 20 and 28px. Buttons and the header are pills. Sections are 72px a
 
 - **Platform tags:** small glass pills under the headline, each a link to its download row; a platform that is not out yet says so in muted text ("iOS soon").
 - **Buttons:** primary is a solid accent fill with no glow. Secondary is glass. Neither lifts on hover.
-- **Download list:** one panel with a row per platform. Your own platform's row is tinted and gets a "This device" badge.
-- **FAQ:** one panel, questions split by hairlines, with a chevron that turns.
+- **Download:** leaning platform tabs over one leaning panel showing only the chosen platform. It opens on the visitor's own platform (with a "This device" badge), or the one a link points at (#dl-android); without the script the first platform shows.
+- **FAQ:** no glass: questions split by thin lines, with a chevron that turns.
 - **Links:** links to other sites open in a new tab (`target="_blank" rel="noopener"`). Download buttons stay in the page, since they fetch a file.
 - **Choice button:** when a platform has more than one way to get it (Android: APK or Google Play), the row has one "Get app" pill with a chevron at its right edge. It is a `<details>`, so it works without script. Opening it turns the pill itself into a solid menu: the same shape grows from its centre, up and down at once, over the rows around it, goes from the accent to `--surface`, and lists the choices under its title, each with an icon for what it does (download, or opens another site).
 - **Motion:** nothing moves at a constant speed. Movement uses `--spring` (a quick start, about 12% overshoot and a small dip back before it settles), colour and blur use `--spring-soft` (about 5%), exits use `--exit` (a slight pull back before leaving), and the diagram's looping dots use `--wave`. Browsers without `linear()` easing get close cubic curves. When something inside an element changes (a menu opening or closing, an FAQ answer appearing), its contents blur through the change. Reduced motion turns all of it off.
