@@ -68,7 +68,7 @@
   var reveal = window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
   if (reveal) {
     var shapes = Array.prototype.slice.call(document.querySelectorAll(
-      '.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram'));
+      '.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram, .dl-card'));
     var skewDeg = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--skew')) || 0;
     var tilt = Math.tan(skewDeg * Math.PI / 180);
     var REACH = 160; // px around a shape where its edge starts to catch the light

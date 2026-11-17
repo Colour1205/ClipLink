@@ -696,12 +696,12 @@ summary::-webkit-details-marker { display: none; }
 .btn { white-space: nowrap; padding: 11px 28px; min-height: 46px; }
 
 /* Slanted shapes: a skewed ::before behind upright content. */
-:is(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram) {
+:is(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram, .dl-card) {
   position: relative; isolation: isolate;
   background: none; border: 0; box-shadow: none; border-radius: 0;
 }
-:is(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram):hover { background: none; }
-:where(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram)::before {
+:is(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram, .dl-card):hover { background: none; }
+:where(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram, .dl-card)::before {
   content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
   transform: skewX(var(--skew));
   background-color: var(--glass); background-image: var(--glass-sheen);
@@ -756,14 +756,14 @@ html { scroll-padding-top: 78px; }
 .nav .lang { margin-left: 0; padding-left: 16px; border-left: 0; border-radius: 0; }
 
 /* ---- Download: one card, tabs on top, the chosen platform below ---- */
-.dl-card {
-  background-color: var(--glass); background-image: var(--glass-sheen);
-  border: 1px solid var(--glass-edge);
-  box-shadow: inset 0 1px 0 var(--glass-rim), var(--glass-shadow);
-}
-.dl-tabs { display: flex; flex-wrap: wrap; margin: 0; padding: 0 12px; border-bottom: 1px solid var(--line); }
+/* The card leans like the Features panel. Its tab dividers lean at the same
+   angle, so they run parallel to its sides, and the chosen tab is filled
+   between its two dividers: the tabs read as cells of the one shape. Inside,
+   the button and badges stay straight. */
+.dl-card { margin: 0 6px; }
+.dl-tabs { display: flex; flex-wrap: wrap; margin: 0; padding: 0 30px; border-bottom: 1px solid var(--line); }
 .dl-tab {
-  position: relative; padding: 15px 22px; color: var(--muted); font-weight: 600; text-decoration: none;
+  position: relative; isolation: isolate; padding: 15px 24px; color: var(--muted); font-weight: 600; text-decoration: none;
   transition: color 0.35s var(--spring-soft);
 }
 .dl-tab span { font-weight: 400; }
@@ -771,19 +771,22 @@ html { scroll-padding-top: 78px; }
   content: ""; position: absolute; left: 0; top: 30%; bottom: 30%;
   border-left: 1px solid var(--line-strong); transform: skewX(var(--skew));
 }
-.dl-tab:hover, .dl-tab[aria-current="true"] { color: var(--text); }
+.dl-tab:hover { color: var(--text); }
+.dl-tab[aria-current="true"] { color: var(--accent); }
 .dl-tab::after {
-  content: ""; position: absolute; left: 18px; right: 18px; bottom: -1px; height: 2px;
-  background: var(--accent); transform: scaleX(0); transition: transform 0.4s var(--spring);
+  content: ""; position: absolute; inset: 0 0 -1px; z-index: -1;
+  transform: skewX(var(--skew)); border-bottom: 2px solid transparent;
+  transition: background-color 0.35s var(--spring-soft), border-color 0.35s var(--spring-soft);
 }
-.dl-tab[aria-current="true"]::after { transform: scaleX(1); }
+.dl-tab:hover::after { background-color: color-mix(in srgb, var(--text) 5%, transparent); }
+.dl-tab[aria-current="true"]::after { background-color: var(--accent-soft); border-bottom-color: var(--accent); }
 .downloads { display: block; padding: 0; }
 .downloads .dl { display: none; }
 .downloads:not(.js-tabs):not(:has(.dl:target)) .dl:first-child, .downloads:not(.js-tabs) .dl:target { display: grid; }
 .downloads.js-tabs .dl { display: none; }
 .downloads.js-tabs .dl.is-active { display: grid; animation: dl-in 0.5s var(--spring); }
 @keyframes dl-in { from { opacity: 0; filter: blur(6px); transform: translateY(6px); } }
-.dl { grid-template-columns: 11rem minmax(0, 1fr) auto; gap: 8px 32px; padding: 26px 34px; }
+.dl { grid-template-columns: 11rem minmax(0, 1fr) auto; gap: 8px 32px; padding: 26px 40px 26px 60px; }
 .dl.is-yours { background: none; box-shadow: none; }
 .dl-head { gap: 8px; }
 .dl-actions .btn, .dl-actions .pick-slot, .dl-pending { width: auto; min-width: 13rem; }
@@ -802,7 +805,7 @@ html { scroll-padding-top: 78px; }
    a soft light that follows it. ::after is a ring the width of the border (the
    mask cuts its middle out); site.js sets --rx/--ry in the shape's own leaning
    frame and --ro (how lit), only for a mouse or pen. */
-:where(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram)::after {
+:where(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram, .dl-card)::after {
   content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
   transform: skewX(var(--skew));
   border: 1.5px solid transparent;
@@ -830,8 +833,9 @@ html { scroll-padding-top: 78px; }
      straight, and only the short hero button and tags keep the slant. */
   .feature-panel { padding: 26px 24px; }
   .trust-diagram { padding: 24px; }
-  :is(.feature-panel, .trust-diagram)::before, :is(.feature-panel, .trust-diagram)::after { transform: none; }
-  .dl-tabs { padding: 0 4px; }
+  :is(.feature-panel, .trust-diagram, .dl-card)::before, :is(.feature-panel, .trust-diagram, .dl-card)::after { transform: none; }
+  .dl-card { margin: 0; }
+  .dl-tabs { padding: 0 8px; }
   .dl-tab { padding: 13px 12px; font-size: 0.92rem; }
   .dl-tab::after { left: 10px; right: 10px; }
   .dl { grid-template-columns: minmax(0, 1fr); padding: 22px 20px; }
