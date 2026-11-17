@@ -210,7 +210,7 @@
       active = (active + 1) % count;
       leaving = old; // it flies off to the left, then waits at the back
       clearTimeout(leaveTimer);
-      leaveTimer = setTimeout(function () { leaving = -1; render(); }, 560);
+      leaveTimer = setTimeout(function () { leaving = -1; render(); }, 900);
       render();
     }
 
