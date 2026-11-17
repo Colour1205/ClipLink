@@ -42,6 +42,20 @@ public sealed record EngineOptions
     // handshake and speaks (see HandshakeMessage.Protocol). 1 stands in for a
     // build from before protocol 2.
     public int Protocol { get; init; } = Networking.HandshakeMessage.CurrentProtocol;
+
+    // For tests and tools only: what this engine says in its handshake it can
+    // do (see HandshakeMessage.Caps). Empty stands in for a build from before
+    // them: no file_ack sent, no stream paced.
+    public IReadOnlyList<string> Caps { get; init; } = Networking.HandshakeMessage.CurrentCaps;
+
+    // For tests and tools only: how long a paced file stream waits for an ack
+    // before it is given up on (see SendWindow.AckTimeout).
+    public TimeSpan FileAckTimeout { get; init; } = Networking.SendWindow.AckTimeout;
+
+    // For tests and tools only: how long a paced stream coming in may go
+    // with nothing new before it is given up on and asked for again (see
+    // SendWindow.StallTimeout).
+    public TimeSpan FileStallTimeout { get; init; } = Networking.SendWindow.StallTimeout;
 }
 
 // A device's pairing payload - what the QR code and "copy pairing info" carry,

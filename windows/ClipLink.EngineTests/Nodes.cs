@@ -143,12 +143,21 @@ internal sealed class TestNode : IDisposable
             JsonSerializer.Serialize(keys.Select(key => new DeletedEntry(key, at++)).ToList()));
     }
 
-    // protocol 1: stands in for a build from before protocol 2.
-    public ClipLinkEngine Start(int protocol = HandshakeMessage.CurrentProtocol)
+    // protocol 1: stands in for a build from before protocol 2. caps empty:
+    // for one from before handshake caps (no file_ack). fileAckTimeout: how
+    // long a paced file stream waits for an ack (30 seconds in the app).
+    public ClipLinkEngine Start(int protocol = HandshakeMessage.CurrentProtocol, IReadOnlyList<string>? caps = null, TimeSpan? fileAckTimeout = null)
     {
         Engine?.Dispose();
         Engine = new ClipLinkEngine();
-        Assert.True(Engine.Start(Label, Port, new EngineOptions { WatchClipboard = false, LoopbackOnly = true, Protocol = protocol }));
+        Assert.True(Engine.Start(Label, Port, new EngineOptions
+        {
+            WatchClipboard = false,
+            LoopbackOnly = true,
+            Protocol = protocol,
+            Caps = caps ?? HandshakeMessage.CurrentCaps,
+            FileAckTimeout = fileAckTimeout ?? SendWindow.AckTimeout,
+        }));
         return Engine;
     }
 
@@ -201,11 +210,14 @@ internal sealed class RawPeer : IDisposable
 
     // The node must trust this peer already (TestNode.Trust), or it is a pairing request.
     // port: where to dial instead of the node's own (a proxy in front of it, say).
-    public async Task ConnectAsync(TestNode node, int protocol = HandshakeMessage.CurrentProtocol, int? port = null)
+    // caps: what it says it can do (null: what this build says; empty: a build
+    // from before caps). It never acknowledges file chunks by itself: a test
+    // does that with SendAckAsync.
+    public async Task ConnectAsync(TestNode node, int protocol = HandshakeMessage.CurrentProtocol, int? port = null, IReadOnlyList<string>? caps = null)
     {
         var client = new TcpClient();
         await client.ConnectAsync(IPAddress.Loopback, port ?? node.Port);
-        conn = await PeerConnection.CreateAsync(client, Identity, new TrustStore(label), new PassphraseKeyStore(label), "raw peer", protocol: protocol);
+        conn = await PeerConnection.CreateAsync(client, Identity, new TrustStore(label), new PassphraseKeyStore(label), "raw peer", protocol: protocol, caps: caps);
         Assert.NotNull(conn);
         conn!.MessageReceived += msg =>
         {
@@ -219,6 +231,12 @@ internal sealed class RawPeer : IDisposable
     }
 
     public int PeerProtocol => conn!.PeerProtocol;
+
+    // What the node's handshake said it can do.
+    public IReadOnlyList<string> PeerCaps => conn!.PeerCaps;
+
+    // A file_ack: every chunk of fileHash's stream up to chunkIndex is done with.
+    public Task SendAckAsync(string fileHash, int chunkIndex) => conn!.Send(FileAckMessage.Envelope(fileHash, chunkIndex));
 
     // Connects and completes the handshake, then sends nothing at all - not
     // even a heartbeat: what a replayed handshake looks like to the node.

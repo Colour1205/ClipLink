@@ -516,6 +516,58 @@ public class TransferTests
         }
     }
 
+    // A sender that paces its streams gives one up when its acks stop coming
+    // while the link stays up; the receiver then sees no more chunks, and
+    // must let the stream go itself (see IncomingFiles.AbandonStalled).
+    [Fact]
+    public async Task A_stream_that_stops_part_way_is_abandoned_once_it_has_been_quiet_long_enough()
+    {
+        string label = TestData.NewLabel("stalled");
+        try
+        {
+            var store = new FileStore(label);
+            var incoming = new IncomingFiles(store);
+            int done = 0;
+            incoming.ChunkDone += (_, _, _) => Interlocked.Increment(ref done);
+            byte[] data = RandomNumberGenerator.GetBytes(4 * Chunk);
+            string hash = Convert.ToHexString(SHA256.HashData(data));
+            var owner = new object();
+            var other = new object();
+            var idle = TimeSpan.FromSeconds(45);
+
+            await incoming.ReceiveAsync(owner, hash, 0, false, ChunkData.Of(data[..Chunk]));
+            await incoming.ReceiveAsync(owner, hash, 1, false, ChunkData.Of(data[Chunk..(2 * Chunk)]));
+            Assert.True(await Wait.Until(() => Volatile.Read(ref done) == 2));
+            long now = Environment.TickCount64;
+
+            // Its latest chunk only just came: left alone.
+            Assert.Empty(incoming.AbandonStalled(owner, idle, now));
+            // Another sender's check never touches it.
+            Assert.Empty(incoming.AbandonStalled(other, idle, now + 60_000));
+            Assert.True(incoming.IsReceiving(hash));
+
+            // Quiet for long enough, everything written: let go of, its
+            // bytes gone, and the file free for any sender again.
+            Assert.Equal(new[] { hash }, incoming.AbandonStalled(owner, idle, now + 60_000));
+            Assert.False(incoming.IsReceiving(hash));
+            Assert.True(await Wait.Until(() => Partials(store, hash).Count == 0));
+            Assert.False(incoming.WouldIgnore(other, hash, 0));
+            // What it sends after that is the rest of a stream never seen
+            // starting: ignored, as ever.
+            Assert.Equal(IncomingFiles.Outcome.Ignored, (await incoming.ReceiveAsync(owner, hash, 2, false, ChunkData.Of(data[..10]))).Outcome);
+
+            // A stream whose last chunk has come is complete, being checked
+            // and stored: never abandoned.
+            await incoming.ReceiveAsync(owner, hash, 0, true, ChunkData.Of(data));
+            Assert.Empty(incoming.AbandonStalled(owner, idle, Environment.TickCount64 + 60_000));
+            Assert.True(await Wait.Until(() => store.Exists(hash)));
+        }
+        finally
+        {
+            TestData.Delete(label);
+        }
+    }
+
     [Fact]
     public async Task A_queued_file_whose_bytes_do_not_match_its_hash_is_not_stored()
     {

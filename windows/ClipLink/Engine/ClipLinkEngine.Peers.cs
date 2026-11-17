@@ -126,6 +126,10 @@ public sealed partial class ClipLinkEngine
         {
             HandleFileRequest(envelope.Payload, conn);
         }
+        else if (envelope.Type == FileAckMessage.Type)
+        {
+            HandleFileAck(envelope.Payload, conn);
+        }
         else if (envelope.Type == "unpair")
         {
             HandleUnpair(conn);
@@ -722,6 +726,33 @@ public sealed partial class ClipLinkEngine
         }
     }
 
+    // A sender that paces its streams gives one up when this PC acknowledges
+    // nothing for its timeout while the link stays up - a write held up, say.
+    // No more chunks come then, so with nothing new for a while and
+    // everything that came written, the stream is given up here too and the
+    // file asked for again (see IncomingFiles.AbandonStalled). An older
+    // sender never stops part-way on a live link, so its streams are left
+    // alone. With each heartbeat, on a timer thread.
+    private void AbandonStalledTransfersFrom(PeerConnection conn)
+    {
+        if (!conn.FileAck) return;
+        try
+        {
+            var stalled = incomingFiles.AbandonStalled(conn, options.FileStallTimeout, Environment.TickCount64);
+            if (stalled.Count == 0) return;
+            Console.WriteLine($"[file] {stalled.Count} file transfer(s) from {DeviceLabel.ShortId(conn.PeerDeviceId)} stopped part-way - asking again");
+            NotifyTransfersChanged();
+            foreach (string hash in stalled)
+            {
+                RequestAgain(hash, connectionsByDeviceId.Values);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[file] couldn't check the transfers from {DeviceLabel.ShortId(conn.PeerDeviceId)}: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
     private void HandleFileRequest(string payloadJson, PeerConnection requestingConn)
     {
         FileRequestMessage? request;
@@ -759,7 +790,14 @@ public sealed partial class ClipLinkEngine
             chunk = JsonSerializer.Deserialize<FileChunkMessage>(payloadJson);
         }
         catch (JsonException) { chunk = null; }
-        if (chunk == null || !FileStore.IsValidHash(chunk.FileHash) || chunk.DataBase64 == null) return default;
+        // (Nothing to acknowledge without a valid hash: no stream is sent
+        // under one.)
+        if (chunk == null || !FileStore.IsValidHash(chunk.FileHash)) return default;
+        if (chunk.DataBase64 == null)
+        {
+            AckChunk(conn, chunk.FileHash, chunk.ChunkIndex);
+            return default;
+        }
 
         byte[] chunkBytes;
         try
@@ -767,7 +805,11 @@ public sealed partial class ClipLinkEngine
             // "" is no bytes: a 0-byte file's one chunk.
             chunkBytes = Convert.FromBase64String(chunk.DataBase64);
         }
-        catch (FormatException) { return default; }
+        catch (FormatException)
+        {
+            AckChunk(conn, chunk.FileHash, chunk.ChunkIndex);
+            return default;
+        }
         return ReceiveChunkAsync(conn, chunk.FileHash, chunk.ChunkIndex, chunk.IsLast, ChunkData.Of(chunkBytes));
     }
 
@@ -776,13 +818,25 @@ public sealed partial class ClipLinkEngine
     // decoded.
     private ValueTask HandleFileChunk(FileChunk chunk, PeerConnection conn)
     {
-        if (chunk.FileHash is not { } hash || !FileStore.IsValidHash(hash) || !chunk.HasData) return default;
+        // (Nothing to acknowledge without a valid hash: no stream is sent
+        // under one.)
+        if (chunk.FileHash is not { } hash || !FileStore.IsValidHash(hash)) return default;
+        if (!chunk.HasData)
+        {
+            AckChunk(conn, hash, chunk.ChunkIndex);
+            return default;
+        }
         if (incomingFiles.WouldIgnore(conn, hash, chunk.ChunkIndex))
         {
+            AckChunk(conn, hash, chunk.ChunkIndex);
             ChunkIgnored(conn, hash, chunk.IsLast);
             return default;
         }
-        if (!chunk.TryDecode(out var data)) return default;
+        if (!chunk.TryDecode(out var data))
+        {
+            AckChunk(conn, hash, chunk.ChunkIndex);
+            return default;
+        }
         return ReceiveChunkAsync(conn, hash, chunk.ChunkIndex, chunk.IsLast, data);
     }
 
@@ -792,7 +846,21 @@ public sealed partial class ClipLinkEngine
     // Waits only while that file's write queue is full.
     private async ValueTask ReceiveChunkAsync(PeerConnection conn, string fileHash, int chunkIndex, bool isLast, ChunkData data)
     {
-        var result = await incomingFiles.ReceiveAsync(conn, fileHash, chunkIndex, isLast, data);
+        IncomingFiles.Result result;
+        try
+        {
+            result = await incomingFiles.ReceiveAsync(conn, fileHash, chunkIndex, isLast, data);
+        }
+        catch
+        {
+            // (Logged where the message was handled.) Done with all the
+            // same: unacknowledged, it would stall a sender that paces.
+            AckChunk(conn, fileHash, chunkIndex);
+            throw;
+        }
+        // Written is acknowledged once it is on disk (OnChunkDone); anything
+        // else is done with already.
+        if (result.Outcome != IncomingFiles.Outcome.Written) AckChunk(conn, fileHash, chunkIndex);
         switch (result.Outcome)
         {
             case IncomingFiles.Outcome.Written when chunkIndex == 0:
@@ -819,6 +887,38 @@ public sealed partial class ClipLinkEngine
         // the request for. With nobody else sending the file now, this one
         // may as well start over.
         if (isLast) RequestAgain(fileHash, new[] { conn });
+    }
+
+    // A chunk from conn is done with: written (IncomingFiles.ChunkDone, on
+    // the file's writer), or ignored, failed or unreadable (on the read
+    // loop). A sender that announced "file-ack" waits for this before it
+    // sends more than a few chunks ahead (see FileFlow), so every chunk it
+    // sends is acknowledged, whatever became of it: one left out would stall
+    // its stream until it gave up. Ignored chunks are acknowledged too, so a
+    // stream this PC doesn't use still runs to its end, as it always did
+    // (and its end may ask that sender again - see ChunkIgnored). A peer
+    // that didn't announce it is sent nothing: it wouldn't know the message.
+    private static void AckChunk(PeerConnection conn, string fileHash, int chunkIndex)
+    {
+        if (!conn.FileAck) return;
+        _ = conn.Send(FileAckMessage.Envelope(fileHash, chunkIndex)).ContinueWith(
+            // A link that has gone: its read loop says so, once.
+            task => _ = task.Exception, TaskContinuationOptions.OnlyOnFaulted);
+    }
+
+    private void OnChunkDone(object owner, string fileHash, int chunkIndex)
+    {
+        if (owner is PeerConnection conn) AckChunk(conn, fileHash, chunkIndex);
+    }
+
+    // A peer's file_ack: it is done with a stream's chunks up to ChunkIndex,
+    // so the stream sending them may go on (see StreamFileToPeer). One for a
+    // stream that isn't being sent to it, or has ended, is ignored. It only
+    // paces sending: nothing is stored or deleted because of it.
+    private void HandleFileAck(string payloadJson, PeerConnection conn)
+    {
+        if (FileAckMessage.Parse(payloadJson) is not { } ack) return;
+        sendWindows.Ack(conn, ack.FileHash, ack.ChunkIndex);
     }
 
     // How a queued stream ended (IncomingFiles.Completed), on its writer.
@@ -927,6 +1027,15 @@ public sealed partial class ClipLinkEngine
     // Reads a file incrementally and sends it as a sequence of file_chunk
     // envelopes — bounded memory (one chunk at a time) regardless of the
     // file's total size, unlike embedding the whole thing in one message.
+    //
+    // To a peer that acknowledges chunks (conn.FileAck), at most
+    // SendWindow.Size chunks are ever sent and not yet acknowledged: a phone
+    // that takes them in more slowly than the network brings them no longer
+    // piles the rest of the file up in memory (see FileFlow). With no ack for
+    // SendWindow.AckTimeout the stream is given up on, as if cut off; the
+    // receiver asks again. To any other peer, as fast as the link takes them.
+    // The same for a file pushed when it's copied and one sent because it
+    // was asked for.
     private async Task StreamFileToPeer(PeerConnection conn, string filePath, string fileHash)
     {
         string key = $"{conn.PeerDeviceId}:{fileHash}";
@@ -938,7 +1047,10 @@ public sealed partial class ClipLinkEngine
         }
         const int chunkSize = 256 * 1024;
         string shortPeer = DeviceLabel.ShortId(conn.PeerDeviceId);
-        Console.WriteLine($"[file] sending {fileHash[..12]}... to {shortPeer}");
+        // Opened before the first chunk, so no ack can come before it; a
+        // stream of this file to this peer starts with a count of its own.
+        SendWindow? acks = conn.FileAck ? sendWindows.Open(conn, fileHash) : null;
+        Console.WriteLine($"[file] sending {fileHash[..12]}... to {shortPeer}{(acks != null ? " (paced by acks)" : "")}");
         try
         {
             using var stream = File.OpenRead(filePath);
@@ -950,6 +1062,11 @@ public sealed partial class ClipLinkEngine
                 bool isLast = stream.Position >= stream.Length;
                 byte[] chunkBytes = bytesRead == chunkSize ? buffer : buffer[..bytesRead];
                 var chunkMsg = new FileChunkMessage(fileHash, chunkIndex, isLast, Convert.ToBase64String(chunkBytes));
+                if (acks != null)
+                {
+                    await acks.WaitForRoomAsync(options.FileAckTimeout, conn.Closed);
+                    acks.Sending();
+                }
                 await conn.Send(Wire.Envelope("file_chunk", chunkMsg));
                 chunkIndex++;
             }
@@ -963,6 +1080,7 @@ public sealed partial class ClipLinkEngine
                 // decode an empty chunk and go on waiting, as they always
                 // have.
                 var emptyChunk = new FileChunkMessage(fileHash, 0, true, "");
+                acks?.Sending(); // (the first: there's room)
                 await conn.Send(Wire.Envelope("file_chunk", emptyChunk));
                 chunkIndex++;
             }
@@ -977,6 +1095,7 @@ public sealed partial class ClipLinkEngine
         }
         finally
         {
+            if (acks != null) sendWindows.Close(conn, fileHash, acks);
             fileTransferState.StreamingInFlight.TryRemove(key, out _);
             // Its entry may have left history while this was sending - one
             // of more files than history keeps, shared or copied at once, or
@@ -1137,6 +1256,7 @@ public sealed partial class ClipLinkEngine
             });
             NotifyDevicesChanged(); // waiting becomes connected
         };
+        conn.Tick += () => AbandonStalledTransfersFrom(conn);
         conn.Disconnected += () =>
         {
             // Identity-checked removal, NOT TryRemove(key). When both ends
@@ -1423,7 +1543,7 @@ public sealed partial class ClipLinkEngine
             // dials to it as well.
             using var timeout = new CancellationTokenSource(HandshakeTimeout);
             conn = await PeerConnection.CreateAsync(client, identity, trustStore, passphraseKeyStore, deviceName.Current,
-                    answeredAsSelf: () => answeredAsSelf = true, isBlocked: blockStore.IsBlocked, protocol: options.Protocol,
+                    answeredAsSelf: () => answeredAsSelf = true, isBlocked: blockStore.IsBlocked, protocol: options.Protocol, caps: options.Caps,
                     cancellationToken: timeout.Token);
         }
         catch
@@ -1518,7 +1638,7 @@ public sealed partial class ClipLinkEngine
 
             using var timeout = new CancellationTokenSource(HandshakeTimeout);
             var conn = await PeerConnection.CreateAsync(client, identity, trustStore, passphraseKeyStore, deviceName.Current,
-                    isBlocked: blockStore.IsBlocked, protocol: options.Protocol, cancellationToken: timeout.Token);
+                    isBlocked: blockStore.IsBlocked, protocol: options.Protocol, caps: options.Caps, cancellationToken: timeout.Token);
             if (conn == null)
             {
                 // handshake failed - it disconnected, sent a bad handshake, or
@@ -1562,7 +1682,7 @@ public sealed partial class ClipLinkEngine
             bool answeredAsSelf = false;
             using var timeout = new CancellationTokenSource(HandshakeTimeout);
             var conn = await PeerConnection.CreateAsync(client, identity, trustStore, passphraseKeyStore, deviceName.Current,
-                    answeredAsSelf: () => answeredAsSelf = true, isBlocked: blockStore.IsBlocked, protocol: options.Protocol,
+                    answeredAsSelf: () => answeredAsSelf = true, isBlocked: blockStore.IsBlocked, protocol: options.Protocol, caps: options.Caps,
                     cancellationToken: timeout.Token);
             if (conn == null)
             {

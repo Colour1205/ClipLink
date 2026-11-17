@@ -56,7 +56,7 @@ public sealed class IncomingFiles
     // How many chunks may wait for a file's writer: 16 of 256 KiB, 4 MiB.
     private const int QueueLength = 16;
 
-    private readonly record struct Queued(ChunkData Data, bool IsLast);
+    private readonly record struct Queued(ChunkData Data, int Index, bool IsLast);
 
     private sealed class Transfer
     {
@@ -80,8 +80,13 @@ public sealed class IncomingFiles
         // failed, or abandoned and tidied away.
         public readonly TaskCompletionSource Done = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public int NextIndex;    // the owner's calls only
+        public int NextIndex;    // the owner's calls, under the lock
         public bool LastAdmitted; // under the lock
+        // When its owner's latest chunk was taken (Environment.TickCount64),
+        // and how many of the chunks taken its writer is done with: what
+        // AbandonStalled goes by.
+        public long LastTakenAt;  // under the lock
+        public int Handled;       // Interlocked: the writer adds
         public volatile bool Dropped;
         public volatile bool Finished;
         public long Received;     // Interlocked: the writer adds, GetTransfers reads
@@ -117,6 +122,16 @@ public sealed class IncomingFiles
     // (with why). Raised on the file's writer task, never under the lock.
     // Handlers mustn't throw.
     public event Action<object, string, Result>? Completed;
+
+    // A chunk ReceiveAsync took is done with: written to its file (and
+    // hashed), or let go of unwritten because its transfer was dropped
+    // meanwhile. Its owner, its hash and its index, in the order the owner's
+    // chunks were taken. Raised on the file's writer task (or where
+    // ReceiveAsync wrote it, for a transfer Receive started), never under
+    // the lock; not for a chunk ReceiveAsync returned anything but Written
+    // for. The engine's cue to acknowledge it (see FileFlow). Handlers
+    // mustn't throw.
+    public event Action<object, string, int>? ChunkDone;
 
     public IncomingFiles(FileStore fileStore, Func<string, long?>? sizeHint = null)
     {
@@ -203,9 +218,10 @@ public sealed class IncomingFiles
                 // Started by Receive: written here, the same way.
                 var result = Write(transfer, data.Span, isLast) ?? new(Outcome.Written);
                 data.Release();
+                if (result.Outcome == Outcome.Written) RaiseChunkDone(transfer, chunkIndex);
                 return result;
             }
-            var item = new Queued(data, isLast);
+            var item = new Queued(data, chunkIndex, isLast);
             while (!queue.Writer.TryWrite(item))
             {
                 if (!await queue.Writer.WaitToWriteAsync())
@@ -260,6 +276,7 @@ public sealed class IncomingFiles
                 if (transfer == null) return new(new(Outcome.Failed, "couldn't create a file for an incoming transfer"));
             }
             transfer.NextIndex++;
+            transfer.LastTakenAt = Environment.TickCount64;
             if (isLast) transfer.LastAdmitted = true;
             return new(new(Outcome.Written), transfer);
         }
@@ -340,6 +357,8 @@ public sealed class IncomingFiles
                     {
                         item.Data.Release();
                     }
+                    Interlocked.Increment(ref transfer.Handled);
+                    RaiseChunkDone(transfer, item.Index);
                     if (ended is { } result)
                     {
                         try
@@ -364,12 +383,30 @@ public sealed class IncomingFiles
                 // does, so that its owner's next chunk isn't left waiting for
                 // room in a queue nobody reads, nor for a check that won't
                 // happen, and the file can be asked for again. What's still
-                // queued is released.
+                // queued is released, and told as done with like any chunk
+                // let go of unwritten: a sender waiting for its ack would
+                // otherwise stall until it gave up.
                 lock (transfers) { Drop(transfer.Hash, transfer); }
                 transfer.Queue.Writer.TryComplete();
-                while (reader.TryRead(out var left)) left.Data.Release();
+                while (reader.TryRead(out var left))
+                {
+                    left.Data.Release();
+                    RaiseChunkDone(transfer, left.Index);
+                }
                 CloseAndDelete(transfer);
             }
+        }
+    }
+
+    private void RaiseChunkDone(Transfer transfer, int index)
+    {
+        try
+        {
+            ChunkDone?.Invoke(transfer.Owner, transfer.Hash, index);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[file] a written chunk's handler failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -387,6 +424,36 @@ public sealed class IncomingFiles
                 Drop(hash, transfer);
             }
             return owned.Select(pair => pair.Key).ToList();
+        }
+    }
+
+    // Abandons every stream from owner that has stopped part-way: its latest
+    // chunk taken at least idle before now (Environment.TickCount64), every
+    // chunk taken written already, and its last chunk not come. Returns their
+    // hashes. Only for a sender that paces its streams (see FileFlow): one
+    // gives a stream up when this PC acknowledges nothing for its timeout
+    // while the link stays up (a write held up by a virus scanner, say), and
+    // then no more chunks come - the stream would hold its file, and keep
+    // every other sender's copy out, until the link closed, and the file
+    // would never be asked for again. An older sender never stops part-way
+    // on a live link. Only streams ReceiveAsync takes: this may run while
+    // the owner's calls do, and only a queued transfer is tidied away by its
+    // writer rather than right here, under a write.
+    public List<string> AbandonStalled(object owner, TimeSpan idle, long now)
+    {
+        long idleMs = (long)idle.TotalMilliseconds;
+        lock (transfers)
+        {
+            var stalled = transfers
+                .Where(pair => ReferenceEquals(pair.Value.Owner, owner) && pair.Value.Queue != null && !pair.Value.LastAdmitted
+                    && now - pair.Value.LastTakenAt >= idleMs
+                    && Volatile.Read(ref pair.Value.Handled) == pair.Value.NextIndex)
+                .ToList();
+            foreach (var (hash, transfer) in stalled)
+            {
+                Drop(hash, transfer);
+            }
+            return stalled.Select(pair => pair.Key).ToList();
         }
     }
 

@@ -92,4 +92,67 @@ public class SyncHandshakeTests
 
         Assert.Equal(new OldHandshake("eph", "id", "sig", "proof", "Desk PC"), old);
     }
+
+    // ---- Caps: what else a build can do ("file-ack": paced file streams) ----
+
+    [Fact]
+    public void The_handshake_carries_its_caps_at_the_end()
+    {
+        string json = JsonSerializer.Serialize(new HandshakeMessage("eph", "id", "sig", null, "Desk PC", HandshakeMessage.CurrentProtocol, HandshakeMessage.CurrentCaps));
+
+        Assert.Equal("{\"EphemeralPublicKey\":\"eph\",\"IdentityPublicKey\":\"id\",\"Signature\":\"sig\",\"PassphraseProof\":null,\"DeviceName\":\"Desk PC\",\"Protocol\":2,\"Caps\":[\"file-ack\"]}", json);
+        Assert.Equal("file-ack", HandshakeMessage.FileAckCap);
+        Assert.Contains(HandshakeMessage.FileAckCap, HandshakeMessage.CurrentCaps);
+    }
+
+    [Fact]
+    public void Caps_are_read_from_a_peers_handshake_and_names_nobody_knows_are_kept_but_mean_nothing()
+    {
+        var message = Parse("{\"EphemeralPublicKey\":\"e\",\"IdentityPublicKey\":\"i\",\"Signature\":\"s\",\"Protocol\":2,\"Caps\":[\"bin1\",\"file-ack\"],\"DeviceName\":\"Phone\"}");
+
+        Assert.Equal(new[] { "bin1", "file-ack" }, message.Caps);
+        Assert.True(HandshakeMessage.Has(message.Caps, HandshakeMessage.FileAckCap));
+        Assert.False(HandshakeMessage.Has(message.Caps, "file-raw1"));
+        Assert.Equal("Phone", message.DeviceName);
+        Assert.Equal(2, message.Protocol);
+    }
+
+    [Fact]
+    public void A_handshake_without_caps_has_none()
+    {
+        var message = Parse("{\"EphemeralPublicKey\":\"e\",\"IdentityPublicKey\":\"i\",\"Signature\":\"s\",\"DeviceName\":\"Old PC\",\"Protocol\":2}");
+
+        Assert.Null(message.Caps);
+        Assert.False(HandshakeMessage.Has(message.Caps, HandshakeMessage.FileAckCap));
+    }
+
+    [Theory]
+    [InlineData("null", false)]
+    [InlineData("\"file-ack\"", false)]
+    [InlineData("1", false)]
+    [InlineData("{\"file-ack\":true}", false)]
+    [InlineData("[]", false)]
+    [InlineData("[\"FILE-ACK\"]", false)]
+    [InlineData("[\"file-ack \"]", false)]
+    [InlineData("[1,null,{\"a\":[\"file-ack\"]},[\"file-ack\"],\"file-ack\"]", true)]
+    [InlineData("[\"file-ack\",\"file-ack\"]", true)]
+    public void Caps_that_are_not_a_list_of_names_never_fail_the_handshake(string value, bool fileAck)
+    {
+        var message = Parse("{\"EphemeralPublicKey\":\"e\",\"IdentityPublicKey\":\"i\",\"Caps\":" + value + ",\"Signature\":\"s\",\"DeviceName\":\"X\",\"Protocol\":2}");
+
+        Assert.Equal("X", message.DeviceName); // the rest of the line was read
+        Assert.Equal("s", message.Signature);
+        Assert.Equal(2, message.Protocol);
+        Assert.Equal(fileAck, HandshakeMessage.Has(message.Caps, HandshakeMessage.FileAckCap));
+    }
+
+    [Fact]
+    public void Without_caps_the_line_is_the_older_one_exactly_and_an_older_build_ignores_them()
+    {
+        string without = JsonSerializer.Serialize(new HandshakeMessage("eph", "id", "sig", "proof", "Desk PC", HandshakeMessage.CurrentProtocol));
+        Assert.DoesNotContain("Caps", without);
+
+        string with = JsonSerializer.Serialize(new HandshakeMessage("eph", "id", "sig", "proof", "Desk PC", HandshakeMessage.CurrentProtocol, HandshakeMessage.CurrentCaps));
+        Assert.Equal(new OldHandshake("eph", "id", "sig", "proof", "Desk PC"), JsonSerializer.Deserialize<OldHandshake>(with));
+    }
 }

@@ -1,6 +1,6 @@
 import { describe, it, expect } from '@ohos/hypium';
 import socket from '@ohos.net.socket';
-import { PeerVerdict, TcpLike, TcpLineChannel, exactBuffer } from '../main/ets/networking/PeerConnection';
+import { PeerVerdict, SESSION_QUEUE_MAX_BYTES, TcpLike, TcpLineChannel, exactBuffer } from '../main/ets/networking/PeerConnection';
 
 // ASCII only, so no text codec is needed.
 function bytesOf(s: string): ArrayBuffer {
@@ -145,6 +145,48 @@ export default function lineChannelTest() {
       expect(fake.closed).assertTrue();
       expect(channel.hasPendingLine).assertFalse();
       expect(textOf(await channel.readLine())).assertEqual('null');
+    });
+
+    // One line may be bigger than the cap, a big picture say, and it still
+    // gets through (see TcpLineChannel.deliverLine), with a quarter of the
+    // cap behind it, not the whole cap.
+    it('letsOneLongLineWaitWithALittleBehindIt', 0, async () => {
+      const fake = new FakeSocket();
+      const channel = new TcpLineChannel(fake);
+      fake.push('handshake\n');
+      await channel.readLine();
+      channel.limitQueue(100);
+      fake.push(`${repeat('a', 150)}\n`);
+      expect(channel.isClosed).assertFalse();
+      fake.push(`${repeat('b', 20)}\n`);
+      expect(channel.isClosed).assertFalse();
+      expect(textOf(await channel.readLine())).assertEqual(repeat('a', 150));
+      expect(textOf(await channel.readLine())).assertEqual(repeat('b', 20));
+      fake.push(`${repeat('c', 150)}\n${repeat('d', 20)}\n`);
+      expect(channel.isClosed).assertFalse();
+      // 30 behind it, past the 25 a quarter of the cap allows.
+      fake.push(`${repeat('e', 10)}\n`);
+      expect(channel.queueOverflow).assertTrue();
+      expect(channel.isClosed).assertTrue();
+    });
+
+    it('knowsWhenALineIsHalfWayIn', 0, async () => {
+      const fake = new FakeSocket();
+      const channel = new TcpLineChannel(fake);
+      expect(channel.hasPartLine).assertFalse();
+      fake.push('half a li');
+      expect(channel.hasPartLine).assertTrue();
+      expect(channel.hasPendingLine).assertFalse();
+      fake.push('ne\n');
+      expect(channel.hasPartLine).assertFalse();
+      expect(channel.hasPendingLine).assertTrue();
+      expect(textOf(await channel.readLine())).assertEqual('half a line');
+    });
+
+    // 512 MB was more than the phone could hold (it ran out of memory at
+    // about 365 MB); see SESSION_QUEUE_MAX_BYTES.
+    it('capsTheQueueAtWhatAPhoneCanHold', 0, () => {
+      expect(SESSION_QUEUE_MAX_BYTES).assertEqual(128 * 1024 * 1024);
     });
 
     it('keepsWhatIsReadUnderTheCapAndNotesTheHighest', 0, async () => {

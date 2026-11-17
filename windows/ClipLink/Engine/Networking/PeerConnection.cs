@@ -83,6 +83,22 @@ public class PeerConnection
     public int Protocol => Math.Min(ownProtocol, PeerProtocol);
     private readonly int ownProtocol;
 
+    // What the peer's handshake said it can do (see HandshakeMessage.Caps),
+    // empty when it said nothing. Not signed either: a man in the middle can
+    // only take a name away, which turns that feature off.
+    public IReadOnlyList<string> PeerCaps { get; }
+    private readonly IReadOnlyList<string> ownCaps;
+
+    // Whether file streams on this connection are paced by acks (see
+    // FileFlow): only when both sides announced "file-ack". Otherwise neither
+    // side sends file_ack or waits for one, as before.
+    public bool FileAck => HandshakeMessage.Has(ownCaps, HandshakeMessage.FileAckCap) && HandshakeMessage.Has(PeerCaps, HandshakeMessage.FileAckCap);
+
+    // Cancelled once the connection has closed (its read loop has ended, or
+    // Close was called): what a file stream waiting for an ack gives up on.
+    public CancellationToken Closed => closed.Token;
+    private readonly CancellationTokenSource closed = new();
+
     // The address this connection runs over, read when it was created (the
     // socket may be closed by the time anyone asks): what the Devices list
     // shows for a connected device. Null if it couldn't be read.
@@ -92,6 +108,12 @@ public class PeerConnection
     // tests' scripted peers); the engine uses MessageHandler.
     public event Action<string>? MessageReceived;
     public event Action? Disconnected;
+
+    // Raised with each heartbeat (every HeartbeatIntervalMs) while the
+    // connection is open, on a timer thread: for checks that only need to
+    // run now and then, such as a file stream that stopped coming. Handlers
+    // must be quick and mustn't throw.
+    public event Action? Tick;
 
     // Each decrypted message as its UTF-8 bytes, awaited by the read loop
     // before it reads the next line - which is what lets a file chunk wait
@@ -126,7 +148,7 @@ public class PeerConnection
     private HashSet<string>? sentNonces = new();
     private readonly object sentNoncesGate = new(); // Send runs off the read loop
 
-    private PeerConnection(TcpClient client, LineReader reader, Stream stream, byte[] sessionKey, string peerDeviceId, bool wasAlreadyTrusted, bool newlyTrustedViaPassphrase, string? peerDeviceName, int peerProtocol, int ownProtocol)
+    private PeerConnection(TcpClient client, LineReader reader, Stream stream, byte[] sessionKey, string peerDeviceId, bool wasAlreadyTrusted, bool newlyTrustedViaPassphrase, string? peerDeviceName, int peerProtocol, int ownProtocol, IReadOnlyList<string>? peerCaps, IReadOnlyList<string> ownCaps)
     {
         this.client = client;
         this.reader = reader;
@@ -139,6 +161,8 @@ public class PeerConnection
         PeerDeviceName = peerDeviceName;
         PeerProtocol = peerProtocol;
         this.ownProtocol = ownProtocol;
+        PeerCaps = peerCaps ?? Array.Empty<string>();
+        this.ownCaps = ownCaps;
         try
         {
             RemoteAddress = (client.Client.RemoteEndPoint as System.Net.IPEndPoint)?.Address.ToString();
@@ -179,7 +203,9 @@ public class PeerConnection
     //
     // protocol is the sync protocol this side sends and speaks (see
     // HandshakeMessage.Protocol): always the current one, except in tests and
-    // tools that stand in for an older build.
+    // tools that stand in for an older build. caps is what this side says
+    // it can do (see HandshakeMessage.Caps): null for the current build's,
+    // empty for a stand-in for a build from before them.
     //
     // cancellationToken ends the handshake (the caller's timeout): its read
     // or write then throws OperationCanceledException, to the caller. Merely
@@ -187,8 +213,9 @@ public class PeerConnection
     // closed the socket, and that failure was then nobody's - logged as an
     // unobserved task error, stack and all, on every redial of a peer that
     // accepts TCP and never answers.
-    public static async Task<PeerConnection?> CreateAsync(TcpClient client, DeviceIdentity myIdentity, TrustStore trustStore, PassphraseKeyStore passphraseKeyStore, string? myDeviceName = null, Action? answeredAsSelf = null, Func<string, bool>? isBlocked = null, int protocol = HandshakeMessage.CurrentProtocol, CancellationToken cancellationToken = default)
+    public static async Task<PeerConnection?> CreateAsync(TcpClient client, DeviceIdentity myIdentity, TrustStore trustStore, PassphraseKeyStore passphraseKeyStore, string? myDeviceName = null, Action? answeredAsSelf = null, Func<string, bool>? isBlocked = null, int protocol = HandshakeMessage.CurrentProtocol, CancellationToken cancellationToken = default, IReadOnlyList<string>? caps = null)
     {
+        caps ??= HandshakeMessage.CurrentCaps;
         Stream stream = client.GetStream();
         // Bytes, not a StreamReader, from the first line on: whatever the
         // peer sends straight after its handshake is already in this
@@ -210,7 +237,8 @@ public class PeerConnection
             Convert.ToBase64String(mySignature),
             myProof,
             DeviceNameStore.Normalize(myDeviceName),
-            protocol);
+            protocol,
+            caps.Count > 0 ? caps : null);
         await writer.WriteLineAsync(JsonSerializer.Serialize(myHandshake).AsMemory(), cancellationToken);
 
         string? theirHandshakeJson = await ReadHandshakeLineAsync(reader, MaxHandshakeChars, cancellationToken);
@@ -281,7 +309,7 @@ public class PeerConnection
         byte[] sessionKey = ecdh.DeriveKeyFromHash(theirEcdh.PublicKey, HashAlgorithmName.SHA256);
 
         return new PeerConnection(client, reader, stream, sessionKey, theirHandshake.IdentityPublicKey, effectivelyTrusted, passphraseVerified, DeviceNameStore.Normalize(theirHandshake.DeviceName),
-            HandshakeMessage.Normalize(theirHandshake.Protocol), protocol);
+            HandshakeMessage.Normalize(theirHandshake.Protocol), protocol, theirHandshake.Caps, caps);
     }
 
     // The longest handshake line read (bytes, UTF-8). A real one is a few
@@ -384,6 +412,7 @@ public class PeerConnection
         finally
         {
             StopHeartbeat();
+            CancelClosed();
             decryptor.Dispose(); // only ever used by this loop
             reader.Dispose();    // and so is this
             Disconnected?.Invoke();
@@ -403,6 +432,15 @@ public class PeerConnection
                 // list reflect reality, instead of relying on some much
                 // longer OS-level timeout to eventually notice.
                 Close();
+                return;
+            }
+            try
+            {
+                Tick?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[conn] a heartbeat check for {DeviceLabel.ShortId(PeerDeviceId)} failed: {ex.GetType().Name}: {ex.Message}");
             }
         }, null, HeartbeatIntervalMs, HeartbeatIntervalMs);
     }
@@ -419,6 +457,20 @@ public class PeerConnection
     {
         StopHeartbeat();
         client.Close();
+        CancelClosed();
+    }
+
+    private void CancelClosed()
+    {
+        try
+        {
+            closed.Cancel();
+        }
+        catch (AggregateException ex)
+        {
+            // A handler of Closed that threw - never the connection's to fail over.
+            Console.WriteLine($"[conn] a handler of a closed connection failed: {ex.GetBaseException().Message}");
+        }
     }
 
     private const int NonceSize = 12; // AES-GCM standard nonce size

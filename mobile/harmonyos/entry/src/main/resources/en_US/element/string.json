@@ -93,6 +93,10 @@
       "value": "Save file"
     },
     {
+      "name": "image_save_name",
+      "value": "Image from %1$s %2$s"
+    },
+    {
       "name": "item_image",
       "value": "Image"
     },

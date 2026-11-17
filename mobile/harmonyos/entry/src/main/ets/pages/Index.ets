@@ -458,6 +458,23 @@ function mimeTypeForFileName(fileName: string): string {
 // The UTD of a file by its name's extension, for the share sheet - which
 // shows the right icon and offers the right apps for it. 'general.file' when
 // the extension says nothing.
+// A picture item's bytes and the name it is opened or saved under.
+interface PictureFile {
+  name: string;
+  bytes: ArrayBuffer;
+}
+
+// The extension that matches what a picture's bytes really are (their first
+// bytes), so a saved or opened file is not a JPEG named .png. PNG otherwise,
+// which is what every platform sends for a copied picture.
+function pictureExtension(bytes: Uint8Array): string {
+  if (bytes.length >= 3 && bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) return 'jpg';
+  if (bytes.length >= 4 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return 'gif';
+  if (bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return 'webp';
+  return 'png';
+}
+
 function utdForFileName(fileName: string): string {
   const dot: number = fileName.lastIndexOf('.');
   if (dot < 0) return 'general.file';
@@ -3440,20 +3457,34 @@ struct Index {
       promptAction.showToast({ message: $r('app.string.toast_file_store_not_ready') });
       return;
     }
-    let payload: FilePayload;
-    try {
-      payload = JSON.parse(item.content) as FilePayload;
-    } catch (e) {
-      return; // not a file entry: nothing to open
+    let fileName: string;
+    let uri: string | null;
+    if (item.type === 'image') {
+      // A picture's bytes are in the item itself: written to a cache file under
+      // the name Save would suggest, then opened like any file.
+      const picture: PictureFile | null = this.pictureFileOf(item);
+      if (picture === null) {
+        promptAction.showToast({ message: this.str($r('app.string.toast_open_file_failed'), -1) });
+        return;
+      }
+      fileName = picture.name;
+      uri = this.writePictureToCache(context, picture);
+    } else {
+      let payload: FilePayload;
+      try {
+        payload = JSON.parse(item.content) as FilePayload;
+      } catch (e) {
+        return; // not a file entry: nothing to open
+      }
+      if (!fileStore.exists(payload.FileHash)) {
+        promptAction.showToast({ message: $r('app.string.toast_file_not_downloaded') });
+        return;
+      }
+      fileName = safeFileName(payload.FileName, 'file');
+      // The copy under its real name, not the stored file named by its hash:
+      // that is what the previewer or the other app shows and opens by.
+      uri = await this.namedFileUri(payload);
     }
-    if (!fileStore.exists(payload.FileHash)) {
-      promptAction.showToast({ message: $r('app.string.toast_file_not_downloaded') });
-      return;
-    }
-    const fileName: string = safeFileName(payload.FileName, 'file');
-    // The copy under its real name, not the stored file named by its hash:
-    // that is what the previewer or the other app shows and opens by.
-    const uri: string | null = await this.namedFileUri(payload);
     if (uri === null) {
       promptAction.showToast({ message: this.str($r('app.string.toast_open_file_failed'), -1) });
       return;
@@ -3550,6 +3581,10 @@ struct Index {
   // behind a security component - confirmed against @ohos.file.picker.d.ts
   // rather than assumed.
   async saveFileToDocuments(item: SyncedItem): Promise<void> {
+    if (item.type === 'image') {
+      await this.savePictureToDocuments(item);
+      return;
+    }
     const fileStore = this.fileStore;
     if (fileStore === null) {
       promptAction.showToast({ message: $r('app.string.toast_file_store_not_ready') });
@@ -3582,6 +3617,72 @@ struct Index {
       // No toast: the file went through the system's picker.
     } catch (e) {
       promptAction.showToast({ message: $r('app.string.toast_save_file_failed') });
+    }
+  }
+
+  // A picture item saved as a file, through the same document picker as a
+  // file (not to the gallery). A picture carries no name of its own (a
+  // screenshot never had one), so the picker suggests one built from where and
+  // when it was copied, with the extension of what the bytes really are.
+  private async savePictureToDocuments(item: SyncedItem): Promise<void> {
+    const picture: PictureFile | null = this.pictureFileOf(item);
+    if (picture === null) {
+      promptAction.showToast({ message: $r('app.string.toast_save_file_failed') });
+      return;
+    }
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const documentPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
+      const uris: Array<string> = await documentPicker.save({ newFileNames: [picture.name] });
+      if (uris.length === 0) return; // user canceled the picker
+      const destFile = fs.openSync(uris[0], fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(destFile.fd, picture.bytes);
+      } finally {
+        fs.closeSync(destFile);
+      }
+      // No toast: the file went through the system's picker.
+    } catch (e) {
+      promptAction.showToast({ message: $r('app.string.toast_save_file_failed') });
+    }
+  }
+
+  // A picture item's bytes and the file name to give them: "Image from
+  // <device> <date> <time>.<png|jpg|gif|webp>", in the current language.
+  // null when the item's content is not a picture.
+  private pictureFileOf(item: SyncedItem): PictureFile | null {
+    try {
+      const decoded: Uint8Array = base64Helper.decodeSync(item.content);
+      if (decoded.byteLength === 0) return null;
+      const bytes = decoded.buffer.slice(decoded.byteOffset, decoded.byteOffset + decoded.byteLength) as ArrayBuffer;
+      const when: Date = new Date(item.stamp);
+      const pad = (n: number): string => (n < 10 ? '0' : '') + n;
+      const stamp: string = isNaN(when.getTime()) ? item.time.replace(':', '.')
+        : `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())} ${pad(when.getHours())}.${pad(when.getMinutes())}`;
+      const ext: string = pictureExtension(decoded);
+      const base: string = this.str($r('app.string.image_save_name'), this.sourceLabelFor(item.deviceId), stamp);
+      return { name: safeFileName(`${base}.${ext}`, `image.${ext}`), bytes: bytes };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Writes a picture to the cache under its name and returns its file URI, for
+  // the previewer or another app to open. null if it could not be written.
+  private writePictureToCache(context: common.UIAbilityContext, picture: PictureFile): string | null {
+    try {
+      const dir = `${context.cacheDir}/opened`;
+      if (!fs.accessSync(dir)) fs.mkdirSync(dir);
+      const path = `${dir}/${picture.name}`;
+      const file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(file.fd, picture.bytes);
+      } finally {
+        fs.closeSync(file);
+      }
+      return fileUri.getUriFromPath(path);
+    } catch (e) {
+      return null;
     }
   }
 
@@ -5240,8 +5341,9 @@ struct Index {
         MenuItem({ content: $r('app.string.action_copy'), startIcon: $r('app.media.ic_menu_copy') }).onClick(() => { tapHaptic(); this.copyItemContent(item); })
       }
       MenuItem({ content: $r('app.string.action_share'), startIcon: $r('app.media.ic_menu_share') }).onClick(() => { tapHaptic(); void this.shareItem(item); })
-      if (item.type !== 'text' && item.type !== 'image') {
-        // Same shape as the preview title bar's Open button
+      if (item.type !== 'text') {
+        // Files and pictures alike (a picture saves as a file, through the
+        // same picker, not to the gallery). Same shape as the preview title bar's Open button
         // (sys.symbol.arrow_right_up_and_square), drawn in this menu's
         // stroke style.
         MenuItem({ content: $r('app.string.action_open'), startIcon: $r('app.media.ic_menu_open') }).onClick(() => { tapHaptic(); void this.openFileWithSystem(item); })
@@ -6386,7 +6488,7 @@ struct Index {
         },
       }, share, deleteButton]);
     }
-    if (item.type === 'file') {
+    if (item.type === 'file' || item.type === 'image') {
       return this.hdsTitleBar('', false, [{
         content: {
           label: $r('app.string.action_open'),

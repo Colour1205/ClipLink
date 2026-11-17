@@ -113,6 +113,9 @@ public sealed partial class ClipLinkEngine : IDisposable
     private DeviceIdentity identity = null!;
     private FileStore fileStore = null!;
     private IncomingFiles incomingFiles = null!;
+    // The files being sent to peers that acknowledge chunks, so their acks
+    // find them (see FileFlow and StreamFileToPeer).
+    private readonly SendWindows sendWindows = new();
     private HistoryAccess historyAccess = null!;
     private TrustStore trustStore = null!;
     private BlockStore blockStore = null!;
@@ -223,6 +226,7 @@ public sealed partial class ClipLinkEngine : IDisposable
             fileStore = new FileStore(label);
             incomingFiles = new IncomingFiles(fileStore, FileSizeOf);
             incomingFiles.Completed += OnTransferCompleted;
+            incomingFiles.ChunkDone += OnChunkDone;
             historyAccess = new HistoryAccess(label, fileStore, new DeletedEntries(label));
             trustStore = new TrustStore(label);
             blockStore = new BlockStore(label);

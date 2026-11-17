@@ -15,6 +15,7 @@ import contentPrintTest from './ContentPrint.test';
 import lineChannelTest from './LineChannel.test';
 import zoomMorphTest from './ZoomMorph.test';
 import transferProgressTest from './TransferProgress.test';
+import fileFlowTest from './FileFlow.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -34,4 +35,5 @@ export default function testsuite() {
   lineChannelTest();
   zoomMorphTest();
   transferProgressTest();
+  fileFlowTest();
 }

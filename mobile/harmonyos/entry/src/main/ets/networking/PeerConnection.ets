@@ -20,6 +20,7 @@ import { deviceFingerprint, normalizeDeviceName } from '../identity/DeviceName';
 import * as AesGcm from '../crypto/AesGcm';
 import { LineFramer } from './LineFramer';
 import { PROTOCOL_VERSION, negotiatedProtocol, peerProtocolOf } from './SyncProtocol';
+import { OWN_CAPS, acksFiles, peerCapsOf } from './FileFlow';
 
 const base64Helper = new util.Base64Helper();
 const decoder = util.TextDecoder.create('utf-8');
@@ -45,6 +46,12 @@ export interface HandshakeMessage {
   // just skips it. It is not signed (the signature covers only the ephemeral
   // key): a man in the middle who strips it only forces v1, the safe fallback.
   Protocol?: number;
+  // Optional - what else the sender can do, as short names (see FileFlow.ets).
+  // This build lists "file-ack": it paces file streams with file_ack. Absent
+  // means nothing: every older build, which gets exactly the old
+  // behaviour. Unknown names are ignored, and an older build's parser skips
+  // the whole field. Not signed either: stripping it only turns pacing off.
+  Caps?: string[];
 }
 
 // The handshake is the one plaintext line this side writes, and DeviceName is
@@ -239,19 +246,26 @@ export function sameIdentityKey(a: string, b: string): boolean {
 export const UNREAD_MAX_BYTES = 64 * 1024 * 1024;
 
 // What a trusted connection that is being read may hold in lines this side
-// has not got to yet (see TcpLineChannel.limitQueue). The socket API cannot
-// pause a sender, so when a PC sends a big file faster than the phone takes it
-// in, the lines wait here: a 290 MB file is about 516 MB on the wire, and a
-// PC on a fast network had sent most of it while the phone was still working
-// through the start. Past this, the connection is closed rather than the app
-// being killed for its memory, and the file is asked for again (the sender
+// has not got to yet (see TcpLineChannel.limitQueue). The socket API cannot pause a sender, so when a
+// PC sends a big file faster than the phone takes it in, the lines wait here:
+// a 290 MB file is about 516 MB on the wire, and a PC on a fast network sends
+// all of it in seconds. Past this, the connection is closed rather than the
+// app being killed for its memory, and the file is asked for again (the sender
 // starts over at chunk 0), though only once more: a file that fills it twice
 // is not asked for again on this run (see SyncManager's MAX_QUEUE_CLOSURES),
-// or every reconnect would tear the session down at the same point. Deliberately well above what the files people
-// normally send pile up to: the cure for a long queue is the phone keeping up
-// (see SyncManager.handleFileChunk), not this cap. Not measured on a phone
-// yet: check the "queue high" line the log prints after a big transfer.
-export const SESSION_QUEUE_MAX_BYTES = 512 * 1024 * 1024;
+// or every reconnect would tear the session down at the same point.
+//
+// It was 512 MB, which the phone could not hold: a 290 MB file from a PC died
+// with the shared heap out of memory at about 365 MB of large objects, the
+// waiting lines among them. 128 MB leaves the rest of that for what the app
+// needs at the same time - the line being worked on and its decoded and
+// decrypted copies, the chunks waiting to be written, the history and its
+// pictures - and is still far more than ever piles up in normal use: a
+// history of 25 pictures is about 13 MB, and a sender that paces its file
+// streams (file_ack, see FileFlow.ets) keeps at most about 4 MB of a file
+// here. Only an older sender, which does not pace, can still fill it, and
+// for it this cap is what stops the app being killed.
+export const SESSION_QUEUE_MAX_BYTES = 128 * 1024 * 1024;
 
 // Session lines decoded ahead of the one being decrypted (see listenLoop).
 const DECODE_AHEAD = 2;
@@ -377,7 +391,16 @@ export class TcpLineChannel {
       this.pendingLines.push(line);
       this.pendingBytes += line.length;
       if (this.pendingBytes > this.highWater) this.highWater = this.pendingBytes;
-      if (this.queueLimit >= 0 && this.pendingBytes > this.queueLimit) {
+      // One line may be up to MAX_LINE_BYTES (192 MB, a big picture), more
+      // than the cap, and it must still get through as it always did. So the
+      // line read next may take the queue past the cap, but only with a
+      // quarter of the cap behind it (32 MB: a history batch and a paced
+      // file stream's few chunks, with room to spare), not the whole cap: a
+      // 192 MB line and 128 MB of chunks from an older sender behind it,
+      // with the line's decoded and decrypted copies on top, is past what
+      // the phone ran out of memory at.
+      const allowed: number = Math.max(this.queueLimit, this.pendingLines[0].length + this.queueLimit / 4);
+      if (this.queueLimit >= 0 && this.pendingBytes > allowed) {
         // Closed, not trimmed: a line dropped from the middle would break
         // whatever it belonged to anyway (see SESSION_QUEUE_MAX_BYTES).
         this.pendingLines = [];
@@ -391,7 +414,8 @@ export class TcpLineChannel {
   }
 
   // Once the channel is being read: it holds at most maxBytes of lines not
-  // read yet, and closes past that (see SESSION_QUEUE_MAX_BYTES).
+  // read yet (or one longer line and a quarter of that behind it), and
+  // closes past that (see SESSION_QUEUE_MAX_BYTES and deliverLine).
   limitQueue(maxBytes: number): void {
     this.queueLimit = maxBytes;
   }
@@ -399,6 +423,12 @@ export class TcpLineChannel {
   // Whether a whole line is waiting to be read now, without waiting.
   get hasPendingLine(): boolean {
     return this.pendingLines.length > 0;
+  }
+
+  // Whether part of a line has arrived and the rest has not yet: a big line
+  // still coming in over a slow link.
+  get hasPartLine(): boolean {
+    return this.framer.bufferedBytes > 0;
   }
 
   // The most bytes of lines held at once since the last call, then starts
@@ -637,6 +667,9 @@ export class PeerConnection {
   // The sync protocol the peer's handshake says it speaks: 1 when it says
   // nothing (an older build), see SyncProtocol.peerProtocolOf.
   public readonly peerProtocol: number;
+  // What the peer's handshake says it can do (see FileFlow.peerCapsOf): empty
+  // for an older build.
+  public readonly peerCaps: string[];
   // Set by the first line that decrypts - see onSessionProven.
   private sessionProven: boolean = false;
   private sessionProvenCallbacks: Array<() => void> = [];
@@ -654,8 +687,13 @@ export class PeerConnection {
   private sentNonces: Set<string> | null = new Set<string>();
   // See holdReadsUntil.
   private readHold: Promise<void> | null = null;
+  // Lines listenLoop has taken from the channel and is decoding, oldest
+  // first, and whether it is working on one of its own right now (see
+  // isReceiving).
+  private ahead: Promise<Uint8Array>[] = [];
+  private lineInHand: boolean = false;
 
-  private constructor(channel: TcpLineChannel, sessionKey: Uint8Array, symKey: cryptoFramework.SymKey, peerDeviceId: string, wasAlreadyTrusted: boolean, newlyTrustedViaPassphrase: boolean, peerName: string | null, peerProtocol: number) {
+  private constructor(channel: TcpLineChannel, sessionKey: Uint8Array, symKey: cryptoFramework.SymKey, peerDeviceId: string, wasAlreadyTrusted: boolean, newlyTrustedViaPassphrase: boolean, peerName: string | null, peerProtocol: number, peerCaps: string[]) {
     this.channel = channel;
     this.sessionKey = sessionKey;
     this.symKey = symKey;
@@ -664,6 +702,14 @@ export class PeerConnection {
     this.newlyTrustedViaPassphrase = newlyTrustedViaPassphrase;
     this.peerName = peerName;
     this.peerProtocol = peerProtocol;
+    this.peerCaps = peerCaps;
+  }
+
+  // The peer paces file streams with file_ack (see FileFlow.ets): this side
+  // acknowledges the chunks it gets from it, and waits for its
+  // acknowledgements when it sends it a file. False for an older build.
+  get peerAcksFiles(): boolean {
+    return acksFiles(this.peerCaps);
   }
 
   // The protocol this connection speaks: 2 only if both sides sent 2 or more.
@@ -714,6 +760,7 @@ export class PeerConnection {
         PassphraseProof: myProof,
         DeviceName: ownName !== null ? (normalizeDeviceName(ownName) ?? undefined) : undefined,
         Protocol: PROTOCOL_VERSION,
+        Caps: OWN_CAPS,
       };
       await channel.writeLine(handshakeLine(myHandshake));
 
@@ -786,7 +833,7 @@ export class PeerConnection {
       const sentName: string | undefined = theirHandshake.DeviceName;
       const theirName: string | null = typeof sentName === 'string' ? normalizeDeviceName(sentName) : null;
       return new PeerConnection(channel, sessionKey, symKey, theirHandshake.IdentityPublicKey, effectivelyTrusted, passphraseVerified, theirName,
-        peerProtocolOf(theirHandshake.Protocol));
+        peerProtocolOf(theirHandshake.Protocol), peerCapsOf(theirHandshake.Caps));
     } catch (e) {
       return null;
     }
@@ -821,6 +868,15 @@ export class PeerConnection {
   // SESSION_QUEUE_MAX_BYTES). A later call replaces an earlier one.
   holdReadsUntil(until: Promise<void>): void {
     this.readHold = until;
+  }
+
+  // Something from the peer is on its way through this side: a line still
+  // arriving, lines waiting to be read, or one the read loop is decoding,
+  // decrypting or handing on. A line of 100 MB or more can take that long
+  // over a slow link, and nothing else gets through meanwhile, so a check
+  // that the peer has gone quiet waits for this to be false.
+  get isReceiving(): boolean {
+    return this.channel.hasPartLine || this.channel.hasPendingLine || this.ahead.length > 0 || this.lineInHand;
   }
 
   // The most bytes of lines waiting to be read at once since the last call
@@ -922,9 +978,10 @@ export class PeerConnection {
     // being decoded on a worker, instead of each waiting its turn: for a big
     // file that is most of each chunk's time. Lines are still handled one at
     // a time and in order.
-    const ahead: Promise<Uint8Array>[] = [];
+    const ahead: Promise<Uint8Array>[] = this.ahead;
     try {
       while (true) {
+        this.lineInHand = false;
         while (ahead.length < DECODE_AHEAD + 1 && this.channel.hasPendingLine) {
           const queued: Uint8Array | null = await this.channel.readLine();
           if (queued === null) break;
@@ -942,6 +999,7 @@ export class PeerConnection {
         // Decoded from the line's bytes, on a worker (the promise form):
         // decodeSync held the UI thread for 0.4 s on a 16 MB history
         // batch, right as the peer was about to count as connected.
+        this.lineInHand = true;
         const packed: Uint8Array = await ahead.shift()!;
         const nonce: string | null = nonceKey(packed);
         if (this.sentNonces !== null && nonce !== null && this.sentNonces.has(nonce)) {

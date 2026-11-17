@@ -93,6 +93,10 @@
       "value": "保存文件"
     },
     {
+      "name": "image_save_name",
+      "value": "来自%1$s的图片 %2$s"
+    },
+    {
       "name": "item_image",
       "value": "图片"
     },
