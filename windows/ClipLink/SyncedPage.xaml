@@ -49,6 +49,64 @@
             </StackPanel>
         </DataTemplate>
 
+        <!-- A file whose bytes are arriving: the speed and how far along (a
+             percentage), above one thin bar, in place of its size line (see
+             HistoryCard.ShowTransfer). The bar hangs into the space below the
+             line, so the card keeps its height. -->
+        <DataTemplate x:Key="TransferLine" x:DataType="local:HistoryCard">
+            <Grid Opacity="{x:Bind TransferOpacity, Mode=OneWay}"
+                  AutomationProperties.Name="{x:Bind TransferAutomationName, Mode=OneWay}">
+                <Grid.OpacityTransition>
+                    <ScalarTransition Duration="0:0:0.25" />
+                </Grid.OpacityTransition>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock Text="{x:Bind TransferLeft, Mode=OneWay}" Style="{StaticResource CaptionSecondary}"
+                           TextTrimming="CharacterEllipsis" Typography.NumeralAlignment="Tabular" />
+                <TextBlock Grid.Column="1" Text="{x:Bind TransferRight, Mode=OneWay}" Style="{StaticResource CaptionSecondary}"
+                           Margin="8,0,0,0" Typography.NumeralAlignment="Tabular" />
+                <local:TransferBar Grid.Row="1" Grid.ColumnSpan="2" Height="3" CornerRadius="1.5" Margin="0,3,0,-6"
+                                   Value="{x:Bind TransferFraction, Mode=OneWay}"
+                                   Visibility="{x:Bind TransferShowsBar, Mode=OneWay}"
+                                   Background="{ThemeResource ControlStrokeColorDefaultBrush}"
+                                   Fill="{ThemeResource AccentFillColorDefaultBrush}" />
+            </Grid>
+        </DataTemplate>
+
+        <!-- The same in the full view, where the right end says how much of
+             how much ("124 of 290 MB") instead of a percentage. -->
+        <DataTemplate x:Key="DetailTransferLine" x:DataType="local:HistoryCard">
+            <Grid Opacity="{x:Bind TransferOpacity, Mode=OneWay}"
+                  AutomationProperties.Name="{x:Bind TransferAutomationName, Mode=OneWay}">
+                <Grid.OpacityTransition>
+                    <ScalarTransition Duration="0:0:0.25" />
+                </Grid.OpacityTransition>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock Text="{x:Bind TransferLeft, Mode=OneWay}" Style="{StaticResource CaptionSecondary}"
+                           TextTrimming="CharacterEllipsis" Typography.NumeralAlignment="Tabular" />
+                <TextBlock Grid.Column="1" Text="{x:Bind TransferDetailRight, Mode=OneWay}" Style="{StaticResource CaptionSecondary}"
+                           Margin="8,0,0,0" Typography.NumeralAlignment="Tabular" />
+                <local:TransferBar Grid.Row="1" Grid.ColumnSpan="2" Height="3" CornerRadius="1.5" Margin="0,3,0,-6"
+                                   Value="{x:Bind TransferFraction, Mode=OneWay}"
+                                   Visibility="{x:Bind TransferShowsBar, Mode=OneWay}"
+                                   Background="{ThemeResource ControlStrokeColorDefaultBrush}"
+                                   Fill="{ThemeResource AccentFillColorDefaultBrush}" />
+            </Grid>
+        </DataTemplate>
+
         <DataTemplate x:Key="FileContent" x:DataType="local:HistoryCard">
             <Grid ColumnSpacing="12">
                 <Grid.ColumnDefinitions>
@@ -62,7 +120,34 @@
                 <StackPanel Grid.Column="1" VerticalAlignment="Center">
                     <TextBlock Text="{x:Bind FileName, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis"
                                ToolTipService.ToolTip="{x:Bind FileName, Mode=OneWay}" />
-                    <TextBlock Text="{x:Bind FileDetail, Mode=OneWay}" Style="{StaticResource CaptionSecondary}" />
+                    <TextBlock Text="{x:Bind FileDetail, Mode=OneWay}" Style="{StaticResource CaptionSecondary}"
+                               Visibility="{x:Bind ShowsFileDetail, Mode=OneWay}" />
+                    <ContentControl Content="{x:Bind}" ContentTemplate="{StaticResource TransferLine}"
+                                    Visibility="{x:Bind ShowsTransfer, Mode=OneWay}"
+                                    HorizontalContentAlignment="Stretch" IsTabStop="False" />
+                </StackPanel>
+            </Grid>
+        </DataTemplate>
+
+        <!-- A file in the full view: as on the card, but with DetailTransferLine. -->
+        <DataTemplate x:Key="DetailFileContent" x:DataType="local:HistoryCard">
+            <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border Width="40" Height="40" CornerRadius="4" VerticalAlignment="Top"
+                        Background="{ThemeResource SubtleFillColorSecondaryBrush}">
+                    <SymbolIcon Symbol="Document" />
+                </Border>
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    <TextBlock Text="{x:Bind FileName, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis"
+                               ToolTipService.ToolTip="{x:Bind FileName, Mode=OneWay}" />
+                    <TextBlock Text="{x:Bind FileDetail, Mode=OneWay}" Style="{StaticResource CaptionSecondary}"
+                               Visibility="{x:Bind ShowsFileDetail, Mode=OneWay}" />
+                    <ContentControl Content="{x:Bind}" ContentTemplate="{StaticResource DetailTransferLine}"
+                                    Visibility="{x:Bind ShowsTransfer, Mode=OneWay}"
+                                    HorizontalContentAlignment="Stretch" IsTabStop="False" />
                 </StackPanel>
             </Grid>
         </DataTemplate>
@@ -119,7 +204,11 @@
                     <TextBlock Text="{x:Bind FileName, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}"
                                TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxLines="2"
                                ToolTipService.ToolTip="{x:Bind FileName, Mode=OneWay}" />
-                    <TextBlock Text="{x:Bind FileDetail, Mode=OneWay}" Style="{StaticResource CaptionSecondary}" />
+                    <TextBlock Text="{x:Bind FileDetail, Mode=OneWay}" Style="{StaticResource CaptionSecondary}"
+                               Visibility="{x:Bind ShowsFileDetail, Mode=OneWay}" />
+                    <ContentControl Content="{x:Bind}" ContentTemplate="{StaticResource TransferLine}"
+                                    Visibility="{x:Bind ShowsTransfer, Mode=OneWay}"
+                                    HorizontalContentAlignment="Stretch" IsTabStop="False" />
                 </StackPanel>
             </Grid>
         </DataTemplate>
@@ -403,7 +492,7 @@
                                        CanDrag="True" DragStarting="Detail_DragStarting" DropCompleted="Item_DropCompleted"
                                        Visibility="Collapsed" />
                                 <ContentControl x:Name="DetailFile"
-                                                ContentTemplate="{StaticResource FileContent}"
+                                                ContentTemplate="{StaticResource DetailFileContent}"
                                                 HorizontalContentAlignment="Stretch" IsTabStop="False"
                                                 CanDrag="True" DragStarting="Detail_DragStarting" DropCompleted="Item_DropCompleted"
                                                 Visibility="Collapsed" />

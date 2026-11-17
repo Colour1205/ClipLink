@@ -21,11 +21,12 @@ public class PeerConnection
     // application-level ping/watchdog is what actually makes a connection
     // list reflect reality within seconds of a peer actually going away.
     private const string PingSentinel = "__ping__";
+    private static ReadOnlySpan<byte> PingSentinelUtf8 => "__ping__"u8;
     private const int HeartbeatIntervalMs = 5000;
     private const int HeartbeatTimeoutMs = 15000;
 
     private readonly TcpClient client;
-    private readonly StreamReader reader;
+    private readonly LineReader reader;
     // Lines are written straight to the stream (see Send) - the handshake's
     // StreamWriter flushes every write, so it never holds anything back.
     private readonly Stream stream;
@@ -87,8 +88,18 @@ public class PeerConnection
     // shows for a connected device. Null if it couldn't be read.
     public string? RemoteAddress { get; }
 
+    // Each decrypted message, as text. For whoever only wants strings (the
+    // tests' scripted peers); the engine uses MessageHandler.
     public event Action<string>? MessageReceived;
     public event Action? Disconnected;
+
+    // Each decrypted message as its UTF-8 bytes, awaited by the read loop
+    // before it reads the next line - which is what lets a file chunk wait
+    // for room in its file's write queue without the socket being read any
+    // faster than the disk keeps up. The bytes are only good until the
+    // returned task completes (the next line is decoded in the same buffer):
+    // a handler copies what it keeps. Set once, before Listen.
+    public Func<ReadOnlyMemory<byte>, ValueTask>? MessageHandler { get; set; }
 
     // Raised once, on the read loop, the first time a line from the peer
     // decrypts with the session key - a message or a heartbeat - and isn't
@@ -115,7 +126,7 @@ public class PeerConnection
     private HashSet<string>? sentNonces = new();
     private readonly object sentNoncesGate = new(); // Send runs off the read loop
 
-    private PeerConnection(TcpClient client, StreamReader reader, Stream stream, byte[] sessionKey, string peerDeviceId, bool wasAlreadyTrusted, bool newlyTrustedViaPassphrase, string? peerDeviceName, int peerProtocol, int ownProtocol)
+    private PeerConnection(TcpClient client, LineReader reader, Stream stream, byte[] sessionKey, string peerDeviceId, bool wasAlreadyTrusted, bool newlyTrustedViaPassphrase, string? peerDeviceName, int peerProtocol, int ownProtocol)
     {
         this.client = client;
         this.reader = reader;
@@ -179,7 +190,10 @@ public class PeerConnection
     public static async Task<PeerConnection?> CreateAsync(TcpClient client, DeviceIdentity myIdentity, TrustStore trustStore, PassphraseKeyStore passphraseKeyStore, string? myDeviceName = null, Action? answeredAsSelf = null, Func<string, bool>? isBlocked = null, int protocol = HandshakeMessage.CurrentProtocol, CancellationToken cancellationToken = default)
     {
         Stream stream = client.GetStream();
-        var reader = new StreamReader(stream);
+        // Bytes, not a StreamReader, from the first line on: whatever the
+        // peer sends straight after its handshake is already in this
+        // reader's buffer, and Listen goes on from there.
+        var reader = new LineReader(stream);
         var writer = new StreamWriter(stream) { AutoFlush = true };
 
         using var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
@@ -270,31 +284,25 @@ public class PeerConnection
             HandshakeMessage.Normalize(theirHandshake.Protocol), protocol);
     }
 
-    // The longest handshake line read (characters). A real one is a few
+    // The longest handshake line read (bytes, UTF-8). A real one is a few
     // hundred: two keys, a signature, a proof and a name.
     public const int MaxHandshakeChars = 16 * 1024;
 
     // The peer's handshake line, or null if the stream ends first or the
-    // line runs past MaxHandshakeChars. Anyone on the network can connect and
-    // send this before proving anything, and ReadLineAsync kept everything
-    // until a newline - a host streaming bytes without one made this buffer
+    // line runs past maxBytes. Anyone on the network can connect and send
+    // this before proving anything, and ReadLineAsync kept everything until
+    // a newline - a host streaming bytes without one made this buffer
     // gigabytes. Reads through reader, so whatever it has buffered beyond the
     // line is still there for Listen. A line ends at "\n" (every build ends
-    // its lines with "\n" or "\r\n"); a "\r" before it is dropped.
-    public static async Task<string?> ReadHandshakeLineAsync(StreamReader reader, int maxChars = MaxHandshakeChars, CancellationToken cancellationToken = default)
+    // its lines with "\n" or "\r\n"); a "\r" is dropped. UTF-8, without the
+    // byte order mark the StreamReader this replaced would have skipped.
+    public static async Task<string?> ReadHandshakeLineAsync(LineReader reader, int maxBytes = MaxHandshakeChars, CancellationToken cancellationToken = default)
     {
-        var line = new StringBuilder();
-        var one = new char[1];
-        while (true)
-        {
-            int read = await reader.ReadAsync(one.AsMemory(), cancellationToken);
-            if (read == 0) return null;
-            char c = one[0];
-            if (c == '\n') return line.ToString();
-            if (c == '\r') continue;
-            if (line.Length >= maxChars) return null;
-            line.Append(c);
-        }
+        byte[]? line = await reader.ReadHandshakeLineAsync(maxBytes, cancellationToken);
+        if (line == null) return null;
+        var text = line.AsSpan();
+        if (text.StartsWith(Encoding.UTF8.Preamble)) text = text[Encoding.UTF8.Preamble.Length..];
+        return Encoding.UTF8.GetString(text);
     }
 
     public Task Send(string message) => Send(Encoding.UTF8.GetBytes(message));
@@ -340,19 +348,30 @@ public class PeerConnection
         {
             while (true)
             {
-                string? line = await reader.ReadLineAsync();
-                if (line == null) break; // peer closed cleanly
+                if (await reader.ReadLineAsync() is not { } line) break; // peer closed cleanly
                 lastActivityAt = DateTime.UtcNow;
-                string decrypted = Decrypt(line);
-                if (!sessionProven)
+                // The line's bytes decoded into a buffer of their own, and
+                // decrypted where they are: no string of the line, and no
+                // string of the message unless someone asks for one.
+                byte[] packed = ByteBuffers.Rent(Base64.GetMaxDecodedFromUtf8Length(line.Length));
+                try
                 {
-                    // Before the ping check: a heartbeat proves the key just as well.
-                    sessionProven = true;
-                    lock (sentNoncesGate) sentNonces = null;
-                    SessionProven?.Invoke();
+                    var decrypted = Decrypt(line.Span, ref packed);
+                    if (!sessionProven)
+                    {
+                        // Before the ping check: a heartbeat proves the key just as well.
+                        sessionProven = true;
+                        lock (sentNoncesGate) sentNonces = null;
+                        SessionProven?.Invoke();
+                    }
+                    if (decrypted.Span.SequenceEqual(PingSentinelUtf8)) continue; // heartbeat only, not real data
+                    if (MessageHandler is { } handler) await handler(decrypted);
+                    MessageReceived?.Invoke(Encoding.UTF8.GetString(decrypted.Span));
                 }
-                if (decrypted == PingSentinel) continue; // heartbeat only, not real data
-                MessageReceived?.Invoke(decrypted);
+                finally
+                {
+                    ByteBuffers.Return(packed);
+                }
             }
         }
         catch (Exception ex)
@@ -366,6 +385,7 @@ public class PeerConnection
         {
             StopHeartbeat();
             decryptor.Dispose(); // only ever used by this loop
+            reader.Dispose();    // and so is this
             Disconnected?.Invoke();
         }
     }
@@ -417,14 +437,31 @@ public class PeerConnection
         }
     }
 
-    // Decrypted in place, in the bytes the line decodes to.
-    private string Decrypt(string packedBase64)
+    // A line's Base64 decoded into packed (from ByteBuffers, and replaced
+    // by a bigger one if it has to be) and decrypted in place there; returns
+    // the plaintext, inside packed. Base64 that the fast decoder won't take
+    // goes through Convert.FromBase64String, which the line reader this
+    // replaced always used: whatever it accepted is still accepted, and what
+    // it refused still ends the connection (its FormatException, caught in
+    // Listen).
+    private ReadOnlyMemory<byte> Decrypt(ReadOnlySpan<byte> line, ref byte[] packed)
     {
-        byte[] packed = Convert.FromBase64String(packedBase64);
-        if (packed.Length < NonceSize + TagSize) throw new CryptographicException("line too short"); // caught in Listen()
+        var status = Base64.DecodeFromUtf8(line, packed, out int consumed, out int length);
+        if (status != OperationStatus.Done || consumed != line.Length)
+        {
+            byte[] decoded = Convert.FromBase64String(Encoding.UTF8.GetString(line));
+            if (decoded.Length > packed.Length)
+            {
+                ByteBuffers.Return(packed);
+                packed = ByteBuffers.Rent(decoded.Length);
+            }
+            decoded.CopyTo(packed, 0);
+            length = decoded.Length;
+        }
+        if (length < NonceSize + TagSize) throw new CryptographicException("line too short"); // caught in Listen()
         ReadOnlySpan<byte> nonce = packed.AsSpan(0, NonceSize);
         ReadOnlySpan<byte> tag = packed.AsSpan(NonceSize, TagSize);
-        Span<byte> cipher = packed.AsSpan(NonceSize + TagSize);
+        Span<byte> cipher = packed.AsSpan(NonceSize + TagSize, length - NonceSize - TagSize);
         lock (sentNoncesGate)
         {
             if (sentNonces != null && sentNonces.Contains(Convert.ToBase64String(nonce)))
@@ -434,6 +471,6 @@ public class PeerConnection
         }
 
         decryptor.Decrypt(nonce, cipher, tag, cipher); // throws if tampered — caught in Listen()
-        return Encoding.UTF8.GetString(cipher);
+        return packed.AsMemory(NonceSize + TagSize, length - NonceSize - TagSize);
     }
 }

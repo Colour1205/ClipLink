@@ -238,6 +238,32 @@ export function sameIdentityKey(a: string, b: string): boolean {
 // 13 MB on the wire).
 export const UNREAD_MAX_BYTES = 64 * 1024 * 1024;
 
+// What a trusted connection that is being read may hold in lines this side
+// has not got to yet (see TcpLineChannel.limitQueue). The socket API cannot
+// pause a sender, so when a PC sends a big file faster than the phone takes it
+// in, the lines wait here: a 290 MB file is about 516 MB on the wire, and a
+// PC on a fast network had sent most of it while the phone was still working
+// through the start. Past this, the connection is closed rather than the app
+// being killed for its memory, and the file is asked for again (the sender
+// starts over at chunk 0), though only once more: a file that fills it twice
+// is not asked for again on this run (see SyncManager's MAX_QUEUE_CLOSURES),
+// or every reconnect would tear the session down at the same point. Deliberately well above what the files people
+// normally send pile up to: the cure for a long queue is the phone keeping up
+// (see SyncManager.handleFileChunk), not this cap. Not measured on a phone
+// yet: check the "queue high" line the log prints after a big transfer.
+export const SESSION_QUEUE_MAX_BYTES = 512 * 1024 * 1024;
+
+// Session lines decoded ahead of the one being decrypted (see listenLoop).
+const DECODE_AHEAD = 2;
+const NEWLINE = 10;
+
+// The ArrayBuffer holding exactly these bytes: their own when they fill it
+// from the start, otherwise a copy.
+export function exactBuffer(bytes: Uint8Array): ArrayBuffer {
+  if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) return bytes.buffer as ArrayBuffer;
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
 async function sha256(data: Uint8Array): Promise<Uint8Array> {
   const md = cryptoFramework.createMd('SHA256');
   await md.update({ data });
@@ -271,6 +297,13 @@ export class TcpLineChannel {
   // Went over unreadLimit: what was queued was dropped, and everything after
   // is ignored. Lines are missing, so the connection can't be used for sync.
   private overflow: boolean = false;
+  // See limitQueue: the most pendingLines may hold while the channel is being
+  // read, or -1 for no limit. Past it the channel closes.
+  private queueLimit: number = -1;
+  // The most pendingLines held since the last takeQueueHigh, for the log.
+  private highWater: number = 0;
+  // Closed by limitQueue.
+  queueOverflow: boolean = false;
   // When the socket last brought any bytes at all - a whole line or a piece
   // of one (see PeerConnection.lastHeardAt).
   private lastBytes: number = Date.now();
@@ -302,7 +335,7 @@ export class TcpLineChannel {
 
   private handleChunk(chunk: ArrayBuffer): void {
     this.lastBytes = Date.now();
-    if (this.overflow) return;
+    if (this.overflow || this.queueOverflow) return;
     if (this.unreadLimit >= 0 && this.pendingBytes + this.framer.bufferedBytes + chunk.byteLength > this.unreadLimit) {
       // Kept open, so the request can still be answered; only the bytes go.
       this.overflow = true;
@@ -328,6 +361,7 @@ export class TcpLineChannel {
       const end: number = lineBytes.length > 0 && lineBytes[lineBytes.length - 1] === CARRIAGE_RETURN
         ? lineBytes.length - 1 : lineBytes.length;
       this.deliverLine(end === lineBytes.length ? lineBytes : lineBytes.subarray(0, end));
+      if (this.queueOverflow) return;
     }
     // For waitForActivity, a partial line is already proof the peer is
     // talking (a big first message can take seconds to arrive in full over
@@ -342,8 +376,37 @@ export class TcpLineChannel {
     } else {
       this.pendingLines.push(line);
       this.pendingBytes += line.length;
+      if (this.pendingBytes > this.highWater) this.highWater = this.pendingBytes;
+      if (this.queueLimit >= 0 && this.pendingBytes > this.queueLimit) {
+        // Closed, not trimmed: a line dropped from the middle would break
+        // whatever it belonged to anyway (see SESSION_QUEUE_MAX_BYTES).
+        this.pendingLines = [];
+        this.pendingBytes = 0;
+        this.queueOverflow = true;
+        this.close();
+        return;
+      }
     }
     this.notifyActivity();
+  }
+
+  // Once the channel is being read: it holds at most maxBytes of lines not
+  // read yet, and closes past that (see SESSION_QUEUE_MAX_BYTES).
+  limitQueue(maxBytes: number): void {
+    this.queueLimit = maxBytes;
+  }
+
+  // Whether a whole line is waiting to be read now, without waiting.
+  get hasPendingLine(): boolean {
+    return this.pendingLines.length > 0;
+  }
+
+  // The most bytes of lines held at once since the last call, then starts
+  // counting again.
+  takeQueueHigh(): number {
+    const high: number = this.highWater;
+    this.highWater = this.pendingBytes;
+    return high;
   }
 
   // From now until something reads the channel (stopLimit), it holds at most
@@ -465,6 +528,24 @@ export class TcpLineChannel {
     await current;
   }
 
+  // A line that is still being made (encrypted and encoded), already ending
+  // in '\n', as bytes. Its place in the queue is taken now, when this is
+  // called, not when the bytes are ready: the next line can then be made
+  // while this one is written (a file's chunks are sent a few at a time, see
+  // SyncManager.streamFileToPeer), and lines still leave in the order they
+  // were sent. As bytes, not a string: the old `line + '\n'` built a second
+  // copy of a 466 KB string for every file chunk, which the socket then
+  // encoded to bytes again.
+  writeLineBytes(line: Promise<Uint8Array>): Promise<void> {
+    const current: Promise<void> = this.writeQueue
+      .then(() => line)
+      .then((bytes: Uint8Array) => this.client.send({ data: exactBuffer(bytes) }));
+    this.writeQueue = current.catch(() => {});
+    // `line` failing is reported through `current`, and only there.
+    line.catch(() => {});
+    return current;
+  }
+
   // Never throws - listenLoop's teardown calls it before telling SyncManager
   // the link is gone. Ends the channel here and now rather than waiting for
   // the socket's own 'close' event: a readLine() still waiting gets null, so
@@ -571,6 +652,8 @@ export class PeerConnection {
   // sender could "prove" the session with this side's own history batch or
   // ping. listenLoop refuses such a line instead. Keyed by nonceKey.
   private sentNonces: Set<string> | null = new Set<string>();
+  // See holdReadsUntil.
+  private readHold: Promise<void> | null = null;
 
   private constructor(channel: TcpLineChannel, sessionKey: Uint8Array, symKey: cryptoFramework.SymKey, peerDeviceId: string, wasAlreadyTrusted: boolean, newlyTrustedViaPassphrase: boolean, peerName: string | null, peerProtocol: number) {
     this.channel = channel;
@@ -711,13 +794,39 @@ export class PeerConnection {
 
   // The Base64 is made off the UI thread (Base64Helper's promise form runs
   // on a worker), as the read loop's decoding is: a history batch of images
-  // is tens of MB of it.
-  async send(message: string): Promise<void> {
+  // is tens of MB of it. Lines leave in the order send is called, even when
+  // several are being made at once (see TcpLineChannel.writeLineBytes); the
+  // bytes are the same Base64 line, ending in '\n', as before.
+  send(message: string): Promise<void> {
+    return this.channel.writeLineBytes(this.sealLine(message));
+  }
+
+  private async sealLine(message: string): Promise<Uint8Array> {
     const packed: Uint8Array = await AesGcm.encryptPacked(this.symKey, message);
-    // Before the write, so its echo can't arrive ahead of it.
+    // Before the write (which waits for this), so its echo can't arrive
+    // ahead of it.
     const nonce: string | null = nonceKey(packed);
     if (this.sentNonces !== null && nonce !== null) this.sentNonces.add(nonce);
-    await this.channel.writeLine(await base64Helper.encodeToString(packed));
+    const base64: Uint8Array = await base64Helper.encode(packed);
+    const line: Uint8Array = new Uint8Array(base64.length + 1);
+    line.set(base64);
+    line[base64.length] = NEWLINE;
+    return line;
+  }
+
+  // The next line is read only once `until` settles: SyncManager holds the
+  // reading while the file chunks it already has are still being written, so
+  // decoded chunks do not pile up in memory faster than the disk takes them.
+  // The lines wait in the channel meanwhile, as they arrived (see
+  // SESSION_QUEUE_MAX_BYTES). A later call replaces an earlier one.
+  holdReadsUntil(until: Promise<void>): void {
+    this.readHold = until;
+  }
+
+  // The most bytes of lines waiting to be read at once since the last call
+  // (see SESSION_QUEUE_MAX_BYTES), for the log after a big transfer.
+  takeQueueHigh(): number {
+    return this.channel.takeQueueHigh();
   }
 
   onMessage(callback: (message: string) => void): void {
@@ -771,6 +880,13 @@ export class PeerConnection {
     return this.channel.overflowed;
   }
 
+  // Closed because more than SESSION_QUEUE_MAX_BYTES of lines waited to be
+  // read: the sender was far ahead of this side. SyncManager stops asking for
+  // a file that keeps doing this (see its MAX_QUEUE_CLOSURES).
+  get queueOverflowed(): boolean {
+    return this.channel.queueOverflow;
+  }
+
   // Starts the read loop - fire-and-forget, matches PeerConnection.cs's
   // Listen() being kicked off without awaiting it. ANY failure (clean
   // close, corrupt/forged line that fails to decrypt) ends the whole
@@ -785,16 +901,40 @@ export class PeerConnection {
       return;
     }
     this.channel.stopLimit();
+    this.channel.limitQueue(SESSION_QUEUE_MAX_BYTES);
     void this.listenLoop();
     this.startHeartbeat();
   }
 
+  // A line's Base64 decoding, started (on a worker), with its failure kept
+  // for whoever awaits it: a line decoded ahead that is never reached (the
+  // loop ended first) must not become an unhandled rejection.
+  private decodeLine(line: Uint8Array): Promise<Uint8Array> {
+    const decoding: Promise<Uint8Array> = base64Helper.decode(line);
+    decoding.catch(() => { /* reported where it is awaited */ });
+    return decoding;
+  }
+
   private async listenLoop(): Promise<void> {
     let failed = false;
+    // Lines whose decoding has started, oldest first. While one line is
+    // decrypted and handled here on the UI thread, the next ones are already
+    // being decoded on a worker, instead of each waiting its turn: for a big
+    // file that is most of each chunk's time. Lines are still handled one at
+    // a time and in order.
+    const ahead: Promise<Uint8Array>[] = [];
     try {
       while (true) {
-        const line = await this.channel.readLine();
-        if (line === null) break;
+        while (ahead.length < DECODE_AHEAD + 1 && this.channel.hasPendingLine) {
+          const queued: Uint8Array | null = await this.channel.readLine();
+          if (queued === null) break;
+          ahead.push(this.decodeLine(queued));
+        }
+        if (ahead.length === 0) {
+          const line = await this.channel.readLine();
+          if (line === null) break;
+          ahead.push(this.decodeLine(line));
+        }
         // Decoded once: the nonce checked is the one decrypted with (see
         // nonceKey). Checked before decrypting: an echo of this side's own
         // envelope would decrypt (see sentNonces), and must neither prove
@@ -802,7 +942,7 @@ export class PeerConnection {
         // Decoded from the line's bytes, on a worker (the promise form):
         // decodeSync held the UI thread for 0.4 s on a 16 MB history
         // batch, right as the peer was about to count as connected.
-        const packed: Uint8Array = await base64Helper.decode(line);
+        const packed: Uint8Array = await ahead.shift()!;
         const nonce: string | null = nonceKey(packed);
         if (this.sentNonces !== null && nonce !== null && this.sentNonces.has(nonce)) {
           throw new Error('reflected line');
@@ -812,6 +952,11 @@ export class PeerConnection {
         if (!this.sessionProven) this.markSessionProven();
         if (decrypted === PING_SENTINEL) continue; // heartbeat only, not real data
         this.messageCallback?.(decrypted);
+        if (this.readHold !== null) {
+          const hold: Promise<void> = this.readHold;
+          this.readHold = null;
+          await hold;
+        }
       }
     } catch (e) {
       // abrupt disconnect, a corrupt/forged line that failed to decrypt,
@@ -830,7 +975,7 @@ export class PeerConnection {
       // link; a small idleMs means the peer (or a superseding connection,
       // see SyncManager.registerConnection) closed it.
       hilog.info(0x0001, 'ClipLinkNet', '%{public}s',
-        `conn closed: peer=${deviceFingerprint(this.peerDeviceId)} idleMs=${idleMs} failed=${failed}`);
+        `conn closed: peer=${deviceFingerprint(this.peerDeviceId)} idleMs=${idleMs} failed=${failed} queueFull=${this.channel.queueOverflow}`);
     }
   }
 

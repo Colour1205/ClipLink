@@ -767,6 +767,26 @@
     {
       "name": "READ_PASTEBOARD_reason",
       "value": "打开 ClipLink 时读取剪贴板，以便把你刚复制的内容发送到你的其他设备。"
+    },
+    {
+      "name": "transfer_stalled",
+      "value": "等待中"
+    },
+    {
+      "name": "transfer_retrying",
+      "value": "正在重试"
+    },
+    {
+      "name": "transfer_waiting",
+      "value": "等待设备"
+    },
+    {
+      "name": "transfer_stopped",
+      "value": "接收失败"
+    },
+    {
+      "name": "transfer_amount_of",
+      "value": "%1$s / %2$s %3$s"
     }
   ]
 }

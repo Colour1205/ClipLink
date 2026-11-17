@@ -652,8 +652,12 @@ public sealed partial class SyncedPage : Page
         if (args.Index == 0) ShowList(animate: true);
     }
 
-    // A file's bytes arriving, a device's new name, ...
-    private void Detail_PropertyChanged(object? sender, PropertyChangedEventArgs e) => UpdateDetail();
+    // A file's bytes arriving, a device's new name, ... (Not its progress,
+    // up to 4 times a second: the full view's bar is bound to that itself.)
+    private void Detail_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (!HistoryCard.IsTransferProperty(e.PropertyName)) UpdateDetail();
+    }
 
     private void UpdateDetail()
     {

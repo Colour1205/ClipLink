@@ -176,6 +176,7 @@ internal sealed class RawPeer : IDisposable
 {
     private readonly string label;
     private readonly List<Envelope> inbox = new();
+    private readonly List<string> texts = new();
     private PeerConnection? conn;
 
     public DeviceIdentity Identity { get; }
@@ -199,15 +200,20 @@ internal sealed class RawPeer : IDisposable
     public ClipboardEntry Make(string text, int minute) => TestData.Entry(Identity, text, minute);
 
     // The node must trust this peer already (TestNode.Trust), or it is a pairing request.
-    public async Task ConnectAsync(TestNode node, int protocol = HandshakeMessage.CurrentProtocol)
+    // port: where to dial instead of the node's own (a proxy in front of it, say).
+    public async Task ConnectAsync(TestNode node, int protocol = HandshakeMessage.CurrentProtocol, int? port = null)
     {
         var client = new TcpClient();
-        await client.ConnectAsync(IPAddress.Loopback, node.Port);
+        await client.ConnectAsync(IPAddress.Loopback, port ?? node.Port);
         conn = await PeerConnection.CreateAsync(client, Identity, new TrustStore(label), new PassphraseKeyStore(label), "raw peer", protocol: protocol);
         Assert.NotNull(conn);
         conn!.MessageReceived += msg =>
         {
-            lock (inbox) inbox.Add(JsonSerializer.Deserialize<Envelope>(msg)!);
+            lock (inbox)
+            {
+                texts.Add(msg);
+                inbox.Add(JsonSerializer.Deserialize<Envelope>(msg)!);
+            }
         };
         _ = conn.Listen();
     }
@@ -225,6 +231,15 @@ internal sealed class RawPeer : IDisposable
     }
 
     public Task SendAsync(string type, string payload) => conn!.Send(JsonSerializer.Serialize(new Envelope(type, payload)));
+
+    // A message exactly as given (UTF-8), encrypted like any other.
+    public Task SendUtf8Async(ReadOnlyMemory<byte> message) => conn!.Send(message);
+
+    // Every message received so far, as the text that was decrypted, oldest first.
+    public List<string> Texts
+    {
+        get { lock (inbox) { return texts.ToList(); } }
+    }
 
     public Task SendHeadAsync(IReadOnlyList<ClipboardEntry> history, params string[] deleted) =>
         SendAsync("history_head", JsonSerializer.Serialize(HistoryHead.ForSync(history, deleted)));

@@ -59,6 +59,12 @@ public sealed partial class ClipLinkEngine : IDisposable
     // is already listening on the port.
     public event Action<EngineStatus>? StatusChanged;
 
+    // GetTransfers() changed in more than its numbers: a file started
+    // arriving, was stored, failed, broke off, or was asked for again. Not
+    // raised as its bytes come in: a UI showing progress polls GetTransfers
+    // (a few times a second, only while one is Receiving) between these.
+    public event Action? TransfersChanged;
+
     // Bundles the state chunked file transfers need besides the streams
     // being received (those are IncomingFiles'): any entry that arrived (and
     // was verified) before its bytes finished streaming in, waiting to be
@@ -81,6 +87,11 @@ public sealed partial class ClipLinkEngine : IDisposable
         // sequences interleave on the wire - the actual cause of "file
         // transfer failed hash verification" on the receiving end.
         public ConcurrentDictionary<string, byte> StreamingInFlight = new();
+        // What GetTransfers says about a file that isn't arriving right now:
+        // just stored, asked for again, or waiting for a device that has it
+        // (see TransferPhase), and since when (Environment.TickCount64).
+        // Dropped when a stream of it starts, or once it is stored.
+        public ConcurrentDictionary<string, (TransferPhase Phase, long Since)> Notes = new(StringComparer.OrdinalIgnoreCase);
     }
 
     // The latest beacon heard from another device, trusted or not. Memory
@@ -210,7 +221,8 @@ public sealed partial class ClipLinkEngine : IDisposable
 
             identity = new DeviceIdentity(label);
             fileStore = new FileStore(label);
-            incomingFiles = new IncomingFiles(fileStore);
+            incomingFiles = new IncomingFiles(fileStore, FileSizeOf);
+            incomingFiles.Completed += OnTransferCompleted;
             historyAccess = new HistoryAccess(label, fileStore, new DeletedEntries(label));
             trustStore = new TrustStore(label);
             blockStore = new BlockStore(label);

@@ -14,6 +14,7 @@ import cardFooterTest from './CardFooter.test';
 import contentPrintTest from './ContentPrint.test';
 import lineChannelTest from './LineChannel.test';
 import zoomMorphTest from './ZoomMorph.test';
+import transferProgressTest from './TransferProgress.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -32,4 +33,5 @@ export default function testsuite() {
   contentPrintTest();
   lineChannelTest();
   zoomMorphTest();
+  transferProgressTest();
 }

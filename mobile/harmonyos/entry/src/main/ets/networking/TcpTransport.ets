@@ -19,6 +19,13 @@ const BIND_RETRY_MAX_MS = 30000;
 // default is 8 KB, and a 'message' event carries at most one buffer's
 // worth: a 16 MB history batch arrived as 2000 events, each a callback
 // and a copy on the UI thread (0.44 s of it in all, measured).
+//
+// Left as it is on purpose, for now. Setting the buffers turns off the
+// kernel's own sizing of them, which on Wi-Fi may cap one connection at
+// somewhere between 5 and 21 MB/s of file data - the same range the phone
+// manages today - but bigger (or unset) buffers may change the 'message'
+// size this depends on. Decide it from a measurement on a phone (an iperf
+// baseline against ClipLink's own "received a file" log line), not by guess.
 const SOCKET_BUFFER_BYTES = 262144;
 
 export class TcpServer {

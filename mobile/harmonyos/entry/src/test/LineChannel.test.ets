@@ -1,6 +1,6 @@
 import { describe, it, expect } from '@ohos/hypium';
 import socket from '@ohos.net.socket';
-import { PeerVerdict, TcpLike, TcpLineChannel } from '../main/ets/networking/PeerConnection';
+import { PeerVerdict, TcpLike, TcpLineChannel, exactBuffer } from '../main/ets/networking/PeerConnection';
 
 // ASCII only, so no text codec is needed.
 function bytesOf(s: string): ArrayBuffer {
@@ -26,6 +26,8 @@ function repeat(c: string, n: number): string {
 class FakeSocket implements TcpLike {
   private messageCallback: ((info: socket.SocketMessageInfo) => void) | null = null;
   closed: boolean = false;
+  // What was written, each send as text.
+  sent: string[] = [];
 
   onMessage(callback: (info: socket.SocketMessageInfo) => void): void {
     this.messageCallback = callback;
@@ -35,6 +37,8 @@ class FakeSocket implements TcpLike {
   }
 
   send(options: socket.TCPSendOptions): Promise<void> {
+    const data: string | ArrayBuffer = options.data;
+    this.sent.push(typeof data === 'string' ? data : textOf(new Uint8Array(data)));
     return Promise.resolve();
   }
 
@@ -121,6 +125,78 @@ export default function lineChannelTest() {
         expect(textOf(await channel.readLine())).assertEqual(repeat('a', 60));
       }
       expect(channel.overflowed).assertFalse();
+    });
+
+    // A trusted connection being read (see SESSION_QUEUE_MAX_BYTES): lines
+    // pile up only when this side falls behind, and past the cap it closes
+    // rather than holding more.
+    it('closesWhenTheReadQueueGoesOverItsCap', 0, async () => {
+      const fake = new FakeSocket();
+      const channel = new TcpLineChannel(fake);
+      fake.push('handshake\n');
+      await channel.readLine();
+      channel.limitQueue(100);
+      fake.push(`${repeat('a', 60)}\n`);
+      expect(channel.hasPendingLine).assertTrue();
+      expect(channel.isClosed).assertFalse();
+      fake.push(`${repeat('b', 60)}\n${repeat('c', 60)}\n`);
+      expect(channel.queueOverflow).assertTrue();
+      expect(channel.isClosed).assertTrue();
+      expect(fake.closed).assertTrue();
+      expect(channel.hasPendingLine).assertFalse();
+      expect(textOf(await channel.readLine())).assertEqual('null');
+    });
+
+    it('keepsWhatIsReadUnderTheCapAndNotesTheHighest', 0, async () => {
+      const fake = new FakeSocket();
+      const channel = new TcpLineChannel(fake);
+      fake.push('handshake\n');
+      await channel.readLine();
+      channel.limitQueue(100);
+      fake.push(`${repeat('a', 60)}\n`);
+      expect(textOf(await channel.readLine())).assertEqual(repeat('a', 60));
+      fake.push(`${repeat('b', 60)}\n`);
+      expect(textOf(await channel.readLine())).assertEqual(repeat('b', 60));
+      expect(channel.isClosed).assertFalse();
+      expect(channel.takeQueueHigh()).assertEqual(60);
+      expect(channel.takeQueueHigh()).assertEqual(0);
+    });
+
+    // A file's chunks are made a few at a time (see SyncManager.
+    // streamFileToPeer): each line keeps the place it was sent in, even
+    // when a later one is ready first.
+    it('writesLinesInTheOrderTheyWereSent', 0, async () => {
+      const fake = new FakeSocket();
+      const channel = new TcpLineChannel(fake);
+      let finishFirst: (bytes: Uint8Array) => void = (bytes: Uint8Array): void => {};
+      const first: Promise<Uint8Array> = new Promise<Uint8Array>((resolve: (bytes: Uint8Array) => void) => {
+        finishFirst = resolve;
+      });
+      const one: Promise<void> = channel.writeLineBytes(first);
+      const two: Promise<void> = channel.writeLineBytes(Promise.resolve(new Uint8Array(bytesOf('second\n'))));
+      await new Promise<void>((resolve: () => void) => { setTimeout(resolve, 10); });
+      expect(fake.sent.length).assertEqual(0);
+      finishFirst(new Uint8Array(bytesOf('first\n')));
+      await one;
+      await two;
+      expect(fake.sent.join('')).assertEqual('first\nsecond\n');
+    });
+
+    it('goesOnWritingAfterALineFailsToBeMade', 0, async () => {
+      const fake = new FakeSocket();
+      const channel = new TcpLineChannel(fake);
+      let failed: boolean = false;
+      await channel.writeLineBytes(Promise.reject<Uint8Array>(new Error('no line'))).catch(() => { failed = true; });
+      await channel.writeLineBytes(Promise.resolve(new Uint8Array(bytesOf('next\n'))));
+      expect(failed).assertTrue();
+      expect(fake.sent.join('')).assertEqual('next\n');
+    });
+
+    it('sendsExactlyTheLinesBytes', 0, () => {
+      const backing: Uint8Array = new Uint8Array(bytesOf('xxline\nyy'));
+      expect(textOf(new Uint8Array(exactBuffer(backing.subarray(2, 7))))).assertEqual('line\n');
+      const whole: Uint8Array = new Uint8Array(bytesOf('all'));
+      expect(exactBuffer(whole) === whole.buffer).assertTrue();
     });
 
     // The heartbeat counts any bytes once the session is proven (see

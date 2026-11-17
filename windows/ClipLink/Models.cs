@@ -201,6 +201,194 @@ public sealed class HistoryCard : Observable
         return taken;
     }
 
+    // ---- a file arriving ------------------------------------------------------
+    // While a file's bytes arrive (EngineHost.ApplyTransfers, about 4 times a
+    // second): one thin bar where the card's size line was, with the speed
+    // above its left end and how far along above its right end - a
+    // percentage on the card, "124 of 290 MB" in the full view
+    // (TransferDetailRight). When the file is in, the bar fills, fades and
+    // the size line is back. A transfer that broke off, or a file nobody
+    // connected has, gets a few plain words instead of the numbers. Only these
+    // properties change meanwhile: the list is never rebuilt for progress.
+
+    private bool showsTransfer;
+    private double transferFraction;
+    private bool transferShowsBar;
+    private string transferLeft = "", transferRight = "", transferDetailRight = "";
+    private double transferOpacity = 1;
+    private long transferTotal;
+    private bool finishing;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? finishTimer;
+
+    // How long a full bar stays before it fades, and how long it fades
+    // (TransferOpacity's transition in the templates).
+    private const int FullHoldMs = 300, FadeMs = 250;
+
+    public bool ShowsTransfer => showsTransfer;
+    public bool ShowsFileDetail => !showsTransfer;
+    public double TransferFraction => transferFraction;
+    public bool TransferShowsBar => transferShowsBar;
+    public string TransferLeft => transferLeft;
+    public string TransferRight => transferRight;
+    public string TransferDetailRight => transferDetailRight;
+    public double TransferOpacity => transferOpacity;
+    public string TransferAutomationName => string.Join(", ", new[] { transferLeft, transferDetailRight }.Where(part => part.Length > 0));
+
+    // Where this card's file stands: transfer is what GetTransfers says about
+    // it (null: nothing), speed how fast it has been arriving, now the clock
+    // speed was fed with.
+    public void ShowTransfer(IncomingTransfer? transfer, TransferSpeed? speed, long now)
+    {
+        if (finishing)
+        {
+            // Filling and fading: only a new stream of it interrupts that.
+            if (transfer?.Phase != TransferPhase.Receiving) return;
+            StopFinish();
+        }
+        switch (transfer?.Phase)
+        {
+            case TransferPhase.Receiving:
+                long received = transfer.Received;
+                long total = transfer.Total ?? (Item.SizeBytes is long size and > 0 ? size : 0);
+                transferTotal = total;
+                string left = speed?.IsStalled(now) == true ? TransferText.Stalled
+                    : speed?.BytesPerSecond(now) is double bytesPerSecond ? TransferText.Speed(bytesPerSecond)
+                    : "";
+                SetTransfer(true, total > 0 ? (double)received / total : 0, true, left,
+                    total > 0 ? TransferText.Percent(received, total) : TransferText.Size(received),
+                    total > 0 ? TransferText.OfTotal(received, total) : TransferText.Size(received));
+                break;
+            case TransferPhase.Retrying when !Item.IsAvailable:
+                SetTransfer(true, 0, false, TransferText.Retrying, "", "");
+                break;
+            case TransferPhase.NoSender when !Item.IsAvailable:
+                SetTransfer(true, 0, false, TransferText.NoSender, "", "");
+                break;
+            case TransferPhase.Done when showsTransfer && transferShowsBar:
+                BeginFinish();
+                break;
+            case TransferPhase.Done:
+                // Never seen arriving here (or last seen failing): nothing to finish.
+                if (showsTransfer) HideTransfer();
+                break;
+            default:
+                if (showsTransfer) HideTransfer();
+                break;
+        }
+    }
+
+    // The bar fills, stays a moment, fades, and the size line is back.
+    // Straight to the size line, after the moment, with animations off.
+    private void BeginFinish()
+    {
+        finishing = true;
+        string right = transferTotal > 0 ? TransferText.Percent(transferTotal, transferTotal, done: true) : transferRight;
+        string detailRight = transferTotal > 0 ? TransferText.OfTotal(transferTotal, transferTotal) : transferDetailRight;
+        SetTransfer(true, 1, true, transferLeft, right, detailRight);
+        After(FullHoldMs, () =>
+        {
+            if (!MotionPreference.Enabled)
+            {
+                HideTransfer();
+                return;
+            }
+            transferOpacity = 0;
+            Raise(nameof(TransferOpacity));
+            After(FadeMs, HideTransfer);
+        });
+    }
+
+    private void HideTransfer()
+    {
+        StopFinish();
+        SetTransfer(false, 0, false, "", "", "");
+        if (transferOpacity != 1)
+        {
+            // (Hidden by now: the transition back to 1 isn't seen.)
+            transferOpacity = 1;
+            Raise(nameof(TransferOpacity));
+        }
+    }
+
+    private void StopFinish()
+    {
+        finishing = false;
+        finishTimer?.Stop();
+        if (transferOpacity != 1)
+        {
+            transferOpacity = 1;
+            Raise(nameof(TransferOpacity));
+        }
+    }
+
+    private void After(int ms, Action then)
+    {
+        finishTimer ??= Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
+        finishTimer.Stop();
+        finishTimer.IsRepeating = false;
+        finishTimer.Interval = TimeSpan.FromMilliseconds(ms);
+        finishTimer.Tick -= OnFinishTick;
+        finishStep = then;
+        finishTimer.Tick += OnFinishTick;
+        finishTimer.Start();
+    }
+
+    private Action? finishStep;
+
+    private void OnFinishTick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
+    {
+        sender.Stop();
+        var step = finishStep;
+        finishStep = null;
+        step?.Invoke();
+    }
+
+    // Raises only what changed.
+    private void SetTransfer(bool shows, double fraction, bool showsBar, string left, string right, string detailRight)
+    {
+        var changed = new List<string>(8);
+        if (shows != showsTransfer)
+        {
+            showsTransfer = shows;
+            changed.Add(nameof(ShowsTransfer));
+            changed.Add(nameof(ShowsFileDetail));
+        }
+        if (fraction != transferFraction)
+        {
+            transferFraction = fraction;
+            changed.Add(nameof(TransferFraction));
+        }
+        if (showsBar != transferShowsBar)
+        {
+            transferShowsBar = showsBar;
+            changed.Add(nameof(TransferShowsBar));
+        }
+        if (left != transferLeft)
+        {
+            transferLeft = left;
+            changed.Add(nameof(TransferLeft));
+        }
+        if (right != transferRight)
+        {
+            transferRight = right;
+            changed.Add(nameof(TransferRight));
+        }
+        if (detailRight != transferDetailRight)
+        {
+            transferDetailRight = detailRight;
+            changed.Add(nameof(TransferDetailRight));
+        }
+        if (changed.Count == 0) return;
+        changed.Add(nameof(TransferAutomationName));
+        Raise(changed.ToArray());
+    }
+
+    // The properties above: none of them changes what the full view shows
+    // besides its own bar (SyncedPage skips them).
+    public static bool IsTransferProperty(string? name) => name is nameof(ShowsTransfer) or nameof(ShowsFileDetail) or nameof(TransferFraction)
+        or nameof(TransferShowsBar) or nameof(TransferLeft) or nameof(TransferRight) or nameof(TransferDetailRight) or nameof(TransferOpacity)
+        or nameof(TransferAutomationName);
+
     public bool CanCopy => IsText || IsImage || (IsFile && Item.IsAvailable);
     public bool CanOpen => IsImage || (IsFile && Item.IsAvailable);
 

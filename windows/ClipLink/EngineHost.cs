@@ -26,6 +26,7 @@ public sealed class EngineHost : Observable
         Engine.PairingRequested += pending => Post(() => PairingRequested?.Invoke(pending));
         Engine.PairingResolved += (id, decision) => Post(() => PairingResolved?.Invoke(id, decision));
         Engine.StatusChanged += _ => Post(RefreshStatus);
+        Engine.TransfersChanged += () => Post(ApplyTransfers);
 
         // "5 min ago" moves on by itself.
         clock = dispatcher.CreateTimer();
@@ -34,6 +35,11 @@ public sealed class EngineHost : Observable
         {
             foreach (var card in cards.Values) card.Tick();
         };
+
+        // A file's progress, while one is arriving (see ApplyTransfers).
+        transferClock = dispatcher.CreateTimer();
+        transferClock.Interval = TimeSpan.FromMilliseconds(250);
+        transferClock.Tick += (_, _) => ApplyTransfers();
     }
 
     public ClipLinkEngine Engine { get; } = new();
@@ -95,6 +101,7 @@ public sealed class EngineHost : Observable
     public void Stop()
     {
         clock.Stop();
+        transferClock.Stop();
         Engine.Stop();
     }
 
@@ -259,7 +266,56 @@ public sealed class EngineHost : Observable
             if (card.IsPicture && card.Item.IsAvailable && !card.ThumbnailRequested) _ = LoadThumbnailAsync(card);
         }
         Raise(nameof(HistoryIsEmpty));
+        // A card made while its file is arriving shows how far along it is at
+        // once. One showing a transfer is looked at again too: its file may
+        // have come some other way meanwhile (copied on this PC, say), with
+        // no word from the engine about transfers.
+        if (made.Count > 0 || cards.Values.Any(card => card.ShowsTransfer)) ApplyTransfers();
         if (arrived.Count > 0) ItemsArrived?.Invoke(arrived);
+    }
+
+    // ---- files arriving -----------------------------------------------------
+
+    private readonly DispatcherQueueTimer transferClock;
+    // How fast each arriving file has come so far, by its hash.
+    private readonly Dictionary<string, TransferSpeed> speeds = new(StringComparer.OrdinalIgnoreCase);
+
+    // Shows where each file being received stands on its cards. Runs when
+    // the engine says something changed (a file started, was stored,
+    // failed), and 4 times a second while one is arriving - never more, and
+    // not at all while none is. It only sets the cards' progress: the list
+    // isn't touched.
+    private void ApplyTransfers()
+    {
+        IReadOnlyList<IncomingTransfer> transfers;
+        try
+        {
+            transfers = Engine.GetTransfers();
+        }
+        catch (InvalidOperationException)
+        {
+            return; // not started
+        }
+        long now = Environment.TickCount64;
+        var byHash = new Dictionary<string, IncomingTransfer>(StringComparer.OrdinalIgnoreCase);
+        foreach (var transfer in transfers) byHash[transfer.FileHash] = transfer;
+        foreach (string hash in speeds.Keys.Where(hash => byHash.GetValueOrDefault(hash)?.Phase != TransferPhase.Receiving).ToList())
+        {
+            speeds.Remove(hash);
+        }
+        foreach (var transfer in transfers.Where(transfer => transfer.Phase == TransferPhase.Receiving))
+        {
+            if (!speeds.TryGetValue(transfer.FileHash, out var speed)) speeds[transfer.FileHash] = speed = new TransferSpeed();
+            speed.Add(now, transfer.Received);
+        }
+        foreach (var card in cards.Values)
+        {
+            if (card.Item.FileHash is not { } hash) continue;
+            var transfer = byHash.GetValueOrDefault(hash);
+            card.ShowTransfer(transfer, transfer != null ? speeds.GetValueOrDefault(hash) : null, now);
+        }
+        if (speeds.Count == 0) transferClock.Stop();
+        else if (!transferClock.IsRunning) transferClock.Start();
     }
 
     private void ApplyDevices(IReadOnlyList<DeviceListing> devices)

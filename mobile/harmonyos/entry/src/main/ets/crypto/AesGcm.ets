@@ -77,9 +77,11 @@ export async function encryptPacked(symKey: cryptoFramework.SymKey, plaintext: s
   const output = await cipher.doFinal({ data: utf8Bytes(plaintext) });
 
   // Working hypothesis: output.data = ciphertext || tag (16 bytes at the end).
+  // Views, not copies: concatBytes copies them into the packed line anyway,
+  // and a file chunk's ciphertext is about 350 KB.
   const outBytes = output.data;
-  const cipherBytes = outBytes.slice(0, outBytes.length - TAG_SIZE);
-  const tag = outBytes.slice(outBytes.length - TAG_SIZE);
+  const cipherBytes = outBytes.subarray(0, outBytes.length - TAG_SIZE);
+  const tag = outBytes.subarray(outBytes.length - TAG_SIZE);
 
   return concatBytes([nonce, tag, cipherBytes]);
 }
@@ -91,6 +93,12 @@ export async function decryptPacked(symKey: cryptoFramework.SymKey, packed: Uint
   if (packed.length < NONCE_SIZE + TAG_SIZE) {
     throw new Error('packed message too short');
   }
+  // Copies, not views, on purpose: these go to the native cipher, and
+  // whether it honours a view's offset into a bigger buffer is not checked on
+  // a phone yet (the unit tests have no real crypto). A view would save one
+  // copy of about 350 KB per file chunk. The cipher is also made per line,
+  // not kept per connection, for the same reason: re-initialising one after
+  // doFinal is not proven here, and a failure would end every connection.
   const nonce = packed.slice(0, NONCE_SIZE);
   const tag = packed.slice(NONCE_SIZE, NONCE_SIZE + TAG_SIZE);
   const cipherBytes = packed.slice(NONCE_SIZE + TAG_SIZE);

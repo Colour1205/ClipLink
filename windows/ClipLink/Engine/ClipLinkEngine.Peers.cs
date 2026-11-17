@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
 using ClipboardDaemon.Crypto;
 using ClipboardDaemon.Networking;
@@ -11,13 +12,43 @@ namespace ClipboardDaemon.Engine;
 // messages, history batches and chunked file transfers.
 public sealed partial class ClipLinkEngine
 {
-    private void HandleMessage(string msg, PeerConnection conn)
+    // One message from a peer, as its UTF-8 bytes, on its connection's read
+    // loop (see PeerConnection.MessageHandler). A file chunk of the usual
+    // shape is read from the bytes as they are (FileChunk); anything else
+    // becomes the string HandleMessage has always read. The bytes are only
+    // good until this returns, and are read before anything is awaited.
+    private async ValueTask HandleMessageUtf8(ReadOnlyMemory<byte> message, PeerConnection conn)
+    {
+        // One bad message is skipped, not fatal. An exception escaping
+        // here used to end the whole connection with nothing logged (it
+        // unwinds PeerConnection.Listen's read loop) - e.g. two peers'
+        // history batches saving at once, or a malformed file message -
+        // which looked like the connection randomly dropping.
+        try
+        {
+            using var chunk = FileChunk.TryRead(message.Span);
+            if (chunk != null)
+            {
+                await HandleFileChunk(chunk, conn);
+                return;
+            }
+            await HandleMessage(Encoding.UTF8.GetString(message.Span), conn);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[conn] error handling a message from {DeviceLabel.ShortId(conn.PeerDeviceId)} (connection kept): {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // Only a file chunk is awaited (see ReceiveChunkAsync); everything else
+    // is done by the time this returns.
+    private ValueTask HandleMessage(string msg, PeerConnection conn)
     {
         var envelope = JsonSerializer.Deserialize<Envelope>(msg);
         if (envelope == null)
         {
             Console.WriteLine("Received invalid message from peer."); // debug
-            return;
+            return default;
         }
 
         if (envelope.Type == "entry")
@@ -26,18 +57,18 @@ public sealed partial class ClipLinkEngine
             if (entry == null)
             {
                 Console.WriteLine("Received invalid message from peer."); // debug
-                return;
+                return default;
             }
             if (!SigningService.Verify(entry, entry.DeviceId) || !trustStore.IsTrusted(entry.DeviceId))
             {
                 Console.WriteLine($"Received {entry.Type} message with invalid signature from peer (verified={SigningService.Verify(entry, entry.DeviceId)}, trusted={trustStore.IsTrusted(entry.DeviceId)}).");
-                return;
+                return default;
             }
             if (historyAccess.isEntryDeleted(entry))
             {
                 // deleted here earlier - neither back into history nor onto the clipboard
                 Console.WriteLine($"[clip] received {entry.Type} entry from {DeviceLabel.ShortId(entry.DeviceId)} - deleted here, ignoring");
-                return;
+                return default;
             }
             // Into history first, and onto the clipboard only if history took
             // it: one already here, deleted meanwhile, or older than everything
@@ -46,7 +77,7 @@ public sealed partial class ClipLinkEngine
             if (!historyAccess.addToHistory(entry))
             {
                 Console.WriteLine($"[clip] received {entry.Type} entry from {DeviceLabel.ShortId(entry.DeviceId)} - already here, deleted, or older than all history keeps; ignoring");
-                return;
+                return default;
             }
             Console.WriteLine($"[clip] received {entry.Type} entry from {DeviceLabel.ShortId(entry.DeviceId)} - applying");
             NotifyHistoryChanged();
@@ -74,7 +105,7 @@ public sealed partial class ClipLinkEngine
                 Console.WriteLine("Received invalid message from peer."); // debug
                 // On a version 2 connection a batch answers a request, which
                 // must leave the queue: one nobody can read is an empty answer.
-                if (conn.Protocol < 2) return;
+                if (conn.Protocol < 2) return default;
                 entries = new List<ClipboardEntry>();
             }
             HandleHistoryBatch(entries, conn);
@@ -89,7 +120,7 @@ public sealed partial class ClipLinkEngine
         }
         else if (envelope.Type == "file_chunk")
         {
-            HandleFileChunk(envelope.Payload, conn);
+            return HandleFileChunk(envelope.Payload, conn);
         }
         else if (envelope.Type == "file_request")
         {
@@ -102,8 +133,8 @@ public sealed partial class ClipLinkEngine
         else
         {
             Console.WriteLine("Received message with unknown type from peer.");
-            return;
         }
+        return default;
     }
 
     // A peer's history_head. From a version 2 peer (see HandleSyncHead) it is
@@ -634,9 +665,15 @@ public sealed partial class ClipLinkEngine
     private void RequestAgain(string fileHash, IEnumerable<PeerConnection> from)
     {
         var live = from.ToList();
-        if (live.Count == 0 || stopping.IsCancellationRequested
+        if (stopping.IsCancellationRequested
             || fileStore.Exists(fileHash) || incomingFiles.IsReceiving(fileHash) || !IsWanted(fileHash))
         {
+            return;
+        }
+        if (live.Count == 0)
+        {
+            // (For the card: nobody to ask until a device connects.)
+            NoteTransfer(fileHash, TransferPhase.NoSender);
             return;
         }
         int tries = fileTransferState.Retries.AddOrUpdate(fileHash, 1, (_, previous) => previous + 1);
@@ -646,10 +683,19 @@ public sealed partial class ClipLinkEngine
             {
                 Console.WriteLine($"[file] giving up on {fileHash[..12]}... until a device connects");
             }
+            NoteTransfer(fileHash, TransferPhase.NoSender);
             return;
         }
         Console.WriteLine($"[file] asking for {fileHash[..12]}... again ({tries} of {MaxFileRetries})");
+        NoteTransfer(fileHash, TransferPhase.Retrying);
         SendFileRequest(fileHash, live);
+    }
+
+    // What GetTransfers says about fileHash until a stream of it starts.
+    private void NoteTransfer(string fileHash, TransferPhase phase)
+    {
+        fileTransferState.Notes[fileHash] = (phase, Environment.TickCount64);
+        NotifyTransfersChanged();
     }
 
     // The files conn was still sending can't be resumed, only started over
@@ -663,6 +709,7 @@ public sealed partial class ClipLinkEngine
             var abandoned = incomingFiles.AbandonAll(conn);
             if (abandoned.Count == 0) return;
             Console.WriteLine($"[file] {abandoned.Count} file transfer(s) from {DeviceLabel.ShortId(conn.PeerDeviceId)} broke off");
+            NotifyTransfersChanged();
             var others = connectionsByDeviceId.Values.Where(other => other != conn).ToList();
             foreach (string hash in abandoned)
             {
@@ -700,10 +747,11 @@ public sealed partial class ClipLinkEngine
         // already broadcast to everyone else too; someone else might have it
     }
 
-    // One chunk of a file conn is streaming. Which chunks are written, and
-    // which ignored, is IncomingFiles' to say: one sender's stream per file,
-    // from chunk 0, with no gaps.
-    private void HandleFileChunk(string payloadJson, PeerConnection conn)
+    // One chunk of a file conn is streaming, as a string: the old way, for a
+    // message FileChunk doesn't read (see there). Which chunks are written,
+    // and which ignored, is IncomingFiles' to say: one sender's stream per
+    // file, from chunk 0, with no gaps.
+    private ValueTask HandleFileChunk(string payloadJson, PeerConnection conn)
     {
         FileChunkMessage? chunk;
         try
@@ -711,7 +759,7 @@ public sealed partial class ClipLinkEngine
             chunk = JsonSerializer.Deserialize<FileChunkMessage>(payloadJson);
         }
         catch (JsonException) { chunk = null; }
-        if (chunk == null || !FileStore.IsValidHash(chunk.FileHash) || chunk.DataBase64 == null) return;
+        if (chunk == null || !FileStore.IsValidHash(chunk.FileHash) || chunk.DataBase64 == null) return default;
 
         byte[] chunkBytes;
         try
@@ -719,23 +767,79 @@ public sealed partial class ClipLinkEngine
             // "" is no bytes: a 0-byte file's one chunk.
             chunkBytes = Convert.FromBase64String(chunk.DataBase64);
         }
-        catch (FormatException) { return; }
+        catch (FormatException) { return default; }
+        return ReceiveChunkAsync(conn, chunk.FileHash, chunk.ChunkIndex, chunk.IsLast, ChunkData.Of(chunkBytes));
+    }
 
-        string shortHash = chunk.FileHash[..12];
-        string shortPeer = DeviceLabel.ShortId(conn.PeerDeviceId);
-        var result = incomingFiles.Receive(conn, chunk, chunkBytes);
-        if (chunk.ChunkIndex == 0 && result.Outcome is IncomingFiles.Outcome.Written or IncomingFiles.Outcome.Stored)
+    // The same, read from its bytes. A chunk that would only be ignored
+    // (another sender's copy of a file already arriving, say) isn't even
+    // decoded.
+    private ValueTask HandleFileChunk(FileChunk chunk, PeerConnection conn)
+    {
+        if (chunk.FileHash is not { } hash || !FileStore.IsValidHash(hash) || !chunk.HasData) return default;
+        if (incomingFiles.WouldIgnore(conn, hash, chunk.ChunkIndex))
         {
-            Console.WriteLine($"[file] receiving {shortHash}... from {shortPeer}");
+            ChunkIgnored(conn, hash, chunk.IsLast);
+            return default;
         }
+        if (!chunk.TryDecode(out var data)) return default;
+        return ReceiveChunkAsync(conn, hash, chunk.ChunkIndex, chunk.IsLast, data);
+    }
+
+    // A chunk's bytes to IncomingFiles (which releases them). It is written
+    // off the read loop, by the file's writer: how a stream ends - stored,
+    // or failed in writing or in its check - comes to OnTransferCompleted.
+    // Waits only while that file's write queue is full.
+    private async ValueTask ReceiveChunkAsync(PeerConnection conn, string fileHash, int chunkIndex, bool isLast, ChunkData data)
+    {
+        var result = await incomingFiles.ReceiveAsync(conn, fileHash, chunkIndex, isLast, data);
+        switch (result.Outcome)
+        {
+            case IncomingFiles.Outcome.Written when chunkIndex == 0:
+                Console.WriteLine($"[file] receiving {fileHash[..12]}... from {DeviceLabel.ShortId(conn.PeerDeviceId)}");
+                fileTransferState.Notes.TryRemove(fileHash, out _);
+                NotifyTransfersChanged();
+                break;
+            case IncomingFiles.Outcome.Stored or IncomingFiles.Outcome.Failed:
+                // (Stored here: a transfer IncomingFiles.Receive started,
+                // never the engine's, but told the same way. Failed: a gap,
+                // or no file for it.)
+                TransferEnded(conn, fileHash, result);
+                break;
+            case IncomingFiles.Outcome.Ignored:
+                ChunkIgnored(conn, fileHash, isLast);
+                break;
+        }
+    }
+
+    private void ChunkIgnored(PeerConnection conn, string fileHash, bool isLast)
+    {
+        // The end of a stream this PC couldn't use - one under way when
+        // another sender's copy failed, say, which this sender then ignored
+        // the request for. With nobody else sending the file now, this one
+        // may as well start over.
+        if (isLast) RequestAgain(fileHash, new[] { conn });
+    }
+
+    // How a queued stream ended (IncomingFiles.Completed), on its writer.
+    private void OnTransferCompleted(object owner, string fileHash, IncomingFiles.Result result)
+    {
+        if (owner is PeerConnection conn) TransferEnded(conn, fileHash, result);
+    }
+
+    private void TransferEnded(PeerConnection conn, string fileHash, IncomingFiles.Result result)
+    {
+        string shortHash = fileHash[..12];
         switch (result.Outcome)
         {
             case IncomingFiles.Outcome.Stored:
-                fileTransferState.Retries.TryRemove(chunk.FileHash, out _);
+                fileTransferState.Retries.TryRemove(fileHash, out _);
+                fileTransferState.Notes[fileHash] = (TransferPhase.Done, Environment.TickCount64);
                 Console.WriteLine($"[file] received {shortHash}... - verified, saved");
                 NotifyHistoryChanged(); // its entry's bytes are here now
-                if (!TryFulfillPendingEntry(chunk.FileHash)
-                    && historyAccess.DeleteFileIfUnused(chunk.FileHash))
+                NotifyTransfersChanged();
+                if (!TryFulfillPendingEntry(fileHash)
+                    && historyAccess.DeleteFileIfUnused(fileHash))
                 {
                     // Its history item was deleted while these bytes were
                     // on their way (nothing waits to apply them, and
@@ -750,18 +854,32 @@ public sealed partial class ClipLinkEngine
                 // stream with a gap, or a disk error. Its entry still waits:
                 // another peer's copy, or this one's next stream, may be
                 // intact - so ask again.
-                Console.WriteLine($"[file] {shortHash}... from {shortPeer}: {result.Reason} - discarded");
-                RequestAgain(chunk.FileHash, connectionsByDeviceId.Values);
-                break;
-            case IncomingFiles.Outcome.Ignored when chunk.IsLast:
-                // The end of a stream this PC couldn't use - one under way
-                // when another sender's copy failed, say, which this sender
-                // then ignored the request for. With nobody else sending the
-                // file now, this one may as well start over.
-                RequestAgain(chunk.FileHash, new[] { conn });
+                Console.WriteLine($"[file] {shortHash}... from {DeviceLabel.ShortId(conn.PeerDeviceId)}: {result.Reason} - discarded");
+                RequestAgain(fileHash, connectionsByDeviceId.Values);
+                NotifyTransfersChanged();
                 break;
         }
     }
+
+    // How big the file with this hash is meant to be, from its entry: one
+    // waiting for these bytes, or one in history. Null if none says.
+    private long? FileSizeOf(string fileHash)
+    {
+        if (fileTransferState.PendingEntries.TryGetValue(fileHash, out var pending) && FilePayloadOf(pending.Entry) is { FileSize: > 0 } waiting)
+        {
+            return waiting.FileSize;
+        }
+        foreach (var entry in historyAccess.GetHistory())
+        {
+            if (FilePayloadOf(entry) is { FileSize: > 0 } payload && string.Equals(payload.FileHash, fileHash, StringComparison.OrdinalIgnoreCase))
+            {
+                return payload.FileSize;
+            }
+        }
+        return null;
+    }
+
+    private void NotifyTransfersChanged() => Raise(TransfersChanged, nameof(TransfersChanged));
 
     // FileStore can gain a blob through more than one path — chunk-stream
     // completion (above), but also a device's own local capture of a file it
@@ -1006,22 +1124,8 @@ public sealed partial class ClipLinkEngine
             // nothing would ever redial this peer.
             Console.WriteLine($"[conn] couldn't send history or file requests to {DeviceLabel.ShortId(conn.PeerDeviceId)}: {ex.Message}");
         }
-        conn.MessageReceived += msg =>
-        {
-            // One bad message is skipped, not fatal. An exception escaping
-            // here used to end the whole connection with nothing logged (it
-            // unwinds PeerConnection.Listen's read loop) - e.g. two peers'
-            // history batches saving at once, or a malformed file message -
-            // which looked like the connection randomly dropping.
-            try
-            {
-                HandleMessage(msg, conn);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[conn] error handling a message from {DeviceLabel.ShortId(conn.PeerDeviceId)} (connection kept): {ex.GetType().Name}: {ex.Message}");
-            }
-        };
+        // (Errors in handling a message are caught and logged there.)
+        conn.MessageHandler = message => HandleMessageUtf8(message, conn);
         // Its handshake's name is stored only now, and off the read loop.
         conn.SessionProven += () =>
         {

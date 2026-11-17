@@ -147,6 +147,8 @@ public sealed record SkippedShare(string Path, FileSkipReason Reason, string? Er
 //                 all, so the stack can show its size at once. Null otherwise.
 //   Quiet         arrived in a version 2 sync after its first item: shown, but
 //                 not announced with a notification (only the first is).
+//   FileHash      file only: its SHA-256, as GetTransfers names the file
+//                 while its bytes arrive. Null for anything else.
 public sealed record HistoryItem(
     string Key,
     string Type,
@@ -161,7 +163,27 @@ public sealed record HistoryItem(
     bool IsAvailable,
     string? BatchId = null,
     int? BatchExpected = null,
-    bool Quiet = false)
+    bool Quiet = false,
+    string? FileHash = null)
 {
     public const int PreviewLength = 1000;
 }
+
+// Where a file whose bytes this PC is waiting for stands (see GetTransfers).
+public enum TransferPhase
+{
+    // Its bytes are arriving: Received of Total (null if its entry didn't say).
+    Receiving,
+    // Just stored: the bar can fill and go.
+    Done,
+    // A transfer of it broke off or failed its check, and it has been asked
+    // for again.
+    Retrying,
+    // It was asked for as often as it is asked, or there was no device to
+    // ask: it waits for one that has it to connect.
+    NoSender,
+}
+
+// One file in GetTransfers. Received and Total only mean something while
+// Receiving.
+public sealed record IncomingTransfer(string FileHash, TransferPhase Phase, long Received = 0, long? Total = null);

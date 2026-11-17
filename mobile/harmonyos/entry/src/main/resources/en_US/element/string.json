@@ -767,6 +767,26 @@
     {
       "name": "READ_PASTEBOARD_reason",
       "value": "ClipLink reads your clipboard when you open the app, so it can send what you just copied to your other devices."
+    },
+    {
+      "name": "transfer_stalled",
+      "value": "Waiting"
+    },
+    {
+      "name": "transfer_retrying",
+      "value": "Trying again"
+    },
+    {
+      "name": "transfer_waiting",
+      "value": "Waiting for a device"
+    },
+    {
+      "name": "transfer_stopped",
+      "value": "Couldn't receive"
+    },
+    {
+      "name": "transfer_amount_of",
+      "value": "%1$s of %2$s %3$s"
     }
   ]
 }

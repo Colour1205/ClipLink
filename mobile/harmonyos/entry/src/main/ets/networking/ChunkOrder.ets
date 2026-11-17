@@ -13,17 +13,25 @@
 //               go and a new transfer starts with this chunk - never
 //               appended to them.
 //   'ignore'  - the middle of a stream this side never saw start (cut off,
-//               or begun before this run), or the rest of an older
-//               connection's stream that a newer one has taken over.
+//               or begun before this run), the rest of an older
+//               connection's stream that a newer one has taken over, or a
+//               second sender's stream of a file another sender's stream is
+//               already bringing (see otherSender).
 //   'abandon' - a gap in the transfer under way: it can never hash right.
 export type ChunkPlace = 'start' | 'write' | 'restart' | 'ignore' | 'abandon';
 
 // underWay: a transfer of this file from this peer exists; sameConnection:
 // it's arriving on the connection this chunk came on; nextIndex: the chunk
-// it expects next.
+// it expects next. otherSender: another peer's stream of this same file is
+// under way. A receiver takes one stream per file, the first, as Windows,
+// Android and iOS do: a file_request goes to every peer, and decoding and
+// writing the same file twice at once only halved the speed of both. The
+// second sender is not told anything (nothing on the wire changes); its
+// chunks are dropped unread, and when its stream ends it may be asked again
+// if the first one came to nothing (see SyncManager.handleFileChunk).
 export function placeChunk(underWay: boolean, sameConnection: boolean, nextIndex: number,
-  chunkIndex: number): ChunkPlace {
-  if (!underWay) return chunkIndex === 0 ? 'start' : 'ignore';
+  chunkIndex: number, otherSender: boolean = false): ChunkPlace {
+  if (!underWay) return chunkIndex === 0 && !otherSender ? 'start' : 'ignore';
   if (sameConnection && chunkIndex === nextIndex) return 'write';
   if (chunkIndex === 0) return 'restart';
   return sameConnection ? 'abandon' : 'ignore';

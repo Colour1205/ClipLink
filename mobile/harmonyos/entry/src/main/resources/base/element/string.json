@@ -767,6 +767,26 @@
     {
       "name": "toast_clipboard_access_off",
       "value": "Clipboard access is off for ClipLink. Turn it on in system settings."
+    },
+    {
+      "name": "transfer_stalled",
+      "value": "Waiting"
+    },
+    {
+      "name": "transfer_retrying",
+      "value": "Trying again"
+    },
+    {
+      "name": "transfer_waiting",
+      "value": "Waiting for a device"
+    },
+    {
+      "name": "transfer_stopped",
+      "value": "Couldn't receive"
+    },
+    {
+      "name": "transfer_amount_of",
+      "value": "%1$s of %2$s %3$s"
     }
   ]
 }

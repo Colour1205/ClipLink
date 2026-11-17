@@ -82,10 +82,15 @@ export async function sha256File(path: string): Promise<string> {
     fs.closeSync(file);
   }
   if (total === 0) return EMPTY_FILE_HASH;
-  const digest = (await md.digest()).data;
+  return hexString((await md.digest()).data);
+}
+
+// Bytes as lowercase hex, two digits each: how a digest is compared with a
+// FileHash.
+export function hexString(bytes: Uint8Array): string {
   let out = '';
-  for (let i = 0; i < digest.length; i++) {
-    out += digest[i].toString(16).padStart(2, '0');
+  for (let i = 0; i < bytes.length; i++) {
+    out += bytes[i].toString(16).padStart(2, '0');
   }
   return out;
 }

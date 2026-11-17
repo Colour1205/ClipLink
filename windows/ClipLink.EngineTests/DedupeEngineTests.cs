@@ -227,21 +227,40 @@ public class DedupeEngineTests
     public async Task A_handshake_line_is_read_up_to_its_limit_and_what_follows_it_is_kept()
     {
         var bytes = Encoding.UTF8.GetBytes("{\"a\":1}\r\nnext line\n");
-        using (var reader = new StreamReader(new MemoryStream(bytes)))
+        using (var reader = new LineReader(new MemoryStream(bytes)))
         {
             Assert.Equal("{\"a\":1}", await PeerConnection.ReadHandshakeLineAsync(reader));
-            Assert.Equal("next line", await reader.ReadLineAsync());
+            Assert.Equal("next line", Encoding.UTF8.GetString((await reader.ReadLineAsync())!.Value.Span));
         }
 
         var endless = Encoding.UTF8.GetBytes(new string('x', PeerConnection.MaxHandshakeChars + 10) + "\n");
-        using (var reader = new StreamReader(new MemoryStream(endless)))
+        using (var reader = new LineReader(new MemoryStream(endless)))
         {
             Assert.Null(await PeerConnection.ReadHandshakeLineAsync(reader));
         }
 
-        using (var reader = new StreamReader(new MemoryStream(Encoding.UTF8.GetBytes("no newline"))))
+        using (var reader = new LineReader(new MemoryStream(Encoding.UTF8.GetBytes("no newline"))))
         {
             Assert.Null(await PeerConnection.ReadHandshakeLineAsync(reader));
+        }
+
+        // "\r" isn't kept, but it still counts: a stranger sending nothing
+        // else is turned away long before the stream ends, not buffered.
+        var carriageReturns = new byte[8 * 1024 * 1024 + 1];
+        carriageReturns.AsSpan(0, carriageReturns.Length - 1).Fill((byte)'\r');
+        carriageReturns[^1] = (byte)'\n';
+        var flood = new MemoryStream(carriageReturns);
+        using (var reader = new LineReader(flood))
+        {
+            Assert.Null(await PeerConnection.ReadHandshakeLineAsync(reader));
+            Assert.True(flood.Position < 1024 * 1024, $"read {flood.Position} bytes");
+        }
+
+        // One "\r" before the "\n", as every build may send, at the limit.
+        var atLimit = Encoding.UTF8.GetBytes(new string('y', PeerConnection.MaxHandshakeChars) + "\r\n");
+        using (var reader = new LineReader(new MemoryStream(atLimit)))
+        {
+            Assert.Equal(PeerConnection.MaxHandshakeChars, (await PeerConnection.ReadHandshakeLineAsync(reader))?.Length);
         }
     }
 }
