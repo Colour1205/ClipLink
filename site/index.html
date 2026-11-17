@@ -74,33 +74,13 @@
           </div>
         </div>
       </div>
-      <a class="scroll-cue" href="#screens" aria-label="See more"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9.5l6 6 6-6"/></svg></a>
+      <a class="scroll-cue" href="#features" aria-label="See more"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9.5l6 6 6-6"/></svg></a>
     </div>
-
-    <section id="screens" aria-labelledby="screens-title">
-      <div class="wrap">
-        <h2 id="screens-title" class="visually-hidden">On each phone</h2>
-        <div class="showcase trio" data-hint="Swipe to see the next one">
-          <figure class="frame" style="--cx:51.4%;--cy:32.5%;--cw:44.3%;--ch:33.5%;--drop:0.255">
-            <div class="frame-screen"><img src="assets/shot-ios.webp" width="560" height="1212" alt="ClipLink for iPhone, in development" loading="lazy"><span class="frame-ring" aria-hidden="true"></span></div>
-            <figcaption><a class="chip" href="#dl-ios">iPhone <span>soon</span></a></figcaption>
-          </figure>
-          <figure class="frame" style="--cx:51.8%;--cy:44.9%;--cw:43.9%;--ch:32.3%">
-            <div class="frame-screen"><img src="assets/shot-android.webp" width="560" height="1239" alt="ClipLink on Android" loading="lazy"><span class="frame-ring" aria-hidden="true"></span></div>
-            <figcaption><a class="chip" href="#dl-android">Android</a></figcaption>
-          </figure>
-          <figure class="frame" style="--cx:51.6%;--cy:21.2%;--cw:44.3%;--ch:33.1%;--drop:0.503">
-            <div class="frame-screen"><img src="assets/shot-hmos.webp" width="560" height="1208" alt="ClipLink on HarmonyOS, in Chinese" loading="lazy"><span class="frame-ring" aria-hidden="true"></span></div>
-            <figcaption><a class="chip" href="#dl-harmonyos">HarmonyOS</a></figcaption>
-          </figure>
-        </div>
-      </div>
-    </section>
 
     <section id="features">
       <div class="wrap">
         <h2>Features</h2>
-        <div class="feature-panel glass">
+        <div class="feature-panel">
           <div class="feature">
             <h3>On your local network</h3>
             <p>Devices on the same Wi-Fi find each other and connect directly.</p>
@@ -132,11 +112,11 @@
     <section id="security">
       <div class="wrap">
         <div class="trust-text">
-          <h2>Who can connect</h2>
-          <p>A device can't read or send anything until you trust it. When one asks to pair, you choose <strong>Trust</strong>, <strong>Ignore</strong> or <strong>Block</strong>.</p>
-          <p>Connections are encrypted and every item is signed by the device it came from. <a href="https://github.com/Colour1205/ClipLink/blob/main/docs/security.md" target="_blank" rel="noopener">How it works</a></p>
+          <h2>Privacy</h2>
+          <p>Everything between your devices is encrypted, and every item is signed by the device it came from. <a href="https://github.com/Colour1205/ClipLink/blob/main/docs/security.md" target="_blank" rel="noopener">How it works</a></p>
+          <p>A device can't read or send anything until you pair with it and choose <strong>Trust</strong>.</p>
         </div>
-        <figure class="trust-diagram glass">
+        <figure class="trust-diagram">
           <svg viewBox="0 0 360 260" aria-hidden="true" focusable="false">
             <g class="link">
               <path d="M146 62L244 58"/>
@@ -167,7 +147,7 @@
           <h2>Download</h2>
           <p id="how">Install it on each device, then pair them once with a QR code.</p>
         </div>
-        <div class="downloads glass">
+        <div class="downloads">
           <div class="dl" id="dl-windows" data-platform="windows">
             <div class="dl-head">
               <h3>Windows</h3>
@@ -238,7 +218,7 @@
     <section id="faq">
       <div class="wrap">
         <h2>FAQ</h2>
-        <div class="faq-list glass">
+        <div class="faq-list">
           <details><summary>Does my clipboard go through a server?</summary><p>No. Items go straight between your paired devices. The only outside request any ClipLink app makes is the Windows update check to GitHub, described in the <a href="privacy.html">privacy policy</a>.</p></details>
           <details><summary>Can someone else on my Wi-Fi see what I copy?</summary><p>No. They can see that a ClipLink device is there, but never what you copy. Items only go to devices you trust, encrypted.</p></details>
           <details><summary>Do my devices have to be on the same Wi-Fi?</summary><p>To find each other on their own, yes. Otherwise you can pair by address over a VPN such as Tailscale.</p></details>

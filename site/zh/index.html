@@ -74,33 +74,13 @@
           </div>
         </div>
       </div>
-      <a class="scroll-cue" href="#screens" aria-label="继续浏览"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9.5l6 6 6-6"/></svg></a>
+      <a class="scroll-cue" href="#features" aria-label="继续浏览"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9.5l6 6 6-6"/></svg></a>
     </div>
-
-    <section id="screens" aria-labelledby="screens-title">
-      <div class="wrap">
-        <h2 id="screens-title" class="visually-hidden">每台手机上</h2>
-        <div class="showcase trio" data-hint="左右滑动查看更多">
-          <figure class="frame" style="--cx:51.4%;--cy:32.5%;--cw:44.3%;--ch:33.5%;--drop:0.255">
-            <div class="frame-screen"><img src="../assets/shot-ios.webp" width="560" height="1212" alt="iPhone 上的 ClipLink（开发中）" loading="lazy"><span class="frame-ring" aria-hidden="true"></span></div>
-            <figcaption><a class="chip" href="#dl-ios">iPhone <span>开发中</span></a></figcaption>
-          </figure>
-          <figure class="frame" style="--cx:51.8%;--cy:44.9%;--cw:43.9%;--ch:32.3%">
-            <div class="frame-screen"><img src="../assets/shot-android.webp" width="560" height="1239" alt="Android 上的 ClipLink" loading="lazy"><span class="frame-ring" aria-hidden="true"></span></div>
-            <figcaption><a class="chip" href="#dl-android">Android</a></figcaption>
-          </figure>
-          <figure class="frame" style="--cx:51.6%;--cy:21.2%;--cw:44.3%;--ch:33.1%;--drop:0.503">
-            <div class="frame-screen"><img src="../assets/shot-hmos.webp" width="560" height="1208" alt="鸿蒙上的 ClipLink" loading="lazy"><span class="frame-ring" aria-hidden="true"></span></div>
-            <figcaption><a class="chip" href="#dl-harmonyos">鸿蒙</a></figcaption>
-          </figure>
-        </div>
-      </div>
-    </section>
 
     <section id="features">
       <div class="wrap">
         <h2>功能</h2>
-        <div class="feature-panel glass">
+        <div class="feature-panel">
           <div class="feature">
             <h3>局域网直连</h3>
             <p>同一个 Wi-Fi 下的设备会自动找到对方，直接连接。</p>
@@ -132,11 +112,11 @@
     <section id="security">
       <div class="wrap">
         <div class="trust-text">
-          <h2>配对和信任</h2>
-          <p>没被你信任的设备，什么都读不到，也发不过来。有设备请求配对时，你可以选<strong>信任</strong>、<strong>忽略</strong>或<strong>屏蔽</strong>。</p>
-          <p>连接全程加密，每条内容都带着来源设备的签名。<a href="https://github.com/Colour1205/ClipLink/blob/main/docs/security.md" target="_blank" rel="noopener">具体做法（英文）</a></p>
+          <h2>隐私</h2>
+          <p>设备之间传的所有内容都加密，每条内容都带着来源设备的签名。<a href="https://github.com/Colour1205/ClipLink/blob/main/docs/security.md" target="_blank" rel="noopener">具体做法（英文）</a></p>
+          <p>没配对、没点<strong>信任</strong>的设备，什么都读不到，也发不过来。</p>
         </div>
-        <figure class="trust-diagram glass">
+        <figure class="trust-diagram">
           <svg viewBox="0 0 360 260" aria-hidden="true" focusable="false">
             <g class="link">
               <path d="M146 62L244 58"/>
@@ -167,7 +147,7 @@
           <h2>下载</h2>
           <p id="how">每台设备装上 ClipLink，扫一次二维码配对就行。</p>
         </div>
-        <div class="downloads glass">
+        <div class="downloads">
           <div class="dl" id="dl-windows" data-platform="windows">
             <div class="dl-head">
               <h3>Windows</h3>
@@ -238,7 +218,7 @@
     <section id="faq">
       <div class="wrap">
         <h2>常见问题</h2>
-        <div class="faq-list glass">
+        <div class="faq-list">
           <details><summary>我的剪贴板会经过服务器吗？</summary><p>不会。内容直接在配对过的设备之间传。ClipLink 唯一的对外请求是 Windows 版向 GitHub 检查更新，见<a href="privacy.html">隐私政策</a>。</p></details>
           <details><summary>同一个 Wi-Fi 里的其他人能看到我复制的内容吗？</summary><p>看不到。他们能看到网络里有一台 ClipLink 设备，但看不到你复制了什么。内容只会加密发给你信任的设备。</p></details>
           <details><summary>不在同一个 Wi-Fi 下能用吗？</summary><p>要自动找到对方，得在同一个网络。不然可以通过 Tailscale 这类 VPN 按地址配对。</p></details>

@@ -167,14 +167,10 @@ code { background: var(--accent-soft); padding: 1px 7px; border-radius: 7px; fon
   border: 1px solid var(--glass-edge);
   box-shadow: inset 0 1px 0 var(--glass-rim), var(--glass-shadow);
 }
-.site-header .wrap {
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
-}
 .glass { border-radius: var(--r-lg); }
 
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .site-header .wrap { background-color: var(--glass-strong); }
+  .site-header .wrap::before { background-color: var(--glass-strong); }
 }
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
   .glass, .callout, .btn:not(.primary), .chip, .site-header .wrap {
@@ -267,8 +263,6 @@ section { padding: 72px 0; position: relative; }
 .download-intro p { margin: 0; color: var(--muted); }
 .downloads { padding: 8px; }
 .dl { display: grid; grid-template-columns: 12rem 1fr 13.5rem; gap: 8px 28px; align-items: center; padding: 20px 22px; position: relative; border-radius: calc(var(--r-lg) - 8px); }
-.dl + .dl::before { content: ""; position: absolute; top: 0; left: 22px; right: 22px; border-top: 1px solid var(--line); }
-.dl.is-yours::before, .dl.is-yours + .dl::before { display: none; }
 .dl-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
 .dl-head h3 { margin: 0; font-size: 1.2rem; }
 .dl-info p { margin: 0; }
@@ -290,7 +284,6 @@ section { padding: 72px 0; position: relative; }
 #faq h2 { position: sticky; top: 104px; }
 .faq-list { padding: 6px 30px; }
 .faq-list details { padding: 18px 0; margin: 0; }
-.faq-list details + details { border-top: 1px solid var(--line); }
 summary { list-style: none; cursor: pointer; }
 summary::-webkit-details-marker { display: none; }
 .faq-list summary { font-weight: 650; display: flex; justify-content: space-between; gap: 18px; }
@@ -312,24 +305,27 @@ summary::-webkit-details-marker { display: none; }
 .pick-slot { position: relative; width: 100%; height: 48px; }
 .pick {
   position: absolute; z-index: 10; top: 50%; left: 0; right: 0; transform: translateY(-50%);
-  border-radius: 24px; background: var(--accent); color: var(--accent-ink);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
-  transition: background-color 0.35s var(--spring-soft), color 0.35s var(--spring-soft), border-radius 0.5s var(--spring), box-shadow 0.35s var(--spring-soft);
+  color: var(--accent-ink); isolation: isolate;
+  transition: color 0.35s var(--spring-soft);
+}
+.pick::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  transform: skewX(var(--skew)); border-radius: var(--slant-r);
+  background: var(--accent); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  transition: background-color 0.35s var(--spring-soft), box-shadow 0.35s var(--spring-soft);
 }
 .pick-head {
   position: relative; display: flex; align-items: center; justify-content: center;
   min-height: 48px; padding: 0 44px; font-weight: 650;
 }
-.pick:not([open]):hover { background: var(--accent-hover); }
+.pick:not([open]):hover::before { background: var(--accent-hover); }
 .pick-chev {
   position: absolute; right: 18px; top: 50%; width: 16px; height: 16px; margin-top: -8px;
   fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
   transition: rotate 0.5s var(--spring);
 }
-.pick[open]:not(.closing) {
-  border-radius: 22px; background: var(--surface); color: var(--text);
-  box-shadow: 0 0 0 1px var(--line-strong), var(--glass-shadow);
-}
+.pick[open]:not(.closing) { color: var(--text); }
+.pick[open]:not(.closing)::before { background: var(--surface); box-shadow: 0 0 0 1px var(--line-strong), var(--glass-shadow); }
 .pick[open]:not(.closing) .pick-head { color: var(--muted); }
 .pick[open]:not(.closing) .pick-chev { rotate: 180deg; }
 .pick-menu { display: grid; gap: 2px; padding: 0 6px 6px; overflow: hidden; }
@@ -353,11 +349,15 @@ summary::-webkit-details-marker { display: none; }
 @keyframes pick-focus { from { opacity: 0; filter: blur(8px); transform: translateY(-6px); } }
 @keyframes pick-unfocus { to { opacity: 0; filter: blur(8px); transform: translateY(-4px); } }
 .pick-menu a {
-  display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 8px 14px; border-radius: 16px;
+  position: relative; isolation: isolate;
+  display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 8px 18px;
   color: var(--text); text-decoration: none; font-weight: 600; font-size: 0.95rem;
+}
+.pick-menu a::before {
+  content: ""; position: absolute; inset: 0 4px; z-index: -1; transform: skewX(var(--skew)); border-radius: 6px;
   transition: background-color 0.3s var(--spring-soft);
 }
-.pick-menu a:hover { background: var(--accent-soft); }
+.pick-menu a:hover::before { background: var(--accent-soft); }
 .pick-menu svg { flex: none; width: 16px; height: 16px; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
 /* ---- prose pages ---- */
@@ -403,7 +403,6 @@ summary::-webkit-details-marker { display: none; }
   .shelf { padding: 24px 12px 18px; }
   .feature-panel { grid-template-columns: 1fr; gap: 24px; padding: 26px 22px; }
   .dl { grid-template-columns: 1fr; padding: 18px 16px; }
-  .dl + .dl::before { left: 16px; right: 16px; }
   .dl-info, .dl-actions { grid-column: 1; grid-row: auto; }
   .dl-actions { margin-top: 6px; }
   .faq-list { padding: 4px 20px; }
@@ -672,3 +671,116 @@ summary::-webkit-details-marker { display: none; }
   .trio { padding: 0; }
   .frame-screen img { border-width: 4px; }
 }
+
+/* ================= slanted glass ================= */
+
+/* Every glass shape leans the same way: a parallelogram drawn by ::before and
+   skewed, behind the element's own content, so text, icons and screenshots stay
+   upright. The shared look uses :where() so any one shape can override it. --skew is the lean (gentler on phones); a tall panel can ease it off so
+   its corners do not run far past its text. The live demo's window and phone are
+   real screens and stay square. */
+:root { --skew: -12deg; --slant-r: 8px; }
+
+:is(.site-header .wrap, .chip, .btn, .feature-panel, .trust-diagram, .dl, .faq-list details, .dl-pending, .callout, .badge) {
+  position: relative; isolation: isolate;
+  background: none; border: 0; box-shadow: none; border-radius: 0;
+}
+:is(.site-header .wrap, .chip, .btn, .feature-panel, .trust-diagram, .dl, .faq-list details, .dl-pending, .callout, .badge):hover { background: none; }
+:where(.site-header .wrap, .chip, .btn, .feature-panel, .trust-diagram, .dl, .faq-list details, .dl-pending, .callout, .badge)::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  transform: skewX(var(--skew)); border-radius: var(--slant-r);
+  background-color: var(--glass); background-image: var(--glass-sheen);
+  border: 1px solid var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--glass-rim), var(--glass-shadow);
+  transition: background-color 0.35s var(--spring-soft), border-color 0.35s var(--spring-soft);
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  :where(.site-header .wrap, .chip, .btn, .feature-panel, .trust-diagram, .dl, .faq-list details, .dl-pending, .callout, .badge)::before {
+    background-color: var(--surface); background-image: none;
+  }
+}
+/* Focus follows the slant too. */
+:is(.chip, .btn):focus-visible { outline: none; }
+:is(.chip, .btn):focus-visible::before { outline: 2px solid var(--text); outline-offset: 3px; }
+
+/* The header bar: the one pane that really blurs what scrolls under it. */
+.site-header .wrap { border-radius: 0; padding: 0 22px 0 26px; }
+.site-header .wrap::before {
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+  border-radius: 12px;
+}
+/* Links split by slanted rules, with a slanted highlight on hover. */
+.nav { gap: 0; }
+.nav a { position: relative; isolation: isolate; border-radius: 0; padding: 8px 16px; }
+.nav a:hover { background: none; }
+.nav a::before {
+  content: ""; position: absolute; left: 0; top: 24%; bottom: 24%;
+  border-left: 1px solid var(--line-strong); transform: skewX(var(--skew));
+}
+.nav a::after {
+  content: ""; position: absolute; inset: 6px 4px; z-index: -1; border-radius: 6px;
+  transform: skewX(var(--skew)); transition: background-color 0.35s var(--spring-soft);
+}
+.nav a:hover::after { background-color: var(--accent-soft); }
+.nav .lang { margin-left: 0; padding-left: 16px; border-left: 0; border-radius: 0; }
+
+/* Buttons and tags */
+.btn { border-radius: 0; padding: 12px 30px; }
+.btn.primary { background: none; border: 0; box-shadow: none; }
+.btn.primary::before { background: var(--accent); background-image: none; border-color: transparent; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 10px 26px -12px color-mix(in srgb, var(--accent) 70%, transparent); }
+.btn.primary:hover::before { background: var(--accent-hover); }
+.btn:not(.primary):hover::before, .chip:hover::before { background-color: var(--glass-strong); }
+.chip { border-radius: 0; padding: 6px 17px; }
+.chip::before { --slant-r: 5px; box-shadow: inset 0 1px 0 var(--glass-rim); }
+.badge { border-radius: 0; padding: 3px 11px; }
+.badge::before { --slant-r: 3px; box-shadow: none; background-image: none; }
+.badge[data-stage="release"] { background: none; color: var(--bg); }
+.badge[data-stage="release"]::before { background-color: var(--text); border-color: transparent; }
+.badge[data-stage="beta"], .badge[data-stage="alpha"] { border: 0; }
+.badge[data-stage="beta"]::before, .badge[data-stage="alpha"]::before { background-color: transparent; border-color: var(--line-strong); }
+.badge[data-stage="soon"]::before { display: none; }
+.badge-yours { background: none; }
+.badge-yours::before { background-color: var(--accent); border-color: transparent; }
+.dl-pending { border-radius: 0; }
+.dl-pending::before { background: none; border: 1px dashed var(--line-strong); box-shadow: none; }
+
+/* Features: one wide leaning panel. Its sides lean out by about a fifth of its
+   height, so the text sits further in. */
+.feature-panel { padding: 40px 72px; }
+
+/* Privacy: words on the left, the devices diagram in a leaning pane on the right. */
+.trust-diagram { padding: 30px 56px; }
+
+/* Download: a leaning bar per platform. Yours is tinted. */
+.downloads { display: grid; gap: 12px; padding: 0; }
+.dl { padding: 20px 34px; }
+.dl.is-yours { background: none; box-shadow: none; }
+.dl.is-yours::before {
+  background-color: color-mix(in srgb, var(--accent) 13%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.dl:target { animation: none; }
+.dl:target::before { animation: picked 1.6s var(--spring-soft); }
+
+/* FAQ: a leaning bar per question; an open one grows, so it leans a little less. */
+.faq-list { display: grid; gap: 10px; padding: 0; }
+.faq-list details { padding: 18px 34px; --skew: -8deg; }
+
+.callout { --skew: -3deg; border-radius: 0; }
+
+@media (max-width: 620px) {
+  :root { --skew: -9deg; }
+  .feature-panel { --skew: -3deg; padding: 28px 30px; }
+  .trust-diagram { padding: 24px 36px; }
+  .dl { padding: 18px 24px; }
+  .faq-list details { --skew: -4deg; padding: 16px 24px; }
+  .site-header .wrap { padding: 0 12px 0 18px; }
+  .nav a { padding: 8px 12px; }
+}
+@media (max-width: 400px) {
+  .site-header .wrap { padding: 0 8px 0 14px; }
+  .nav a { padding: 7px 10px; }
+}
+/* Each leaning row is its own layer, so a row with the Get app menu open is lifted
+   above the rows under it, or they would cover the menu. */
+.dl:has(.pick[open]) { z-index: 5; }

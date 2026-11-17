@@ -26,7 +26,11 @@ The accent is a deeper cut of the app icon's salmon (`#e09068`). No purple or bl
 
 ## Glass
 
-`.glass`: a `--glass` tint, a `--glass-sheen` gradient from the top, a lit top edge (`inset 0 1px 0 --glass-rim`) and a soft shadow. No grain. Only the header has a real `backdrop-filter` blur (28px, 18px on phones), because only the header floats over content. The panels sit on the soft colour field, where a blur looks the same as no blur but cost about three quarters of each scrolled frame, so don't add `backdrop-filter` to panels. With reduced transparency or more contrast, glass becomes `--surface`.
+Every glass shape leans: a parallelogram drawn by `::before` with `transform: skewX(var(--skew))` behind the element's own content, so text, icons and screenshots stay upright. `--skew` is -12deg (-9deg on phones); tall panels lean less (the features panel on phones, open FAQ rows) so their corners do not run far past the text. The live demo's window and phone are real screens and stay square.
+
+The glass itself: a `--glass` tint, a `--glass-sheen` gradient from the top, a lit top edge (`inset 0 1px 0 --glass-rim`), a soft shadow and small rounded corners (`--slant-r`). Only the header has a real `backdrop-filter` blur, because only the header floats over content; don't add `backdrop-filter` to panels (it cost most of each scrolled frame and looked the same). With reduced transparency or more contrast, glass becomes `--surface`.
+
+Shapes that lean: the header bar (its links split by slanted rules), buttons, platform tags, badges, the features panel, the privacy diagram's pane, one bar per download row and per FAQ question, the Get app menu, and the callout on the policy pages.
 
 ## Type
 
