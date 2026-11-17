@@ -60,6 +60,54 @@
     window.addEventListener('hashchange', fromHash);
   }
 
+  // ---- 1c. Reveal: the pointer lights the edges of the leaning shapes. ----
+  // For each shape near the pointer, set where the light is, in the shape's
+  // own frame: its glass is skewed by --skew around its middle, so a point at
+  // height y sits tan(skew) * (y - h/2) further along than it looks. Only for a
+  // mouse or pen that hovers; nothing runs while the pointer is still.
+  var reveal = window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+  if (reveal) {
+    var shapes = Array.prototype.slice.call(document.querySelectorAll(
+      '.site-header .wrap, .chip, .btn, .feature-panel, .trust-diagram, .dl, .dl-pending, .feature'));
+    var skewDeg = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--skew')) || 0;
+    var tilt = Math.tan(skewDeg * Math.PI / 180);
+    var REACH = 160; // px around a shape where its edge starts to catch the light
+    var lit = [];
+    var px = 0, py = 0, queued = false;
+    var paint = function () {
+      queued = false;
+      var still = [];
+      shapes.forEach(function (el) {
+        var r = el.getBoundingClientRect();
+        if (!r.width) return;
+        var dx = Math.max(r.left - px, 0, px - r.right);
+        var dy = Math.max(r.top - py, 0, py - r.bottom);
+        var d = Math.sqrt(dx * dx + dy * dy);
+        if (d > REACH) return;
+        var y = py - r.top;
+        var x = px - r.left - tilt * (y - r.height / 2);
+        el.style.setProperty('--rx', x.toFixed(1) + 'px');
+        el.style.setProperty('--ry', y.toFixed(1) + 'px');
+        el.style.setProperty('--ro', (1 - d / REACH).toFixed(2));
+        still.push(el);
+      });
+      lit.forEach(function (el) { if (still.indexOf(el) < 0) el.style.setProperty('--ro', '0'); });
+      lit = still;
+    };
+    document.addEventListener('pointermove', function (event) {
+      if (event.pointerType === 'touch') return;
+      px = event.clientX; py = event.clientY;
+      if (!queued) { queued = true; requestAnimationFrame(paint); }
+    }, { passive: true });
+    document.addEventListener('pointerleave', function () {
+      lit.forEach(function (el) { el.style.setProperty('--ro', '0'); });
+      lit = [];
+    });
+    window.addEventListener('scroll', function () {
+      if (lit.length && !queued) { queued = true; requestAnimationFrame(paint); }
+    }, { passive: true });
+  }
+
   // ---- 2. On small phones, "See it in action" is a swipeable, looping stack. ----
   // The frames sit on top of each other: the one in front can be dragged left
   // or right to go to the next (or back) and the stack goes round in a circle -
