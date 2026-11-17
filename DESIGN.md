@@ -6,7 +6,7 @@ The website in `site/` follows this. The values live as CSS variables in `site/a
 
 Glass panels over a still, warm colour field, with a cool neutral page. The glass stays, but there are only a few large panes: the header, the hero window, and one panel per section. Items inside a panel are plain text, not cards. Copy is short: a heading and one or two lines, in plain words.
 
-Things that made the old page read as generated and are not used: a pill label above the headline, gradient text, platform chips, floating shapes, icon tiles on feature cards, glowing number circles, a grey subtitle under every heading, and slogan lines ("Your X, on every Y", "No X. No Y. Just Z.").
+Things that made the old page read as generated and are not used: a pill label above the headline, gradient text, floating shapes, icon tiles on feature cards, glowing number circles, a grey subtitle under every heading, and slogan lines ("Your X, on every Y", "No X. No Y. Just Z.").
 
 ## Colour
 
@@ -38,6 +38,7 @@ Radii are 12, 20 and 28px. Buttons and the header are pills. Sections are 72px a
 
 ## Components
 
+- **Platform tags:** small glass pills under the headline; a platform that is not out yet says so in muted text ("iOS soon").
 - **Buttons:** primary is a solid accent fill with no glow. Secondary is glass. Neither lifts on hover.
 - **Download list:** one panel with a row per platform. Your own platform's row is tinted and gets a "This device" badge.
 - **FAQ:** one panel, questions split by hairlines, with a chevron that turns.

@@ -135,13 +135,14 @@ h2 { font-size: clamp(1.65rem, 3.2vw, 2.25rem); margin: 0 0 22px; letter-spacing
 h3 { letter-spacing: -0.01em; }
 :lang(zh) :is(h1, h2, h3) { letter-spacing: 0; }
 /* Chinese headlines break only where the page says (a span per phrase). */
-h1 > span { display: inline-block; }
+h1 > span { display: inline-block; white-space: nowrap; }
+:lang(zh) h1 { font-size: clamp(2.3rem, 4.4vw, 3.4rem); max-width: none; }
 strong { font-weight: 650; }
 code { background: var(--accent-soft); padding: 1px 7px; border-radius: 7px; font-size: 0.92em; font-variant-numeric: tabular-nums; }
 
 /* ---- the glass ----
    A blurred, tinted pane with a lit top edge and its grain inside it. */
-.glass, details, .callout, .btn:not(.primary), .site-header .wrap {
+.glass, details, .callout, .btn:not(.primary), .chip, .site-header .wrap {
   background-color: var(--glass);
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.5  0 0 0 0 0.5  0 0 0 0 0.5  0 0 0 1 0'/></filter><rect width='100%' height='100%' filter='url(%23n)' opacity='0.6'/></svg>");
   background-blend-mode: overlay;
@@ -153,10 +154,10 @@ code { background: var(--accent-soft); padding: 1px 7px; border-radius: 7px; fon
 .glass { border-radius: var(--r-lg); }
 
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .glass, details, .callout, .btn:not(.primary), .site-header .wrap { background-color: var(--glass-strong); }
+  .glass, details, .callout, .btn:not(.primary), .chip, .site-header .wrap { background-color: var(--glass-strong); }
 }
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
-  .glass, details, .callout, .btn:not(.primary), .site-header .wrap {
+  .glass, details, .callout, .btn:not(.primary), .chip, .site-header .wrap {
     background-color: var(--surface); background-image: none;
     -webkit-backdrop-filter: none; backdrop-filter: none;
   }
@@ -194,6 +195,9 @@ code { background: var(--accent-soft); padding: 1px 7px; border-radius: 7px; fon
 h1 { font-size: clamp(2.5rem, 5vw, 3.9rem); line-height: 1.05; margin: 0 0 18px; letter-spacing: -0.035em; font-weight: 700; max-width: 10em; text-wrap: balance; }
 .lead { font-size: 1.22rem; color: var(--muted); margin: 0 0 32px; max-width: 26em; text-wrap: balance; }
 .hero-note { margin: 18px 0 0; font-size: 0.92rem; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 0 0 30px; padding: 0; }
+.chip { padding: 6px 15px; border-radius: 999px; font-size: 0.92rem; font-weight: 600; box-shadow: inset 0 1px 0 var(--glass-rim); }
+.chip span { font-weight: 400; color: var(--muted); }
 
 .art-stage { position: relative; }
 .window { padding: 8px; }
@@ -312,7 +316,7 @@ details { border-radius: var(--r); padding: 18px 24px; margin-bottom: 12px; }
 /* ---- phones ---- */
 @media (max-width: 620px) {
   body { font-size: 16px; }
-  .glass, details, .callout, .btn:not(.primary), .site-header .wrap { --glass-blur: blur(18px) saturate(160%); }
+  .glass, details, .callout, .btn:not(.primary), .chip, .site-header .wrap { --glass-blur: blur(18px) saturate(160%); }
   .hero { padding: 24px 0 80px; }
   .lead { font-size: 1.1rem; }
   .cta .btn { flex: 1 1 100%; }
