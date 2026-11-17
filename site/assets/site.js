@@ -60,7 +60,7 @@
     window.addEventListener('hashchange', fromHash);
   }
 
-  // ---- 1c. Reveal: the pointer lights the edges of the leaning shapes. ----
+  // ---- 1c. Reveal: the pointer lights the edges of the slanted shapes. ----
   // For each shape near the pointer, set where the light is, in the shape's
   // own frame: its glass is skewed by --skew around its middle, so a point at
   // height y sits tan(skew) * (y - h/2) further along than it looks. Only for a
@@ -68,7 +68,7 @@
   var reveal = window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
   if (reveal) {
     var shapes = Array.prototype.slice.call(document.querySelectorAll(
-      '.site-header .wrap, .chip, .btn, .feature-panel, .trust-diagram, .dl, .dl-pending, .feature'));
+      '.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram'));
     var skewDeg = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--skew')) || 0;
     var tilt = Math.tan(skewDeg * Math.PI / 180);
     var REACH = 160; // px around a shape where its edge starts to catch the light

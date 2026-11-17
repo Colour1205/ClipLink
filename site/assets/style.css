@@ -672,200 +672,137 @@ summary::-webkit-details-marker { display: none; }
   .frame-screen img { border-width: 4px; }
 }
 
-/* ================= slanted glass ================= */
+/* ================= slant: only where it counts ================= */
 
-/* Every glass shape leans the same way: a parallelogram drawn by ::before and
-   skewed, behind the element's own content, so text, icons and screenshots stay
-   upright. The shared look uses :where() so any one shape can override it. --skew is the lean, the same
-   everywhere; on phones the layout keeps shapes short instead of leaning less. The live demo's window and phone are
-   real screens and stay square. */
-:root { --skew: 18deg; --slant-r: 0; }
+/* The slant is ClipLink's mark, not its whole layout. It is on the few shapes the
+   owner sketched: the hero's Download button and platform tags, the Features
+   panel, the privacy diagram's pane, and the thin dividers in the top bar.
+   Everything else is straight, sharp-cornered glass. Never a slanted shape inside
+   another, and text always stays upright. (Sports and game sites do the same:
+   their navigation, menus and lists are straight; the angle is a signature.) */
+:root {
+  --skew: 18deg;
+  --bar: rgba(250, 250, 251, 0.78);
+  --reveal: rgba(185, 74, 36, 0.75);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --bar: rgba(24, 25, 28, 0.78); --reveal: rgba(255, 228, 210, 0.85); }
+}
+:root[data-theme="dark"] { --bar: rgba(24, 25, 28, 0.78); --reveal: rgba(255, 228, 210, 0.85); }
 
-:is(.site-header .wrap, .chip, .btn, .feature-panel, .trust-diagram, .dl, .faq-list details, .dl-pending, .callout, .badge) {
+/* Straight shapes: sharp corners. Their glass stays on the element itself. */
+.btn, .chip, .dl-pending, .callout { border-radius: 0; }
+.badge { border-radius: 2px; }
+.btn { white-space: nowrap; padding: 11px 28px; min-height: 46px; }
+
+/* Slanted shapes: a skewed ::before behind upright content. */
+:is(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram) {
   position: relative; isolation: isolate;
   background: none; border: 0; box-shadow: none; border-radius: 0;
 }
-:is(.site-header .wrap, .chip, .btn, .feature-panel, .trust-diagram, .dl, .faq-list details, .dl-pending, .callout, .badge):hover { background: none; }
-:where(.site-header .wrap, .chip, .btn, .feature-panel, .trust-diagram, .dl, .faq-list details, .dl-pending, .callout, .badge)::before {
+:is(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram):hover { background: none; }
+:where(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram)::before {
   content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
-  transform: skewX(var(--skew)); border-radius: var(--slant-r);
+  transform: skewX(var(--skew));
   background-color: var(--glass); background-image: var(--glass-sheen);
   border: 1px solid var(--glass-edge);
   box-shadow: inset 0 1px 0 var(--glass-rim), var(--glass-shadow);
   transition: background-color 0.35s var(--spring-soft), border-color 0.35s var(--spring-soft);
 }
+.hero .btn.primary { padding: 11px 32px; }
+.hero .btn.primary::before { background: var(--accent); border-color: transparent; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22); }
+.hero .btn.primary:hover::before { background: var(--accent-hover); }
+.hero .chip { padding: 6px 19px; }
+.hero .chip::before { box-shadow: inset 0 1px 0 var(--glass-rim); }
+.hero .chip:hover::before { background-color: var(--glass-strong); border-color: var(--line-strong); }
+:is(.hero .btn.primary, .hero .chip):focus-visible { outline: none; }
+:is(.hero .btn.primary, .hero .chip):focus-visible::before { outline: 2px solid var(--text); outline-offset: 3px; }
+/* A slanted panel's sides lean out by tan(18deg) x its height, so the text sits further in. */
+.feature-panel { padding: 40px 96px; }
+.trust-diagram { padding: 30px 76px; }
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
-  :where(.site-header .wrap, .chip, .btn, .feature-panel, .trust-diagram, .dl, .faq-list details, .dl-pending, .callout, .badge)::before {
-    background-color: var(--surface); background-image: none;
-  }
+  :where(.hero .chip, .feature-panel, .trust-diagram)::before { background-color: var(--surface); background-image: none; }
 }
-/* Focus follows the slant too. */
-:is(.chip, .btn):focus-visible { outline: none; }
-:is(.chip, .btn):focus-visible::before { outline: 2px solid var(--text); outline-offset: 3px; }
 
-/* The header bar: the one pane that really blurs what scrolls under it. */
-.site-header .wrap { border-radius: 0; padding: 0 30px 0 34px; }
-.site-header .wrap::before {
+/* ---- the top bar: full width, straight, the one pane that really blurs ---- */
+body { padding-top: 62px; }
+html { scroll-padding-top: 78px; }
+.hero { min-height: calc(100svh - 62px); }
+.site-header { top: 0; padding: 0; }
+.site-header .wrap {
+  max-width: none; min-height: 62px; border-radius: 0;
+  padding: 0 max(22px, calc((100% - var(--max)) / 2 + 22px));
+  background: var(--bar); background-image: none;
+  border: 0; border-bottom: 1px solid var(--line); box-shadow: none;
   -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
 }
-/* Links split by slanted rules, with a slanted highlight on hover. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .site-header .wrap { background: var(--glass-strong); }
+}
+/* Links split by thin slanted rules; hover turns the text accent and draws a
+   straight accent line under it. */
 .nav { gap: 0; }
-.nav a { position: relative; isolation: isolate; border-radius: 0; padding: 8px 16px; }
-.nav a:hover { background: none; }
+.nav a { position: relative; padding: 8px 16px; border-radius: 0; transition: color 0.35s var(--spring-soft); }
+.nav a:hover { background: none; color: var(--accent); }
 .nav a::before {
   content: ""; position: absolute; left: 0; top: 24%; bottom: 24%;
   border-left: 1px solid var(--line-strong); transform: skewX(var(--skew));
 }
 .nav a::after {
-  content: ""; position: absolute; inset: 6px 4px; z-index: -1;
-  transform: skewX(var(--skew)); transition: background-color 0.35s var(--spring-soft);
+  content: ""; position: absolute; left: 16px; right: 16px; bottom: 2px; height: 2px;
+  background: var(--accent); transform: scaleX(0); transition: transform 0.4s var(--spring);
 }
-.nav a:hover::after { background-color: var(--accent-soft); }
+.nav a:hover::after { transform: scaleX(1); }
 .nav .lang { margin-left: 0; padding-left: 16px; border-left: 0; border-radius: 0; }
 
-/* Buttons and tags */
-.btn { border-radius: 0; padding: 12px 34px; }
-.btn.primary { background: none; border: 0; box-shadow: none; }
-.btn.primary::before { background: var(--accent); background-image: none; border-color: transparent; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 10px 26px -12px color-mix(in srgb, var(--accent) 70%, transparent); }
-.btn.primary:hover::before { background: var(--accent-hover); }
-.btn:not(.primary):hover::before, .chip:hover::before { background-color: var(--glass-strong); }
-.chip { border-radius: 0; padding: 6px 19px; }
-.chip::before { box-shadow: inset 0 1px 0 var(--glass-rim); }
-.badge { border-radius: 0; padding: 3px 11px; }
-.badge::before { box-shadow: none; background-image: none; }
-.badge[data-stage="release"] { background: none; color: var(--bg); }
-.badge[data-stage="release"]::before { background-color: var(--text); border-color: transparent; }
-.badge[data-stage="beta"], .badge[data-stage="alpha"] { border: 0; }
-.badge[data-stage="beta"]::before, .badge[data-stage="alpha"]::before { background-color: transparent; border-color: var(--line-strong); }
-.badge[data-stage="soon"]::before { display: none; }
-.badge-yours { background: none; }
-.badge-yours::before { background-color: var(--accent); border-color: transparent; }
-.dl-pending { border-radius: 0; }
-.dl-pending::before { background: none; border: 1px dashed var(--line-strong); box-shadow: none; }
-
-/* Features: one wide leaning panel. Its sides lean out by about a fifth of its
-   height, so the text sits further in. */
-.feature-panel { padding: 40px 96px; }
-
-/* Privacy: words on the left, the devices diagram in a leaning pane on the right. */
-.trust-diagram { padding: 30px 76px; }
-
-/* Download: a leaning bar per platform. Yours is tinted. */
-.downloads { display: grid; gap: 12px; padding: 0; }
-.dl { padding: 20px 44px; }
-.dl.is-yours { background: none; box-shadow: none; }
-.dl.is-yours::before {
-  background-color: color-mix(in srgb, var(--accent) 13%, transparent);
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+/* ---- Download: one card, tabs on top, the chosen platform below ---- */
+.dl-card {
+  background-color: var(--glass); background-image: var(--glass-sheen);
+  border: 1px solid var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--glass-rim), var(--glass-shadow);
 }
-.dl:target { animation: none; }
-.dl:target::before { animation: picked 1.6s var(--spring-soft); }
-
-/* FAQ: a leaning bar per question; an open one grows, so it leans a little less. */
-.faq-list { display: grid; gap: 10px; padding: 0; }
-.faq-list details { padding: 18px 44px; }
-
-.callout { border-radius: 0; padding: 16px 40px; }
-
-@media (max-width: 620px) {
-  /* Same lean as on wider screens. A tall shape would push its corners far past
-     its text, so on a phone the layout keeps shapes short instead: each feature
-     becomes its own leaning bar rather than one tall panel. */
-  .feature-panel { padding: 0; gap: 12px; }
-  .feature-panel::before { display: none; }
-  .feature { position: relative; isolation: isolate; padding: 18px 40px; }
-  .feature::before {
-    content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
-    transform: skewX(var(--skew));
-    background-color: var(--glass); background-image: var(--glass-sheen);
-    border: 1px solid var(--glass-edge);
-    box-shadow: inset 0 1px 0 var(--glass-rim), var(--glass-shadow);
-  }
-  .trust-diagram { padding: 22px 64px; }
-  .dl { padding: 18px 42px; }
-  .faq-list details { padding: 16px 40px; }
-  .site-header .wrap { padding: 0 20px 0 26px; }
-  .nav a { padding: 8px 12px; }
+.dl-tabs { display: flex; flex-wrap: wrap; margin: 0; padding: 0 12px; border-bottom: 1px solid var(--line); }
+.dl-tab {
+  position: relative; padding: 15px 22px; color: var(--muted); font-weight: 600; text-decoration: none;
+  transition: color 0.35s var(--spring-soft);
 }
-@media (max-width: 400px) {
-  .site-header .wrap { padding: 0 8px 0 14px; }
-  .nav a { padding: 7px 10px; }
+.dl-tab span { font-weight: 400; }
+.dl-tab + .dl-tab::before {
+  content: ""; position: absolute; left: 0; top: 30%; bottom: 30%;
+  border-left: 1px solid var(--line-strong); transform: skewX(var(--skew));
 }
-/* Each leaning row is its own layer, so a row with the Get app menu open is lifted
-   above the rows under it, or they would cover the menu. */
-.dl:has(.pick[open]) { z-index: 5; }
-
-/* ================= FAQ: plain list ================= */
-
-/* No glass: questions split by thin lines. */
-.faq-list { gap: 0; }
-.faq-list details { padding: 18px 0; }
-.faq-list details::before { display: none; }
-.faq-list details + details { border-top: 1px solid var(--line); }
-
-/* ================= Download: one platform at a time ================= */
-
-/* Leaning platform tabs over one short leaning panel that shows the chosen
-   platform. Without the script the first platform shows, or the one a link
-   points at (#dl-android); site.js then opens the visitor's own platform and
-   switches with a tap. */
-.dl-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; }
-.dl-tabs .chip { padding: 8px 22px; }
-.dl-tabs .chip[aria-current="true"] { color: var(--accent); }
-.dl-tabs .chip[aria-current="true"]::before {
-  background-color: var(--accent-soft); background-image: none;
-  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+.dl-tab:hover, .dl-tab[aria-current="true"] { color: var(--text); }
+.dl-tab::after {
+  content: ""; position: absolute; left: 18px; right: 18px; bottom: -1px; height: 2px;
+  background: var(--accent); transform: scaleX(0); transition: transform 0.4s var(--spring);
 }
-.downloads { display: block; }
+.dl-tab[aria-current="true"]::after { transform: scaleX(1); }
+.downloads { display: block; padding: 0; }
 .downloads .dl { display: none; }
 .downloads:not(.js-tabs):not(:has(.dl:target)) .dl:first-child, .downloads:not(.js-tabs) .dl:target { display: grid; }
 .downloads.js-tabs .dl { display: none; }
 .downloads.js-tabs .dl.is-active { display: grid; animation: dl-in 0.5s var(--spring); }
 @keyframes dl-in { from { opacity: 0; filter: blur(6px); transform: translateY(6px); } }
-.dl { padding: 26px 56px; }
-.dl.is-yours::before { background-color: var(--glass); border-color: var(--glass-edge); }
-@media (max-width: 620px) {
-  .dl-tabs .chip { padding: 7px 14px; font-size: 0.88rem; }
-  .dl { padding: 22px 52px; }
-}
-
-/* ================= readable header ================= */
-
-/* The bar floats over the demo's bright screenshots, so a clear tint let them
-   wash out its text. It gets a deeper tint than the panels (still blurred). */
-:root { --bar: rgba(250, 250, 251, 0.78); }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bar: rgba(24, 25, 28, 0.78); } }
-:root[data-theme="dark"] { --bar: rgba(24, 25, 28, 0.78); }
-.site-header .wrap::before { background-color: var(--bar); }
-
-/* ================= download panel and buttons ================= */
-
-/* One platform's row: name, the details, then the button on one line. The
-   button keeps its label on one line and sizes to it. */
-.dl { grid-template-columns: 11rem minmax(0, 1fr) auto; gap: 8px 32px; }
-.dl-actions .btn, .dl-actions .pick-slot, .dl-pending { width: auto; min-width: 13rem; }
-.btn { white-space: nowrap; padding: 11px 28px; min-height: 46px; }
-.btn.primary::before { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22); }
+.dl { grid-template-columns: 11rem minmax(0, 1fr) auto; gap: 8px 32px; padding: 26px 34px; }
+.dl.is-yours { background: none; box-shadow: none; }
 .dl-head { gap: 8px; }
-@media (max-width: 960px) {
-  .dl { grid-template-columns: minmax(0, 1fr) auto; }
-}
-@media (max-width: 620px) {
-  .dl { grid-template-columns: minmax(0, 1fr); }
-  .dl-actions .btn, .dl-actions .pick-slot, .dl-pending { width: 100%; min-width: 0; }
-}
+.dl-actions .btn, .dl-actions .pick-slot, .dl-pending { width: auto; min-width: 13rem; }
+/* Get app: straight like the other buttons; its menu items fill edge to edge. */
+.pick::before { transform: none; border-radius: 0; }
+.pick-menu a { padding: 8px 14px; }
+.pick-menu a::before { transform: none; border-radius: 0; inset: 0; }
 
-/* ================= reveal: the cursor lights the edges ================= */
+/* ---- FAQ: plain list ---- */
+.faq-list { padding: 0; }
+.faq-list details { padding: 18px 0; }
+.faq-list details + details { border-top: 1px solid var(--line); }
 
-/* Like Windows 10's reveal: near the pointer, the edges of the leaning shapes
-   catch a soft light that follows it. Only the edge: ::after is a ring the
-   width of the border (the mask cuts its middle out), lit by a radial gradient
-   at the pointer. site.js sets --rx/--ry (in the shape's own leaning frame) and
-   --ro (how lit) on the shapes near the pointer, only on mouse-like pointers. */
-:root { --reveal: rgba(185, 74, 36, 0.75); }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --reveal: rgba(255, 228, 210, 0.85); } }
-:root[data-theme="dark"] { --reveal: rgba(255, 228, 210, 0.85); }
-:where(.site-header .wrap, .chip, .btn, .feature-panel, .trust-diagram, .dl, .dl-pending, .feature)::after {
+/* ---- reveal: the pointer lights the edges of the slanted shapes ---- */
+/* Like Windows 10's reveal: near the pointer, the edge of a slanted shape catches
+   a soft light that follows it. ::after is a ring the width of the border (the
+   mask cuts its middle out); site.js sets --rx/--ry in the shape's own leaning
+   frame and --ro (how lit), only for a mouse or pen. */
+:where(.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram)::after {
   content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
   transform: skewX(var(--skew));
   border: 1.5px solid transparent;
@@ -876,5 +813,31 @@ summary::-webkit-details-marker { display: none; }
   opacity: var(--ro, 0);
   transition: opacity 0.35s var(--spring-soft);
 }
-/* On wider screens a feature is plain text inside its panel, not a shape. */
-@media (min-width: 621px) { .feature::after { display: none; } }
+
+/* ---- tablets and phones ---- */
+@media (max-width: 960px) {
+  .dl { grid-template-columns: minmax(0, 1fr) auto; }
+}
+@media (max-width: 620px) {
+  .site-header .wrap { min-height: 58px; padding: 0 16px; }
+  body { padding-top: 58px; }
+  .hero { min-height: calc(100svh - 58px); }
+  .nav a { padding: 8px 12px; }
+  .nav a::after { left: 12px; right: 12px; }
+  .hero .chip { padding: 5px 11px; }
+  .hero .btn.primary { padding: 11px 26px; }
+  /* Tall shapes on a narrow screen would lean too far: here the panels stand
+     straight, and only the short hero button and tags keep the slant. */
+  .feature-panel { padding: 26px 24px; }
+  .trust-diagram { padding: 24px; }
+  :is(.feature-panel, .trust-diagram)::before, :is(.feature-panel, .trust-diagram)::after { transform: none; }
+  .dl-tabs { padding: 0 4px; }
+  .dl-tab { padding: 13px 12px; font-size: 0.92rem; }
+  .dl-tab::after { left: 10px; right: 10px; }
+  .dl { grid-template-columns: minmax(0, 1fr); padding: 22px 20px; }
+  .dl-actions .btn, .dl-actions .pick-slot, .dl-pending { width: 100%; min-width: 0; }
+}
+@media (max-width: 400px) {
+  .site-header .wrap { padding: 0 10px; }
+  .nav a { padding: 7px 10px; }
+}
