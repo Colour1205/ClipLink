@@ -280,6 +280,8 @@ summary::-webkit-details-marker { display: none; }
 }
 .faq-list details[open] summary::after { rotate: -135deg; margin-top: 0.7em; }
 .faq-list details p { color: var(--muted); margin: 10px 0 0; max-width: 62ch; }
+.faq-list details[open] p { animation: answer-in 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); }
+@keyframes answer-in { from { opacity: 0; filter: blur(6px); transform: translateY(-4px); } }
 
 /* "Get app": a button that turns into its own menu. Closed, it is a pill like the
    other download buttons, with a chevron at its right edge. Open, the same shape
@@ -295,23 +297,38 @@ summary::-webkit-details-marker { display: none; }
 }
 .pick-head {
   position: relative; display: flex; align-items: center; justify-content: center;
-  min-height: 48px; padding: 0 44px; border-radius: inherit; font-weight: 650;
+  min-height: 48px; padding: 0 44px; font-weight: 650;
 }
-.pick:not([open]) .pick-head:hover { background: var(--accent-hover); }
+.pick:not([open]):hover { background: var(--accent-hover); }
 .pick-chev {
   position: absolute; right: 18px; top: 50%; width: 16px; height: 16px; margin-top: -8px;
   fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
   transition: rotate 0.22s ease;
 }
-.pick[open] {
+.pick[open]:not(.closing) {
   border-radius: 22px; background: var(--surface); color: var(--text);
   box-shadow: 0 0 0 1px var(--line-strong), var(--glass-shadow);
 }
-.pick[open] .pick-head { color: var(--muted); }
-.pick[open] .pick-chev { rotate: 180deg; }
+.pick[open]:not(.closing) .pick-head { color: var(--muted); }
+.pick[open]:not(.closing) .pick-chev { rotate: 180deg; }
 .pick-menu { display: grid; gap: 2px; padding: 0 6px 6px; overflow: hidden; }
-.pick[open] .pick-menu { animation: pick-grow 0.24s cubic-bezier(0.2, 0.8, 0.2, 1); }
-@keyframes pick-grow { from { max-height: 0; opacity: 0; } to { max-height: 120px; opacity: 1; } }
+
+/* While it changes shape, what is inside blurs through the change: the title
+   blurs as its colour flips, and the choices come into focus as they appear
+   (and go out of focus as they leave, see site.js). */
+.pick[open] .pick-head span, .pick.closing .pick-head span { animation: pick-swap 0.26s ease; }
+.pick.closing .pick-head span { animation-name: pick-swap-back; }
+@keyframes pick-swap { 40% { filter: blur(4px); opacity: 0.6; } }
+@keyframes pick-swap-back { 40% { filter: blur(4px); opacity: 0.6; } }
+.pick[open] .pick-menu { animation: pick-grow 0.26s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.pick[open] .pick-menu a { animation: pick-focus 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) backwards; }
+.pick[open] .pick-menu a + a { animation-delay: 0.04s; }
+.pick.closing .pick-menu { animation: pick-shrink 0.2s ease-in forwards; }
+.pick.closing .pick-menu a { animation: pick-unfocus 0.16s ease-in forwards; }
+@keyframes pick-grow { from { max-height: 0; } to { max-height: 120px; } }
+@keyframes pick-shrink { from { max-height: 120px; } to { max-height: 0; padding-bottom: 0; } }
+@keyframes pick-focus { from { opacity: 0; filter: blur(8px); transform: translateY(-6px); } }
+@keyframes pick-unfocus { to { opacity: 0; filter: blur(8px); transform: translateY(-4px); } }
 .pick-menu a {
   display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 8px 14px; border-radius: 16px;
   color: var(--text); text-decoration: none; font-weight: 600; font-size: 0.95rem;

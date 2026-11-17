@@ -207,22 +207,37 @@
 
   // ---- 3. The "Get app" menu: a <details>, so it works without this script.
   // Here it also closes on a click elsewhere, on Escape, and after a choice. ----
+  // Closing plays the opening backwards (the choices blur out, the shape
+  // shrinks back to the pill) before the <details> actually closes.
   var picks = document.querySelectorAll('details.pick');
+  var still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function closePick(menu, refocus) {
+    if (!menu.open || menu.classList.contains('closing')) return;
+    var done = function () {
+      menu.classList.remove('closing');
+      menu.open = false;
+      if (refocus) menu.querySelector('summary').focus();
+    };
+    if (still) { done(); return; }
+    menu.classList.add('closing');
+    setTimeout(done, 200);
+  }
+  Array.prototype.forEach.call(picks, function (menu) {
+    menu.querySelector('summary').addEventListener('click', function (event) {
+      if (menu.open) { event.preventDefault(); closePick(menu, false); }
+    });
+  });
   if (picks.length) {
     document.addEventListener('click', function (event) {
       Array.prototype.forEach.call(picks, function (menu) {
         if (!menu.open) return;
         var inMenu = menu.contains(event.target);
-        if (!inMenu || event.target.closest('.pick-menu a')) menu.open = false;
+        if (!inMenu || event.target.closest('.pick-menu a')) closePick(menu, false);
       });
     });
     document.addEventListener('keydown', function (event) {
       if (event.key !== 'Escape') return;
-      Array.prototype.forEach.call(picks, function (menu) {
-        if (!menu.open) return;
-        menu.open = false;
-        menu.querySelector('summary').focus();
-      });
+      Array.prototype.forEach.call(picks, function (menu) { closePick(menu, true); });
     });
   }
 
