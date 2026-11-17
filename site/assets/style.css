@@ -399,7 +399,7 @@ summary::-webkit-details-marker { display: none; }
   .cta .btn { flex: 1 1 100%; }
   .shot-phone { right: -6px; bottom: -34px; width: 30%; border-width: 4px; }
   section { padding: 56px 0; }
-  #screens { padding-top: 24px; }
+  #screens { padding-top: 40px; }
   .shelf { padding: 24px 12px 18px; }
   .feature-panel { grid-template-columns: 1fr; gap: 24px; padding: 26px 22px; }
   .dl { grid-template-columns: 1fr; padding: 18px 16px; }
@@ -487,13 +487,34 @@ summary::-webkit-details-marker { display: none; }
    Without motion, the photo simply sits on the phone. */
 .hero { padding: 28px 0 56px; }
 .hero .wrap { display: block; }
+
+/* The hero fills the first screen (below the top bar), so the next section only
+   shows once you scroll. A chevron at the bottom says there is more. */
+.hero {
+  position: relative; min-height: calc(100svh - 88px);
+  display: flex; flex-direction: column; justify-content: center;
+  padding-bottom: 72px;
+}
+.hero > .wrap { width: 100%; }
+.scroll-cue {
+  position: absolute; left: 50%; bottom: 14px; translate: -50% 0;
+  display: grid; place-items: center; width: 44px; height: 44px; border-radius: 999px;
+  color: var(--muted); transition: color 0.35s var(--spring-soft);
+}
+.scroll-cue:hover { color: var(--text); }
+.scroll-cue svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+@media (prefers-reduced-motion: no-preference) {
+  .scroll-cue svg { animation: cue 2.4s var(--spring) infinite; }
+}
+/* a small drop, a bounce back, then a rest */
+@keyframes cue { 0%, 45%, 100% { transform: translateY(0); } 20% { transform: translateY(6px); } }
 /* The demo is sized by the window's height as well as its width, so the title,
    the platform tags and the download button always fit on the first screen
    under it (two lines: the title, then tags and buttons). The text column
-   narrows with it, so both stay aligned. About 300px is the top bar, the
-   padding and the two lines of text. */
+   narrows with it, so both stay aligned. About 330px is the top bar, the
+   padding, the two lines of text and the scroll chevron. */
 @media (min-width: 621px) {
-  .hero .wrap { max-width: clamp(640px, calc((100svh - 300px) * 1.98 + 44px), var(--max)); }
+  .hero .wrap { max-width: clamp(640px, calc((100svh - 330px) * 1.98 + 44px), var(--max)); }
 }
 
 .demo {
@@ -582,7 +603,7 @@ summary::-webkit-details-marker { display: none; }
 .hero-copy h1 { font-size: clamp(1.75rem, 2.6vw, 2.15rem); line-height: 1.1; letter-spacing: -0.03em; margin: 0 0 18px; max-width: none; }
 .hero-row { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 28px; }
 .hero-row .chips { margin: 0; }
-.hero-row .cta { align-items: center; gap: 22px; }
+/* One line on wider screens: Download first, the platform tags, then GitHub. */
 .plain-link { color: var(--text); font-weight: 600; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 4px; transition: text-decoration-color 0.35s var(--spring-soft); }
 .plain-link:hover { text-decoration-color: var(--accent); }
 
@@ -629,22 +650,24 @@ summary::-webkit-details-marker { display: none; }
 .trio .frame .chip { font-size: 0.95rem; }
 
 @media (max-width: 620px) {
-  .hero { padding: 12px 0 36px; }
-  /* On a phone the title, tags and download button come first, so they are on
-     the first screen, and the demo below is compact: the window takes most of
-     the width and the phone overlaps its right edge, a little lower. */
-  .hero .wrap { display: grid; grid-template-columns: minmax(0, 1fr); }
-  .hero-copy { order: -1; }
+  .hero { padding: 12px 0 64px; }
+  /* On a phone the demo stays on top but is compact (the window takes most of
+     the width and the phone overlaps its right edge, a little lower), so the
+     title, tags and download button under it still fit on the first screen.
+     They also keep the demo apart from the phone screenshots that follow. */
+  .hero .wrap { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
   .demo { aspect-ratio: 100 / 70; --wt: 0cqw; --ww: 76cqw; --wp: 1.2cqw; --pl: 71cqw; --pt: 10cqw; --pw: 27cqw; --pb: 0.9cqw; }
   .demo-screen { border-radius: 2cqw; }
   .demo-win { border-radius: 3.2cqw; }
   .demo-ring { box-shadow: inset 0 0 0 1.5px var(--accent); }
-  .hero-copy { margin: 0 0 26px; }
+  .hero-copy { margin: 22px 0 0; }
   .hero-copy h1 { margin-bottom: 14px; }
   .hero-row { gap: 14px; }
   .hero-row .chips { gap: 5px; flex-wrap: nowrap; }
   .hero-row .chip { padding: 5px 9px; font-size: 0.8rem; white-space: nowrap; }
-  .hero-row .cta .btn { flex: 0 0 auto; }
+  /* On a phone the tags get their own line first, then Download and GitHub. */
+  .hero-row .chips { order: -1; flex: 1 1 100%; }
+  .hero-row .btn { flex: 0 0 auto; }
   .demo-path { display: none; }
   .trio { padding: 0; }
   .frame-screen img { border-width: 4px; }
