@@ -50,34 +50,50 @@
   <main id="main">
     <div class="hero">
       <div class="wrap">
+        <figure class="demo">
+          <div class="demo-win glass">
+            <div class="demo-screen">
+              <img src="../assets/shot-windows.webp" width="950" height="676" alt="Windows 上的 ClipLink：“已同步”窗口里有小鸭子照片、一个 PDF 和几条文字" fetchpriority="high">
+              <span class="demo-ring" aria-hidden="true"></span>
+            </div>
+          </div>
+          <div class="demo-phone">
+            <img src="../assets/demo-ios-empty.webp" width="560" height="1212" alt="iPhone 上的 ClipLink（开发中）">
+          </div>
+          <svg class="demo-path" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" focusable="false"><path d="M0 95C30 10 70 10 100 75"/></svg>
+          <div class="demo-fly" aria-hidden="true"><img src="../assets/demo-ios-card.webp" width="248" height="406" alt=""></div>
+          <figcaption class="visually-hidden">Windows 电脑上的小鸭子照片，也出现在 iPhone 上。</figcaption>
+        </figure>
+
         <div class="hero-copy">
           <h1><span>在自己的设备之间</span><span>同步剪贴板</span></h1>
-          <ul class="chips" aria-label="支持的平台"><li><a class="chip" href="#dl-windows">Windows</a></li><li><a class="chip" href="#dl-android">Android</a></li><li><a class="chip" href="#dl-harmonyos">鸿蒙</a></li><li><a class="chip" href="#dl-ios">iOS <span>开发中</span></a></li></ul>
-          <div class="cta">
-            <a class="btn primary" href="#download">下载 ClipLink</a>
-            <a class="btn" href="https://github.com/Colour1205/ClipLink" target="_blank" rel="noopener">查看源代码</a>
+          <div class="hero-row">
+            <ul class="chips" aria-label="支持的平台"><li><a class="chip" href="#dl-windows">Windows</a></li><li><a class="chip" href="#dl-android">Android</a></li><li><a class="chip" href="#dl-harmonyos">鸿蒙</a></li><li><a class="chip" href="#dl-ios">iOS <span>开发中</span></a></li></ul>
+            <div class="cta">
+              <a class="btn primary" href="#download">下载</a>
+              <a class="plain-link" href="https://github.com/Colour1205/ClipLink" target="_blank" rel="noopener">GitHub 上的源代码</a>
+            </div>
           </div>
-          <p class="hero-note">免费开源。</p>
-        </div>
-
-        <div class="art-stage">
-          <div class="window glass">
-            <img class="shot-win" src="../assets/shot-windows.webp" width="950" height="676" alt="Windows 上的 ClipLink：“已同步”窗口里有从其他设备传来的文字、图片和一个 PDF" fetchpriority="high">
-          </div>
-          <img class="shot-phone" src="../assets/shot-ios.webp" width="560" height="1212" alt="iPhone 上的 ClipLink（开发中），显示同样的内容和“粘贴”按钮">
         </div>
       </div>
     </div>
 
-    <section id="screens">
+    <section id="screens" aria-labelledby="screens-title">
       <div class="wrap">
-        <h2>每台手机上都是同一份列表</h2>
-        <div class="shelf glass">
-          <div class="showcase" data-hint="左右滑动查看更多">
-            <figure class="frame"><img src="../assets/shot-ios.webp" width="560" height="1212" alt="iPhone 上的 ClipLink（开发中）" loading="lazy"><figcaption>iPhone</figcaption></figure>
-            <figure class="frame"><img src="../assets/shot-android.webp" width="560" height="1239" alt="Android 上的 ClipLink" loading="lazy"><figcaption>Android</figcaption></figure>
-            <figure class="frame"><img src="../assets/shot-hmos.webp" width="560" height="1208" alt="鸿蒙上的 ClipLink" loading="lazy"><figcaption>鸿蒙</figcaption></figure>
-          </div>
+        <h2 id="screens-title" class="visually-hidden">每台手机上</h2>
+        <div class="showcase trio" data-hint="左右滑动查看更多">
+          <figure class="frame" style="--cx:51.4%;--cy:32.5%;--cw:44.3%;--ch:33.5%;--drop:0.255">
+            <div class="frame-screen"><img src="../assets/shot-ios.webp" width="560" height="1212" alt="iPhone 上的 ClipLink（开发中）" loading="lazy"><span class="frame-ring" aria-hidden="true"></span></div>
+            <figcaption><a class="chip" href="#dl-ios">iPhone <span>开发中</span></a></figcaption>
+          </figure>
+          <figure class="frame" style="--cx:51.8%;--cy:44.9%;--cw:43.9%;--ch:32.3%">
+            <div class="frame-screen"><img src="../assets/shot-android.webp" width="560" height="1239" alt="Android 上的 ClipLink" loading="lazy"><span class="frame-ring" aria-hidden="true"></span></div>
+            <figcaption><a class="chip" href="#dl-android">Android</a></figcaption>
+          </figure>
+          <figure class="frame" style="--cx:51.6%;--cy:21.2%;--cw:44.3%;--ch:33.1%;--drop:0.503">
+            <div class="frame-screen"><img src="../assets/shot-hmos.webp" width="560" height="1208" alt="鸿蒙上的 ClipLink" loading="lazy"><span class="frame-ring" aria-hidden="true"></span></div>
+            <figcaption><a class="chip" href="#dl-harmonyos">鸿蒙</a></figcaption>
+          </figure>
         </div>
       </div>
     </section>

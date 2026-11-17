@@ -50,34 +50,50 @@
   <main id="main">
     <div class="hero">
       <div class="wrap">
+        <figure class="demo">
+          <div class="demo-win glass">
+            <div class="demo-screen">
+              <img src="assets/shot-windows.webp" width="950" height="676" alt="ClipLink on Windows: the Synced window with a photo of ducklings, a PDF and text items" fetchpriority="high">
+              <span class="demo-ring" aria-hidden="true"></span>
+            </div>
+          </div>
+          <div class="demo-phone">
+            <img src="assets/demo-ios-empty.webp" width="560" height="1212" alt="ClipLink for iPhone, in development">
+          </div>
+          <svg class="demo-path" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" focusable="false"><path d="M0 95C30 10 70 10 100 75"/></svg>
+          <div class="demo-fly" aria-hidden="true"><img src="assets/demo-ios-card.webp" width="248" height="406" alt=""></div>
+          <figcaption class="visually-hidden">The ducklings photo on the Windows PC also shows up on the iPhone.</figcaption>
+        </figure>
+
         <div class="hero-copy">
           <h1>Clipboard sync for your own devices</h1>
-          <ul class="chips" aria-label="Platforms"><li><a class="chip" href="#dl-windows">Windows</a></li><li><a class="chip" href="#dl-android">Android</a></li><li><a class="chip" href="#dl-harmonyos">HarmonyOS</a></li><li><a class="chip" href="#dl-ios">iOS <span>soon</span></a></li></ul>
-          <div class="cta">
-            <a class="btn primary" href="#download">Download ClipLink</a>
-            <a class="btn" href="https://github.com/Colour1205/ClipLink" target="_blank" rel="noopener">View on GitHub</a>
+          <div class="hero-row">
+            <ul class="chips" aria-label="Platforms"><li><a class="chip" href="#dl-windows">Windows</a></li><li><a class="chip" href="#dl-android">Android</a></li><li><a class="chip" href="#dl-harmonyos">HarmonyOS</a></li><li><a class="chip" href="#dl-ios">iOS <span>soon</span></a></li></ul>
+            <div class="cta">
+              <a class="btn primary" href="#download">Download</a>
+              <a class="plain-link" href="https://github.com/Colour1205/ClipLink" target="_blank" rel="noopener">Open source on GitHub</a>
+            </div>
           </div>
-          <p class="hero-note">Free and open source.</p>
-        </div>
-
-        <div class="art-stage">
-          <div class="window glass">
-            <img class="shot-win" src="assets/shot-windows.webp" width="950" height="676" alt="ClipLink on Windows: the Synced window with text, images and a PDF that arrived from other devices" fetchpriority="high">
-          </div>
-          <img class="shot-phone" src="assets/shot-ios.webp" width="560" height="1212" alt="ClipLink for iPhone (in development) showing the same items, with a Paste button">
         </div>
       </div>
     </div>
 
-    <section id="screens">
+    <section id="screens" aria-labelledby="screens-title">
       <div class="wrap">
-        <h2>The same list on every phone</h2>
-        <div class="shelf glass">
-          <div class="showcase" data-hint="Swipe to see the next one">
-            <figure class="frame"><img src="assets/shot-ios.webp" width="560" height="1212" alt="ClipLink for iPhone, in development" loading="lazy"><figcaption>iPhone</figcaption></figure>
-            <figure class="frame"><img src="assets/shot-android.webp" width="560" height="1239" alt="ClipLink on Android" loading="lazy"><figcaption>Android</figcaption></figure>
-            <figure class="frame"><img src="assets/shot-hmos.webp" width="560" height="1208" alt="ClipLink on HarmonyOS, in Chinese" loading="lazy"><figcaption>HarmonyOS</figcaption></figure>
-          </div>
+        <h2 id="screens-title" class="visually-hidden">On each phone</h2>
+        <div class="showcase trio" data-hint="Swipe to see the next one">
+          <figure class="frame" style="--cx:51.4%;--cy:32.5%;--cw:44.3%;--ch:33.5%;--drop:0.255">
+            <div class="frame-screen"><img src="assets/shot-ios.webp" width="560" height="1212" alt="ClipLink for iPhone, in development" loading="lazy"><span class="frame-ring" aria-hidden="true"></span></div>
+            <figcaption><a class="chip" href="#dl-ios">iPhone <span>soon</span></a></figcaption>
+          </figure>
+          <figure class="frame" style="--cx:51.8%;--cy:44.9%;--cw:43.9%;--ch:32.3%">
+            <div class="frame-screen"><img src="assets/shot-android.webp" width="560" height="1239" alt="ClipLink on Android" loading="lazy"><span class="frame-ring" aria-hidden="true"></span></div>
+            <figcaption><a class="chip" href="#dl-android">Android</a></figcaption>
+          </figure>
+          <figure class="frame" style="--cx:51.6%;--cy:21.2%;--cw:44.3%;--ch:33.1%;--drop:0.503">
+            <div class="frame-screen"><img src="assets/shot-hmos.webp" width="560" height="1208" alt="ClipLink on HarmonyOS, in Chinese" loading="lazy"><span class="frame-ring" aria-hidden="true"></span></div>
+            <figcaption><a class="chip" href="#dl-harmonyos">HarmonyOS</a></figcaption>
+          </figure>
         </div>
       </div>
     </section>

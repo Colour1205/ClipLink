@@ -477,3 +477,170 @@ summary::-webkit-details-marker { display: none; }
   .nav a { padding: 7px 10px; font-size: 0.9rem; }
   .nav .lang { margin-left: 2px; padding-left: 11px; }
 }
+
+/* ================= hero: the app shows what it does ================= */
+
+/* The hero is a small demonstration made of the real screenshots: the ducklings
+   photo on the Windows PC lifts off and lands in its place on the iPhone, then
+   it starts again. Everything is placed in units of the stage's width (cqw), so
+   the same numbers work at every size; a breakpoint only moves the two devices.
+   Without motion, the photo simply sits on the phone. */
+.hero { padding: 28px 0 56px; }
+.hero .wrap { display: block; }
+/* The demo is sized by the window's height as well as its width, so the title,
+   the platform tags and the download button always fit on the first screen
+   under it (two lines: the title, then tags and buttons). The text column
+   narrows with it, so both stay aligned. About 300px is the top bar, the
+   padding and the two lines of text. */
+@media (min-width: 621px) {
+  .hero .wrap { max-width: clamp(640px, calc((100svh - 300px) * 1.98 + 44px), var(--max)); }
+}
+
+.demo {
+  position: relative; margin: 0; container-type: inline-size;
+  aspect-ratio: 100 / 50.5;
+  /* Windows window: left, top, outer width, glass padding */
+  --wl: 0cqw; --wt: 2.5cqw; --ww: 63cqw; --wp: 0.75cqw;
+  /* phone: left, top, outer width, bezel */
+  --pl: 76.6cqw; --pt: 0cqw; --pw: 23.2cqw; --pb: 0.45cqw;
+}
+.demo > * { position: absolute; }
+.demo-win { left: var(--wl); top: var(--wt); width: var(--ww); padding: var(--wp); border-radius: calc(var(--wp) + 1.1cqw); }
+.demo-screen { position: relative; overflow: hidden; border-radius: 1.1cqw; }
+.demo-screen img, .demo-phone img, .demo-fly img { display: block; width: 100%; height: auto; }
+.demo-phone {
+  left: var(--pl); top: var(--pt); width: var(--pw); overflow: hidden;
+  border: var(--pb) solid #111214; border-radius: 13% / 6%;
+  box-shadow: var(--device-shadow);
+}
+
+/* Where the photo starts (over the photo in the Windows window) and where it
+   lands (its slot on the phone), from pixel positions in the screenshots. */
+.demo-fly {
+  --inw: calc(var(--ww) - 2 * var(--wp));
+  --inp: calc(var(--pw) - 2 * var(--pb));
+  --x0: calc(var(--wl) + var(--wp) + var(--inw) * 0.3877);
+  --y0: calc(var(--wt) + var(--wp) + var(--inw) * 0.3255);
+  --w0: calc(var(--inw) * 0.2785);
+  --x1: calc(var(--pl) + var(--pb) + var(--inp) * 0.5143);
+  --y1: calc(var(--pt) + var(--pb) + var(--inp) * 0.7036);
+  --w1: calc(var(--inp) * 0.4429);
+  --lift: calc(min(var(--y0), var(--y1)) - 5cqw);
+  left: var(--x1); top: var(--y1); width: var(--w1); z-index: 3;
+  border-radius: 8.9% / 5.4%; overflow: hidden;
+}
+/* "Copied": a ring on the photo in the Windows window. */
+.demo-ring {
+  position: absolute; left: 38.6%; top: 45.5%; width: 27.9%; height: 70%;
+  border-radius: 0.6cqw; opacity: 0;
+  box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 4px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .demo-fly {
+    animation: fly-x 7s infinite, fly-y 7s infinite, fly-look 7s infinite;
+    will-change: transform, filter, opacity;
+  }
+  .demo-ring { animation: ring 7s infinite; }
+}
+/* left and width: along the way, no overshoot sideways */
+@keyframes fly-x {
+  0%, 22% { left: var(--x0); width: var(--w0); animation-timing-function: cubic-bezier(0.5, 0, 0.25, 1); }
+  50%, 100% { left: var(--x1); width: var(--w1); }
+}
+/* top: up a little, then down into the slot with the spring's bounce */
+@keyframes fly-y {
+  0%, 22% { top: var(--y0); animation-timing-function: cubic-bezier(0.2, 0.6, 0.35, 1); }
+  35% { top: var(--lift); animation-timing-function: var(--spring); }
+  52%, 100% { top: var(--y1); }
+}
+/* appears, lifts, blurs while moving, settles, then fades out for the next round */
+@keyframes fly-look {
+  0%, 12% { opacity: 0; filter: blur(8px); transform: scale(0.96); box-shadow: none; animation-timing-function: var(--spring-soft); }
+  21% { opacity: 1; filter: blur(0); transform: scale(1.06); box-shadow: 0 18px 40px -12px rgba(0, 0, 0, 0.45); animation-timing-function: ease-in; }
+  34% { filter: blur(2.5px); animation-timing-function: ease-out; }
+  45% { filter: blur(0); transform: scale(1.06); box-shadow: 0 18px 40px -12px rgba(0, 0, 0, 0.45); animation-timing-function: var(--spring); }
+  56%, 86% { opacity: 1; filter: blur(0); transform: scale(1); box-shadow: none; animation-timing-function: var(--exit); }
+  95%, 100% { opacity: 0; filter: blur(8px); transform: scale(0.97); }
+}
+@keyframes ring {
+  0%, 4% { opacity: 0; transform: scale(1.04); animation-timing-function: var(--spring); }
+  12%, 58% { opacity: 1; transform: scale(1); animation-timing-function: var(--spring-soft); }
+  68%, 100% { opacity: 0; }
+}
+
+/* The way between them: a dotted line, like the one in "Who can connect". */
+.demo-path { left: 64.2cqw; top: 15cqw; width: 11.6cqw; height: 8cqw; overflow: visible; }
+.demo-path path { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-linecap: round; stroke-dasharray: 2 8; opacity: 0.7; vector-effect: non-scaling-stroke; }
+@media (prefers-reduced-motion: no-preference) {
+  .demo-path path { animation: flow 1.8s var(--wave) infinite; }
+}
+
+/* The words come after the picture: small, then one row with the platforms
+   and the button. */
+.hero-copy { margin-top: 34px; }
+.hero-copy h1 { font-size: clamp(1.75rem, 2.6vw, 2.15rem); line-height: 1.1; letter-spacing: -0.03em; margin: 0 0 18px; max-width: none; }
+.hero-row { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 28px; }
+.hero-row .chips { margin: 0; }
+.hero-row .cta { align-items: center; gap: 22px; }
+.plain-link { color: var(--text); font-weight: 600; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 4px; transition: text-decoration-color 0.35s var(--spring-soft); }
+.plain-link:hover { text-decoration-color: var(--accent); }
+
+/* ================= phones: the same photo on each ================= */
+
+/* No shelf and no big heading: three phones on the page, each named by a tag that
+   jumps to its download. Each phone is moved down so the ducklings photo sits at
+   the same height on all three, a dotted line runs between them at that height,
+   and the photo is ringed on each in turn, left to right. (--drop is the
+   distance from the photo's middle to the lowest one's, in column widths.) */
+#screens { padding-top: 24px; }
+.trio { --gap: clamp(24px, 6vw, 88px); grid-template-columns: repeat(3, minmax(0, 240px)); justify-content: center; gap: var(--gap); align-items: start; }
+.trio .frame { margin-top: calc(var(--drop, 0) * 100%); }
+.trio .frame:not(:last-child) .frame-screen::after {
+  content: ""; position: absolute; z-index: -1; left: 100%; width: var(--gap);
+  top: calc(var(--cy) + var(--ch) / 2); height: 4px; margin-top: -2px; opacity: 0.75;
+  background: radial-gradient(circle, var(--accent) 1.3px, transparent 1.7px) 0 50% / 10px 4px repeat-x;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .trio .frame:not(:last-child) .frame-screen::after { animation: dots 1.8s var(--wave) infinite; }
+}
+@keyframes dots { to { background-position-x: 10px; } }
+.showcase.is-stack .frame { margin-top: 0; }
+.showcase.is-stack .frame-screen::after { display: none; }
+.trio .frame figcaption span { display: inline; font-size: inherit; }
+.frame-screen { position: relative; }
+.frame-screen img { display: block; width: 100%; height: auto; border-radius: 13% / 6%; border: 5px solid #111214; box-shadow: var(--device-shadow); }
+.frame-ring {
+  position: absolute; left: var(--cx); top: var(--cy); width: var(--cw); height: var(--ch);
+  margin: -1px 0 0 -1px; border-radius: 10% / 6%; opacity: 0;
+  box-shadow: 0 0 0 2px var(--accent), 0 0 0 6px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .frame-ring { animation: frame-ring 6s infinite; }
+  .frame:nth-child(2) .frame-ring { animation-delay: 1.2s; }
+  .frame:nth-child(3) .frame-ring { animation-delay: 2.4s; }
+}
+@keyframes frame-ring {
+  0% { opacity: 0; transform: scale(1.06); animation-timing-function: var(--spring); }
+  8%, 30% { opacity: 1; transform: scale(1); animation-timing-function: var(--spring-soft); }
+  42%, 100% { opacity: 0; }
+}
+.trio .frame figcaption { padding-top: 18px; }
+.trio .frame .chip { font-size: 0.95rem; }
+
+@media (max-width: 620px) {
+  .hero { padding: 16px 0 40px; }
+  /* the phone moves down over the window's right edge */
+  .demo { aspect-ratio: 100 / 122; --wt: 0cqw; --ww: 92cqw; --wp: 1.2cqw; --pl: 61cqw; --pt: 39cqw; --pw: 39cqw; --pb: 1cqw; }
+  .demo-screen { border-radius: 2cqw; }
+  .demo-win { border-radius: 3.2cqw; }
+  .demo-ring { box-shadow: inset 0 0 0 1.5px var(--accent); }
+  .hero-copy { margin-top: 24px; }
+  .hero-copy h1 { margin-bottom: 14px; }
+  .hero-row .chips { gap: 5px; flex-wrap: nowrap; }
+  .hero-row .chip { padding: 5px 9px; font-size: 0.8rem; white-space: nowrap; }
+  .hero-row .cta .btn { flex: 0 0 auto; }
+  .demo-path { display: none; }
+  .trio { padding: 0; }
+  .frame-screen img { border-width: 4px; }
+}
