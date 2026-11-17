@@ -26,7 +26,7 @@ The accent is a deeper cut of the app icon's salmon (`#e09068`). No purple or bl
 
 ## Glass
 
-`.glass`: `--glass` tint, `blur(26px) saturate(170%)`, a lit top edge (`inset 0 1px 0 --glass-rim`), a soft shadow, and the grain inside the pane. Phones use an 18px blur. With reduced transparency or more contrast, glass becomes `--surface`.
+`.glass`: a `--glass` tint, a `--glass-sheen` gradient from the top, a lit top edge (`inset 0 1px 0 --glass-rim`) and a soft shadow. No grain. Only the header has a real `backdrop-filter` blur (28px, 18px on phones), because only the header floats over content. The panels sit on the soft colour field, where a blur looks the same as no blur but cost about three quarters of each scrolled frame, so don't add `backdrop-filter` to panels. With reduced transparency or more contrast, glass becomes `--surface`.
 
 ## Type
 
