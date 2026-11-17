@@ -21,6 +21,45 @@
     }
   }
 
+  // ---- 1b. Download: one platform at a time. ----
+  // The tabs pick which platform's row shows. It opens on the visitor's own
+  // platform (or the one a link points at, like the platform tags at the top),
+  // and the address keeps the choice (#dl-android) without adding history.
+  var dlBox = document.querySelector('.downloads');
+  var dlTabs = document.querySelectorAll('.dl-tabs [data-for]');
+  if (dlBox && dlTabs.length) {
+    dlBox.classList.add('js-tabs');
+    var pickPlatform = function (key, scroll) {
+      var row = document.getElementById('dl-' + key);
+      if (!row) return false;
+      Array.prototype.forEach.call(dlBox.querySelectorAll('.dl'), function (r) {
+        r.classList.toggle('is-active', r === row);
+      });
+      Array.prototype.forEach.call(dlTabs, function (t) {
+        if (t.getAttribute('data-for') === key) t.setAttribute('aria-current', 'true');
+        else t.removeAttribute('aria-current');
+      });
+      if (scroll) {
+        var section = document.getElementById('download');
+        if (section) section.scrollIntoView({ block: 'start' });
+      }
+      return true;
+    };
+    var fromHash = function () {
+      var m = /^#dl-([a-z]+)$/.exec(location.hash);
+      return m && pickPlatform(m[1], true);
+    };
+    if (!fromHash()) pickPlatform(mine || 'windows', false);
+    Array.prototype.forEach.call(dlTabs, function (t) {
+      t.addEventListener('click', function (event) {
+        event.preventDefault();
+        var key = t.getAttribute('data-for');
+        if (pickPlatform(key, false) && history.replaceState) history.replaceState(null, '', '#dl-' + key);
+      });
+    });
+    window.addEventListener('hashchange', fromHash);
+  }
+
   // ---- 2. On small phones, "See it in action" is a swipeable, looping stack. ----
   // The frames sit on top of each other: the one in front can be dragged left
   // or right to go to the next (or back) and the stack goes round in a circle -
