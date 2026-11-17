@@ -41,7 +41,7 @@
         <a href="#features">Features</a>
         <a class="keep" href="#download">Download</a>
         <a href="#faq">FAQ</a>
-        <a href="https://github.com/Colour1205/ClipLink">GitHub</a>
+        <a href="https://github.com/Colour1205/ClipLink" target="_blank" rel="noopener">GitHub</a>
         <a class="lang" href="zh/?lang=zh" hreflang="zh-Hans" lang="zh-Hans">中文</a>
       </nav>
     </div>
@@ -52,10 +52,10 @@
       <div class="wrap">
         <div class="hero-copy">
           <h1>Clipboard sync for your own devices</h1>
-          <ul class="chips" aria-label="Platforms"><li class="chip">Windows</li><li class="chip">Android</li><li class="chip">HarmonyOS</li><li class="chip">iOS <span>soon</span></li></ul>
+          <ul class="chips" aria-label="Platforms"><li><a class="chip" href="#dl-windows">Windows</a></li><li><a class="chip" href="#dl-android">Android</a></li><li><a class="chip" href="#dl-harmonyos">HarmonyOS</a></li><li><a class="chip" href="#dl-ios">iOS <span>soon</span></a></li></ul>
           <div class="cta">
             <a class="btn primary" href="#download">Download ClipLink</a>
-            <a class="btn" href="https://github.com/Colour1205/ClipLink">View on GitHub</a>
+            <a class="btn" href="https://github.com/Colour1205/ClipLink" target="_blank" rel="noopener">View on GitHub</a>
           </div>
           <p class="hero-note">Free and open source.</p>
         </div>
@@ -74,9 +74,9 @@
         <h2>The same list on every phone</h2>
         <div class="shelf glass">
           <div class="showcase" data-hint="Swipe to see the next one">
-            <figure class="frame"><img src="assets/shot-ios.webp" width="560" height="1212" alt="ClipLink for iPhone, in development" loading="lazy"><figcaption>iPhone <span>in development</span></figcaption></figure>
+            <figure class="frame"><img src="assets/shot-ios.webp" width="560" height="1212" alt="ClipLink for iPhone, in development" loading="lazy"><figcaption>iPhone</figcaption></figure>
             <figure class="frame"><img src="assets/shot-android.webp" width="560" height="1239" alt="ClipLink on Android" loading="lazy"><figcaption>Android</figcaption></figure>
-            <figure class="frame"><img src="assets/shot-hmos.webp" width="560" height="1208" alt="ClipLink on HarmonyOS, in Chinese" loading="lazy"><figcaption>HarmonyOS <span>Chinese interface</span></figcaption></figure>
+            <figure class="frame"><img src="assets/shot-hmos.webp" width="560" height="1208" alt="ClipLink on HarmonyOS, in Chinese" loading="lazy"><figcaption>HarmonyOS</figcaption></figure>
           </div>
         </div>
       </div>
@@ -103,8 +103,8 @@
             <p><strong>Share to ClipLink</strong> in File Explorer, or the share sheet on a phone.</p>
           </div>
           <div class="feature">
-            <h3>Huawei phones work with Windows</h3>
-            <p>Every version speaks the same protocol.</p>
+            <h3>HarmonyOS works with Windows</h3>
+            <p>A Huawei phone syncs with a Windows PC or an Android phone.</p>
           </div>
           <div class="feature">
             <h3>Runs in the tray</h3>
@@ -119,24 +119,29 @@
         <div class="trust-text">
           <h2>Who can connect</h2>
           <p>A device can't read or send anything until you trust it. When one asks to pair, you choose <strong>Trust</strong>, <strong>Ignore</strong> or <strong>Block</strong>.</p>
-          <p>Connections are encrypted and every item is signed by the device it came from. <a href="https://github.com/Colour1205/ClipLink/blob/main/docs/security.md">How it works</a></p>
+          <p>Connections are encrypted and every item is signed by the device it came from. <a href="https://github.com/Colour1205/ClipLink/blob/main/docs/security.md" target="_blank" rel="noopener">How it works</a></p>
         </div>
         <figure class="trust-diagram glass">
-          <svg viewBox="0 0 360 200" aria-hidden="true" focusable="false">
-            <g class="dev">
-              <rect x="22" y="58" width="112" height="72" rx="7"/>
-              <path d="M10 142h136l-8 10H18z"/>
-              <rect x="262" y="48" width="58" height="104" rx="11"/>
-              <path d="M284 58h14"/>
+          <svg viewBox="0 0 360 260" aria-hidden="true" focusable="false">
+            <g class="link">
+              <path d="M146 62L244 58"/>
+              <path d="M92 112V160"/>
+              <path d="M270 100V156"/>
+              <path d="M146 198L236 200"/>
+              <path d="M146 96L236 166"/>
+              <path d="M244 94L146 166"/>
             </g>
-            <path class="link" d="M140 100H256"/>
-            <circle class="dot" cx="140" cy="100" r="4"/>
-            <circle class="dot" cx="256" cy="100" r="4"/>
+            <g class="dev">
+              <rect x="40" y="28" width="104" height="66" rx="7"/>
+              <path d="M28 104h128l-8 9H36z"/>
+              <rect x="250" y="16" width="42" height="80" rx="9"/>
+              <path d="M265 24h12"/>
+              <rect x="40" y="166" width="104" height="62" rx="6"/>
+              <path d="M92 228v12M74 242h36"/>
+              <rect x="240" y="160" width="62" height="84" rx="8"/>
+            </g>
           </svg>
-          <figcaption>
-            <span class="label-top">Direct, over your own network</span>
-            <span class="label-bottom">Encrypted, no server</span>
-          </figcaption>
+          <figcaption class="visually-hidden">A laptop, a phone, a desktop and a tablet, each connected directly to all the others.</figcaption>
         </figure>
       </div>
     </section>
@@ -148,7 +153,7 @@
           <p id="how">Install it on each device, then pair them once with a QR code.</p>
         </div>
         <div class="downloads glass">
-          <div class="dl" data-platform="windows">
+          <div class="dl" id="dl-windows" data-platform="windows">
             <div class="dl-head">
               <h3>Windows</h3>
               <span class="badge" data-stage="beta">Beta</span>
@@ -162,7 +167,7 @@
               <a class="btn primary" data-asset="windows" data-label-ready="Download installer" href="https://github.com/Colour1205/ClipLink/releases">Download installer</a>
             </div>
           </div>
-          <div class="dl" data-platform="android">
+          <div class="dl" id="dl-android" data-platform="android">
             <div class="dl-head">
               <h3>Android</h3>
               <span class="badge" data-stage="alpha">Alpha</span>
@@ -170,14 +175,13 @@
             </div>
             <div class="dl-info">
               <p class="meta">Android 12 or later. <span class="js-version">Version 2.0.0, APK file</span></p>
-              <p class="note">Android asks you to allow the install the first time.</p>
+              <p class="note">Or join the alpha on <a href="https://play.google.com/apps/testing/io.uaena.cliplink" target="_blank" rel="noopener">Google Play</a>.</p>
             </div>
             <div class="dl-actions">
               <a class="btn primary" data-asset="android" data-label-ready="Download APK" href="https://github.com/Colour1205/ClipLink/releases/download/v2.0.0/ClipLink-2.0.0.apk">Download APK</a>
-              <a class="btn" href="https://play.google.com/apps/testing/io.uaena.cliplink">Google Play alpha</a>
             </div>
           </div>
-          <div class="dl" data-platform="harmonyos">
+          <div class="dl" id="dl-harmonyos" data-platform="harmonyos">
             <div class="dl-head">
               <h3>HarmonyOS</h3>
               <span class="badge" data-stage="release">Release</span>
@@ -188,10 +192,10 @@
               <p class="note">Syncs while the app is open.</p>
             </div>
             <div class="dl-actions">
-              <a class="btn primary" href="https://appgallery.huawei.com/app/detail?id=io.uaena.cliplink">Get it on AppGallery</a>
+              <a class="btn primary" href="https://appgallery.huawei.com/app/detail?id=io.uaena.cliplink" target="_blank" rel="noopener">Get it on AppGallery</a>
             </div>
           </div>
-          <div class="dl" data-platform="ios">
+          <div class="dl" id="dl-ios" data-platform="ios">
             <div class="dl-head">
               <h3>iOS</h3>
               <span class="badge" data-stage="soon">Not out yet</span>
@@ -201,9 +205,12 @@
               <p class="meta">iPhone and iPad, iOS 15 or later.</p>
               <p class="note">TestFlight beta first.</p>
             </div>
+            <div class="dl-actions">
+              <span class="dl-pending">Coming soon</span>
+            </div>
           </div>
         </div>
-        <p class="fine">Older versions are on the <a href="https://github.com/Colour1205/ClipLink/releases">releases page</a>.</p>
+        <p class="fine">Older versions are on the <a href="https://github.com/Colour1205/ClipLink/releases" target="_blank" rel="noopener">releases page</a>.</p>
       </div>
     </section>
 
@@ -218,7 +225,7 @@
           <details><summary>What does ClipLink keep on my device?</summary><p>The last 25 items and their files, in the app's own storage. You can delete single items or clear the whole history.</p></details>
           <details><summary>How do I update ClipLink?</summary><p>On Windows, open <strong>Settings</strong>, then <strong>About</strong>, and click <strong>Download and install</strong>. Phone apps update through their store, or you install a newer APK over the old one.</p></details>
           <details><summary>Windows says "Windows protected your PC".</summary><p>The beta installer isn't code-signed yet. Choose <strong>More info</strong>, then <strong>Run anyway</strong>. See the <a href="code-signing-policy.html">code signing policy</a>.</p></details>
-          <details><summary>Is it free?</summary><p>Yes. It's open source under Apache 2.0, and the code is on <a href="https://github.com/Colour1205/ClipLink">GitHub</a>.</p></details>
+          <details><summary>Is it free?</summary><p>Yes. It's open source under Apache 2.0, and the code is on <a href="https://github.com/Colour1205/ClipLink" target="_blank" rel="noopener">GitHub</a>.</p></details>
         </div>
       </div>
     </section>
@@ -227,9 +234,9 @@
   <footer class="site-footer">
     <div class="wrap">
       <span>ClipLink, Apache 2.0</span>
-      <a href="https://github.com/Colour1205/ClipLink">GitHub</a>
-      <a href="https://github.com/Colour1205/ClipLink/releases">Releases</a>
-      <a href="https://github.com/Colour1205/ClipLink/blob/main/LICENSE">Licence</a>
+      <a href="https://github.com/Colour1205/ClipLink" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/Colour1205/ClipLink/releases" target="_blank" rel="noopener">Releases</a>
+      <a href="https://github.com/Colour1205/ClipLink/blob/main/LICENSE" target="_blank" rel="noopener">Licence</a>
       <a href="code-signing-policy.html">Code signing policy</a>
       <a href="privacy.html">Privacy policy</a>
       <span class="grow">This site has no cookies or analytics. When it loads, your browser asks GitHub for the latest release.</span>

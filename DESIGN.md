@@ -38,7 +38,8 @@ Radii are 12, 20 and 28px. Buttons and the header are pills. Sections are 72px a
 
 ## Components
 
-- **Platform tags:** small glass pills under the headline; a platform that is not out yet says so in muted text ("iOS soon").
+- **Platform tags:** small glass pills under the headline, each a link to its download row; a platform that is not out yet says so in muted text ("iOS soon").
 - **Buttons:** primary is a solid accent fill with no glow. Secondary is glass. Neither lifts on hover.
 - **Download list:** one panel with a row per platform. Your own platform's row is tinted and gets a "This device" badge.
 - **FAQ:** one panel, questions split by hairlines, with a chevron that turns.
+- **Links:** links to other sites open in a new tab (`target="_blank" rel="noopener"`). Download buttons stay in the page, since they fetch a file.
