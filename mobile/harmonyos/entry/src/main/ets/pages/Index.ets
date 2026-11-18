@@ -65,7 +65,7 @@ import { SyncManager } from '../networking/SyncManager';
 import { unixMillis } from '../networking/SyncProtocol';
 import { BatchApplied, HeadApplied, SyncApplied } from '../networking/HistorySync';
 import { StackBadge, StackChrome, StackedCard } from '../stack/StackedCard';
-import { DONE_HOLD_MS, FADE_MS, REDUCED_FADE_MS, TransferBar, TransferState } from '../stack/TransferBar';
+import { BAR_MIN_BYTES, DONE_HOLD_MS, FADE_MS, REDUCED_FADE_MS, TransferBar, TransferState } from '../stack/TransferBar';
 import { PROGRESS_INTERVAL_MS, TransferUpdate } from '../networking/TransferProgress';
 import { fileExtensionLabel, fileGlyphKind } from '../stack/CardFooter';
 import { PICTURE_SIDE_VP, PictureFlight, ZoomMorph, ZoomRect, containRect, contentShift, lerp, picturePlace, startScale, zoomHeight, zoomRadius, zoomRect, zoomScale } from '../stack/ZoomMorph';
@@ -3830,6 +3830,9 @@ struct Index {
     if (this.transfers.size === 0) return false;
     const state: TransferState | undefined = this.transferStateOf(item);
     if (state === undefined) return false;
+    // A bar only for a big file (see BAR_MIN_BYTES); a size not known yet
+    // counts as small until its card gives it.
+    if ((state.phase === 'receiving' || state.phase === 'done') && state.total <= BAR_MIN_BYTES) return false;
     if (state.phase === 'done') return true;
     const fileHash: string = this.filePayloadOf(item)?.FileHash ?? '';
     return this.fileStore === null || !this.fileStore.exists(fileHash);
@@ -3864,7 +3867,11 @@ struct Index {
     if (state.phase === 'done') return;
     // Its size, once a card for it is listed (its stream can start before
     // its entry is checked and listed).
-    if (state.total <= 0) state.total = Math.max(0, this.listedFileSize(update.fileHash));
+    if (state.total <= 0) {
+      state.total = Math.max(0, this.listedFileSize(update.fileHash));
+      // Known only now to be big enough for a bar: its card gets one.
+      if (state.total > BAR_MIN_BYTES && update.phase !== 'done') this.arrivalsChanged();
+    }
     state.update(update.phase, update.received, now, this.reduceMotion);
     if (update.phase === 'done') {
       this.finishArrival(update.fileHash, state);

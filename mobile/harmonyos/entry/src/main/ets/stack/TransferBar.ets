@@ -20,6 +20,11 @@ export const DONE_HOLD_MS: number = 300;
 export const FADE_MS: number = 220;
 // With reduce motion on: no hold, a short plain fade.
 export const REDUCED_FADE_MS: number = 150;
+// Only a file bigger than this (100 MB) gets a bar while it arrives: a
+// smaller one is in within seconds, and a bar flashing up for every file is
+// noise. The words for a file that can't come (no sender, retrying) are
+// shown whatever its size.
+export const BAR_MIN_BYTES: number = 100 * 1024 * 1024;
 
 const BAR_HEIGHT_VP: number = 3;
 
