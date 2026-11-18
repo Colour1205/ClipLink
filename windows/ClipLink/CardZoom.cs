@@ -52,10 +52,12 @@ internal sealed class CardZoom
     internal sealed record Flight(ZoomMorph.Rect From, ZoomMorph.Rect To, ImageSource Source, double RadiusFrom,
         UIElement CardPicture, UIElement ViewPicture);
 
-    // About as long as the phones' spring (critically damped, stiffness 328)
-    // takes to settle, on a curve fitted to it (within 1.2%): no slow start,
-    // most of the way at once, then a gentle settle.
-    private static readonly TimeSpan Duration = TimeSpan.FromMilliseconds(350);
+    // Windows' own lengths: opening takes ControlNormalAnimationDuration
+    // (250 ms), closing the shorter ControlFastAnimationDuration (167 ms), as
+    // things leaving go faster than things arriving. The curve has no slow
+    // start: most of the way at once, then a gentle settle.
+    private static readonly TimeSpan OpenDuration = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan CloseDuration = TimeSpan.FromMilliseconds(167);
 
     private readonly FrameworkElement view, content, list, backdrop, cover;
     private readonly Image? flying;
@@ -515,20 +517,20 @@ internal sealed class CardZoom
         var move = compositor.CreateScalarKeyFrameAnimation();
         move.InsertExpressionKeyFrame(0f, "this.StartingValue");
         move.InsertKeyFrame(1f, target, ease);
-        move.Duration = Duration;
+        move.Duration = opening ? OpenDuration : CloseDuration;
 
         var batch = compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
         zoom.StartAnimation("P", move);
         var sprite = ElementCompositionPreview.GetElementChildVisual(cover);
         if (opening)
         {
-            if (sprite != null) Fade(sprite, 1f, 0f, 110, 0);
-            Fade(VisualOf(content), 0f, 1f, 170, 70);
+            if (sprite != null) Fade(sprite, 1f, 0f, 83, 0);
+            Fade(VisualOf(content), 0f, 1f, 120, 50);
         }
         else
         {
-            Fade(VisualOf(content), null, 0f, 110, 0);
-            if (sprite != null) Fade(sprite, null, 1f, 140, 80);
+            Fade(VisualOf(content), null, 0f, 67, 0);
+            if (sprite != null) Fade(sprite, null, 1f, 83, 40);
         }
         batch.End();
 
