@@ -55,6 +55,51 @@ export default function lineFramerTest() {
       expect(texts(lines)).assertEqual('["abc"]');
     });
 
+    it('givesEachLineABufferOfItsOwn', 0, () => {
+      // The socket's message may be freed once pushed, and each line once
+      // read (see SpentBuffers): so no line may share memory with either.
+      const f = new LineFramer(1024);
+      const first: Uint8Array = bytes('ab');
+      expect(texts(f.push(first))).assertEqual('[]');
+      const second: Uint8Array = bytes('c\nde\nfg');
+      const lines: Uint8Array[] | null = f.push(second);
+      expect(texts(lines)).assertEqual('["abc","de"]');
+      for (const line of lines!) {
+        expect(line.buffer === first.buffer || line.buffer === second.buffer).assertFalse();
+        expect(line.byteOffset).assertEqual(0);
+        expect(line.buffer.byteLength).assertEqual(line.length);
+      }
+      expect(lines![0].buffer === lines![1].buffer).assertFalse();
+      expect(texts(f.push(bytes('h\n')))).assertEqual('["fgh"]');
+    });
+
+    it('keepsItsRoomForTheNextLineAndLetsGoOfWhatItOutgrows', 0, () => {
+      const spent: number[] = [];
+      const f = new LineFramer(8 * 1024 * 1024, 1024, (buffer: ArrayBuffer): void => { spent.push(buffer.byteLength); });
+      expect(texts(f.push(bytes('hello\n')))).assertEqual('["hello"]');
+      // Lines in pieces that fit the first room: nothing let go, line after line.
+      const piece: Uint8Array = new Uint8Array(20 * 1024).fill(97);
+      for (let n = 0; n < 3; n++) {
+        f.push(piece);
+        f.push(piece);
+        expect((f.push(bytes('\n')) as Uint8Array[])[0].length).assertEqual(40 * 1024);
+      }
+      expect(spent.length).assertEqual(0);
+      // A longer one outgrows it: the old room goes as the line is gathered.
+      for (let i = 0; i < 4; i++) f.push(piece);
+      expect(spent.length).assertEqual(1);
+      expect(spent[0]).assertEqual(64 * 1024);
+      expect((f.push(bytes('\n')) as Uint8Array[])[0].length).assertEqual(80 * 1024);
+      // And one past KEEP_BYTES is let go once it is out.
+      const big: Uint8Array = new Uint8Array(2 * 1024 * 1024).fill(98);
+      f.push(big);
+      const before: number = spent.length;
+      expect((f.push(bytes('\n')) as Uint8Array[])[0].length).assertEqual(2 * 1024 * 1024);
+      expect(spent.length).assertEqual(before + 1);
+      expect(spent[spent.length - 1]).assertEqual(2 * 1024 * 1024);
+      expect(f.bufferedBytes).assertEqual(0);
+    });
+
     it('refusesAnOversizedFirstLine', 0, () => {
       const big = new LineFramer();
       expect(texts(big.push(new Uint8Array(64 * 1024 + 1).fill(97)))).assertEqual('null');

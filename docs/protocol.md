@@ -82,7 +82,7 @@ All four apps (Windows, Android, HarmonyOS and iOS) follow this page, which is w
 **The handshake.** The first line each way is JSON, and it is not encrypted:
 
 ```json
-{"EphemeralPublicKey":"…","IdentityPublicKey":"…","Signature":"…","PassphraseProof":null,"DeviceName":"Colour's Laptop","Protocol":2}
+{"EphemeralPublicKey":"…","IdentityPublicKey":"…","Signature":"…","PassphraseProof":null,"DeviceName":"Colour's Laptop","Protocol":2,"Caps":["file-ack"]}
 ```
 
 | Field | What it holds |
@@ -93,6 +93,9 @@ All four apps (Windows, Android, HarmonyOS and iOS) follow this page, which is w
 | `PassphraseProof` | The passcode proof, or null if no passcode is set |
 | `DeviceName` | The device name, as plain text, or missing if not known |
 | `Protocol` | The sync version this device speaks (2 now). Missing, null or anything below 2 means 1 |
+| `Caps` | A list of short names for other things this device can do. Missing, null or not a list means none. A name that is not text, or that the receiver does not know, is ignored. Names are compared exactly. Today there is one: `file-ack` (see [Files](#files)) |
+
+A receiver ignores handshake fields it does not know, so older builds simply do not see `Caps`. A feature named in `Caps` is used on a connection only when both handshakes name it. The handshake is not signed beyond the fresh key, so someone on the path could remove a name; that only turns the feature off, back to how older builds work.
 
 An acceptor writes its own handshake first and then reads the connecting device's, so a connecting device always sees the acceptor's handshake before the acceptor has decided anything.
 
@@ -128,11 +131,12 @@ After the handshake, every message is an **envelope**, a small piece of JSON tha
 | `delete` | When entries are deleted on this device | `{"Keys": ["…"]}` |
 | `file_request` | When a device needs a file's bytes | `{"FileHash": "…"}` |
 | `file_chunk` | In answer to `file_request` | One piece of a file (see [Files](#files)) |
+| `file_ack` | After a `file_chunk` is written or ignored, only when both handshakes named `file-ack` | `{"FileHash": "…", "ChunkIndex": 7}` (see [Files](#files)) |
 | `unpair` | When a device is removed | `{}` |
 
 The heartbeat is not an envelope. It is the text `__ping__`, encrypted like any other line, and the receiver does not treat it as data.
 
-**An entry** has five fields:
+**An entry** has five fields, and a picture can have a sixth:
 
 | Field | What it holds |
 | --- | --- |
@@ -141,8 +145,18 @@ The heartbeat is not an envelope. It is the text `__ping__`, encrypted like any 
 | `DeviceId` | The device that made it |
 | `Timestamp` | When it was made, in UTC, like `2026-10-13T14:20:05.1230000Z` |
 | `Signature` | The maker's signature (Base64) |
+| `Name` | Optional, for `image` only: the picture's original name, as a suggested file name (see below). Left out when it is not known |
 
-The signature is over the text `Content:Type:DeviceId:Timestamp`, with the timestamp written as above. A receiver accepts an entry only if the signature is valid and the maker is a device it trusts.
+The signature is over the text `Content:Type:DeviceId:Timestamp`, with the timestamp written as above. A receiver accepts an entry only if the signature is valid and the maker is a device it trusts. `Name` is not part of the signature.
+
+**A picture's name.** A picture copied as a picture has no name of its own. A screenshot has only pixels. But when you use "Copy image" in a browser, or in some other apps, the clipboard also says where the picture came from. So the Windows app looks, in this order, at the file it came from (a one-file `CF_HDROP`, `FileNameW`, `FileName`), a virtual file (`FileGroupDescriptorW`), the copied HTML (`HTML Format`, when the copied part holds exactly one `<img>`) and the address (`UniformResourceLocatorW`, `UniformResourceLocator`). It asks the address only when the HTML holds no `<img>` at all, and uses it only when its last part ends in a picture's extension (such as `.png`, `.jpg` or `.webp`), because next to a picture's HTML, or for a linked picture, the address can be the page's or the link's. It takes the last part of the path or address, decoded, without the query or fragment. It skips `data:` and `blob:` addresses and names without a letter, and cuts the name to a safe length. It leaves the extension out, since it always sends the picture as PNG. So `<img src="https://example.com/a/after-like.png?x=1">` gives `"Name":"after-like"`. A picture dropped on the window gets its name the same way.
+
+- **Optional.** A sender leaves the field out when it does not know a name, so an entry without one is exactly what older builds send. It is only for `image`. A receiver ignores it on any other type, and does not store or pass it on there (Windows reads it as no name on a `text` or `file` entry; HarmonyOS drops it).
+- **Not signed, and why that is fine.** The signature covers only `Content:Type:DeviceId:Timestamp`, so adding the field changed nothing for older builds and the key stays the signature. The name is only a suggested file name. It travels like every message, inside the encrypted session, from a device that proved who it is in the handshake. A device that relays the entry could change or drop it, but it cannot change the picture.
+- **Untrusted text.** A receiver treats `Name` like a received `FileName`: it keeps only a safe last part, with no folders, no control characters or invisible characters that disguise a name, no half characters (a surrogate without its pair), nothing Windows refuses in a file name, not a reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `COM1`–`COM9`, `LPT1`–`LPT9`, and `COM`/`LPT` with a superscript ¹, ² or ³), and not too long. If nothing usable is left, it uses its own name, such as "Image from <device> <date time>". It never takes the extension from `Name`. It picks the extension from the picture's bytes, and replaces any picture extension the name has.
+- **Stored and passed on.** The name stays with the entry: in history on disk, in `history_batch` answers and in the `Newest` entry of a version 1 `history_head`. Windows and HarmonyOS keep it across a restart and pass it on. Windows cleans an incoming name before it keeps it. An incoming `Name` that is not a string, or a string that is not valid text (an escaped surrogate without its pair such as `"\ud800"`, or bytes that are not UTF-8), counts as no name on Windows and never costs the entry or the rest of a `history_batch`. A device that keeps a name still never stores or sends one with half characters, because a JSON reader may refuse the whole message over such a string.
+- **Duplicates, deletes and keys do not change.** The key is still the signature. The same entry with and without a name is the same entry, and is kept once (whichever copy came first).
+- **Older builds.** Every build reads only the entry fields it knows, so an entry with a name works unchanged on all of them. Windows (System.Text.Json) skips properties it does not know. Android (`ClipboardEntry.fromJson`, `org.json`) and iOS (`ClipboardEntry.from` in `WireModels.swift`) read the five fields by name and rebuild the entry, so they drop the name when they store or relay the entry. HarmonyOS 2.2 and older keep the parsed object as it came (`JSON.parse`), so they may store and relay the name untouched, but never read it.
 
 **Removing a device.** A device that is removed sends `unpair` over the encrypted link. A receiver that trusts the sender drops it from its trust list, closes the connection and stops reconnecting to it. A receiver that does not trust the sender does nothing. Only a device can say this about itself, since the message arrives over its own proven connection and changes only whether the receiver trusts that device.
 
@@ -213,11 +227,24 @@ The receiver checks the SHA-256 of what arrived against `FileHash`, and throws t
 
 **Sending a stream of chunks.** A sender sends a file as one stream of `file_chunk` messages on one connection. `ChunkIndex` starts at 0 and goes up by 1, and only the last chunk has `IsLast` set to true. A sender never carries on from the middle. If a stream is cut off, or the file is asked for again, it starts again at 0. It never sends the same file to the same device twice at once, and ignores a `file_request` for a file it is already sending to that device.
 
+**Flow control.** A sender used to send chunks as fast as the network took them. A HarmonyOS phone cannot pause its socket, so whatever it could not handle yet piled up in memory, and a 290 MB file from Windows ran it out of memory. So when both handshakes name `file-ack`:
+
+- The receiver sends `file_ack` once it is done with a chunk: after the chunk is written (and added to the hash), or straight away when it ignores the chunk or cannot use it. `ChunkIndex` is that chunk's index and `FileHash` is the chunk's `FileHash` as it arrived. Every chunk gets one, even one that is ignored; otherwise its sender would stall.
+- An ack counts for every chunk up to and including `ChunkIndex`, so a sender takes the highest one. An ack for a chunk it has not sent, or an older one, changes nothing.
+- The sender keeps at most **8 chunks** (2 MiB of file) sent but not yet acknowledged, and waits for an ack before sending more. This holds for every stream: a file sent the moment it is copied, and one sent because it was asked for. Each stream counts on its own, so a stream started again from chunk 0 starts with nothing unacknowledged.
+- If chunks are waiting and no ack comes for **30 seconds**, the sender gives the stream up, as if it had been cut off. The connection stays open, so the receiver is not told: it sees no more chunks. So Windows and HarmonyOS give up a stream from a sender that named `file-ack` once nothing new has come for **45 seconds** (the 30 plus some slack) and every chunk that did come is written, and then ask for the file again as for any stream that broke off (see below). A stream from an older sender is left alone: it never stops part-way while the connection is open. (A peer that sends nothing at all is closed after 15 seconds by the heartbeat anyway.)
+- An ack for a file the sender is not sending to that device, or has finished sending, is ignored.
+- Acks are encrypted like every other message. They only pace the sender. They never change what is stored: the bytes are still checked against `FileHash` as always.
+
+Eight chunks are enough to keep the network busy (at 50 MB/s and a Wi-Fi round trip of 10 to 30 ms, about 0.5 to 1.5 MB is on its way at any moment), while a receiver never has more than about 4 MB of lines waiting for it.
+
+With an older device nothing changes, in either direction. A device whose handshake does not name `file-ack` is never sent `file_ack` (older builds skip it anyway, as an unknown `Type`), and its streams are not paced: chunks go to it as fast as the network takes them, and chunks from it arrive as fast as it sends them. That is why HarmonyOS still keeps its limit on lines waiting to be read (below) for older senders.
+
 **Receiving a stream.**
 
-- A receiver takes one stream for each file. Windows, Android and iOS keep the first sender's stream and ignore other senders' chunks for that file until it is stored or the stream is given up. HarmonyOS writes each sender's stream to its own file and keeps whichever finishes first.
+- A receiver takes one stream for each file. Windows, Android, iOS and HarmonyOS keep the first sender's stream and ignore other senders' chunks for that file until it is stored or the stream is given up. (HarmonyOS 2.2.1 and older wrote each sender's stream to its own file and kept whichever finished first. Senders need not tell the two apart.)
 - Chunk 0 starts the file again from empty, even in the middle of that sender's stream. A receiver ignores a stream it did not see start (a chunk other than 0 with no stream under way from that sender). It gives up on a stream with a gap and throws its bytes away, and does the same with any streams that were open when a connection closed.
-- A receiver asks again for a file that a history entry still needs. It asks each device that connects, for every file entry it is missing bytes for. It also asks its other devices when a stream fails (a gap, a wrong hash or a closed connection), and asks a sender again when a stream it ignored ends and nobody else is sending that file. After failures it only asks a few times in a row (3 on Windows, Android and HarmonyOS), so a device with a bad copy is not asked for ever.
+- A receiver asks again for a file that a history entry still needs. It asks each device that connects, for every file entry it is missing bytes for. It also asks its other devices when a stream fails (a gap, a wrong hash, a closed connection, or a paced stream that stopped for 45 seconds), and asks a sender again when a stream it ignored ends and nobody else is sending that file. After failures it only asks a few times in a row (3 on Windows, Android and HarmonyOS), so a device with a bad copy is not asked for ever. HarmonyOS also stops asking for a file, until the app starts again, once its connection has twice been closed while that file came in faster than the phone could take it in (more than 128 MB of lines waiting to be read behind the one being read). Only an older sender, one without `file-ack`, can get that far ahead.
 
 **The description must match the bytes.** A file on the sending device can change while it is being read (a download, a recording, a document saved again). So the Windows app works out the hash again as it stores the file, and does not send the file at all if the result is different. Stored under the wrong hash, those bytes would fail every receiver's check, and would also stand in for the real file on every later copy.
 
@@ -307,7 +334,10 @@ When the Windows app connects out, it can tell "that address is this PC" from a 
 | Deleted keys sent in a head | 500 (a device remembers up to 2000) |
 | A request nobody answers | Dropped after 90 seconds |
 | A name | 64 characters |
+| A picture's `Name` (Windows) | 80 characters and 160 bytes of UTF-8. Cut, never refused |
 | A file | 1 GB |
+| File chunks sent and not yet acknowledged (`file-ack`) | 8 (2 MiB of file). No ack for 30 seconds: the sender gives the stream up. Nothing new for 45 seconds: the receiver does too |
+| Lines waiting to be read on HarmonyOS, once a device is trusted | 128 MB behind the line being read next (which is not counted, so one line up to the line limit still gets through), then the connection is closed |
 | Handshake time | 10 seconds (15 on Windows) |
 | A handshake line, before anything is trusted | 8 KB on Android, 64 KB on HarmonyOS |
 | Any other line | 64 MB on Android, 192 MB on HarmonyOS and iOS. Windows has no limit yet |

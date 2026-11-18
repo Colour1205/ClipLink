@@ -39,11 +39,21 @@ function findNewline(chunk: Uint8Array, from: number): number {
   return at === -1 ? -1 : from + at;
 }
 
+// Where a line arriving in pieces is gathered: room for this much at first,
+// doubled as needed. Room for a file chunk's 466 KB line is kept from one line
+// to the next (KEEP_BYTES); more than that, which only a big picture or
+// history batch needs, is let go once its line is out.
+const FIRST_ROOM_BYTES = 64 * 1024;
+const KEEP_BYTES = 1024 * 1024;
+
 export class LineFramer {
   private readonly firstLineMaxBytes: number;
   private readonly maxLineBytes: number;
-  // The line still arriving, in pieces, and their total length.
-  private parts: Uint8Array[] = [];
+  // Buffers this no longer uses (outgrown or let go), for whoever made it
+  // to free them (see TcpLineChannel and SpentBuffers).
+  private readonly spent: (buffer: ArrayBuffer) => void;
+  // The line still arriving: its first partBytes bytes so far.
+  private room: Uint8Array | null = null;
   private partBytes: number = 0;
   private sawFirstLine: boolean = false;
   // Dropping the rest of an over-long line, up to its newline.
@@ -53,9 +63,11 @@ export class LineFramer {
   // Lines dropped for being over MAX_LINE_BYTES.
   droppedLines: number = 0;
 
-  constructor(maxLineBytes: number = MAX_LINE_BYTES, firstLineMaxBytes: number = FIRST_LINE_MAX_BYTES) {
+  constructor(maxLineBytes: number = MAX_LINE_BYTES, firstLineMaxBytes: number = FIRST_LINE_MAX_BYTES,
+    spent: (buffer: ArrayBuffer) => void = (buffer: ArrayBuffer): void => {}) {
     this.maxLineBytes = maxLineBytes;
     this.firstLineMaxBytes = Math.min(firstLineMaxBytes, maxLineBytes);
+    this.spent = spent;
   }
 
   // Bytes of a line that hasn't finished arriving.
@@ -63,9 +75,16 @@ export class LineFramer {
     return this.partBytes;
   }
 
-  // The lines this chunk completes, each a copy of its own; null once the
-  // first line is over its cap (close the connection - nothing more comes
-  // out of here after that).
+  // The lines this chunk completes; null once the first line is over its cap
+  // (close the connection - nothing more comes out of here after that).
+  //
+  // Each line is a copy in a buffer of its own, exactly its size, and
+  // nothing here keeps any hold on the chunk: so the caller may hand the
+  // chunk's buffer on to be freed as soon as this returns, and a line's
+  // buffer once it is done with that line (see SpentBuffers). A line
+  // arriving in pieces is gathered in one buffer kept for the next line, then
+  // copied out once: the old way, each piece copied and then joined, made two
+  // copies of every file chunk's line and a buffer for every piece.
   push(chunk: Uint8Array): Uint8Array[] | null {
     if (this.refused) return null;
     const lines: Uint8Array[] = [];
@@ -73,26 +92,28 @@ export class LineFramer {
     while (start < chunk.length) {
       const newline: number = findNewline(chunk, start);
       const end: number = newline === -1 ? chunk.length : newline;
+      // A whole line inside this chunk, with nothing gathered before it.
+      let whole: Uint8Array | null = null;
       if (!this.discarding && end > start) {
         if (this.partBytes + (end - start) > (this.sawFirstLine ? this.maxLineBytes : this.firstLineMaxBytes)) {
-          this.parts = [];
-          this.partBytes = 0;
+          this.letGo();
           if (!this.sawFirstLine) {
             this.refused = true;
             return null;
           }
           this.discarding = true;
           this.droppedLines++;
+        } else if (newline !== -1 && this.partBytes === 0) {
+          whole = chunk.slice(start, end);
         } else {
-          this.parts.push(chunk.slice(start, end));
-          this.partBytes += end - start;
+          this.gather(chunk.subarray(start, end));
         }
       }
       if (newline === -1) break;
       if (this.discarding) {
         this.discarding = false;
       } else {
-        const line: Uint8Array = this.takeLine();
+        const line: Uint8Array = whole !== null ? whole : this.takeLine();
         // An empty line is passed on (the handshake fails on it) but lifts
         // no cap.
         if (line.length > 0) this.sawFirstLine = true;
@@ -103,17 +124,38 @@ export class LineFramer {
     return lines;
   }
 
-  private takeLine(): Uint8Array {
-    const line: Uint8Array = this.parts.length === 1 ? this.parts[0] : new Uint8Array(this.partBytes);
-    if (this.parts.length > 1) {
-      let at = 0;
-      for (const part of this.parts) {
-        line.set(part, at);
-        at += part.length;
+  // Adds a piece to the line being gathered, making room first if needed.
+  private gather(piece: Uint8Array): void {
+    const needed: number = this.partBytes + piece.length;
+    if (this.room === null || this.room.length < needed) {
+      let size: number = this.room === null ? FIRST_ROOM_BYTES : this.room.length * 2;
+      while (size < needed) size *= 2;
+      // Never more than a line may hold (needed never is: see push).
+      const bigger: Uint8Array = new Uint8Array(Math.min(size, this.maxLineBytes));
+      if (this.room !== null) {
+        bigger.set(this.room.subarray(0, this.partBytes));
+        this.spent(this.room.buffer as ArrayBuffer);
       }
+      this.room = bigger;
     }
-    this.parts = [];
+    this.room.set(piece, this.partBytes);
+    this.partBytes = needed;
+  }
+
+  // The gathered line, copied out; the room is kept for the next one unless
+  // it grew past KEEP_BYTES.
+  private takeLine(): Uint8Array {
+    const line: Uint8Array = this.room === null ? new Uint8Array(0) : this.room.slice(0, this.partBytes);
     this.partBytes = 0;
+    if (this.room !== null && this.room.length > KEEP_BYTES) this.letGo();
     return line;
+  }
+
+  // Drops whatever is gathered, and the room it was in (handed to spent).
+  // Called by whoever replaces this framer too, so its room is freed.
+  letGo(): void {
+    if (this.room !== null) this.spent(this.room.buffer as ArrayBuffer);
+    this.room = null;
+    this.partBytes = 0;
   }
 }

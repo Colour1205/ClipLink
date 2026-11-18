@@ -93,6 +93,10 @@
       "value": "保存文件"
     },
     {
+      "name": "image_save_name",
+      "value": "来自%1$s的图片 %2$s"
+    },
+    {
       "name": "item_image",
       "value": "图片"
     },
@@ -767,6 +771,26 @@
     {
       "name": "READ_PASTEBOARD_reason",
       "value": "打开 ClipLink 时读取剪贴板，以便把你刚复制的内容发送到你的其他设备。"
+    },
+    {
+      "name": "transfer_stalled",
+      "value": "等待中"
+    },
+    {
+      "name": "transfer_retrying",
+      "value": "正在重试"
+    },
+    {
+      "name": "transfer_waiting",
+      "value": "等待设备"
+    },
+    {
+      "name": "transfer_stopped",
+      "value": "接收失败"
+    },
+    {
+      "name": "transfer_amount_of",
+      "value": "%1$s / %2$s %3$s"
     }
   ]
 }

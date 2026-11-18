@@ -41,6 +41,11 @@ public class FileStore
     // Used while a file's chunks are still arriving — not yet verified/complete.
     public string GetTempPath(string hash) => Path.Combine(storeDir, $"{Checked(hash)}{PartialSuffix}");
 
+    // The same for one transfer of hash (see IncomingFiles): each gets a file
+    // of its own, so one that is abandoned while its bytes are still being
+    // written can't get in the way of the next stream of the same file.
+    public string GetTempPath(string hash, long transfer) => Path.Combine(storeDir, $"{Checked(hash)}.{transfer}{PartialSuffix}");
+
     public bool Exists(string hash) => IsValidHash(hash) && File.Exists(GetPath(hash));
 
     // Whether hash is the SHA-256 of no bytes (in either case).
@@ -81,7 +86,9 @@ public class FileStore
         int deleted = 0;
         foreach (string partial in Directory.EnumerateFiles(storeDir, "*" + PartialSuffix).ToList())
         {
-            string hash = Path.GetFileNameWithoutExtension(partial);
+            // "<hash>.partial", or "<hash>.<transfer>.partial".
+            string name = Path.GetFileName(partial);
+            string hash = name[..name.IndexOf('.')];
             if (!IsValidHash(hash) || isReceiving(hash)) continue;
             try
             {
@@ -138,6 +145,69 @@ public class FileStore
             try { File.Delete(copying); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
     }
+
+    // A file on this PC whose hash isn't known yet (see LocalFiles.
+    // DescribeAndStore), read from source once: copied beside the store and
+    // hashed as it goes, then stored under the hash it turned out to have.
+    // Hashing first and copying after read every byte twice, for a file of
+    // up to 1 GB. Returns that hash and how many bytes there were, or null
+    // (nothing stored) if there were more than maxBytes. A failure to read
+    // source throws SourceReadException; one to write, IOException /
+    // UnauthorizedAccessException.
+    public (string Hash, long Size)? CopyInNew(Stream source, long maxBytes)
+    {
+        string copying = Path.Combine(storeDir, $"new.{Guid.NewGuid():N}{CopyingSuffix}");
+        try
+        {
+            string hash;
+            long size = 0;
+            using (var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+            {
+                using (var target = new FileStream(copying, FileMode.CreateNew, FileAccess.Write))
+                {
+                    byte[] buffer = new byte[CopyBufferSize];
+                    while (true)
+                    {
+                        int read;
+                        try
+                        {
+                            read = source.Read(buffer, 0, buffer.Length);
+                        }
+                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                        {
+                            throw new SourceReadException(ex);
+                        }
+                        if (read == 0) break;
+                        size += read;
+                        if (size > maxBytes) return null;
+                        hasher.AppendData(buffer, 0, read);
+                        target.Write(buffer, 0, read);
+                    }
+                }
+                hash = Convert.ToHexString(hasher.GetHashAndReset());
+            }
+            string path = GetPath(hash);
+            try
+            {
+                // Already here (copied or received before): the same bytes,
+                // and maybe open right now, being sent - left as it is.
+                if (!File.Exists(path)) File.Move(copying, path);
+            }
+            catch (IOException) when (File.Exists(path))
+            {
+                // Stored meanwhile by another copy of the same file.
+            }
+            return (hash, size);
+        }
+        finally
+        {
+            try { File.Delete(copying); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    // CopyInNew couldn't read the file it was copying (as opposed to write
+    // its copy).
+    public sealed class SourceReadException(Exception inner) : IOException(inner.Message, inner);
 
     public void Delete(string hash)
     {

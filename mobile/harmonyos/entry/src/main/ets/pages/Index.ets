@@ -51,6 +51,7 @@ import {
 } from '../storage/ContentPrint';
 import { MAX_HISTORY_ITEMS } from '../storage/HistoryAccess';
 import { safeFileName } from '../storage/FileNames';
+import { pictureCacheFolder, pictureFileName } from '../storage/PictureNames';
 import { SHARED_IN_EVENT, SharedIn, enqueueShares, intakePicked, removeQuietly, takePendingShares } from '../share/ShareIntake';
 import { entryKey } from '../storage/DeletedEntries';
 import { Discovery, PeerBeacon, sameBeacon } from '../networking/Discovery';
@@ -64,11 +65,13 @@ import { SyncManager } from '../networking/SyncManager';
 import { unixMillis } from '../networking/SyncProtocol';
 import { BatchApplied, HeadApplied, SyncApplied } from '../networking/HistorySync';
 import { StackBadge, StackChrome, StackedCard } from '../stack/StackedCard';
+import { BAR_MIN_BYTES, DONE_HOLD_MS, FADE_MS, REDUCED_FADE_MS, TransferBar, TransferState } from '../stack/TransferBar';
+import { PROGRESS_INTERVAL_MS, TransferUpdate } from '../networking/TransferProgress';
 import { fileExtensionLabel, fileGlyphKind } from '../stack/CardFooter';
 import { PICTURE_SIDE_VP, PictureFlight, ZoomMorph, ZoomRect, containRect, contentShift, lerp, picturePlace, startScale, zoomHeight, zoomRadius, zoomRect, zoomScale } from '../stack/ZoomMorph';
 import { BatchGroupTracker, BatchMember, BatchPlan, StackMotion, StackRow, buildRows, dissolveGroup, foldTwins, hiddenCount, placeBatch, placeQuiet, revealAnimates, settleGroup, staggerDelayMs, startInsetFraction, startPeekVp, twinIds } from '../stack/SyncedRows';
 import { connection } from '@kit.NetworkKit';
-import { signEntry, ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
+import { signEntry, ClipboardEntry, canonicalTimestamp, entryNameOf } from '../crypto/Signing';
 import { ApplyResult } from '../clipboard/ClipboardApply';
 import { resCount, resText } from '../i18n/Strings';
 import socket from '@ohos.net.socket';
@@ -256,6 +259,10 @@ interface SyncedItem extends BatchMember {
   // What its content is (storage/ContentPrint.ets's contentKey), null for
   // none: the list shows one card per content (see SyncedRows.foldTwins).
   contentKey: string | null;
+  // A picture's original name as its entry carries it (the entry's Name, see
+  // entryNameOf), or null when it has none: what Save and Open suggest, after
+  // pictureFileName has made it safe.
+  pictureName: string | null;
 }
 
 // A card's content key, for foldTwins and twinIds.
@@ -456,6 +463,12 @@ function mimeTypeForFileName(fileName: string): string {
 // The UTD of a file by its name's extension, for the share sheet - which
 // shows the right icon and offers the right apps for it. 'general.file' when
 // the extension says nothing.
+// A picture item's bytes and the name it is opened or saved under.
+interface PictureFile {
+  name: string;
+  bytes: ArrayBuffer;
+}
+
 function utdForFileName(fileName: string): string {
   const dot: number = fileName.lastIndexOf('.');
   if (dot < 0) return 'general.file';
@@ -703,6 +716,20 @@ struct Index {
   @State pendingChange: boolean = false;
   @State syncLog: string[] = [];
   @State syncedItems: SyncedItem[] = [];
+  // Files whose bytes are arriving (or failed to), by lowercase hash: what
+  // each one's bar shows (see stack/TransferBar.ets). A plain Map, never
+  // state: a report changes the TransferState's own fields and redraws only
+  // its bars. Whether a file has one decides how its card is drawn (see
+  // isArriving), so adding or removing one goes through arrivalsChanged.
+  private transfers: Map<string, TransferState> = new Map<string, TransferState>();
+  // Counts arrivalsChanged calls, for what is built by whether a file is
+  // arriving and is not rebuilt by syncedItems (see fileDetailItems).
+  @State arrivalsVersion: number = 0;
+  // Refreshes the bars while bytes arrive (see startTransferTicker).
+  private transferTickerId: number = -1;
+  // Ids of items listed before their bytes came (see onEntryWaiting): their
+  // arrival is still news when the bytes are stored.
+  private listedEarly: Set<string> = new Set<string>();
   // The system's "reduce animations" setting (see aboutToAppear): a stack then
   // opens with short fades only.
   @State reduceMotion: boolean = false;
@@ -1103,6 +1130,14 @@ struct Index {
       const item: SyncedItem = this.syncedItemFor(entry, fromPeer);
       const listedAt: number = this.syncedItems.findIndex((i: SyncedItem) => i.id === item.id);
       const alreadyListed: boolean = listedAt !== -1;
+      // Listed while its bytes were on their way (see onEntryWaiting): it is
+      // only now that it has arrived.
+      const listedEarly: boolean = this.listedEarly.delete(item.id);
+      // Its bytes are here. A bar that was not finished by a stream (they
+      // came another way, copied on this device, say) goes now; one that was
+      // is fading out (see finishArrival).
+      const arrival: TransferState | undefined = this.transferStateOf(item);
+      if (arrival !== undefined && arrival.phase !== 'done') this.transfers.delete(this.fileHashKey(item));
       if (alreadyListed) {
         // Listed already - from a history batch, say, while its bytes were on
         // their way: it stays where it is, in its stack if it is in one.
@@ -1119,9 +1154,32 @@ struct Index {
       // above) is not news, and neither is what the clipboard holds already
       // (an older peer echoing back what this device sent), or a file that
       // came too late to go on the clipboard.
-      if (fromPeer && !alreadyListed && !this.appVisible && result !== 'already' && result !== 'held') {
+      if (fromPeer && (!alreadyListed || listedEarly) && !this.appVisible && result !== 'already' && result !== 'held') {
         void this.notifyReceivedItem(item);
       }
+    });
+    // A file sent from another device is listed the moment its entry is
+    // checked, with a bar while its bytes arrive (see SyncManager.
+    // onEntryWaiting). It used to have no card until the last byte was
+    // stored, and none at all if the stream never finished.
+    syncManager.onEntryWaiting((entry: ClipboardEntry) => {
+      const item: SyncedItem = this.syncedItemFor(entry, true);
+      const fileHash: string = this.fileHashKey(item);
+      if (fileHash !== '' && !this.transfers.has(fileHash)) {
+        const state: TransferState = new TransferState(this.filePayloadOf(item)?.FileSize ?? 0);
+        state.update('receiving', 0, Date.now(), this.reduceMotion);
+        this.transfers.set(fileHash, state);
+        this.startTransferTicker();
+      }
+      if (this.syncedItems.some((i: SyncedItem) => i.id === item.id)) {
+        this.arrivalsChanged();
+        return;
+      }
+      this.listedEarly.add(item.id);
+      this.showSynced([item, ...this.syncedItems].slice(0, MAX_HISTORY_ITEMS), [item.id]);
+    });
+    syncManager.onTransferProgress((update: TransferUpdate) => {
+      this.transferProgress(update);
     });
     // A peer's history_batch, as one unit (see SyncManager.onBatchApplied):
     // all of its new items join the list in ONE assignment, so the cards show
@@ -1510,6 +1568,7 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    this.stopTransferTicker();
     try {
       accessibility.offAnimationReduceStateChange(this.onAnimationReduce);
     } catch (e) {
@@ -2605,7 +2664,9 @@ struct Index {
     // The list can hold more than the capped history, so what it showed is
     // tombstoned too.
     const listedKeys: string[] = this.syncedItems.map((i: SyncedItem) => i.id);
+    const cleared: SyncedItem[] = this.syncedItems;
     this.syncedItems = [];
+    this.dropTransfersOf(cleared);
     await this.syncManager?.clearHistory(listedKeys);
     promptAction.showToast({ message: $r('app.string.toast_history_cleared') });
   }
@@ -2640,7 +2701,11 @@ struct Index {
     const gone: Set<string> = new Set<string>(ids);
     const previewOpen: boolean = this.syncedNavStack.size() > 1 && gone.has(this.selectedItemId);
     const kept: SyncedItem[] = this.syncedItems.filter((i: SyncedItem) => !gone.has(i.id));
-    if (kept.length !== this.syncedItems.length) this.syncedItems = kept;
+    if (kept.length !== this.syncedItems.length) {
+      const removed: SyncedItem[] = this.syncedItems.filter((i: SyncedItem) => gone.has(i.id));
+      this.syncedItems = kept;
+      this.dropTransfersOf(removed);
+    }
     if (previewOpen && !this.isSplitLayout()) {
       this.closeItemDetail();
     } else if (previewOpen) {
@@ -2652,6 +2717,19 @@ struct Index {
     }
     // The split's preview moves on to the next item by itself (previewItem).
     if (gone.has(this.selectedItemId)) this.selectedItemId = '';
+  }
+
+  // The bars of files these items (just taken out of the list) showed, unless
+  // a card still listed shows the same file: nothing would finish them now,
+  // and a receiving one kept the transfer ticker running for good. Only these
+  // files: a stream that began before its entry was listed keeps its bar.
+  private dropTransfersOf(removed: SyncedItem[]): void {
+    if (this.transfers.size === 0) return;
+    const listed: Set<string> = new Set<string>(this.syncedItems.map((i: SyncedItem) => this.fileHashKey(i)));
+    for (const item of removed) {
+      const fileHash: string = this.fileHashKey(item);
+      if (fileHash !== '' && !listed.has(fileHash)) this.transfers.delete(fileHash);
+    }
   }
 
   async saveTailscaleIp(): Promise<void> {
@@ -3344,7 +3422,7 @@ struct Index {
   // its bytes are here yet - the pane is built again when they arrive.
   previewKey(item: SyncedItem): string {
     if (item.type !== 'file') return item.id;
-    return `${item.id}|${this.fileLocalPath(item) !== ''}`;
+    return `${item.id}|${this.fileLocalPath(item) !== ''}|${this.isArriving(item)}`;
   }
 
   // The item the split layout's preview shows: the selected one if it is
@@ -3373,20 +3451,34 @@ struct Index {
       promptAction.showToast({ message: $r('app.string.toast_file_store_not_ready') });
       return;
     }
-    let payload: FilePayload;
-    try {
-      payload = JSON.parse(item.content) as FilePayload;
-    } catch (e) {
-      return; // not a file entry: nothing to open
+    let fileName: string;
+    let uri: string | null;
+    if (item.type === 'image') {
+      // A picture's bytes are in the item itself: written to a cache file under
+      // the name Save would suggest, then opened like any file.
+      const picture: PictureFile | null = this.pictureFileOf(item);
+      if (picture === null) {
+        promptAction.showToast({ message: this.str($r('app.string.toast_open_file_failed'), -1) });
+        return;
+      }
+      fileName = picture.name;
+      uri = this.writePictureToCache(context, item.id, picture);
+    } else {
+      let payload: FilePayload;
+      try {
+        payload = JSON.parse(item.content) as FilePayload;
+      } catch (e) {
+        return; // not a file entry: nothing to open
+      }
+      if (!fileStore.exists(payload.FileHash)) {
+        promptAction.showToast({ message: $r('app.string.toast_file_not_downloaded') });
+        return;
+      }
+      fileName = safeFileName(payload.FileName, 'file');
+      // The copy under its real name, not the stored file named by its hash:
+      // that is what the previewer or the other app shows and opens by.
+      uri = await this.namedFileUri(payload);
     }
-    if (!fileStore.exists(payload.FileHash)) {
-      promptAction.showToast({ message: $r('app.string.toast_file_not_downloaded') });
-      return;
-    }
-    const fileName: string = safeFileName(payload.FileName, 'file');
-    // The copy under its real name, not the stored file named by its hash:
-    // that is what the previewer or the other app shows and opens by.
-    const uri: string | null = await this.namedFileUri(payload);
     if (uri === null) {
       promptAction.showToast({ message: this.str($r('app.string.toast_open_file_failed'), -1) });
       return;
@@ -3483,6 +3575,10 @@ struct Index {
   // behind a security component - confirmed against @ohos.file.picker.d.ts
   // rather than assumed.
   async saveFileToDocuments(item: SyncedItem): Promise<void> {
+    if (item.type === 'image') {
+      await this.savePictureToDocuments(item);
+      return;
+    }
     const fileStore = this.fileStore;
     if (fileStore === null) {
       promptAction.showToast({ message: $r('app.string.toast_file_store_not_ready') });
@@ -3515,6 +3611,108 @@ struct Index {
       // No toast: the file went through the system's picker.
     } catch (e) {
       promptAction.showToast({ message: $r('app.string.toast_save_file_failed') });
+    }
+  }
+
+  // A picture item saved as a file, through the same document picker as a
+  // file (not to the gallery). The picker suggests the picture's original name
+  // when the copy had one, and otherwise one built from where and when it was
+  // copied (a screenshot never had a name), always with the extension of what
+  // the bytes really are (see pictureFileOf).
+  private async savePictureToDocuments(item: SyncedItem): Promise<void> {
+    const picture: PictureFile | null = this.pictureFileOf(item);
+    if (picture === null) {
+      promptAction.showToast({ message: $r('app.string.toast_save_file_failed') });
+      return;
+    }
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const documentPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
+      const uris: Array<string> = await documentPicker.save({ newFileNames: [picture.name] });
+      if (uris.length === 0) return; // user canceled the picker
+      const destFile = fs.openSync(uris[0], fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(destFile.fd, picture.bytes);
+      } finally {
+        fs.closeSync(destFile);
+      }
+      // No toast: the file went through the system's picker.
+    } catch (e) {
+      promptAction.showToast({ message: $r('app.string.toast_save_file_failed') });
+    }
+  }
+
+  // A picture item's bytes and the file name to give them: the picture's
+  // original name when its entry carries a usable one, else "Image from
+  // <device> <date> <time>" in the current language, either way with
+  // .png, .jpg, .gif or .webp from the bytes (see storage/PictureNames.ets).
+  // null when the item's content is not a picture.
+  private pictureFileOf(item: SyncedItem): PictureFile | null {
+    try {
+      const decoded: Uint8Array = base64Helper.decodeSync(item.content);
+      if (decoded.byteLength === 0) return null;
+      const bytes = decoded.buffer.slice(decoded.byteOffset, decoded.byteOffset + decoded.byteLength) as ArrayBuffer;
+      const when: Date = new Date(item.stamp);
+      const pad = (n: number): string => (n < 10 ? '0' : '') + n;
+      const stamp: string = isNaN(when.getTime()) ? item.time.replace(':', '.')
+        : `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())} ${pad(when.getHours())}.${pad(when.getMinutes())}`;
+      const base: string = this.str($r('app.string.image_save_name'), this.sourceLabelFor(item.deviceId), stamp);
+      return { name: pictureFileName(item.pictureName, decoded, base), bytes: bytes };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Writes a picture to the cache under its name and returns its file URI, for
+  // the previewer or another app to open. null if it could not be written.
+  // Each item gets a folder of its own (see pictureCacheFolder), so another
+  // picture with the same name never overwrites a file that is still open.
+  // Folders from pictures opened more than an hour ago are removed on the way,
+  // so the copies do not pile up; the one being written is kept whatever its age.
+  private writePictureToCache(context: common.UIAbilityContext, itemKey: string, picture: PictureFile): string | null {
+    try {
+      const root = `${context.cacheDir}/opened`;
+      if (!fs.accessSync(root)) fs.mkdirSync(root);
+      const folder: string = pictureCacheFolder(itemKey);
+      this.removeOldOpenedPictures(root, folder);
+      const dir = `${root}/${folder}`;
+      if (!fs.accessSync(dir)) fs.mkdirSync(dir);
+      const path = `${dir}/${picture.name}`;
+      const file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(file.fd, picture.bytes);
+      } finally {
+        fs.closeSync(file);
+      }
+      return fileUri.getUriFromPath(path);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Removes what the "opened" folder holds from more than an hour ago except
+  // the folder `keep`: older pictures' folders, and the loose files earlier
+  // builds wrote straight into it. Anything that cannot be removed now is left
+  // for the next time (or for the system, which may clear the cache).
+  private removeOldOpenedPictures(root: string, keep: string): void {
+    const cutoff: number = Date.now() / 1000 - 60 * 60;
+    let names: string[] = [];
+    try {
+      names = fs.listFileSync(root);
+    } catch (e) {
+      return;
+    }
+    for (const name of names) {
+      if (name === keep) continue;
+      const path: string = `${root}/${name}`;
+      try {
+        const stat = fs.statSync(path);
+        if (stat.mtime > cutoff) continue;
+        if (stat.isDirectory()) fs.rmdirSync(path);
+        else fs.unlinkSync(path);
+      } catch (e) {
+        // Left for the next time.
+      }
     }
   }
 
@@ -3603,8 +3801,155 @@ struct Index {
   // reused as it was, so a file listed before its bytes arrived (from
   // history, while a peer's history batch was still fetching them) would
   // otherwise keep its plain chip after they did.
+  // A file that is arriving is keyed apart too (see isArriving): its card
+  // has the transfer bar in place of the footer, and becomes the normal card
+  // once its bar has faded out. Not a picture card until then, either.
   private syncedItemKey(item: SyncedItem): string {
+    if (this.isArriving(item)) return `${item.id}#arriving`;
     return this.imagePreviewUri(item) !== null ? `${item.id}#preview` : item.id;
+  }
+
+  // A file item's hash in lowercase, as the transfers are kept by, or ''.
+  private fileHashKey(item: SyncedItem): string {
+    if (item.type !== 'file') return '';
+    const hash: string | undefined = this.filePayloadOf(item)?.FileHash;
+    return typeof hash === 'string' ? hash.toLowerCase() : '';
+  }
+
+  // The bar of a file whose bytes are arriving, or undefined.
+  private transferStateOf(item: SyncedItem): TransferState | undefined {
+    const fileHash: string = this.fileHashKey(item);
+    return fileHash === '' ? undefined : this.transfers.get(fileHash);
+  }
+
+  // Whether a file's card shows its transfer bar: its bytes are on their way
+  // (or failed to come), or they have just been stored and the full bar is
+  // fading out (see finishArrival). A bar left over from a failure for bytes
+  // that got here another way (copied on this device, say) does not count.
+  private isArriving(item: SyncedItem): boolean {
+    if (this.transfers.size === 0) return false;
+    const state: TransferState | undefined = this.transferStateOf(item);
+    if (state === undefined) return false;
+    // A bar only for a big file (see BAR_MIN_BYTES); a size not known yet
+    // counts as small until its card gives it.
+    if ((state.phase === 'receiving' || state.phase === 'done') && state.total <= BAR_MIN_BYTES) return false;
+    if (state.phase === 'done') return true;
+    const fileHash: string = this.filePayloadOf(item)?.FileHash ?? '';
+    return this.fileStore === null || !this.fileStore.exists(fileHash);
+  }
+
+  // One report from SyncManager (see onTransferProgress). Only the file's
+  // TransferState changes, unless the file gets or loses its bar.
+  private transferProgress(update: TransferUpdate): void {
+    const now: number = Date.now();
+    // Nobody is sending it and no card shows it (its item deleted, say, or a
+    // stream begun before its entry was listed that failed): nothing would
+    // ever finish the bar, so there is none. A card listed later gets its own
+    // (see onEntryWaiting).
+    if ((update.phase === 'waiting' || update.phase === 'stopped') && this.listedFileSize(update.fileHash) < 0) {
+      this.transfers.delete(update.fileHash);
+      return;
+    }
+    const state: TransferState | undefined = this.transfers.get(update.fileHash);
+    if (state === undefined) {
+      // Stored with no bar showing: nothing to finish.
+      if (update.phase === 'done') return;
+      const fresh: TransferState = new TransferState(this.listedFileSize(update.fileHash));
+      fresh.update(update.phase, update.received, now, this.reduceMotion);
+      this.transfers.set(update.fileHash, fresh);
+      this.startTransferTicker();
+      // A card listed already (an older item's bytes fetched again) gets its
+      // bar now.
+      if (this.listedFileSize(update.fileHash) >= 0) this.arrivalsChanged();
+      return;
+    }
+    // Already finishing: a second report of the same storing changes nothing.
+    if (state.phase === 'done') return;
+    // Its size, once a card for it is listed (its stream can start before
+    // its entry is checked and listed).
+    if (state.total <= 0) {
+      state.total = Math.max(0, this.listedFileSize(update.fileHash));
+      // Known only now to be big enough for a bar: its card gets one.
+      if (state.total > BAR_MIN_BYTES && update.phase !== 'done') this.arrivalsChanged();
+    }
+    state.update(update.phase, update.received, now, this.reduceMotion);
+    if (update.phase === 'done') {
+      this.finishArrival(update.fileHash, state);
+    } else {
+      this.startTransferTicker();
+    }
+  }
+
+  // The FileSize of a listed file with this (lowercase) hash: 0 when its
+  // entry gives none, -1 when no such file is listed.
+  private listedFileSize(fileHash: string): number {
+    for (const item of this.syncedItems) {
+      if (this.fileHashKey(item) === fileHash) return Math.max(0, this.filePayloadOf(item)?.FileSize ?? 0);
+    }
+    return -1;
+  }
+
+  // The last byte is stored: the bar stays full a moment, fades out, and then
+  // the card becomes the file's normal one (its key changes, see
+  // syncedItemKey). With reduce motion on there is no wait, only the short
+  // fade.
+  private finishArrival(fileHash: string, state: TransferState): void {
+    const holdMs: number = this.reduceMotion ? 0 : PROGRESS_INTERVAL_MS + DONE_HOLD_MS;
+    const fadeMs: number = this.reduceMotion ? REDUCED_FADE_MS : FADE_MS;
+    setTimeout(() => {
+      if (this.transfers.get(fileHash) !== state) return;
+      state.shown = 0;
+      setTimeout(() => {
+        if (this.transfers.get(fileHash) !== state) return;
+        this.transfers.delete(fileHash);
+        this.arrivalsChanged();
+      }, fadeMs);
+    }, holdMs);
+  }
+
+  // A file got or lost its bar: the list is assigned again (as onFileStored
+  // does), so its card's key is worked out again and the card is drawn the
+  // other way, and the opened item is told too (see fileDetailItems). Once at
+  // a transfer's start and once at its end, never for progress.
+  private arrivalsChanged(): void {
+    this.arrivalsVersion++;
+    this.syncedItems = this.syncedItems.slice();
+  }
+
+  // While any bar is receiving, it is looked at twice a second, so its speed
+  // gives way to "Waiting" when no bytes come (no report comes then). The
+  // timer stops once none is receiving.
+  private startTransferTicker(): void {
+    if (this.transferTickerId !== -1) return;
+    this.transferTickerId = setInterval(() => {
+      const now: number = Date.now();
+      let receiving: boolean = false;
+      this.transfers.forEach((state: TransferState) => {
+        if (state.phase !== 'receiving') return;
+        receiving = true;
+        state.refresh(now, this.reduceMotion);
+      });
+      if (!receiving) this.stopTransferTicker();
+    }, 500);
+  }
+
+  private stopTransferTicker(): void {
+    if (this.transferTickerId === -1) return;
+    clearInterval(this.transferTickerId);
+    this.transferTickerId = -1;
+  }
+
+  // The opened file, through a ForEach of one that is built again when a
+  // file gets or loses its bar (see arrivalsChanged): a builder keeps what it
+  // first drew, so the opened item went on saying it was not downloaded after
+  // its bytes came.
+  private fileDetailItems(item: SyncedItem): SyncedItem[] {
+    void this.arrivalsVersion;
+    return [item];
+  }
+
+  private fileDetailKey(item: SyncedItem): string {
+    return `${item.id}|${this.fileLocalPath(item) !== ''}|${this.isArriving(item)}`;
   }
 
   // 'image' entries only exist as in-memory base64 (see itemDetailView) -
@@ -4344,6 +4689,7 @@ struct Index {
       stamp: canonicalTimestamp(entry.Timestamp),
       expected: 0,
       contentKey: contentKey(entry),
+      pictureName: entryNameOf(entry),
     };
   }
 
@@ -4433,6 +4779,7 @@ struct Index {
       stamp: item.stamp,
       expected,
       contentKey: item.contentKey,
+      pictureName: item.pictureName,
     };
   }
 
@@ -5033,8 +5380,9 @@ struct Index {
         MenuItem({ content: $r('app.string.action_copy'), startIcon: $r('app.media.ic_menu_copy') }).onClick(() => { tapHaptic(); this.copyItemContent(item); })
       }
       MenuItem({ content: $r('app.string.action_share'), startIcon: $r('app.media.ic_menu_share') }).onClick(() => { tapHaptic(); void this.shareItem(item); })
-      if (item.type !== 'text' && item.type !== 'image') {
-        // Same shape as the preview title bar's Open button
+      if (item.type !== 'text') {
+        // Files and pictures alike (a picture saves as a file, through the
+        // same picker, not to the gallery). Same shape as the preview title bar's Open button
         // (sys.symbol.arrow_right_up_and_square), drawn in this menu's
         // stroke style.
         MenuItem({ content: $r('app.string.action_open'), startIcon: $r('app.media.ic_menu_open') }).onClick(() => { tapHaptic(); void this.openFileWithSystem(item); })
@@ -5194,12 +5542,17 @@ struct Index {
         }
         // The footer without its own icon: the chip beside the card is it.
         // One line, always - a byline that wraps competes with the content
-        // preview above it for the eye.
-        Row({ space: 6 }) {
-          this.cardBylineParts(item, 11, chrome)
+        // preview above it for the eye. A file that is arriving has its
+        // transfer bar there instead, until its bytes are stored.
+        if (this.isArriving(item)) {
+          this.arrivingFooter(item, 11, chrome)
+        } else {
+          Row({ space: 6 }) {
+            this.cardBylineParts(item, 11, chrome)
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Center)
         }
-        .width('100%')
-        .alignItems(VerticalAlign.Center)
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
@@ -5418,13 +5771,18 @@ struct Index {
 
       // The footer without its small glyph: the tile on top already says
       // what the file is, and the two together looked cluttered. As tall as
-      // the other cards' footers, which their 18 vp glyph sets.
-      Row({ space: 6 }) {
-        this.cardBylineParts(item, 10, chrome)
+      // the other cards' footers, which their 18 vp glyph sets. The transfer
+      // bar in its place while the file is arriving.
+      if (this.isArriving(item)) {
+        this.arrivingFooter(item, 10, chrome)
+      } else {
+        Row({ space: 6 }) {
+          this.cardBylineParts(item, 10, chrome)
+        }
+        .width('100%')
+        .constraintSize({ minHeight: 18 })
+        .alignItems(VerticalAlign.Center)
       }
-      .width('100%')
-      .constraintSize({ minHeight: 18 })
-      .alignItems(VerticalAlign.Center)
     }
     .width('100%')
     .padding({ left: 12, right: 12, top: 12, bottom: 12 + this.stackHandleRoom(item.id) })
@@ -5464,7 +5822,7 @@ struct Index {
 
   @Builder
   syncedGridCard(item: SyncedItem, chrome: StackChrome) {
-    if (item.type === 'file' && this.imagePreviewUri(item) === null) {
+    if (item.type === 'file' && (this.imagePreviewUri(item) === null || this.isArriving(item))) {
       this.syncedGridFileCard(item, chrome)
     } else if (item.type !== 'image' && this.imagePreviewUri(item) === null) {
       this.syncedGridTextCard(item, chrome)
@@ -5884,7 +6242,17 @@ struct Index {
   // done with it. The title bar's Open hands it to another app.
   @Builder
   fileDetailView(item: SyncedItem) {
-    if (filePreviewKindOf(safeFileName((this.filePayloadOf(item)?.FileName) ?? '', 'file')) === 'pdf' && this.fileLocalPath(item) !== '') {
+    // Built again when the file's bytes come (see fileDetailItems).
+    ForEach(this.fileDetailItems(item), (shown: SyncedItem) => {
+      this.fileDetailBody(shown)
+    }, (shown: SyncedItem) => this.fileDetailKey(shown))
+  }
+
+  @Builder
+  fileDetailBody(item: SyncedItem) {
+    if (this.isArriving(item)) {
+      this.fileInfoCard(item)
+    } else if (filePreviewKindOf(safeFileName((this.filePayloadOf(item)?.FileName) ?? '', 'file')) === 'pdf' && this.fileLocalPath(item) !== '') {
       PdfPreviewPane({ filePath: this.fileLocalPath(item) })
         .width('100%')
         .height('100%')
@@ -5914,6 +6282,36 @@ struct Index {
     }
   }
 
+  // A card's footer while its file is arriving: the transfer bar, and a
+  // stack's "+N" count after it as in the usual footer (no room taken on any
+  // other card, see StackBadge).
+  @Builder
+  arrivingFooter(item: SyncedItem, fontSize: number, chrome: StackChrome) {
+    Row({ space: 6 }) {
+      Column() {
+        this.transferBar(item, false, fontSize)
+      }
+      .layoutWeight(1)
+      StackBadge({ chrome: chrome, fill: this.stackBadgeFill() })
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Center)
+  }
+
+  // A file's transfer bar (see stack/TransferBar.ets), on its card or in the
+  // opened item. Only drawn where isArriving is true, so the state is there.
+  @Builder
+  transferBar(item: SyncedItem, detail: boolean, fontSize: number) {
+    TransferBar({
+      state: this.transferStateOf(item) as TransferState,
+      detail: detail,
+      fill: this.colorWithAlpha(themeFor(this.accentTheme).color, 0.85),
+      track: this.colorWithAlpha(themeFor(this.accentTheme).color, 0.18),
+      fontSize: fontSize,
+      reduceMotion: this.reduceMotion,
+    })
+  }
+
   @Builder
   fileInfoCard(item: SyncedItem) {
     Column({ space: 14 }) {
@@ -5928,7 +6326,15 @@ struct Index {
       Text(formatFileSize(this.filePayloadOf(item)?.FileSize ?? 0))
         .fontSize(13)
         .fontColor($r('sys.color.font_secondary'))
-      if (this.fileLocalPath(item) !== '') {
+      if (this.isArriving(item)) {
+        // Arriving: the bar, with "124 of 290 MB" at its right end.
+        Column() {
+          this.transferBar(item, true, 13)
+        }
+        .width('80%')
+        .constraintSize({ maxWidth: 320 })
+        .padding({ top: 4, bottom: 4 })
+      } else if (this.fileLocalPath(item) !== '') {
         Button($r('app.string.file_preview_open_in_app'))
           .fontSize(14)
           .fontColor($r('sys.color.font_on_primary'))
@@ -6121,7 +6527,7 @@ struct Index {
         },
       }, share, deleteButton]);
     }
-    if (item.type === 'file') {
+    if (item.type === 'file' || item.type === 'image') {
       return this.hdsTitleBar('', false, [{
         content: {
           label: $r('app.string.action_open'),

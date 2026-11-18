@@ -17,6 +17,7 @@ import { util } from '@kit.ArkTS';
 import { ClipboardEntry, canonicalTimestamp } from '../crypto/Signing';
 import { entryKey } from './DeletedEntries';
 import { FilePayload } from './FilePayload';
+import { decodeBase64 } from '../crypto/Base64Bytes';
 
 const base64Helper = new util.Base64Helper();
 const FILE_HASH: RegExp = new RegExp('^[0-9A-Fa-f]{64}$');
@@ -290,7 +291,7 @@ export async function primeContentKeys(entries: ClipboardEntry[]): Promise<void>
     const key: string = entryKey(entry);
     if (keyCache.has(key)) continue;
     try {
-      const bytes: Uint8Array = await base64Helper.decode(entry.Content);
+      const bytes: Uint8Array = await decodeBase64(entry.Content);
       if (bytes.length === 0) continue;
       const md = cryptoFramework.createMd('SHA256');
       await md.update({ data: bytes });

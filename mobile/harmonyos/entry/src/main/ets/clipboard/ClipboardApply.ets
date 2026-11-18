@@ -14,7 +14,6 @@
 
 import pasteboard from '@ohos.pasteboard';
 import { image } from '@kit.ImageKit';
-import { util } from '@kit.ArkTS';
 import fileUri from '@ohos.file.fileuri';
 import { ClipboardEntry } from '../crypto/Signing';
 import { FileStore } from '../storage/FileStore';
@@ -22,8 +21,7 @@ import { FilePayload } from '../storage/FilePayload';
 import { safeFileName } from '../storage/FileNames';
 import { contentKey, imagePrint } from '../storage/ContentPrint';
 import { IMAGE_PACKING } from './ClipboardWatcher';
-
-const base64Helper = new util.Base64Helper();
+import { decodeBase64 } from '../crypto/Base64Bytes';
 
 // 'skipped': the user turned off "Copy received items automatically", so the
 // entry was recorded but deliberately not written to the pasteboard.
@@ -66,9 +64,10 @@ export async function writeEntryToClipboard(entry: ClipboardEntry, fileStore?: F
       await pasteboard.getSystemPasteboard().setData(data);
       return written(entry);
     } else if (entry.Type === 'image') {
-      // Decoded on a worker (the promise form): a photo is MBs of Base64,
-      // and this runs as an item arrives, with the UI thread busy already.
-      const imageBytes = await base64Helper.decode(entry.Content);
+      // Decoded on a worker: a photo is MBs of Base64, and this runs as an
+      // item arrives, with the UI thread busy already. As bytes, never the
+      // string itself (see Base64Bytes.ets).
+      const imageBytes = await decodeBase64(entry.Content);
       // Released as soon as they are done with, not left to the garbage
       // collector, which does not see native memory: a 4K picture is about
       // 33 MB of pixels, and a run of them piled up before a finalizer ran.

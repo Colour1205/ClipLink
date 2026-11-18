@@ -14,6 +14,12 @@ import cardFooterTest from './CardFooter.test';
 import contentPrintTest from './ContentPrint.test';
 import lineChannelTest from './LineChannel.test';
 import zoomMorphTest from './ZoomMorph.test';
+import transferProgressTest from './TransferProgress.test';
+import fileFlowTest from './FileFlow.test';
+import pictureNamesTest from './PictureNames.test';
+import chunkSplitTest from './ChunkSplit.test';
+import spentBuffersTest from './SpentBuffers.test';
+import lineOpenerTest from './LineOpener.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -32,4 +38,10 @@ export default function testsuite() {
   contentPrintTest();
   lineChannelTest();
   zoomMorphTest();
+  transferProgressTest();
+  fileFlowTest();
+  pictureNamesTest();
+  chunkSplitTest();
+  spentBuffersTest();
+  lineOpenerTest();
 }

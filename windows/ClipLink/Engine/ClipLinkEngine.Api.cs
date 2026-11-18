@@ -401,6 +401,43 @@ public sealed partial class ClipLinkEngine
             .ToList();
     }
 
+    // The files whose bytes this PC is waiting for, as far as there is
+    // something to show: each one arriving (how much of it so far), and for
+    // a while each one just stored, or asked for again, or waiting for a
+    // device that has it (see TransferPhase). Keyed by FileHash, which
+    // HistoryItem.FileHash matches (compare ignoring case). Cheap: a UI may
+    // poll it a few times a second while one is Receiving, and should then
+    // touch only those items' progress, not reload the history (TransfersChanged
+    // says when to look again).
+    public IReadOnlyList<IncomingTransfer> GetTransfers()
+    {
+        RequireStores();
+        var list = new List<IncomingTransfer>();
+        var receiving = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var progress in incomingFiles.Snapshot())
+        {
+            if (!receiving.Add(progress.FileHash)) continue;
+            list.Add(new IncomingTransfer(progress.FileHash, TransferPhase.Receiving, progress.Received, progress.Total));
+        }
+        long now = Environment.TickCount64;
+        foreach (var (hash, note) in fileTransferState.Notes)
+        {
+            if (receiving.Contains(hash)) continue;
+            // Done is only news for a moment; the others go once the file is here.
+            bool stale = note.Phase == TransferPhase.Done ? now - note.Since > DoneNoteMs : fileStore.Exists(hash);
+            if (stale)
+            {
+                fileTransferState.Notes.TryRemove(new KeyValuePair<string, (TransferPhase, long)>(hash, note));
+                continue;
+            }
+            list.Add(new IncomingTransfer(hash, note.Phase));
+        }
+        return list;
+    }
+
+    // How long a file counts as just stored (TransferPhase.Done).
+    private const long DoneNoteMs = 10_000;
+
     // A text entry's full text; null if key isn't a text entry in history.
     public string? GetText(string key)
     {
@@ -599,7 +636,12 @@ public sealed partial class ClipLinkEngine
                 var known = historyAccess.NewestPrints(unique.Count);
                 foreach (string path in unique)
                 {
-                    var payload = LocalFiles.Describe(path, out var skip, out string? error);
+                    // Hashed and cached here in one read of the file. Its
+                    // bytes first: one that can't be cached here (disk full,
+                    // say) could never reach the other devices - better
+                    // reported than an entry with nothing behind it.
+                    // PublishLocal finds them there.
+                    var payload = LocalFiles.DescribeAndStore(fileStore, path, out var skip, out string? error);
                     if (payload == null)
                     {
                         Console.WriteLine($"[share] skipped ({skip}{(error != null ? ": " + error : "")}): {path}");
@@ -610,17 +652,6 @@ public sealed partial class ClipLinkEngine
                     {
                         Console.WriteLine($"[share] already the newest item, or shared just now - not sent again: {path}");
                         shared.Add(path);
-                        continue;
-                    }
-                    // Its bytes first: one that can't be cached here (disk
-                    // full, say) could never reach the other devices -
-                    // better reported than an entry with nothing behind it.
-                    // PublishLocal finds them there.
-                    if (!fileStore.Exists(payload.FileHash)
-                        && !LocalFiles.CopyInto(fileStore, path, payload.FileHash, out skip, out error))
-                    {
-                        Console.WriteLine($"[share] couldn't store it to send ({skip}{(error != null ? ": " + error : "")}): {path}");
-                        skipped.Add(new SkippedShare(path, skip, error));
                         continue;
                     }
                     try
@@ -660,14 +691,15 @@ public sealed partial class ClipLinkEngine
     }
 
     // A picture dropped on ClipLink's window (PNG bytes), as ShareText: an
-    // "image" entry, as a copied one is.
-    public void ShareImage(byte[] png)
+    // "image" entry, as a copied one is. name: its original name, when what
+    // was dropped said one (see ImageName); null otherwise.
+    public void ShareImage(byte[] png, string? name = null)
     {
         RequireStores();
         if (png.Length == 0) return;
         Console.WriteLine($"[share] dropped image ({png.Length} bytes) - {connectionsByDeviceId.Count} peer(s) connected");
         if (SkipNewest(new[] { png }, ContentPrint.Image).Count == 0) return;
-        PublishLocal(Convert.ToBase64String(png), "image", null, "dropped");
+        PublishLocal(Convert.ToBase64String(png), "image", null, "dropped", name);
     }
 
     // ---- helpers -----------------------------------------------------
@@ -701,7 +733,7 @@ public sealed partial class ClipLinkEngine
                 return item with { SizeBytes = Base64DecodedLength(content) };
             case "file":
                 var payload = FilePayloadOf(entry);
-                return item with { FileName = payload?.FileName, SizeBytes = payload?.FileSize, IsAvailable = payload != null && IsStored(payload) };
+                return item with { FileName = payload?.FileName, SizeBytes = payload?.FileSize, IsAvailable = payload != null && IsStored(payload), FileHash = payload?.FileHash };
             default:
                 return item with { IsAvailable = false };
         }

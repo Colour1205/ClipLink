@@ -15,6 +15,7 @@
 
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { util } from '@kit.ArkTS';
+import { releaseBuffer } from '../networking/FreeOnWorker';
 
 export const NONCE_SIZE = 12;
 const TAG_SIZE = 16;
@@ -64,6 +65,16 @@ export async function importSessionKey(sessionKey: Uint8Array): Promise<cryptoFr
 
 // One line's bytes before the Base64: nonce || tag || ciphertext.
 export async function encryptPacked(symKey: cryptoFramework.SymKey, plaintext: string): Promise<Uint8Array> {
+  const bytes: Uint8Array = utf8Bytes(plaintext);
+  const packed: Uint8Array = await encryptPackedBytes(symKey, bytes);
+  // A history batch is megabytes, freed now rather than whenever this
+  // thread's collector next runs (see SpentBuffers).
+  releaseBuffer(bytes.buffer as ArrayBuffer);
+  return packed;
+}
+
+// encryptPacked for a message that is UTF-8 bytes already.
+export async function encryptPackedBytes(symKey: cryptoFramework.SymKey, plaintext: Uint8Array): Promise<Uint8Array> {
   const nonce = randomBytes(NONCE_SIZE);
 
   const cipher = cryptoFramework.createCipher('AES256|GCM|NoPadding');
@@ -74,26 +85,43 @@ export async function encryptPacked(symKey: cryptoFramework.SymKey, plaintext: s
     authTag: { data: new Uint8Array(TAG_SIZE) }, // placeholder - unused for encrypt, see file header
   };
   await cipher.init(cryptoFramework.CryptoMode.ENCRYPT_MODE, symKey, params);
-  const output = await cipher.doFinal({ data: utf8Bytes(plaintext) });
+  const output = await cipher.doFinal({ data: plaintext });
 
   // Working hypothesis: output.data = ciphertext || tag (16 bytes at the end).
+  // Views, not copies: concatBytes copies them into the packed line anyway,
+  // and a file chunk's ciphertext is about 350 KB.
   const outBytes = output.data;
-  const cipherBytes = outBytes.slice(0, outBytes.length - TAG_SIZE);
-  const tag = outBytes.slice(outBytes.length - TAG_SIZE);
+  const cipherBytes = outBytes.subarray(0, outBytes.length - TAG_SIZE);
+  const tag = outBytes.subarray(outBytes.length - TAG_SIZE);
 
-  return concatBytes([nonce, tag, cipherBytes]);
+  const packed: Uint8Array = concatBytes([nonce, tag, cipherBytes]);
+  // The cipher's own output, copied into packed: freed now (see SpentBuffers).
+  releaseBuffer(outBytes.buffer as ArrayBuffer);
+  return packed;
 }
 
 // A line already decoded from its Base64. Throws if it's too short to hold
 // a nonce and a tag (as Windows' and Android's Decrypt do), or was forged,
 // corrupted or sealed with another key.
 export async function decryptPacked(symKey: cryptoFramework.SymKey, packed: Uint8Array): Promise<string> {
+  return decoder.decodeToString(await decryptPackedBytes(symKey, packed));
+}
+
+// decryptPacked's plaintext as the UTF-8 bytes the cipher gave back.
+export async function decryptPackedBytes(symKey: cryptoFramework.SymKey, packed: Uint8Array): Promise<Uint8Array> {
   if (packed.length < NONCE_SIZE + TAG_SIZE) {
     throw new Error('packed message too short');
   }
-  const nonce = packed.slice(0, NONCE_SIZE);
-  const tag = packed.slice(NONCE_SIZE, NONCE_SIZE + TAG_SIZE);
-  const cipherBytes = packed.slice(NONCE_SIZE + TAG_SIZE);
+  // Views, not copies: the cipher honours a view's offset into a bigger
+  // buffer (checked on a phone: a line placed at an offset inside a larger
+  // buffer decrypted, tag and all, to the same text). A copy cost about
+  // 350 KB per file chunk, garbage the collector has to catch up with. The
+  // cipher is still made per line, not kept per connection: re-initialising
+  // one after doFinal is not proven here, and a failure would end every
+  // connection.
+  const nonce = packed.subarray(0, NONCE_SIZE);
+  const tag = packed.subarray(NONCE_SIZE, NONCE_SIZE + TAG_SIZE);
+  const cipherBytes = packed.subarray(NONCE_SIZE + TAG_SIZE);
 
   const cipher = cryptoFramework.createCipher('AES256|GCM|NoPadding');
   const params: cryptoFramework.GcmParamsSpec = {
@@ -104,5 +132,5 @@ export async function decryptPacked(symKey: cryptoFramework.SymKey, packed: Uint
   };
   await cipher.init(cryptoFramework.CryptoMode.DECRYPT_MODE, symKey, params);
   const output = await cipher.doFinal({ data: cipherBytes });
-  return decoder.decodeToString(output.data);
+  return output.data;
 }

@@ -59,6 +59,12 @@ public sealed partial class ClipLinkEngine : IDisposable
     // is already listening on the port.
     public event Action<EngineStatus>? StatusChanged;
 
+    // GetTransfers() changed in more than its numbers: a file started
+    // arriving, was stored, failed, broke off, or was asked for again. Not
+    // raised as its bytes come in: a UI showing progress polls GetTransfers
+    // (a few times a second, only while one is Receiving) between these.
+    public event Action? TransfersChanged;
+
     // Bundles the state chunked file transfers need besides the streams
     // being received (those are IncomingFiles'): any entry that arrived (and
     // was verified) before its bytes finished streaming in, waiting to be
@@ -81,6 +87,11 @@ public sealed partial class ClipLinkEngine : IDisposable
         // sequences interleave on the wire - the actual cause of "file
         // transfer failed hash verification" on the receiving end.
         public ConcurrentDictionary<string, byte> StreamingInFlight = new();
+        // What GetTransfers says about a file that isn't arriving right now:
+        // just stored, asked for again, or waiting for a device that has it
+        // (see TransferPhase), and since when (Environment.TickCount64).
+        // Dropped when a stream of it starts, or once it is stored.
+        public ConcurrentDictionary<string, (TransferPhase Phase, long Since)> Notes = new(StringComparer.OrdinalIgnoreCase);
     }
 
     // The latest beacon heard from another device, trusted or not. Memory
@@ -102,6 +113,9 @@ public sealed partial class ClipLinkEngine : IDisposable
     private DeviceIdentity identity = null!;
     private FileStore fileStore = null!;
     private IncomingFiles incomingFiles = null!;
+    // The files being sent to peers that acknowledge chunks, so their acks
+    // find them (see FileFlow and StreamFileToPeer).
+    private readonly SendWindows sendWindows = new();
     private HistoryAccess historyAccess = null!;
     private TrustStore trustStore = null!;
     private BlockStore blockStore = null!;
@@ -210,7 +224,9 @@ public sealed partial class ClipLinkEngine : IDisposable
 
             identity = new DeviceIdentity(label);
             fileStore = new FileStore(label);
-            incomingFiles = new IncomingFiles(fileStore);
+            incomingFiles = new IncomingFiles(fileStore, FileSizeOf);
+            incomingFiles.Completed += OnTransferCompleted;
+            incomingFiles.ChunkDone += OnChunkDone;
             historyAccess = new HistoryAccess(label, fileStore, new DeletedEntries(label));
             trustStore = new TrustStore(label);
             blockStore = new BlockStore(label);
@@ -601,7 +617,7 @@ public sealed partial class ClipLinkEngine : IDisposable
     // shared by Windows or the phone itself) - but an older item copied again
     // is: that's how the user gets it back onto the other devices (the
     // Synced page then shows it once, on top - see HistoryAccess.GetHistoryWithBatches).
-    private void OnLocalClipboardChanged((string content, string type, string? sourceFilePath) content)
+    private void OnLocalClipboardChanged((string content, string type, string? sourceFilePath, string? name) content)
     {
         Console.WriteLine($"[clip] detected local {content.type} change ({content.content.Length} chars/bytes-base64) - {connectionsByDeviceId.Count} peer(s) connected");
         if (ContentPrint.Of(content.content, content.type) is string print && historyAccess.NewestHas(new[] { print }, 1))
@@ -609,7 +625,7 @@ public sealed partial class ClipLinkEngine : IDisposable
             Console.WriteLine($"[clip] that {content.type} is the newest item already - not sent again");
             return;
         }
-        PublishLocal(content.content, content.type, content.sourceFilePath, "copied");
+        PublishLocal(content.content, content.type, content.sourceFilePath, "copied", content.type == "image" ? content.name : null);
     }
 
     // Files copied in Explorer (see ClipboardSync.FilesCopied): each goes out
@@ -652,8 +668,10 @@ public sealed partial class ClipLinkEngine : IDisposable
     // others ask for them when they connect and get the entry in the history
     // batch). A file that can't be cached - it changed since it was hashed,
     // or can't be stored - isn't sent at all: its entry would have nothing
-    // behind it, on every device, for good.
-    private void PublishLocal(string content, string type, string? sourceFilePath, string how)
+    // behind it, on every device, for good. name: a picture's original name
+    // (see ImageName), carried as the entry's unsigned Name; only for an
+    // image.
+    private void PublishLocal(string content, string type, string? sourceFilePath, string how, string? name = null)
     {
         FilePayload? payload = null;
         if (type == "file" && sourceFilePath != null)
@@ -672,7 +690,7 @@ public sealed partial class ClipLinkEngine : IDisposable
             }
         }
 
-        var entry = new ClipboardEntry(content, type, ownId, DateTime.UtcNow);
+        var entry = new ClipboardEntry(content, type, ownId, DateTime.UtcNow, Name: type == "image" ? ImageName.Clean(name) : null);
         var signedEntry = SigningService.Sign(entry, identity);
         // Made once, as UTF-8, for every peer (see Wire.Envelope).
         var envelope = Wire.Envelope("entry", signedEntry);

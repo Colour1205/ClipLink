@@ -115,6 +115,76 @@ public static class LocalFiles
         }
     }
 
+    // Describe and CopyInto in one read of the file, for "Share to ClipLink",
+    // which does both one straight after the other: the payload for the
+    // file at path, with its bytes cached as that hash's blob in store, or
+    // null, with why not (and the error for Unreadable and NotStored). What
+    // is stored is exactly what was hashed, so it can't have changed in
+    // between (CopyInto's Changed). (Copying in Explorer still hashes when
+    // the copy is seen and caches later, off the clipboard watcher's thread:
+    // see PublishLocal.)
+    public static FilePayload? DescribeAndStore(FileStore store, string path, out FileSkipReason skip, out string? error)
+    {
+        skip = FileSkipReason.NotFound;
+        error = null;
+        FileInfo fileInfo;
+        FileStream source;
+        try
+        {
+            fileInfo = new FileInfo(path);
+            if (!fileInfo.Exists)
+            {
+                if (Directory.Exists(path)) skip = FileSkipReason.Folder;
+                return null;
+            }
+            if (fileInfo.Length > MaxFileBytes)
+            {
+                skip = FileSkipReason.TooLarge;
+                return null;
+            }
+            source = OpenRead(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            // (ArgumentException / NotSupportedException: not a usable path at all.)
+            skip = ex is IOException or UnauthorizedAccessException ? FileSkipReason.Unreadable : FileSkipReason.NotFound;
+            error = ex.Message;
+            return null;
+        }
+        using (source)
+        {
+            try
+            {
+                // What's actually read: for a symbolic link, FileInfo.Length
+                // is the link's own size (0), not its target's.
+                if (source.Length > MaxFileBytes)
+                {
+                    skip = FileSkipReason.TooLarge;
+                    return null;
+                }
+                if (store.CopyInNew(source, MaxFileBytes) is not { } stored)
+                {
+                    // It grew past the limit while it was read.
+                    skip = FileSkipReason.TooLarge;
+                    return null;
+                }
+                return new FilePayload(fileInfo.Name, stored.Hash, stored.Size);
+            }
+            catch (FileStore.SourceReadException ex)
+            {
+                skip = FileSkipReason.Unreadable;
+                error = ex.Message;
+                return null;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                skip = FileSkipReason.NotStored;
+                error = IsDiskFull(ex) ? "There's not enough space on the disk." : ex.Message;
+                return null;
+            }
+        }
+    }
+
     // ERROR_DISK_FULL or ERROR_HANDLE_DISK_FULL (as an HRESULT, FACILITY_WIN32).
     private static bool IsDiskFull(Exception ex) =>
         ((ex.HResult >> 16) & 0x1FFF) == 7 && (ex.HResult & 0xFFFF) is 112 or 39;

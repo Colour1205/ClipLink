@@ -39,6 +39,88 @@ export interface ClipboardEntry {
   DeviceId: string;
   Timestamp: string; // always opaque - see file header
   Signature?: string;
+  // The picture's original file name, without a folder, when the copy had one
+  // (a picture copied in a browser, say). Only on an image entry, and missing
+  // when unknown: a screenshot never had a name. It is not signed - the
+  // signature stays over Content:Type:DeviceId:Timestamp - because it is only
+  // the name a save suggests, and every entry already arrives inside the
+  // encrypted, authenticated session of a trusted device. It is still text
+  // from another device, so it is read through entryNameOf here and cut to a
+  // safe last part (storage/PictureNames.ets) before it names a file. Builds
+  // that do not know it ignore it.
+  Name?: string;
+}
+
+// A Name longer than this is cut to it when an entry is stored. A real one is
+// far shorter; this only keeps a misbehaving peer from filling the history.
+export const MAX_ENTRY_NAME_LENGTH: number = 255;
+
+// The entry's Name as this device keeps it: only on an image entry, only text,
+// without any half of a surrogate pair that has lost its other half, not
+// empty, and at most MAX_ENTRY_NAME_LENGTH characters (never cutting a pair in
+// two). null for every other case, which includes every entry from a build
+// that does not send a name. A lone half has to go because this device relays
+// the Name in history batches: written back out it is not valid text, and
+// Windows refuses to read an entry that holds one, so one bad Name from any
+// peer would otherwise spoil every batch that carried it.
+export function entryNameOf(entry: ClipboardEntry): string | null {
+  if (entry.Type !== 'image') return null;
+  const name: string | undefined = entry.Name;
+  if (typeof name !== 'string' || name.length === 0) return null;
+  const whole: string = withoutLoneSurrogates(name);
+  if (whole.length === 0) return null;
+  if (whole.length <= MAX_ENTRY_NAME_LENGTH) return whole;
+  let cut: string = whole.substring(0, MAX_ENTRY_NAME_LENGTH);
+  const last: number = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xD800 && last <= 0xDBFF) cut = cut.substring(0, cut.length - 1);
+  return cut;
+}
+
+// The text with every half of a surrogate pair that is not next to its other
+// half removed. Text without such a half comes back as it was.
+export function withoutLoneSurrogates(text: string): string {
+  let kept: string = '';
+  let changed: boolean = false;
+  let i: number = 0;
+  while (i < text.length) {
+    const unit: number = text.charCodeAt(i);
+    if (unit >= 0xD800 && unit <= 0xDBFF) {
+      const next: number = i + 1 < text.length ? text.charCodeAt(i + 1) : 0;
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        kept += text.substring(i, i + 2);
+        i += 2;
+        continue;
+      }
+      changed = true;
+    } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+      changed = true;
+    } else {
+      kept += text.charAt(i);
+    }
+    i++;
+  }
+  return changed ? kept : text;
+}
+
+// The copy of a received entry that is stored, applied and relayed: the five
+// signed fields with `timestamp` as its Timestamp, plus its Name when
+// entryNameOf keeps one. Fields this build does not know are left out, so a
+// peer cannot store anything else here from now on; Windows, which reads an
+// entry into a class, never relayed them either. (History that a 2.2 build
+// stored kept each entry as it was parsed, so an entry from then can still
+// carry a field of its own until it leaves the history. That is harmless:
+// every build ignores fields it does not know.)
+export function storedEntry(entry: ClipboardEntry, timestamp: string): ClipboardEntry {
+  const stored: ClipboardEntry = {
+    Content: entry.Content,
+    Type: entry.Type,
+    DeviceId: entry.DeviceId,
+    Timestamp: timestamp,
+    Signature: entry.Signature,
+  };
+  const name: string | null = entryNameOf(entry);
+  if (name !== null) stored.Name = name;
+  return stored;
 }
 
 // Was `new Uint8Array(Array.from(s).map(c => c.charCodeAt(0)))` - that
@@ -92,8 +174,14 @@ export function canonicalTimestamp(timestamp: string): string {
   return paddedDotNetTimestamp(timestamp) ?? timestamp;
 }
 
+// The text an entry's signature is over. Name is not part of it, so an entry
+// signs and verifies the same with or without one.
+export function signedText(entry: ClipboardEntry): string {
+  return `${entry.Content}:${entry.Type}:${entry.DeviceId}:${entry.Timestamp}`;
+}
+
 function signableData(entry: ClipboardEntry): Uint8Array {
-  return stringToBytes(`${entry.Content}:${entry.Type}:${entry.DeviceId}:${entry.Timestamp}`);
+  return stringToBytes(signedText(entry));
 }
 
 export async function signEntry(identity: DeviceIdentity, content: string, type: string, deviceId: string): Promise<ClipboardEntry> {
@@ -106,7 +194,9 @@ export async function signEntry(identity: DeviceIdentity, content: string, type:
 // Returns the entry exactly as its signer signed it, or null when the
 // signature doesn't hold. Callers must store and relay what this returns,
 // not what arrived: if the timestamp was trimmed in transit, the returned
-// copy carries the padded, signed text, which every platform can verify.
+// copy carries the padded, signed text, which every platform can verify. It
+// is always a fresh copy made by storedEntry, so an image's Name is kept and
+// nothing else unknown is.
 //
 // Verifies against entry.DeviceId itself - matches how Program.cs always
 // calls SigningService.Verify(entry, entry.DeviceId) in practice.
@@ -119,16 +209,10 @@ export async function verifiedEntry(entry: ClipboardEntry): Promise<ClipboardEnt
     return null; // malformed base64 from a misbehaving/hostile peer
   }
   if (await verifyRawSignature(entry.DeviceId, signableData(entry), sigBytes)) {
-    return entry;
+    return storedEntry(entry, entry.Timestamp);
   }
   const padded = paddedDotNetTimestamp(entry.Timestamp);
   if (padded === null) return null;
-  const restored: ClipboardEntry = {
-    Content: entry.Content,
-    Type: entry.Type,
-    DeviceId: entry.DeviceId,
-    Timestamp: padded,
-    Signature: entry.Signature,
-  };
+  const restored: ClipboardEntry = storedEntry(entry, padded);
   return (await verifyRawSignature(restored.DeviceId, signableData(restored), sigBytes)) ? restored : null;
 }

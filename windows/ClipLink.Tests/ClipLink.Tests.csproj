@@ -7,7 +7,8 @@
        history_head that comes first (HistoryHead.cs, BatchGroups.cs), and the
        version 2 sync: handshake, head, requests and where items are placed
        (HandshakeMessage.cs, KeysMessage.cs, SyncRequests.cs, Wire.cs), and how content
-       is recognised whoever copied it (ContentPrint.cs, LastWrite.cs), and the
+       is recognised whoever copied it (ContentPrint.cs, LastWrite.cs), and a
+       copied picture's original name (ImageName.cs, FileNames.cs), and the
        arithmetic of a card zooming into its full view (ZoomMorph.cs). Run with
        `dotnet test windows\ClipLink.Tests`. ClipLink.csproj is a WinUI exe,
        which a test project can't sensibly reference, so the source files are
@@ -35,6 +36,8 @@
     <Compile Include="..\ClipLink\Engine\Networking\DialDecision.cs" Link="Engine\DialDecision.cs" />
     <Compile Include="..\ClipLink\Engine\Networking\DialFallback.cs" Link="Engine\DialFallback.cs" />
     <Compile Include="..\ClipLink\Engine\Storage\ClipboardEntry.cs" Link="Engine\ClipboardEntry.cs" />
+    <Compile Include="..\ClipLink\Engine\Storage\ImageName.cs" Link="Engine\ImageName.cs" />
+    <Compile Include="..\ClipLink\Engine\Storage\FileNames.cs" Link="Engine\FileNames.cs" />
     <Compile Include="..\ClipLink\Engine\Storage\HistoryBatch.cs" Link="Engine\HistoryBatch.cs" />
     <Compile Include="..\ClipLink\Engine\Storage\HistoryHead.cs" Link="Engine\HistoryHead.cs" />
     <Compile Include="..\ClipLink\Engine\Storage\BatchGroups.cs" Link="Engine\BatchGroups.cs" />

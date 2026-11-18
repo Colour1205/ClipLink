@@ -64,6 +64,19 @@ export default function chunkOrderTest() {
         .assertEqual('start write restart ignore write ignore write');
     });
 
+    it('takesOnlyTheFirstSendersStream', 0, () => {
+      // Another peer's stream of the same file is under way: this peer's
+      // chunk 0 does not start a second one, and the rest of it is ignored.
+      expect(placeChunk(false, false, 0, 0, true)).assertEqual('ignore');
+      expect(placeChunk(false, false, 0, 1, true)).assertEqual('ignore');
+      // With nobody else sending, it starts as before.
+      expect(placeChunk(false, false, 0, 0, false)).assertEqual('start');
+      // The stream already taken carries on, and its own sender may still
+      // start it over.
+      expect(placeChunk(true, true, 3, 3, true)).assertEqual('write');
+      expect(placeChunk(true, true, 3, 0, true)).assertEqual('restart');
+    });
+
     it('abandonsAStreamWithAGap', 0, () => {
       expect(play([c('a', 0), c('a', 2), c('a', 3)])).assertEqual('start abandon ignore');
       // A chunk repeated is out of order too.

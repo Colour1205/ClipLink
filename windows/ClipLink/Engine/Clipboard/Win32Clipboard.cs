@@ -22,8 +22,14 @@ internal static class Win32Clipboard
     public const uint CF_HDROP = 15;
 
     public static readonly uint PngFormat = RegisterClipboardFormatW("PNG");
-    private static readonly uint FileNameWFormat = RegisterClipboardFormatW("FileNameW");
-    private static readonly uint FileNameFormat = RegisterClipboardFormatW("FileName");
+    public static readonly uint FileNameWFormat = RegisterClipboardFormatW("FileNameW");
+    public static readonly uint FileNameFormat = RegisterClipboardFormatW("FileName");
+    // Formats a "Copy image" in a browser or another app may put next to the
+    // bitmap, which can say the picture's name (see ImageName).
+    public static readonly uint HtmlFormat = RegisterClipboardFormatW("HTML Format");
+    public static readonly uint UrlWFormat = RegisterClipboardFormatW("UniformResourceLocatorW");
+    public static readonly uint UrlFormat = RegisterClipboardFormatW("UniformResourceLocator");
+    public static readonly uint FileGroupDescriptorWFormat = RegisterClipboardFormatW("FileGroupDescriptorW");
 
     // The clipboard's sequence number: changes with every write to it, by
     // ClipLink or anything else. Any thread, clipboard open or not.
@@ -90,6 +96,62 @@ internal static class Win32Clipboard
             if (DragQueryFileW(drop, i, buffer, length + 1) > 0) files.Add(new string(buffer, 0, (int)length));
         }
         return files;
+    }
+
+    // The first bytes of a format, at most max of them; null if the format
+    // isn't there or can't be read. For formats held in global memory only
+    // (not CF_BITMAP, not CF_HDROP). Asking for a format the app that copied
+    // never put does not make Windows synthesize anything: these are all
+    // registered formats, which only the copying app provides.
+    public static byte[]? GetBytes(uint format, int max)
+    {
+        if (format == 0 || !IsClipboardFormatAvailable(format)) return null;
+        nint handle = GetClipboardData(format);
+        if (handle == 0) return null;
+        nint data = GlobalLock(handle);
+        if (data == 0) return null;
+        try
+        {
+            int length = (int)Math.Min((long)GlobalSize(handle), max);
+            var bytes = new byte[length];
+            Marshal.Copy(data, bytes, 0, length);
+            return bytes;
+        }
+        finally
+        {
+            GlobalUnlock(handle);
+        }
+    }
+
+    // A format holding UTF-16 text, up to its NUL and at most maxChars
+    // characters; null if it isn't there.
+    public static string? GetUnicodeText(uint format, int maxChars)
+    {
+        byte[]? bytes = GetBytes(format, maxChars * 2);
+        if (bytes == null) return null;
+        string text = Encoding.Unicode.GetString(bytes, 0, bytes.Length & ~1);
+        int end = text.IndexOf('\0');
+        return end < 0 ? text : text[..end];
+    }
+
+    // A format holding text in the system's ANSI code page, up to its NUL and
+    // at most maxBytes bytes; null if it isn't there.
+    public static string? GetAnsiText(uint format, int maxBytes)
+    {
+        byte[]? bytes = GetBytes(format, maxBytes);
+        if (bytes == null) return null;
+        int end = Array.IndexOf(bytes, (byte)0);
+        int length = end < 0 ? bytes.Length : end;
+        if (length == 0) return "";
+        var pinned = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+        try
+        {
+            return Marshal.PtrToStringAnsi(pinned.AddrOfPinnedObject(), length);
+        }
+        finally
+        {
+            pinned.Free();
+        }
     }
 
     // The bitmap's handle, or 0. The clipboard's own: copy it (Bitmap.FromHbitmap), never delete it.
