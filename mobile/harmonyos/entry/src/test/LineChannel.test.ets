@@ -224,6 +224,22 @@ export default function lineChannelTest() {
       expect(fake.sent.join('')).assertEqual('first\nsecond\n');
     });
 
+    // A line made without its newline: a small one gets it copied on, in the
+    // same send; a big one gets it in a send of its own, right after.
+    it('endsLinesMadeWithoutTheirNewline', 0, async () => {
+      const fake = new FakeSocket();
+      const channel = new TcpLineChannel(fake);
+      await channel.writeLineBytes(Promise.resolve(new Uint8Array(bytesOf('small'))), true);
+      expect(fake.sent.length).assertEqual(1);
+      expect(fake.sent[0]).assertEqual('small\n');
+      const big: string = repeat('b', 64 * 1024);
+      const later: Promise<void> = channel.writeLineBytes(Promise.resolve(new Uint8Array(bytesOf('next\n'))));
+      await channel.writeLineBytes(Promise.resolve(new Uint8Array(bytesOf(big))), true);
+      await later;
+      expect(fake.sent.length).assertEqual(4);
+      expect(fake.sent.join('')).assertEqual('small\n' + 'next\n' + big + '\n');
+    });
+
     it('goesOnWritingAfterALineFailsToBeMade', 0, async () => {
       const fake = new FakeSocket();
       const channel = new TcpLineChannel(fake);
@@ -232,6 +248,50 @@ export default function lineChannelTest() {
       await channel.writeLineBytes(Promise.resolve(new Uint8Array(bytesOf('next\n'))));
       expect(failed).assertTrue();
       expect(fake.sent.join('')).assertEqual('next\n');
+    });
+
+    // Each socket message is freed as soon as it is framed, and a line sent
+    // as spent once it has gone, with the copy made to end it (see
+    // SpentBuffers); what was read or sent is unchanged.
+    it('freesSocketMessagesAndSpentLines', 0, async () => {
+      const fake = new FakeSocket();
+      const released: ArrayBuffer[] = [];
+      const channel = new TcpLineChannel(fake, (buffer: ArrayBuffer): void => { released.push(buffer); });
+      fake.push('ab');
+      fake.push('c\nd');
+      expect(released.length).assertEqual(2);
+      expect(textOf(await channel.readLine())).assertEqual('abc');
+      const small: Uint8Array = new Uint8Array(bytesOf('small'));
+      await channel.writeLineBytes(Promise.resolve(small), true, true);
+      expect(released.length).assertEqual(4);
+      expect(released[3] === small.buffer).assertTrue();
+      const big: Uint8Array = new Uint8Array(bytesOf(repeat('b', 64 * 1024)));
+      await channel.writeLineBytes(Promise.resolve(big), true, true);
+      expect(released.length).assertEqual(5);
+      expect(released[4] === big.buffer).assertTrue();
+      await channel.writeLineBytes(Promise.resolve(new Uint8Array(bytesOf('kept\n'))));
+      expect(released.length).assertEqual(5);
+      expect(fake.sent.join('')).assertEqual('small\n' + repeat('b', 64 * 1024) + '\n' + 'kept\n');
+    });
+
+    // Past the cap a stranger may keep streaming: what is dropped, and every
+    // message ignored after it, is freed all the same.
+    it('freesWhatItDropsOnceOverTheLimit', 0, async () => {
+      const fake = new FakeSocket();
+      const released: ArrayBuffer[] = [];
+      const channel = new TcpLineChannel(fake, (buffer: ArrayBuffer): void => { released.push(buffer); });
+      fake.push('handshake\n');
+      await channel.readLine();
+      channel.limitUntilRead(100);
+      fake.push(`${repeat('a', 60)}\n`);
+      const before: number = released.length;
+      fake.push(`${repeat('b', 60)}\n`);
+      expect(channel.overflowed).assertTrue();
+      // The queued line and the message that went over.
+      expect(released.length).assertEqual(before + 2);
+      fake.push('c\n');
+      fake.push('d\n');
+      expect(released.length).assertEqual(before + 4);
     });
 
     it('sendsExactlyTheLinesBytes', 0, () => {

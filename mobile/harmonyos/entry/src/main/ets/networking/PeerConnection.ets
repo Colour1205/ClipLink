@@ -18,7 +18,9 @@ import { TrustStore } from '../identity/TrustStore';
 import { PassphraseKeyStore } from '../identity/PassphraseKeyStore';
 import { deviceFingerprint, normalizeDeviceName } from '../identity/DeviceName';
 import * as AesGcm from '../crypto/AesGcm';
-import { LineFramer } from './LineFramer';
+import { FIRST_LINE_MAX_BYTES, LineFramer, MAX_LINE_BYTES } from './LineFramer';
+import { releaseBuffer } from './FreeOnWorker';
+import { OpenedLine, nonceKey, openLine } from './LineOpener';
 import { PROTOCOL_VERSION, negotiatedProtocol, peerProtocolOf } from './SyncProtocol';
 import { OWN_CAPS, acksFiles, peerCapsOf } from './FileFlow';
 
@@ -267,9 +269,23 @@ export const UNREAD_MAX_BYTES = 64 * 1024 * 1024;
 // for it this cap is what stops the app being killed.
 export const SESSION_QUEUE_MAX_BYTES = 128 * 1024 * 1024;
 
-// Session lines decoded ahead of the one being decrypted (see listenLoop).
-const DECODE_AHEAD = 2;
+// Session lines being opened ahead of the one being handled (see
+// listenLoop). Each holds about 2 MB while it is opened.
+const OPEN_AHEAD = 3;
 const NEWLINE = 10;
+// What ends every line this side sends, and the size from which a line's
+// is sent on its own rather than copied onto it (see
+// TcpLineChannel.writeLineBytes).
+const NEWLINE_BUFFER: ArrayBuffer = new Uint8Array([NEWLINE]).buffer as ArrayBuffer;
+const SEPARATE_NEWLINE_BYTES = 64 * 1024;
+
+// A copy of the bytes with a newline after them.
+function withNewline(bytes: Uint8Array): ArrayBuffer {
+  const line: Uint8Array = new Uint8Array(bytes.length + 1);
+  line.set(bytes);
+  line[bytes.length] = NEWLINE;
+  return line.buffer as ArrayBuffer;
+}
 
 // The ArrayBuffer holding exactly these bytes: their own when they fill it
 // from the start, otherwise a copy.
@@ -299,9 +315,12 @@ async function sha256(data: Uint8Array): Promise<Uint8Array> {
 // Base64, and a history batch carries 25 items.)
 export class TcpLineChannel {
   private client: TcpLike;
+  // Frees buffers this is done with: the socket's messages once framed, and
+  // what the framer outgrows (see SpentBuffers).
+  private readonly release: (buffer: ArrayBuffer) => void;
   // Splits the socket's bytes into lines - bounded, and linear in what
   // arrives (see LineFramer).
-  private framer: LineFramer = new LineFramer();
+  private framer: LineFramer;
   private pendingLines: Uint8Array[] = [];
   // The bytes in pendingLines.
   private pendingBytes: number = 0;
@@ -335,8 +354,10 @@ export class TcpLineChannel {
   // (PeerConnection.cs's writeLock), same reasoning.
   private writeQueue: Promise<void> = Promise.resolve();
 
-  constructor(client: TcpLike) {
+  constructor(client: TcpLike, release: (buffer: ArrayBuffer) => void = releaseBuffer) {
     this.client = client;
+    this.release = release;
+    this.framer = this.newFramer();
     client.onMessage((info: socket.SocketMessageInfo) => {
       this.handleChunk(info.message);
     });
@@ -347,19 +368,35 @@ export class TcpLineChannel {
     });
   }
 
+  private newFramer(): LineFramer {
+    return new LineFramer(MAX_LINE_BYTES, FIRST_LINE_MAX_BYTES, this.release);
+  }
+
   private handleChunk(chunk: ArrayBuffer): void {
     this.lastBytes = Date.now();
-    if (this.overflow || this.queueOverflow) return;
+    // A message ignored is freed all the same: a stranger who keeps
+    // streaming past the cap must not pile up native memory the collector
+    // never counts (see SpentBuffers).
+    if (this.overflow || this.queueOverflow) {
+      this.release(chunk);
+      return;
+    }
     if (this.unreadLimit >= 0 && this.pendingBytes + this.framer.bufferedBytes + chunk.byteLength > this.unreadLimit) {
       // Kept open, so the request can still be answered; only the bytes go.
       this.overflow = true;
-      this.pendingLines = [];
-      this.pendingBytes = 0;
-      this.framer = new LineFramer();
+      this.dropQueued();
+      this.framer.letGo();
+      this.framer = this.newFramer();
+      this.release(chunk);
       this.notifyActivity();
       return;
     }
+    // The framer copies out what it keeps, and each message comes in an
+    // ArrayBuffer of its own that nothing else holds: so it is freed now,
+    // not whenever this thread's collector next runs (see SpentBuffers) -
+    // a big file comes as hundreds of these a second.
     const lines: Uint8Array[] | null = this.framer.push(new Uint8Array(chunk));
+    this.release(chunk);
     if (lines === null) {
       // Over the cap before a handshake even arrived - not a ClipLink peer,
       // or one trying to fill this device's memory. Closed here and now,
@@ -403,14 +440,21 @@ export class TcpLineChannel {
       if (this.queueLimit >= 0 && this.pendingBytes > allowed) {
         // Closed, not trimmed: a line dropped from the middle would break
         // whatever it belonged to anyway (see SESSION_QUEUE_MAX_BYTES).
-        this.pendingLines = [];
-        this.pendingBytes = 0;
+        this.dropQueued();
         this.queueOverflow = true;
         this.close();
         return;
       }
     }
     this.notifyActivity();
+  }
+
+  // Drops the lines not read yet, each freed (every line is a buffer of its
+  // own, see LineFramer.push).
+  private dropQueued(): void {
+    for (const line of this.pendingLines) this.release(line.buffer as ArrayBuffer);
+    this.pendingLines = [];
+    this.pendingBytes = 0;
   }
 
   // Once the channel is being read: it holds at most maxBytes of lines not
@@ -566,10 +610,32 @@ export class TcpLineChannel {
   // were sent. As bytes, not a string: the old `line + '\n'` built a second
   // copy of a 466 KB string for every file chunk, which the socket then
   // encoded to bytes again.
-  writeLineBytes(line: Promise<Uint8Array>): Promise<void> {
+  //
+  // newline: the bytes don't end in '\n' yet. A big line's goes in a send of
+  // its own, right after it and still ahead of any other line: copying a
+  // 466 KB line only to add one byte was another 466 KB of garbage for every
+  // file chunk sent. A small line is copied with it, as before: sent alone,
+  // one byte could sit in the socket until the peer acknowledged the line
+  // (Nagle's algorithm), holding up a clipboard entry for as long as the
+  // peer delays its acknowledgements.
+  //
+  // spent: the bytes are this line's alone, and are freed once sent (see
+  // SpentBuffers), with any copy made of them here.
+  writeLineBytes(line: Promise<Uint8Array>, newline: boolean = false, spent: boolean = false): Promise<void> {
     const current: Promise<void> = this.writeQueue
       .then(() => line)
-      .then((bytes: Uint8Array) => this.client.send({ data: exactBuffer(bytes) }));
+      .then((bytes: Uint8Array) => {
+        const separate: boolean = newline && bytes.length >= SEPARATE_NEWLINE_BYTES;
+        const data: ArrayBuffer = newline && !separate ? withNewline(bytes) : exactBuffer(bytes);
+        const sent: Promise<void> = separate
+          ? this.client.send({ data: data }).then(() => this.client.send({ data: NEWLINE_BUFFER }))
+          : this.client.send({ data: data });
+        if (!spent) return sent;
+        return sent.finally(() => {
+          if (data !== bytes.buffer) this.release(data);
+          this.release(bytes.buffer as ArrayBuffer);
+        });
+      });
     this.writeQueue = current.catch(() => {});
     // `line` failing is reported through `current`, and only there.
     line.catch(() => {});
@@ -620,24 +686,18 @@ const PING_SENTINEL = '__ping__';
 const HEARTBEAT_INTERVAL_MS = 3000;
 const HEARTBEAT_TIMEOUT_MS = 9000;
 
-// What sentNonces keeps a line by: its nonce - the first AesGcm.NONCE_SIZE
-// of its packed nonce || tag || ciphertext bytes - in hex. The decoded
-// bytes, as Windows and Android keep them, never the line's text: a decoder
-// may take more than one spelling of the same bytes (whitespace in them, or
-// a character outside the alphabet read as some other), so an echo of one
-// of our lines spelt another way would miss a text match and still decrypt.
-// null for bytes too short to hold a nonce, which decryptPacked refuses.
-export function nonceKey(packed: Uint8Array): string | null {
-  if (packed.length < AesGcm.NONCE_SIZE) return null;
-  let key = '';
-  for (let i = 0; i < AesGcm.NONCE_SIZE; i++) {
-    key += packed[i].toString(16).padStart(2, '0');
-  }
-  return key;
+// What sentNonces keeps a line by (see LineOpener, where lines are opened).
+export { nonceKey };
+
+// A line opened but never handled (the read loop ended first, or it was this
+// side's own line echoed back): its buffers freed (see SpentBuffers).
+function releaseOpened(opened: OpenedLine): void {
+  releaseBuffer(opened.envelope.buffer as ArrayBuffer);
+  if (opened.data !== null) releaseBuffer(opened.data.buffer as ArrayBuffer);
 }
 
 export class PeerConnection {
-  private messageCallback: ((message: string) => void) | null = null;
+  private messageCallback: ((message: string, data: Uint8Array | null) => void) | null = null;
   private disconnectedCallback: (() => void) | null = null;
   private tickCallback: (() => void) | null = null;
   private channel: TcpLineChannel;
@@ -687,10 +747,10 @@ export class PeerConnection {
   private sentNonces: Set<string> | null = new Set<string>();
   // See holdReadsUntil.
   private readHold: Promise<void> | null = null;
-  // Lines listenLoop has taken from the channel and is decoding, oldest
+  // Lines listenLoop has taken from the channel and is opening, oldest
   // first, and whether it is working on one of its own right now (see
   // isReceiving).
-  private ahead: Promise<Uint8Array>[] = [];
+  private ahead: Promise<OpenedLine>[] = [];
   private lineInHand: boolean = false;
 
   private constructor(channel: TcpLineChannel, sessionKey: Uint8Array, symKey: cryptoFramework.SymKey, peerDeviceId: string, wasAlreadyTrusted: boolean, newlyTrustedViaPassphrase: boolean, peerName: string | null, peerProtocol: number, peerCaps: string[]) {
@@ -845,19 +905,34 @@ export class PeerConnection {
   // several are being made at once (see TcpLineChannel.writeLineBytes); the
   // bytes are the same Base64 line, ending in '\n', as before.
   send(message: string): Promise<void> {
-    return this.channel.writeLineBytes(this.sealLine(message));
+    return this.channel.writeLineBytes(this.sealLine(message), true, true);
   }
 
-  private async sealLine(message: string): Promise<Uint8Array> {
-    const packed: Uint8Array = await AesGcm.encryptPacked(this.symKey, message);
+  // send for a message that is UTF-8 bytes already: a file chunk, made
+  // without its Base64 ever being a string (see ChunkSplit.joinFileChunk).
+  // The message's bytes are freed once encrypted (see SpentBuffers): they
+  // must be its own, and not be used again.
+  sendBytes(message: Uint8Array): Promise<void> {
+    return this.channel.writeLineBytes(this.sealLine(message), true, true);
+  }
+
+  // The line's bytes are its own, for writeLineBytes to free once sent; so
+  // are the packed bytes, freed here once encoded (see SpentBuffers).
+  private async sealLine(message: string | Uint8Array): Promise<Uint8Array> {
+    let packed: Uint8Array;
+    if (typeof message === 'string') {
+      packed = await AesGcm.encryptPacked(this.symKey, message);
+    } else {
+      packed = await AesGcm.encryptPackedBytes(this.symKey, message);
+      releaseBuffer(message.buffer as ArrayBuffer);
+    }
     // Before the write (which waits for this), so its echo can't arrive
     // ahead of it.
     const nonce: string | null = nonceKey(packed);
     if (this.sentNonces !== null && nonce !== null) this.sentNonces.add(nonce);
-    const base64: Uint8Array = await base64Helper.encode(packed);
-    const line: Uint8Array = new Uint8Array(base64.length + 1);
-    line.set(base64);
-    line[base64.length] = NEWLINE;
+    // Its '\n' goes in a send of its own (see writeLineBytes).
+    const line: Uint8Array = await base64Helper.encode(packed);
+    releaseBuffer(packed.buffer as ArrayBuffer);
     return line;
   }
 
@@ -885,7 +960,11 @@ export class PeerConnection {
     return this.channel.takeQueueHigh();
   }
 
-  onMessage(callback: (message: string) => void): void {
+  // Each message, as text, and for a file chunk its bytes, decoded: the text
+  // is then the envelope with DataBase64 left empty (see LineOpener). data
+  // is null for everything else, and for a chunk spelt in a way ChunkSplit
+  // leaves alone, which arrives whole as text, as before.
+  onMessage(callback: (message: string, data: Uint8Array | null) => void): void {
     this.messageCallback = callback;
   }
 
@@ -962,54 +1041,61 @@ export class PeerConnection {
     this.startHeartbeat();
   }
 
-  // A line's Base64 decoding, started (on a worker), with its failure kept
-  // for whoever awaits it: a line decoded ahead that is never reached (the
-  // loop ended first) must not become an unhandled rejection.
-  private decodeLine(line: Uint8Array): Promise<Uint8Array> {
-    const decoding: Promise<Uint8Array> = base64Helper.decode(line);
-    decoding.catch(() => { /* reported where it is awaited */ });
-    return decoding;
+  // A line being opened (see LineOpener), with its failure kept for whoever
+  // awaits it: a line opened ahead that is never reached (the loop ended
+  // first) must not become an unhandled rejection.
+  private openLine(line: Uint8Array): Promise<OpenedLine> {
+    const opening: Promise<OpenedLine> = openLine(line, this.symKey);
+    opening.catch(() => { /* reported where it is awaited */ });
+    return opening;
   }
 
   private async listenLoop(): Promise<void> {
     let failed = false;
-    // Lines whose decoding has started, oldest first. While one line is
-    // decrypted and handled here on the UI thread, the next ones are already
-    // being decoded on a worker, instead of each waiting its turn: for a big
-    // file that is most of each chunk's time. Lines are still handled one at
-    // a time and in order.
-    const ahead: Promise<Uint8Array>[] = this.ahead;
+    // Lines being opened, oldest first. While one line is handled here on
+    // the UI thread, the next ones are already being decoded and decrypted
+    // off it, instead of each waiting its turn: for a big file that is most
+    // of each chunk's time. Lines are still handled one at a time and in
+    // order.
+    const ahead: Promise<OpenedLine>[] = this.ahead;
     try {
       while (true) {
         this.lineInHand = false;
-        while (ahead.length < DECODE_AHEAD + 1 && this.channel.hasPendingLine) {
+        while (ahead.length < OPEN_AHEAD + 1 && this.channel.hasPendingLine) {
           const queued: Uint8Array | null = await this.channel.readLine();
           if (queued === null) break;
-          ahead.push(this.decodeLine(queued));
+          ahead.push(this.openLine(queued));
         }
         if (ahead.length === 0) {
           const line = await this.channel.readLine();
           if (line === null) break;
-          ahead.push(this.decodeLine(line));
+          ahead.push(this.openLine(line));
         }
-        // Decoded once: the nonce checked is the one decrypted with (see
-        // nonceKey). Checked before decrypting: an echo of this side's own
-        // envelope would decrypt (see sentNonces), and must neither prove
-        // the session nor count as activity for the heartbeat watchdog.
-        // Decoded from the line's bytes, on a worker (the promise form):
-        // decodeSync held the UI thread for 0.4 s on a 16 MB history
-        // batch, right as the peer was about to count as connected.
+        // The nonce checked is the one the line was decrypted with (see
+        // nonceKey). Checked before anything else: an echo of this side's own
+        // envelope decrypts (see sentNonces), and must neither prove the
+        // session nor count as activity for the heartbeat watchdog. Decoded
+        // by the helpers' promise forms, off this thread: decodeSync here
+        // held the UI thread for 0.4 s on a 16 MB history batch, right as the
+        // peer was about to count as connected.
         this.lineInHand = true;
-        const packed: Uint8Array = await ahead.shift()!;
-        const nonce: string | null = nonceKey(packed);
-        if (this.sentNonces !== null && nonce !== null && this.sentNonces.has(nonce)) {
+        const opened: OpenedLine = await ahead.shift()!;
+        if (this.sentNonces !== null && opened.nonce !== null && this.sentNonces.has(opened.nonce)) {
+          releaseOpened(opened);
           throw new Error('reflected line');
         }
-        const decrypted = await AesGcm.decryptPacked(this.symKey, packed);
         this.lastActivityAt = Date.now();
         if (!this.sessionProven) this.markSessionProven();
-        if (decrypted === PING_SENTINEL) continue; // heartbeat only, not real data
-        this.messageCallback?.(decrypted);
+        const text: string = decoder.decodeToString(opened.envelope);
+        releaseBuffer(opened.envelope.buffer as ArrayBuffer);
+        if (opened.data !== null) {
+          // A file chunk, its bytes decoded already (see LineOpener): they
+          // are the handler's from here, to free once written.
+          this.messageCallback?.(text, opened.data);
+        } else {
+          if (text === PING_SENTINEL) continue; // heartbeat only, not real data
+          this.messageCallback?.(text, null);
+        }
         if (this.readHold !== null) {
           const hold: Promise<void> = this.readHold;
           this.readHold = null;
@@ -1021,6 +1107,11 @@ export class PeerConnection {
       // or an unproven session's own envelope echoed back
       failed = true;
     } finally {
+      // Lines opened ahead that will never be handled: freed once they are
+      // open (a file chunk's are about 0.7 MB each, see LineOpener).
+      for (const pending of ahead.splice(0)) {
+        pending.then(releaseOpened, () => { /* nothing was kept */ });
+      }
       const idleMs: number = Date.now() - this.lastHeardAt();
       // Stops the heartbeat and closes the socket: a loop that ended on a
       // reflected or undecryptable line would otherwise leave the peer an

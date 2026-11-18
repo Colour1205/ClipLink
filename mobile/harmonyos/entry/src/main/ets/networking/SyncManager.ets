@@ -12,6 +12,9 @@ import { PeerConnection, exactBuffer } from './PeerConnection';
 import { ProgressThrottle, TransferPhase, TransferUpdate } from './TransferProgress';
 import { BatchApplied, HeadApplied, HistorySync, SyncApplied, SyncLink } from './HistorySync';
 import { ChunkPlace, placeChunk } from './ChunkOrder';
+import { joinFileChunk } from './ChunkSplit';
+import { decodeBase64 } from '../crypto/Base64Bytes';
+import { releaseBuffer } from './FreeOnWorker';
 import { FileChunkMessage } from './FileChunkMessage';
 import { FileRequestMessage } from './FileRequestMessage';
 import {
@@ -57,12 +60,18 @@ const MAX_QUEUE_CLOSURES = 2;
 // longer wanted).
 type RequestOutcome = 'asked' | 'noDevice' | 'stopped' | 'notNeeded';
 
-// A chunk's bytes, decoded on a worker (Base64Helper's promise form). Never
-// throws: a chunk that is not Base64 comes back as a rejected promise.
-async function decodeChunk(data: string): Promise<Uint8Array> {
+// A chunk's bytes: already decoded when its line was opened (see
+// LineOpener), or, for a chunk that arrived whole as text (an older sender's
+// spelling, see ChunkSplit), decoded from its Base64 now, on a worker (see
+// Base64Bytes.ets). Never throws: a chunk that is not Base64 - or has no
+// DataBase64 at all, or a number or object there - comes back as a rejected
+// promise, so its transfer fails and is asked for again.
+async function decodeChunk(data: string | Uint8Array): Promise<Uint8Array> {
+  if (data instanceof Uint8Array) return data;
+  if (typeof data !== 'string') throw new Error('file chunk has no DataBase64');
   // An empty file's only chunk is empty (see streamFileToPeer).
-  if (data === '') return new Uint8Array(0);
-  return base64Helper.decode(data);
+  if (data.length === 0) return new Uint8Array(0);
+  return decodeBase64(data);
 }
 interface Envelope {
   Type: string;
@@ -194,14 +203,14 @@ class FileChunkSender implements ChunkSender {
     // The last, short chunk is copied out: the encoder is handed exactly its
     // bytes, never the rest of the buffer.
     const chunkBytes = bytesRead === CHUNK_SIZE ? new Uint8Array(this.buffer) : new Uint8Array(this.buffer.slice(0, bytesRead));
-    const chunkMsg: FileChunkMessage = {
-      FileHash: this.fileHash,
-      ChunkIndex: index,
-      IsLast: this.sentBytes >= this.totalSize,
-      DataBase64: await base64Helper.encodeToString(chunkBytes),
-    };
-    const envelope: Envelope = { Type: 'file_chunk', Payload: JSON.stringify(chunkMsg) };
-    const handed: HandedChunk = { written: this.conn.send(JSON.stringify(envelope)).catch(() => { this.failed = true; }) };
+    // The same bytes as the envelope JSON.stringify makes, without the
+    // Base64 ever being a string (see ChunkSplit.joinFileChunk).
+    const data: Uint8Array = await base64Helper.encode(chunkBytes);
+    const message: Uint8Array = joinFileChunk(this.fileHash, index, this.sentBytes >= this.totalSize, data);
+    // Copied into the message, which sendBytes frees once encrypted (see
+    // SpentBuffers).
+    releaseBuffer(data.buffer as ArrayBuffer);
+    const handed: HandedChunk = { written: this.conn.sendBytes(message).catch(() => { this.failed = true; }) };
     return handed;
   }
 }
@@ -552,8 +561,8 @@ export class SyncManager {
     // Caught here: anything that throws in handling a message (a history
     // that won't save, a payload that isn't what it says) was an unhandled
     // rejection that never reached the activity log.
-    conn.onMessage((msg: string) => {
-      this.handleMessage(msg, conn, link).catch((e: Error) => {
+    conn.onMessage((msg: string, data: Uint8Array | null) => {
+      this.handleMessage(msg, conn, link, data).catch((e: Error) => {
         this.logCallback?.(`could not deal with a message from ${shortDeviceId(conn.peerDeviceId)} (${e})`);
       });
     });
@@ -1065,18 +1074,29 @@ export class SyncManager {
   // one waits its turn, and they still land in the order they came. Before,
   // the order held only because nothing was awaited before the write, and so
   // the decoding ran on the UI thread, a chunk at a time.
-  private async handleFileChunk(payloadJson: string, conn: PeerConnection): Promise<void> {
-    let chunk: FileChunkMessage;
+  // data: the chunk's bytes, decoded, when its line came apart that way (see
+  // PeerConnection.onMessage); its DataBase64 is then empty.
+  private async handleFileChunk(payloadJson: string, conn: PeerConnection, data: Uint8Array | null): Promise<void> {
+    let parsed: FileChunkMessage | null = null;
     try {
-      chunk = JSON.parse(payloadJson) as FileChunkMessage;
+      parsed = JSON.parse(payloadJson) as FileChunkMessage;
     } catch (e) {
-      return;
+      parsed = null;
     }
     // The hash names the file these bytes are written to.
-    if (!isObject(chunk) || !isValidFileHash(chunk.FileHash)) return;
+    if (parsed === null || !isObject(parsed) || !isValidFileHash(parsed.FileHash)) {
+      // Not a chunk this side can use: its bytes, if they came decoded, are
+      // freed now rather than left to the collector (see SpentBuffers).
+      if (data !== null) releaseBuffer(data.buffer as ArrayBuffer);
+      return;
+    }
+    const chunk: FileChunkMessage = parsed;
     try {
-      await this.takeFileChunk(chunk, conn);
+      await this.takeFileChunk(chunk, conn, data !== null && chunk.DataBase64 === '' ? data : chunk.DataBase64);
     } finally {
+      // Written and freed by now (see writeChunk), unless the chunk was set
+      // aside: then freed here. Freeing twice does nothing.
+      if (data !== null) releaseBuffer(data.buffer as ArrayBuffer);
       // Whatever came of the chunk - written and hashed, or set aside - it is
       // no longer waiting here, so a sender that paces its streams may send
       // another. Only to a sender that said it does (see FileFlow.ets): an
@@ -1088,7 +1108,8 @@ export class SyncManager {
   // handleFileChunk once the chunk is known to be one: where it goes, and
   // its bytes decoded and written there. Returns once the chunk is written
   // (and, for the last one, the file checked and stored), or set aside.
-  private async takeFileChunk(chunk: FileChunkMessage, conn: PeerConnection): Promise<void> {
+  // content: its Base64, or its bytes already decoded (see decodeChunk).
+  private async takeFileChunk(chunk: FileChunkMessage, conn: PeerConnection, content: string | Uint8Array): Promise<void> {
     const key = `${conn.peerDeviceId}:${chunk.FileHash}`;
     let transfer: IncomingTransfer | undefined = this.incoming.get(key);
     const place: ChunkPlace = placeChunk(transfer !== undefined, transfer?.conn === conn, transfer?.nextIndex ?? 0,
@@ -1144,7 +1165,7 @@ export class SyncManager {
     const current: IncomingTransfer = transfer;
     current.nextIndex++;
     current.lastChunkAt = Date.now();
-    const decoding: Promise<Uint8Array> = decodeChunk(chunk.DataBase64);
+    const decoding: Promise<Uint8Array> = decodeChunk(content);
     decoding.catch(() => { /* reported by writeChunk */ });
     const isLast: boolean = chunk.IsLast === true;
     if (isLast) {
@@ -1291,6 +1312,10 @@ export class SyncManager {
       }
     }
     transfer.received += bytes.byteLength;
+    // Written and hashed: the decoded bytes are not needed again (see
+    // SpentBuffers).
+    if (whole !== bytes.buffer) releaseBuffer(whole);
+    releaseBuffer(bytes.buffer as ArrayBuffer);
     if (!isLast) {
       if (transfer.throttle.due(Date.now())) this.emitProgress(transfer.fileHash, 'receiving', transfer.received);
       return;
@@ -1503,7 +1528,7 @@ export class SyncManager {
     await this.applyAndReport(entry);
   }
 
-  private async handleMessage(msg: string, conn: PeerConnection, link: SyncLink): Promise<void> {
+  private async handleMessage(msg: string, conn: PeerConnection, link: SyncLink, data: Uint8Array | null): Promise<void> {
     let envelope: Envelope;
     try {
       envelope = JSON.parse(msg) as Envelope;
@@ -1545,7 +1570,7 @@ export class SyncManager {
     } else if (envelope.Type === 'delete') {
       await this.sync.onDelete(link, envelope.Payload);
     } else if (envelope.Type === 'file_chunk') {
-      await this.handleFileChunk(envelope.Payload, conn);
+      await this.handleFileChunk(envelope.Payload, conn, data);
     } else if (envelope.Type === 'file_request') {
       this.handleFileRequest(envelope.Payload, conn);
     } else if (envelope.Type === FILE_ACK_TYPE) {

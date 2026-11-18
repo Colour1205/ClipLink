@@ -28,6 +28,33 @@ const BIND_RETRY_MAX_MS = 30000;
 // baseline against ClipLink's own "received a file" log line), not by guess.
 const SOCKET_BUFFER_BYTES = 262144;
 
+// The options every connection gets (see TcpServer.start and connectTcp).
+// TCPNoDelay: a big line's newline goes in a send of its own (see
+// TcpLineChannel.writeLineBytes), and with Nagle's algorithm on that one byte
+// could wait for the peer to acknowledge the line's last segment - up to
+// Windows' delayed-ack timer, about 200 ms - before the peer could take the
+// line: a picture or a file's last chunk arriving late. Android sets it too.
+function socketOptions(noDelay: boolean): socket.TCPExtraOptions {
+  const options: socket.TCPExtraOptions = {
+    keepAlive: true,
+    receiveBufferSize: SOCKET_BUFFER_BYTES,
+    sendBufferSize: SOCKET_BUFFER_BYTES
+  };
+  if (noDelay) options.TCPNoDelay = true;
+  return options;
+}
+
+// Best-effort, as before: a socket that takes no TCPNoDelay still gets its
+// keepalive and buffers, which matter more (a call that fails sets nothing).
+// set: the socket's own setExtraOptions.
+async function applySocketOptions(set: (options: socket.TCPExtraOptions) => Promise<void>): Promise<void> {
+  try {
+    await set(socketOptions(true));
+  } catch (e) {
+    await set(socketOptions(false)).catch(() => { /* not fatal if unsupported */ });
+  }
+}
+
 export class TcpServer {
   private server: socket.TCPSocketServer | null = null;
   private connectionCallback: ((conn: socket.TCPSocketConnection) => void) | null = null;
@@ -94,8 +121,7 @@ export class TcpServer {
     // without needing real application data to flow. Individual accepted
     // TCPSocketConnections don't expose setExtraOptions themselves in this
     // SDK - only the server does, applying to connections it accepts.
-    await server.setExtraOptions({ keepAlive: true, receiveBufferSize: SOCKET_BUFFER_BYTES, sendBufferSize: SOCKET_BUFFER_BYTES })
-      .catch(() => { /* best-effort - not fatal if unsupported */ });
+    await applySocketOptions((options: socket.TCPExtraOptions) => server.setExtraOptions(options));
   }
 
   stop(): void {
@@ -123,8 +149,7 @@ export async function connectTcp(address: string, port: number, timeoutMs: numbe
   // See TcpServer.start's matching comment - keeps an idle connection (and
   // any NAT mapping it depends on, e.g. over Tailscale) alive without
   // needing real traffic to flow.
-  await client.setExtraOptions({ keepAlive: true, receiveBufferSize: SOCKET_BUFFER_BYTES, sendBufferSize: SOCKET_BUFFER_BYTES })
-    .catch(() => { /* best-effort - not fatal if unsupported */ });
+  await applySocketOptions((options: socket.TCPExtraOptions) => client.setExtraOptions(options));
   return link;
 }
 
