@@ -224,6 +224,12 @@ public sealed class HistoryCard : Observable
     // (TransferOpacity's transition in the templates).
     private const int FullHoldMs = 300, FadeMs = 250;
 
+    // Only a file bigger than this (100 MB) gets a bar while it arrives: a
+    // smaller one is in within seconds, and a bar flashing up for every file
+    // is noise. The words for a file that can't come (no sender, retrying)
+    // are shown whatever its size.
+    internal const long BarMinBytes = 100L * 1024 * 1024;
+
     public bool ShowsTransfer => showsTransfer;
     public bool ShowsFileDetail => !showsTransfer;
     public double TransferFraction => transferFraction;
@@ -250,6 +256,13 @@ public sealed class HistoryCard : Observable
             case TransferPhase.Receiving:
                 long received = transfer.Received;
                 long total = transfer.Total ?? (Item.SizeBytes is long size and > 0 ? size : 0);
+                // A bar only for a big file (see BarMinBytes); a size not
+                // known counts as small.
+                if (total <= BarMinBytes)
+                {
+                    if (showsTransfer) HideTransfer();
+                    break;
+                }
                 transferTotal = total;
                 string left = speed?.IsStalled(now) == true ? TransferText.Stalled
                     : speed?.BytesPerSecond(now) is double bytesPerSecond ? TransferText.Speed(bytesPerSecond)
