@@ -753,7 +753,7 @@ extension SyncEngine {
             // Nameless for now, like any trust: see register().
             trust.trust(id, address: address)
             log("auto-paired via passcode: \(DeviceLabel.short(id))")
-            notice("Paired with \(displayName(for: id)) using your passcode.")
+            notice(String(localized: "Paired with \(displayName(for: id)) using your passcode."))
         } else {
             // Back-fill the address we actually reached it at.
             if let address { trust.trust(id, address: address) }

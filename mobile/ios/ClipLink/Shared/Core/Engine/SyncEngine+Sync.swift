@@ -829,19 +829,19 @@ extension SyncEngine {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? -1
             guard size >= 0 else {
-                return finish(completion, .failed("Couldn't read that file."))
+                return finish(completion, .failed(String(localized: "Couldn't read that file.")))
             }
             guard size <= Wire.maxFileBytes else {
-                return finish(completion, .failed("That file is larger than 1 GB."))
+                return finish(completion, .failed(String(localized: "That file is larger than 1 GB.")))
             }
             guard let hash = try? ContentHash.sha256Hex(fileAt: url) else {
-                return finish(completion, .failed("Couldn't read that file."))
+                return finish(completion, .failed(String(localized: "Couldn't read that file.")))
             }
             queue.async { [self] in
                 do {
                     try files.adopt(url, hash: hash, move: moveIntoStore)
                 } catch {
-                    return finish(completion, .failed("Couldn't store that file."))
+                    return finish(completion, .failed(String(localized: "Couldn't store that file.")))
                 }
                 // Bytes are in the store BEFORE the entry goes out: receivers
                 // send file_request the instant they see the entry.
@@ -870,7 +870,7 @@ extension SyncEngine {
         do {
             entry = try EntrySigning.sign(content: content, type: type, identity: identity)
         } catch {
-            finish(completion, .failed("Couldn't sign that item."))
+            finish(completion, .failed(String(localized: "Couldn't sign that item.")))
             return false
         }
         let json = Envelope(type: Wire.MessageType.entry, payload: entry.jsonString()).jsonString()
