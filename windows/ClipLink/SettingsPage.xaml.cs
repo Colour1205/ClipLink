@@ -3,11 +3,13 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using ClipboardDaemon.Engine;
+using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Windows.Foundation;
 using Windows.System;
 
 namespace ClipLink;
@@ -19,8 +21,10 @@ namespace ClipLink;
 public sealed partial class SettingsPage : Page
 {
     private readonly EngineHost host = App.Host;
+    private readonly PointerEventHandler clipboardShortcutPointerPressed;
     private bool loadingToggle;
     private ClipboardShortcutCapture? clipboardShortcutCapture;
+    private InputNonClientPointerSource? clipboardShortcutNonClientInput;
     // The update button that had the focus went away (Check -> Cancel,
     // Download -> Retry...): the focus moves to the next one that's there
     // instead of being lost - unless the user has moved it elsewhere meanwhile.
@@ -34,6 +38,7 @@ public sealed partial class SettingsPage : Page
     public SettingsPage()
     {
         InitializeComponent();
+        clipboardShortcutPointerPressed = ClipboardShortcutWindow_PointerPressed;
         EngineBanner.Track(StatusBanner, host);
         WheelScroll.Attach(Scroller);
         DeviceNameBox.PlaceholderText = ComputerName();
@@ -268,6 +273,7 @@ public sealed partial class SettingsPage : Page
         if (!ClipboardShortcutButton.Focus(FocusState.Programmatic)) return;
 
         var window = App.MainAppWindow;
+        var nonClientInput = InputNonClientPointerSource.GetForWindowId(window.AppWindow.Id);
         nint hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
         var dispatcher = DispatcherQueue;
         ClipboardShortcutCapture? session = null;
@@ -290,6 +296,9 @@ public sealed partial class SettingsPage : Page
 
         clipboardShortcutCapture = session;
         window.Activated += ClipboardShortcutWindow_Activated;
+        window.Content.AddHandler(PointerPressedEvent, clipboardShortcutPointerPressed, true);
+        clipboardShortcutNonClientInput = nonClientInput;
+        if (nonClientInput != null) nonClientInput.PointerPressed += ClipboardShortcutWindow_NonClientPointerPressed;
         ClipboardShortcutOutline.Visibility = Visibility.Visible;
         ClipboardShortcutText.Opacity = 0.45;
         ShowClipboardShortcutFeedback("Press a new shortcut. Press Esc to cancel.");
@@ -322,6 +331,15 @@ public sealed partial class SettingsPage : Page
 
     private void ClipboardShortcutButton_LostFocus(object sender, RoutedEventArgs e) => EndClipboardShortcutCapture();
 
+    private void ClipboardShortcutWindow_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        var bounds = new Rect(0, 0, ClipboardShortcutButton.ActualWidth, ClipboardShortcutButton.ActualHeight);
+        if (!bounds.Contains(e.GetCurrentPoint(ClipboardShortcutButton).Position)) EndClipboardShortcutCapture();
+    }
+
+    private void ClipboardShortcutWindow_NonClientPointerPressed(InputNonClientPointerSource sender, NonClientPointerEventArgs e)
+        => EndClipboardShortcutCapture();
+
     private void ClipboardShortcutWindow_Activated(object sender, WindowActivatedEventArgs e)
     {
         if (e.WindowActivationState == WindowActivationState.Deactivated) EndClipboardShortcutCapture();
@@ -332,7 +350,14 @@ public sealed partial class SettingsPage : Page
         if (clipboardShortcutCapture is not { } session) return;
         clipboardShortcutCapture = null;
         session.Dispose();
-        App.MainAppWindow.Activated -= ClipboardShortcutWindow_Activated;
+        var window = App.MainAppWindow;
+        window.Activated -= ClipboardShortcutWindow_Activated;
+        window.Content.RemoveHandler(PointerPressedEvent, clipboardShortcutPointerPressed);
+        if (clipboardShortcutNonClientInput is { } nonClientInput)
+        {
+            nonClientInput.PointerPressed -= ClipboardShortcutWindow_NonClientPointerPressed;
+            clipboardShortcutNonClientInput = null;
+        }
         ClipboardShortcutOutline.Visibility = Visibility.Collapsed;
         ClipboardShortcutText.Opacity = 1;
         UpdateClipboardShortcut();

@@ -75,11 +75,11 @@ Quit ClipLink first if it's running from `windows\dist`: its files are locked.
   ClipLink remembers the setting after a restart. To change the shortcut,
   click the displayed combination under **Settings > General > Clipboard sync shortcut**
   and press the new combination. If it is already in use, ClipLink keeps the previous
-  shortcut and lets you try again. Press **Esc** to cancel. A blue badge with a white
-  check means auto-sync is on. The pause badge means it is paused, and a gray
-  dash means it is unavailable. If the icon is under the taskbar's overflow
-  arrow, drag it into the visible notification area. If the shortcut is
-  unavailable, choose a new combination in Settings.
+  shortcut and lets you try again. Click outside the shortcut or press **Esc** to
+  cancel. A blue badge with a white check means auto-sync is on. The pause badge
+  means it is paused, and a gray dash means it is unavailable. If the icon is
+  under the taskbar's overflow arrow, drag it into the visible notification area.
+  If the shortcut is unavailable, choose a new combination in Settings.
 - While paused, local copies aren't shared automatically and incoming
   items go to Synced without replacing this PC's clipboard. You can still
   copy an item from Synced or send files explicitly.
