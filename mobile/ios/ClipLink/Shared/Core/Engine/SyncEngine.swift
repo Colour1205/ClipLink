@@ -205,6 +205,9 @@ public final class SyncEngine {
     /// regexes over whole texts and re-parsed every timestamp. Memory only,
     /// pruned with the snapshot.
     var entryFacts: [String: EntryFacts] = [:]
+    /// The pairing payload's JSON, with what it was made from: a snapshot only
+    /// serialises it again when that changed.
+    var pairingPayloadCache: (info: PairingInfo, json: String)?
     /// The entries this process signed and stored itself: all a short-lived
     /// sender (the Share extension) sends a version 1 peer as its history
     /// (see sendHistoryBatch). Memory only.
@@ -891,11 +894,12 @@ public final class SyncEngine {
     }
 
     /// ContentPrint.key, kept by identity (see `contentKeys`).
-    func contentKey(of entry: ClipboardEntry) -> String? {
-        let id = HistoryStore.identity(of: entry)
+    /// `identity` is the entry's HistoryStore.identity when the caller has it.
+    func contentKey(of entry: ClipboardEntry, identity: String? = nil) -> String? {
+        let id = identity ?? HistoryStore.identity(of: entry)
         if let known = contentKeys[id] { return known }
         // A picture kept out of history.json has its print stored with it.
-        let key = history.contentKey(of: entry)
+        let key = history.contentKey(of: entry, identity: id)
         contentKeys[id] = .some(key)
         return key
     }
@@ -1059,12 +1063,14 @@ public final class SyncEngine {
         var s = EngineSnapshot()
         s.ownDeviceId = ownId
         let ordered = history.newestFirst
-        let alive = Set(ordered.map(HistoryStore.identity(of:)))
+        // Each entry's identity, worked out once per change of the history.
+        let identities = history.newestFirstIdentities
+        let alive = Set(identities)
         // Deleted, cleared or cut by the 25-item cap: a block shrinks with its members.
         if !batchGroups.blocks.isEmpty { batchGroups.prune(keeping: alive) }
         if contentKeys.count > alive.count { contentKeys = contentKeys.filter { alive.contains($0.key) } }
         if entryFacts.count > alive.count { entryFacts = entryFacts.filter { alive.contains($0.key) } }
-        s.items = ordered.map(makeItem)
+        s.items = zip(ordered, identities).map { makeItem($0, id: $1) }
         s.blocks = batchGroups.blocks
         s.devices = buildDeviceRows()
         // Only links whose peer has answered count.
@@ -1080,7 +1086,10 @@ public final class SyncEngine {
         // Includes our LAN address when there is no Tailscale IP: without an
         // Address, HarmonyOS refuses to dial a scanned code and Android has
         // nothing to dial either, since neither can hear our beacons.
-        s.pairingPayload = PairingInfo(publicKey: ownId, address: pairingPayloadAddress, name: ownDeviceName).jsonString()
+        // Serialised again only when the key, address or name changed.
+        let pairing = PairingInfo(publicKey: ownId, address: pairingPayloadAddress, name: ownDeviceName)
+        if pairingPayloadCache?.info != pairing { pairingPayloadCache = (pairing, pairing.jsonString()) }
+        s.pairingPayload = pairingPayloadCache?.json ?? ""
         s.transfers = incoming.mapValues { TransferProgress(fileName: $0.fileName, received: $0.received, total: $0.total) }
         s.sweeping = sweeping
         s.nicknames = nicknames
@@ -1097,8 +1106,8 @@ public final class SyncEngine {
         return s
     }
 
-    private func makeItem(_ entry: ClipboardEntry) -> SyncedItem {
-        let id = HistoryStore.identity(of: entry)
+    /// `id` is the entry's HistoryStore.identity.
+    private func makeItem(_ entry: ClipboardEntry, id: String) -> SyncedItem {
         let facts: EntryFacts
         if let known = entryFacts[id] {
             facts = known
@@ -1121,9 +1130,9 @@ public final class SyncEngine {
             fileAvailable: payload.map { files.exists($0.fileHash) } ?? (entry.type != Wire.EntryType.file),
             date: facts.date,
             sourceLabel: isOwn ? "This device" : displayName(for: entry.deviceId),
-            contentKey: contentKey(of: entry)
+            contentKey: contentKey(of: entry, identity: id)
         )
-        item.inlineURL = history.inlineURL(for: entry)
+        item.inlineURL = history.inlineURL(for: entry, identity: id)
         item.needsSpace = payload.map { needsSpace.contains(FileStore.key($0.fileHash)) } ?? false
         return item
     }
@@ -1304,10 +1313,27 @@ final class IncomingTransfer {
 /// base64 characters, so a prefix can't tell devices apart; every platform
 /// shows this hash fingerprint instead (docs/protocol.md, Fingerprint).
 public enum DeviceLabel {
+    /// Fingerprints already worked out: card bodies, unnamed peers' labels and
+    /// log lines ask for the same few again and again, from the main thread and
+    /// the engine queue alike (hence the lock). Ids come off the network, so
+    /// the cache is emptied once it holds `maxCached`, never grown without end.
+    private static var cache: [String: String] = [:]
+    private static let cacheLock = NSLock()
+    private static let maxCached = 256
+
     public static func fingerprint(_ deviceId: String) -> String {
+        cacheLock.lock()
+        let cached = cache[deviceId]
+        cacheLock.unlock()
+        if let cached { return cached }
         let digest = SHA256.hash(data: Data(deviceId.utf8))
         let hex = digest.prefix(4).map { String(format: "%02X", $0) }.joined()
-        return "\(hex.prefix(4))·\(hex.suffix(4))"
+        let label = "\(hex.prefix(4))·\(hex.suffix(4))"
+        cacheLock.lock()
+        if cache.count >= maxCached { cache.removeAll(keepingCapacity: true) }
+        cache[deviceId] = label
+        cacheLock.unlock()
+        return label
     }
 
     public static func short(_ deviceId: String) -> String {

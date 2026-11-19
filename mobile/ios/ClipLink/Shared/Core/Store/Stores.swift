@@ -597,12 +597,17 @@ public final class HistoryStore {
     private var stamp: FileStamp?
     /// Pictures kept out of history.json have an empty Content here (see `refs`).
     private(set) public var entries: [ClipboardEntry] = [] {
-        didSet { sortedCache = nil }
+        didSet {
+            sortedCache = nil
+            sortedIdentitiesCache = nil
+        }
     }
     /// The pictures kept out of history.json, by entry identity.
     private var refs: [String: InlineRef] = [:]
     /// `newestFirst`, until the entries change: every snapshot asks for it.
     private var sortedCache: [ClipboardEntry]?
+    /// `newestFirstIdentities`, until the entries change.
+    private var sortedIdentitiesCache: [String]?
 
     public init(directory: URL, fileStore: FileStore) {
         self.fileStore = fileStore
@@ -666,15 +671,16 @@ public final class HistoryStore {
 
     /// The file holding the base64 text of an entry's picture, when it is kept
     /// out of history.json: the UI reads (memory-maps) it from there.
-    public func inlineURL(for entry: ClipboardEntry) -> URL? {
-        guard entry.content.isEmpty, let ref = refs[Self.identity(of: entry)] else { return nil }
+    /// `identity` is the entry's `identity(of:)` when the caller has it.
+    public func inlineURL(for entry: ClipboardEntry, identity: String? = nil) -> URL? {
+        guard entry.content.isEmpty, let ref = refs[identity ?? Self.identity(of: entry)] else { return nil }
         return fileStore.inlineURL(for: ref.hash)
     }
 
     /// ContentPrint.key of a history entry, without reading a picture kept out
-    /// of history.json back in.
-    public func contentKey(of entry: ClipboardEntry) -> String? {
-        if entry.content.isEmpty, let ref = refs[Self.identity(of: entry)] { return ref.print }
+    /// of history.json back in. `identity` as for `inlineURL`.
+    public func contentKey(of entry: ClipboardEntry, identity: String? = nil) -> String? {
+        if entry.content.isEmpty, let ref = refs[identity ?? Self.identity(of: entry)] { return ref.print }
         return ContentPrint.key(of: entry)
     }
 
@@ -765,6 +771,16 @@ public final class HistoryStore {
         if let sortedCache { return sortedCache }
         let result = entries.sorted { DotNetTimestamp.isEarlier($1.timestamp, than: $0.timestamp) }
         sortedCache = result
+        return result
+    }
+
+    /// `identity(of:)` of each of `newestFirst`, in the same order. Worked out
+    /// once per change: every snapshot needs each identity several times, and
+    /// each one canonicalises a timestamp.
+    public var newestFirstIdentities: [String] {
+        if let sortedIdentitiesCache { return sortedIdentitiesCache }
+        let result = newestFirst.map(Self.identity(of:))
+        sortedIdentitiesCache = result
         return result
     }
 
