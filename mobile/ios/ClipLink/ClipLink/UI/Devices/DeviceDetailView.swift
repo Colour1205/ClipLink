@@ -9,7 +9,9 @@ import UIKit
 struct DeviceDetailView: View {
     let deviceId: String
 
-    @EnvironmentObject private var model: AppModel
+    /// Not watched: only the device list is (see DevicesStore), as on the tab.
+    private var model: AppModel { AppModel.shared }
+    @ObservedObject private var store = AppModel.shared.devices
     @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
 
@@ -19,7 +21,7 @@ struct DeviceDetailView: View {
     @State private var removing: DevicePending?
     @State private var blocking: DevicePending?
 
-    private var row: DeviceRow? { model.snapshot.devices.first { $0.deviceId == deviceId } }
+    private var row: DeviceRow? { store.value.devices.first { $0.deviceId == deviceId } }
     private var actions: DeviceActions { DeviceActions(model: model, haptics: settings.haptics) }
 
     var body: some View {

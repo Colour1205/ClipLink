@@ -3,7 +3,10 @@ import SwiftUI
 /// Three tabs - Synced, Devices, Me - as on Android and HarmonyOS, in the
 /// standard iOS tab bar, each tab with its own navigation stack.
 struct RootView: View {
-    @EnvironmentObject private var model: AppModel
+    /// Not watched (see RootStore): only the startup error and the pairing
+    /// sheet's state are, so a snapshot no longer re-runs the tab view.
+    private var model: AppModel { AppModel.shared }
+    @ObservedObject private var root = AppModel.shared.root
     @EnvironmentObject private var settings: AppSettings
 
     enum Tab: Hashable { case synced, devices, me }
@@ -25,7 +28,7 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            if let error = model.startupError {
+            if let error = root.value.startupError {
                 StartupErrorView(message: error) { model.retryStartup() }
             } else {
                 TabView(selection: $tab) {
@@ -45,12 +48,18 @@ struct RootView: View {
         // Toasts get a window of their own, above this sheet and anything
         // else presented over the app.
         .background(ToastWindowHost(model: model))
-        .sheet(isPresented: $model.pairingPresented) {
+        .sheet(isPresented: pairingPresented) {
             PairingView()
                 .environmentObject(model)
                 .environmentObject(settings)
                 .accentColor(settings.accentTheme.color)
         }
+    }
+
+    /// Read from the root store, written through the model (whose setter
+    /// does what opening and closing the sheet means).
+    private var pairingPresented: Binding<Bool> {
+        Binding(get: { root.value.pairingPresented }, set: { model.pairingPresented = $0 })
     }
 }
 

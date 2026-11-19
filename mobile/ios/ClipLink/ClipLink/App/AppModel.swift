@@ -22,14 +22,24 @@ final class AppModel: ObservableObject {
     let clipboard = ClipboardService()
     private(set) var engine: SyncEngine?
 
-    /// Assigned only when it changed. The Synced tab, its cards, the dock and
-    /// the toast window watch the small stores below instead (see MeState.swift).
-    @Published private(set) var snapshot = EngineSnapshot() {
+    /// Assigned only when it changed. Not published: no view watches the whole
+    /// model any more - each watches the small store below with the part it
+    /// shows (see MeState.swift).
+    private(set) var snapshot = EngineSnapshot() {
         didSet { updateStores() }
     }
+    /// What the app's root view watches.
+    let root = RootStore()
     /// What the Me tab watches instead of `snapshot` (see MeState.swift).
     let me = MeStore()
     let logCount = LogCountStore()
+    /// Me › Activity Log, Me › Diagnostics and the pairing sheet.
+    let log = LogStore()
+    let diagnostics = DiagnosticsStore()
+    let pairing = PairingStore()
+    /// pairStatus, pairInProgress and passcodeBusy, for the pairing sheet and
+    /// Me › Passcode.
+    let progress = ProgressStore()
     /// What the Synced tab watches, and the transfers its file cards show.
     let synced = SyncedStore()
     let transfers = TransfersStore()
@@ -43,7 +53,9 @@ final class AppModel: ObservableObject {
     }
     /// The pasteboard changed since we last looked ("New item" hint).
     var hasNewClipboardItem: Bool { hint.visible }
-    @Published private(set) var startupError: String?
+    @Published private(set) var startupError: String? {
+        didSet { root.update { $0.startupError = startupError } }
+    }
     @Published private(set) var identityIsHardwareBacked = false {
         didSet { me.setHardwareBacked(identityIsHardwareBacked) }
     }
@@ -54,6 +66,7 @@ final class AppModel: ObservableObject {
     /// True while the pairing sheet is on screen.
     @Published var pairingPresented = false {
         didSet {
+            root.update { $0.pairingPresented = pairingPresented }
             guard pairingPresented != oldValue else { return }
             // Somebody expects a request now: nothing stays held back, and it
             // is the moment to ask whether they may be told about one while
@@ -78,9 +91,15 @@ final class AppModel: ObservableObject {
             }
         }
     }
-    @Published private(set) var pairStatus: String?
-    @Published private(set) var pairInProgress = false
-    @Published private(set) var passcodeBusy = false
+    @Published private(set) var pairStatus: String? {
+        didSet { progress.update { $0.pairStatus = pairStatus } }
+    }
+    @Published private(set) var pairInProgress = false {
+        didSet { progress.update { $0.pairInProgress = pairInProgress } }
+    }
+    @Published private(set) var passcodeBusy = false {
+        didSet { progress.update { $0.passcodeBusy = passcodeBusy } }
+    }
 
     /// The scene is in the foreground (between becameActive and
     /// enteredBackground).
@@ -210,6 +229,9 @@ final class AppModel: ObservableObject {
     private func updateStores() {
         me.update(from: snapshot)
         logCount.update(snapshot.log.count)
+        log.update(snapshot.log)
+        diagnostics.update(from: snapshot)
+        pairing.update(from: snapshot)
         synced.update(from: snapshot)
         transfers.update(snapshot.transfers)
         devices.update(from: snapshot)

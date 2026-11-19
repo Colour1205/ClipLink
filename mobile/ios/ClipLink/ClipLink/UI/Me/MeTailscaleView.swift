@@ -4,7 +4,9 @@ import SwiftUI
 /// half-typed text never reaches the pairing code or beacons (the HarmonyOS
 /// quirk this avoids).
 struct MeTailscaleView: View {
-    @EnvironmentObject private var model: AppModel
+    /// Not watched: only the Me fields are (see MeStore).
+    private var model: AppModel { AppModel.shared }
+    @ObservedObject private var me = AppModel.shared.me
     @EnvironmentObject private var settings: AppSettings
 
     @State private var draft = ""
@@ -12,7 +14,7 @@ struct MeTailscaleView: View {
     @State private var detected: String?
     @FocusState private var fieldFocused: Bool
 
-    private var saved: String { model.snapshot.tailscaleIP }
+    private var saved: String { me.value.tailscaleIP }
     private var trimmedDraft: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
