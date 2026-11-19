@@ -201,7 +201,7 @@ struct ItemDetailView: View {
     private func fileContent(_ item: SyncedItem) -> some View {
         ScrollView {
             VStack(spacing: 20) {
-                SyncedFileTile(fileName: item.filePayload?.fileName ?? "File", size: 88)
+                SyncedFileTile(fileName: item.filePayload?.fileName ?? String(localized: "File"), size: 88)
                     .padding(.top, 24)
                 fileInfo(item, centered: true)
                 provenance(item, extra: nil)
@@ -224,7 +224,7 @@ struct ItemDetailView: View {
     }
 
     private func fileInfo(_ item: SyncedItem, centered: Bool, transfers: [String: TransferProgress]) -> some View {
-        let name = item.filePayload?.fileName ?? "File"
+        let name = item.filePayload?.fileName ?? String(localized: "File")
         let fraction = SyncedItemActions.transferFraction(item, transfers: transfers)
         let isPicture = SyncedItemActions.hasPicture(item)
         return VStack(alignment: centered ? .center : .leading, spacing: 14) {
@@ -273,7 +273,7 @@ struct ItemDetailView: View {
     private static func characterCount(_ item: SyncedItem) -> String {
         if let cached = characterCountCache, cached.id == item.id { return cached.label }
         let count = item.entry.content.count
-        let label = count == 1 ? "1 character" : "\(count.formatted()) characters"
+        let label = count == 1 ? String(localized: "1 character") : String(localized: "\(count.formatted()) characters")
         characterCountCache = (item.id, label)
         return label
     }
@@ -302,7 +302,7 @@ struct SyncedActionTile: View {
             VStack(spacing: 6) {
                 Image(systemName: systemImage)
                     .font(.title3)
-                Text(title)
+                Text(NSLocalizedString(title, comment: ""))
                     .font(.caption.weight(.medium))
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)

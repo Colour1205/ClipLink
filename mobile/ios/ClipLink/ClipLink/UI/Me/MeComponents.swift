@@ -57,11 +57,11 @@ struct MeRowLabel: View {
     var body: some View {
         Label {
             VStack(alignment: .leading, spacing: 3) {
-                Text(title)
+                Text(NSLocalizedString(title, comment: ""))
                     .foregroundColor(isEnabled ? titleColor : .secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let subtitle {
-                    Text(subtitle)
+                    Text(NSLocalizedString(subtitle, comment: ""))
                         .font(.footnote)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -87,7 +87,7 @@ struct MeValueRow: View {
         HStack(spacing: 12) {
             MeRowLabel(title: title, systemImage: systemImage, tint: tint)
             Spacer(minLength: 8)
-            Text(value)
+            Text(NSLocalizedString(value, comment: ""))
                 .foregroundColor(valueColor)
                 .multilineTextAlignment(.trailing)
         }
@@ -103,9 +103,9 @@ struct MeDetailRow: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(title)
+            Text(NSLocalizedString(title, comment: ""))
             Spacer(minLength: 8)
-            Text(value)
+            Text(NSLocalizedString(value, comment: ""))
                 .font(monospaced ? .system(.body, design: .monospaced) : .body)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.trailing)
@@ -143,7 +143,7 @@ struct MeSettingsNoticeRow: View {
                 .foregroundColor(tint)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
-                Text(message)
+                Text(NSLocalizedString(message, comment: ""))
                     .font(.subheadline)
                     .foregroundColor(.primary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -180,7 +180,7 @@ enum MeFormat {
         let info = Bundle.main.infoDictionary
         let version = info?["CFBundleShortVersionString"] as? String ?? "2.0"
         let build = info?["CFBundleVersion"] as? String
-        return build.map { "Version \(version) (\($0))" } ?? "Version \(version)"
+        return build.map { String(localized: "Version \(version) (\($0))") } ?? String(localized: "Version \(version)")
     }
 
     static func grouped(_ value: Int) -> String {

@@ -41,22 +41,22 @@ enum DeviceStatus: Equatable {
 
     var text: String {
         switch self {
-        case .connected: return "Connected"
-        case .waiting: return "Paired · Waiting for it to accept"
-        case .pairedNearby: return "Paired · Nearby"
-        case .pairedOffline: return "Paired · Offline"
-        case .nearby: return "Nearby"
-        case .away: return "Not nearby"
-        case .blocked: return "Blocked"
+        case .connected: return String(localized: "Connected")
+        case .waiting: return String(localized: "Paired · Waiting for it to accept")
+        case .pairedNearby: return String(localized: "Paired · Nearby")
+        case .pairedOffline: return String(localized: "Paired · Offline")
+        case .nearby: return String(localized: "Nearby")
+        case .away: return String(localized: "Not nearby")
+        case .blocked: return String(localized: "Blocked")
         }
     }
 
     /// For VoiceOver: no "middle dot" or "em dash" read aloud.
     var spokenText: String {
         switch self {
-        case .waiting: return "Paired, waiting for it to accept"
-        case .pairedNearby: return "Paired, nearby"
-        case .pairedOffline: return "Paired, offline"
+        case .waiting: return String(localized: "Paired, waiting for it to accept")
+        case .pairedNearby: return String(localized: "Paired, nearby")
+        case .pairedOffline: return String(localized: "Paired, offline")
         default: return text
         }
     }
@@ -134,7 +134,7 @@ enum DevicesRelativeTime {
 
     static func string(for date: Date) -> String {
         let now = Date()
-        if now.timeIntervalSince(date) < 10 { return "just now" }
+        if now.timeIntervalSince(date) < 10 { return String(localized: "just now") }
         return formatter.localizedString(for: min(date, now), relativeTo: now)
     }
 
@@ -226,7 +226,7 @@ struct DeviceActions {
     func trust(_ row: DeviceRow) {
         Haptics.success(haptics)
         model.trust(row)
-        model.showToast("Trusted \(name(row)). It syncs once it trusts this \(ThisDeviceNoun.current) too.")
+        model.showToast(String(localized: "Trusted \(name(row)). It syncs once it trusts this \(ThisDeviceNoun.current) too."))
     }
 
     func remove(_ row: DeviceRow) {
@@ -249,13 +249,13 @@ struct DeviceActions {
     func copyDeviceID(_ row: DeviceRow) {
         Haptics.tap(haptics)
         model.clipboard.copyText(row.deviceId)
-        model.showToast("Device ID copied.")
+        model.showToast(String(localized: "Device ID copied."))
     }
 
     func copyAddress(_ address: String) {
         Haptics.tap(haptics)
         model.clipboard.copyText(address)
-        model.showToast("Address copied.")
+        model.showToast(String(localized: "Address copied."))
     }
 
     func renameTarget(_ row: DeviceRow) -> DevicesRenameTarget {
@@ -378,11 +378,11 @@ private struct DeviceConfirmation: ViewModifier {
     }
 
     private var title: String {
-        guard let pending else { return "Are You Sure?" }
+        guard let pending else { return String(localized: "Are You Sure?") }
         let name = actions.name(pending.row)
         switch pending.kind {
-        case .remove: return "Remove \(name)?"
-        case .block: return "Block \(name)?"
+        case .remove: return String(localized: "Remove \(name)?")
+        case .block: return String(localized: "Block \(name)?")
         }
     }
 }

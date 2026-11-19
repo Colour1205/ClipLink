@@ -369,7 +369,7 @@ final class AppModel: ObservableObject {
         }
         Notifier.requestAuthorization { [weak self] granted in
             self?.settings.notifyBackgroundItems = granted
-            if !granted { self?.showToast("Notifications are off for ClipLink in Settings.") }
+            if !granted { self?.showToast(String(localized: "Notifications are off for ClipLink in Settings.")) }
         }
     }
 
@@ -452,7 +452,7 @@ final class AppModel: ObservableObject {
         let capture = await clipboard.capture()
         refreshClipboardHint()
         guard let capture else {
-            if !quiet { showToast(clipboard.lastCaptureDeclined ? "Paste wasn't allowed." : "Nothing on the clipboard to sync.") }
+            if !quiet { showToast(clipboard.lastCaptureDeclined ? String(localized: "Paste wasn't allowed.") : String(localized: "Nothing on the clipboard to sync.")) }
             return
         }
         let source = clipboard.lastCaptureSourceHash.map { Set(["f:" + $0]) } ?? []
@@ -465,7 +465,7 @@ final class AppModel: ObservableObject {
     func sendProviders(_ providers: [NSItemProvider], fromPasteboard: Bool) async {
         guard engine != nil else { return }
         guard fromPasteboard else {
-            guard let capture = await clipboard.capture(from: providers) else { return showToast("Nothing ClipLink can sync there.") }
+            guard let capture = await clipboard.capture(from: providers) else { return showToast(String(localized: "Nothing ClipLink can sync there.")) }
             return share(capture)
         }
         beginCapture()
@@ -478,7 +478,7 @@ final class AppModel: ObservableObject {
             return alreadySynced(quiet: false)
         }
         let serial = clipboard.writeSerial
-        guard let capture = await clipboard.capture(from: providers) else { return showToast("Nothing ClipLink can sync there.") }
+        guard let capture = await clipboard.capture(from: providers) else { return showToast(String(localized: "Nothing ClipLink can sync there.")) }
         clipboard.markSeen()
         refreshClipboardHint()
         await classifyAndSend(capture, mode: .manual, writeSerial: serial)
@@ -584,7 +584,7 @@ final class AppModel: ObservableObject {
             Task {
                 let url = ItemLoader.tempURL(named: "Image.png")
                 let written = await Task.detached(priority: .userInitiated) { (try? png.write(to: url)) != nil }.value
-                guard written else { return showToast("Couldn't store that image.") }
+                guard written else { return showToast(String(localized: "Couldn't store that image.")) }
                 engine.sendFile(at: url, name: "Image.png", moveIntoStore: true, filter: filter) { [weak self] in self?.report($0) }
             }
         case .file(let url, let name):
@@ -595,7 +595,7 @@ final class AppModel: ObservableObject {
     /// A manual paste of what is already synced says why nothing happened;
     /// the automatic capture stays silent.
     private func alreadySynced(quiet: Bool) {
-        if !quiet { showToast("Already synced.") }
+        if !quiet { showToast(String(localized: "Already synced.")) }
     }
 
     /// A file from the document picker. Copied right here: the picker's own
@@ -608,7 +608,7 @@ final class AppModel: ObservableObject {
         do {
             try FileManager.default.copyItem(at: url, to: temp)
         } catch {
-            showToast("Couldn't read that file.")
+            showToast(String(localized: "Couldn't read that file."))
             return
         }
         sendCopiedFile(temp, name: name)
@@ -623,7 +623,7 @@ final class AppModel: ObservableObject {
         let name = url.lastPathComponent
         Task {
             let temp = await Task.detached(priority: .userInitiated) { Self.coordinatedCopy(of: url) }.value
-            guard let temp else { return showToast("Couldn't read that file.") }
+            guard let temp else { return showToast(String(localized: "Couldn't read that file.")) }
             share(.file(temp, name: name))
         }
     }
@@ -668,7 +668,7 @@ final class AppModel: ObservableObject {
     func sendImageData(_ data: Data) {
         Task {
             let png = await Task.detached(priority: .userInitiated) { ItemLoader.pngData(fromImageData: data) }.value
-            guard let png else { return showToast("Couldn't read that image.") }
+            guard let png else { return showToast(String(localized: "Couldn't read that image.")) }
             share(.image(png: png))
         }
     }
@@ -813,20 +813,20 @@ final class AppModel: ObservableObject {
     func copy(_ item: SyncedItem) {
         let url = item.filePayload.flatMap { engine?.blobURL(forHash: $0.fileHash) }
         if item.kind == .file, url == nil {
-            showToast("That file hasn't finished transferring yet.")
+            showToast(String(localized: "That file hasn't finished transferring yet."))
             return
         }
         if item.kind == .file, let url, (ClipboardService.fileSize(at: url) ?? 0) > ClipboardService.maxPasteboardFileBytes {
-            showToast("That file is too big for the clipboard — use Share or Save instead.")
+            showToast(String(localized: "That file is too big for the clipboard — use Share or Save instead."))
             return
         }
         if item.kind == .image {
             applyPicture(content: item.entry.content, inlineURL: item.inlineURL) { [weak self] copied in
                 guard let self else { return }
-                guard copied else { return self.showToast("Couldn't copy that item.") }
+                guard copied else { return self.showToast(String(localized: "Couldn't copy that item.")) }
                 self.noteUserClipboardChange()
                 self.refreshClipboardHint()
-                self.showToast("Copied.")
+                self.showToast(String(localized: "Copied."))
             }
             return
         }
@@ -834,9 +834,9 @@ final class AppModel: ObservableObject {
         if clipboard.apply(item.entry, fileURL: url) {
             noteUserClipboardChange()
             refreshClipboardHint()
-            showToast("Copied.")
+            showToast(String(localized: "Copied."))
         } else {
-            showToast("Couldn't copy that item.")
+            showToast(String(localized: "Couldn't copy that item."))
         }
     }
 
@@ -958,7 +958,7 @@ final class AppModel: ObservableObject {
     func pair(with raw: String) {
         guard let engine, !pairInProgress else { return }
         pairInProgress = true
-        pairStatus = "Connecting…"
+        pairStatus = String(localized: "Connecting…")
         engine.pair(with: raw) { [weak self] outcome in
             guard let self, self.pairingPresented else { return }
             self.pairInProgress = false
@@ -994,7 +994,7 @@ final class AppModel: ObservableObject {
         #endif
         engine?.trustDevice(request.deviceId, address: request.address)
         if !live {
-            showToast("Trusted \(request.name ?? name(for: request.deviceId)). It connects as soon as it's reachable.")
+            showToast(String(localized: "Trusted \(request.name ?? name(for: request.deviceId)). It connects as soon as it's reachable."))
         }
         refreshPrompt()
     }
@@ -1079,13 +1079,13 @@ final class AppModel: ObservableObject {
     func copyDeviceID() {
         clipboard.copyText(ownDeviceId)
         noteUserClipboardChange()
-        showToast("Device ID copied.")
+        showToast(String(localized: "Device ID copied."))
     }
 
     func copyPairingInfo() {
         clipboard.copyText(snapshot.pairingPayload)
         noteUserClipboardChange()
-        showToast("Pairing info copied.")
+        showToast(String(localized: "Pairing info copied."))
     }
 
     // MARK: - Passcode & network
@@ -1093,7 +1093,7 @@ final class AppModel: ObservableObject {
     func setPassphrase(_ passphrase: String, completion: @escaping (Bool) -> Void) {
         guard let engine else { return }
         guard !passphrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            showToast("Enter a passcode first.")
+            showToast(String(localized: "Enter a passcode first."))
             completion(false)
             return
         }
@@ -1102,7 +1102,7 @@ final class AppModel: ObservableObject {
             self?.passcodeBusy = false
             // Only a failure needs saying: on success the screen itself
             // changes to "Passcode is set".
-            if !ok { self?.showToast("Couldn't set the passcode.") }
+            if !ok { self?.showToast(String(localized: "Couldn't set the passcode.")) }
             completion(ok)
         }
     }
@@ -1120,7 +1120,7 @@ final class AppModel: ObservableObject {
     func saveTailscaleIP(_ ip: String) {
         let trimmed = ip.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty, NetworkInterfaces.parse(trimmed) == nil {
-            showToast("Enter an IPv4 address like 100.101.102.103.")
+            showToast(String(localized: "Enter an IPv4 address like 100.101.102.103."))
             return
         }
         engine?.setTailscaleIP(trimmed)
@@ -1129,17 +1129,20 @@ final class AppModel: ObservableObject {
     /// iOS can see the Tailscale VPN interface, unlike the other platforms.
     var detectedTailscaleIP: String? { NetworkInterfaces.tailscale() }
 
+    /// What `runSelfTest` returns when everything works.
+    static var selfTestPassed: String { String(localized: "Self-test passed — identity, signing, and storage all working.") }
+
     /// Identity, signing and storage all working (HarmonyOS' Diagnostics).
     func runSelfTest() -> String {
-        guard let engine else { return "Self-test failed: \(startupError ?? "engine not running")" }
+        guard let engine else { return String(localized: "Self-test failed: \(startupError ?? String(localized: "engine not running"))") }
         do {
             let identity = try KeychainIdentity.loadOrCreate()
-            guard identity.publicKeyBase64 == engine.ownId else { return "Self-test failed: identity changed." }
+            guard identity.publicKeyBase64 == engine.ownId else { return String(localized: "Self-test failed: identity changed.") }
             let entry = try EntrySigning.sign(content: "self-test", type: Wire.EntryType.text, identity: identity)
-            guard EntrySigning.verified(entry) != nil else { return "Self-test failed: signature didn't verify." }
-            return "Self-test passed — identity, signing, and storage all working."
+            guard EntrySigning.verified(entry) != nil else { return String(localized: "Self-test failed: signature didn't verify.") }
+            return Self.selfTestPassed
         } catch {
-            return "Self-test failed: \(error)"
+            return String(localized: "Self-test failed: \(String(describing: error))")
         }
     }
 

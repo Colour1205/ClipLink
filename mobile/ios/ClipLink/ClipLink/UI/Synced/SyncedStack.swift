@@ -48,7 +48,7 @@ enum SyncedStackStyle {
 
     /// "Expand 4 more items".
     static func expandLabel(hidden: Int) -> String {
-        hidden == 1 ? "Expand 1 more item" : "Expand \(hidden) more items"
+        hidden == 1 ? String(localized: "Expand 1 more item") : String(localized: "Expand \(hidden) more items")
     }
 }
 

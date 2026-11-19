@@ -298,7 +298,7 @@ struct PairingView: View {
                 if let text = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
                     address = text
                 } else {
-                    model.showToast("Nothing to paste.")
+                    model.showToast(String(localized: "Nothing to paste."))
                 }
             } label: {
                 Label("Paste", systemImage: "doc.on.clipboard")

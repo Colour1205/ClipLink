@@ -604,7 +604,7 @@ public final class SyncEngine {
         guard !blocks.isBlocked(id), let index = pendingRequests.firstIndex(where: { $0.link.peerDeviceId == id }) else { return }
         let request = pendingRequests.remove(at: index)
         if request.link.isClosed {
-            notice("The other device cancelled the pairing request - try again.")
+            notice(String(localized: "The other device cancelled the pairing request - try again."))
             schedulePublish()
             return
         }
@@ -613,7 +613,7 @@ public final class SyncEngine {
         trust.trust(id, address: request.address)
         log("paired: \(DeviceLabel.short(id))")
         register(request.link, acceptedByUser: true)
-        notice("Paired with \(displayName(for: id)).")
+        notice(String(localized: "Paired with \(displayName(for: id))."))
         schedulePublish()
     }
 
@@ -1129,7 +1129,7 @@ public final class SyncEngine {
             filePayload: payload,
             fileAvailable: payload.map { files.exists($0.fileHash) } ?? (entry.type != Wire.EntryType.file),
             date: facts.date,
-            sourceLabel: isOwn ? "This device" : displayName(for: entry.deviceId),
+            sourceLabel: isOwn ? String(localized: "This device") : displayName(for: entry.deviceId),
             contentKey: contentKey(of: entry, identity: id)
         )
         item.inlineURL = history.inlineURL(for: entry, identity: id)
@@ -1337,6 +1337,6 @@ public enum DeviceLabel {
     }
 
     public static func short(_ deviceId: String) -> String {
-        "Device \(fingerprint(deviceId))"
+        String(localized: "Device \(fingerprint(deviceId))")
     }
 }

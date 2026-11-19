@@ -111,8 +111,8 @@ public struct SyncedItem: Identifiable, Equatable {
 
     public var preview: String {
         switch kind {
-        case .image: return "Image"
-        case .file: return filePayload?.fileName ?? "File"
+        case .image: return String(localized: "Image")
+        case .file: return filePayload?.fileName ?? String(localized: "File")
         default: return entry.content
         }
     }
@@ -311,27 +311,28 @@ public enum PairOutcome: Equatable {
 
     public var message: String {
         switch self {
-        case .ownCode: return "That's this device's own code."
-        case .empty: return "Enter a pairing code or address first."
+        case .ownCode: return String(localized: "That's this device's own code.")
+        case .empty: return String(localized: "Enter a pairing code or address first.")
         case .noAddress(let key, let name):
-            return "\(name ?? DeviceLabel.short(key)) has no address in its code. If it's on the same network, find it under Devices › Nearby and tap Trust."
+            return String(localized: "\(name ?? DeviceLabel.short(key)) has no address in its code. If it's on the same network, find it under Devices › Nearby and tap Trust.")
         case .searching(let key, let name):
-            return "Looking for \(name ?? DeviceLabel.short(key)) on this network…"
-        case .connected(let a): return "Already paired with \(a) - connected."
-        case .passcode(let a): return "Paired with \(a) using your passcode."
-        case .prompt(let a): return "Reached \(a) - accept the pairing prompt on both devices to finish."
-        case .awaitingOther(let a): return "Reached \(a) - accept the request on that device to finish."
-        case .busy: return "Another pairing request is already waiting here - accept or reject it first."
+            return String(localized: "Looking for \(name ?? DeviceLabel.short(key)) on this network…")
+        case .connected(let a): return String(localized: "Already paired with \(a) - connected.")
+        case .passcode(let a): return String(localized: "Paired with \(a) using your passcode.")
+        case .prompt(let a): return String(localized: "Reached \(a) - accept the pairing prompt on both devices to finish.")
+        case .awaitingOther(let a): return String(localized: "Reached \(a) - accept the request on that device to finish.")
+        case .busy: return String(localized: "Another pairing request is already waiting here - accept or reject it first.")
         case .refused(let a):
-            return "\(a) answered but didn't accept this device. Set the same passcode on both, or finish any other pairing request waiting there, then try again."
+            return String(localized: "\(a) answered but didn't accept this device. Set the same passcode on both, or finish any other pairing request waiting there, then try again.")
         case .silent(let a):
-            return "\(a) accepted the connection but ClipLink there didn't respond - try restarting it on that device."
+            return String(localized: "\(a) accepted the connection but ClipLink there didn't respond - try restarting it on that device.")
         case .unreachable(let a):
-            return "Couldn't connect to \(a). Check ClipLink is running there and both devices are on the same network (or Tailscale)."
+            return String(localized: "Couldn't connect to \(a). Check ClipLink is running there and both devices are on the same network (or Tailscale).")
         case .localNetworkDenied:
-            return "iOS is blocking local network access for ClipLink. Turn it on in Settings › Privacy & Security › Local Network."
+            return String(localized: "iOS is blocking local network access for ClipLink. Turn it on in Settings › Privacy & Security › Local Network.")
         case .blocked(let name):
-            return "\(name ?? "That device") is blocked. Unblock it in Devices to pair with it."
+            return name.map { String(localized: "\($0) is blocked. Unblock it in Devices to pair with it.") }
+                ?? String(localized: "That device is blocked. Unblock it in Devices to pair with it.")
         }
     }
 }
