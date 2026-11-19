@@ -70,6 +70,7 @@ public sealed partial class SettingsPage : Page
         UpdateTailscale(host.Engine.TailscaleAddress);
         _ = RefreshTailscaleAsync();
         UpdatePasscode();
+        UpdateClipboardShortcut();
 
         loadingToggle = true;
         try
@@ -248,6 +249,62 @@ public sealed partial class SettingsPage : Page
     }
 
     // ---- general -----------------------------------------------------------
+
+    private void UpdateClipboardShortcut()
+    {
+        string shortcut = App.Settings.ClipboardSyncShortcut.ToString();
+        ClipboardShortcutButton.Content = shortcut;
+        AutomationProperties.SetName(ClipboardShortcutButton, $"Change clipboard sync shortcut ({shortcut})");
+        ClipboardShortcutCard.Description = App.Instance.ClipboardSyncShortcutRegistered
+            ? "Toggle automatic clipboard sync from any app."
+            : "This shortcut is unavailable. Choose a different combination.";
+    }
+
+    private async void ChangeClipboardShortcut_Click(object sender, RoutedEventArgs e)
+    {
+        var current = App.Settings.ClipboardSyncShortcut;
+        var modifiers = new ComboBox { Header = "Modifier keys", HorizontalAlignment = HorizontalAlignment.Stretch };
+        foreach (var option in ClipboardShortcut.ModifierOptions)
+        {
+            int index = modifiers.Items.Count;
+            modifiers.Items.Add(option.Label);
+            if (option.Value == current.Modifiers) modifiers.SelectedIndex = index;
+        }
+
+        var key = new ComboBox { Header = "Key", HorizontalAlignment = HorizontalAlignment.Stretch };
+        foreach (uint candidate in ClipboardShortcut.KeyOptions)
+        {
+            int index = key.Items.Count;
+            key.Items.Add(ClipboardShortcut.KeyLabel(candidate));
+            if (candidate == current.Key) key.SelectedIndex = index;
+        }
+
+        var error = new InfoBar { Severity = InfoBarSeverity.Error, IsClosable = false };
+        var content = new StackPanel { Spacing = 12 };
+        content.Children.Add(modifiers);
+        content.Children.Add(key);
+        content.Children.Add(error);
+
+        var dialog = new ContentDialog
+        {
+            Title = "Change clipboard sync shortcut",
+            Content = content,
+            PrimaryButtonText = "Save",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+        };
+        dialog.PrimaryButtonClick += (_, args) =>
+        {
+            var shortcut = new ClipboardShortcut(ClipboardShortcut.ModifierOptions[modifiers.SelectedIndex].Value,
+                ClipboardShortcut.KeyOptions[key.SelectedIndex]);
+            if (App.Instance.TrySetClipboardSyncShortcut(shortcut)) return;
+
+            args.Cancel = true;
+            error.Message = $"Windows couldn't register {shortcut}. Choose a different combination.";
+            error.IsOpen = true;
+        };
+        if (await App.MainAppWindow.ShowDialogAsync(dialog) == ContentDialogResult.Primary) UpdateClipboardShortcut();
+    }
 
     private void SignInToggle_Toggled(object sender, RoutedEventArgs e)
     {

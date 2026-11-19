@@ -87,6 +87,9 @@
 
                     <!-- General -->
                     <TextBlock Text="General" Style="{StaticResource SectionHeader}" />
+                    <controls:SettingsCard x:Name="ClipboardShortcutCard" Header="Clipboard sync shortcut">
+                        <Button x:Name="ClipboardShortcutButton" Click="ChangeClipboardShortcut_Click" />
+                    </controls:SettingsCard>
                     <controls:SettingsCard Header="Start ClipLink when I sign in"
                                            Description="It starts in the notification area, so your devices stay in sync.">
                         <controls:SettingsCard.HeaderIcon>

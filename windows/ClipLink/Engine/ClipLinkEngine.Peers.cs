@@ -255,8 +255,10 @@ public sealed partial class ClipLinkEngine
     // content (LastWrite): this PC's own copy echoed back by another device
     // (an older build re-sends what it was given), say. Then it's only
     // listed - as one card with its twin - and not announced either.
-    private void QueueReceived(ClipboardEntry entry)
+    private void QueueReceived(ClipboardEntry entry, int? automaticGeneration = null)
     {
+        automaticGeneration ??= ActiveClipboardSyncGeneration;
+        if (!automaticGeneration.HasValue || automaticGeneration != ActiveClipboardSyncGeneration) return;
         if (clipboardSync.Holds(ContentPrint.Key(entry)))
         {
             Console.WriteLine($"[clip] {entry.Type} entry from {DeviceLabel.ShortId(entry.DeviceId)} is what the clipboard already holds - not applied again");
@@ -264,7 +266,8 @@ public sealed partial class ClipLinkEngine
             NotifyHistoryChanged();
             return;
         }
-        clipboardSync.addToQueue(entry.Content, entry.Type, fromElsewhere: entry.DeviceId != ownId);
+        clipboardSync.addToQueue(entry.Content, entry.Type, fromElsewhere: entry.DeviceId != ownId,
+            automaticGeneration: automaticGeneration);
     }
 
     // ---- version 2 sync -------------------------------------------------------
@@ -566,7 +569,7 @@ public sealed partial class ClipLinkEngine
         // this hash finish arriving and verify, and ask every connected peer
         // (not just whoever handed us this entry) whether they have it. Not
         // when the clipboard already holds that file (see QueueReceived).
-        if (applyToClipboard)
+        if (applyToClipboard && ActiveClipboardSyncGeneration is int generation)
         {
             if (clipboardSync.Holds(ContentPrint.File(payload.FileHash)))
             {
@@ -574,7 +577,8 @@ public sealed partial class ClipLinkEngine
             }
             else
             {
-                fileTransferState.PendingEntries[payload.FileHash] = new PendingApply(entry, Environment.TickCount64, clipboardSync.Sequence);
+                fileTransferState.PendingEntries[payload.FileHash] =
+                    new PendingApply(entry, Environment.TickCount64, clipboardSync.Sequence, generation);
             }
         }
         SendFileRequest(payload.FileHash, connectionsByDeviceId.Values);
@@ -1005,7 +1009,7 @@ public sealed partial class ClipLinkEngine
             Console.WriteLine($"[file] {fileHash[..12]}... arrived after something newer went on the clipboard, or too late - stored, not applied");
             return true;
         }
-        QueueReceived(entry);
+        QueueReceived(entry, pending.AutomaticGeneration);
         return true;
     }
 

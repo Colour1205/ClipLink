@@ -123,6 +123,37 @@ public class DedupeEngineTests
     // ---- copies here ----
 
     [Fact]
+    public async Task Pause_keeps_peer_items_in_history_and_blocks_automatic_clipboard_changes_until_resumed()
+    {
+        using var node = new TestNode("a");
+        node.Start();
+        var engine = node.Engine!;
+        using var peer = new RawPeer("p");
+        node.Trust(peer.Id);
+        await peer.ConnectAsync(node);
+        await Registered(node, peer);
+
+        engine.SetAutomaticClipboardSyncEnabled(false);
+        Clipboard(node).Copy("local while paused");
+        var paused = peer.Make("remote while paused", 5);
+        await peer.SendAsync("entry", JsonSerializer.Serialize(paused));
+        Assert.True(await Wait.Until(() => node.Has(paused)));
+        Assert.Empty(node.Applied);
+        Assert.True(engine.CopyToClipboard(paused.Key()));
+        Assert.Equal(new[] { paused.Content }, node.Applied);
+
+        engine.SetAutomaticClipboardSyncEnabled(true);
+        Clipboard(node).Copy("local after resume");
+        await peer.WaitForAsync("entry", 1);
+        Assert.Equal(new[] { "local after resume" }, EntryTexts(peer));
+        var resumed = peer.Make("remote after resume", 6);
+        await peer.SendAsync("entry", JsonSerializer.Serialize(resumed));
+        Assert.True(await Wait.Until(() => node.Applied.Contains(resumed.Content)));
+        Assert.Equal(new[] { paused.Content, resumed.Content }, node.Applied);
+        Assert.DoesNotContain("local while paused", node.Texts);
+    }
+
+    [Fact]
     public async Task A_copy_of_what_the_newest_item_already_is_is_not_sent_again()
     {
         using var node = new TestNode("a");

@@ -4,7 +4,7 @@ namespace ClipboardDaemon.Storage;
 // when that was decided (ArmedAt, Environment.TickCount64 ms) and the
 // clipboard's sequence number then. Bytes that take long, or come after
 // something else went on the clipboard, mustn't overwrite what is newer.
-public sealed record PendingApply(ClipboardEntry Entry, long ArmedAt, uint Sequence)
+public sealed record PendingApply(ClipboardEntry Entry, long ArmedAt, uint Sequence, int AutomaticGeneration = 0)
 {
     // Bytes arriving later than this (ms) are only stored.
     public const long MaxWaitMs = 10 * 60 * 1000;

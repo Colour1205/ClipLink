@@ -17,13 +17,15 @@ public class ClipboardSync
     private readonly object gate = new();
     private readonly List<(string Content, string Type)> applied = new();
     private readonly LastWrite lastWrite = new();
+    private readonly Func<int?> activeGeneration;
     private uint sequence = 1;
 
-    public event Action<(string content, string type, string? sourceFilePath, string? name)>? ClipboardChanged;
-    public event Action<IReadOnlyList<(string content, string path)>>? FilesCopied;
+    public event Action<(string content, string type, string? sourceFilePath, string? name), int>? ClipboardChanged;
+    public event Action<IReadOnlyList<(string content, string path)>, int>? FilesCopied;
 
-    public ClipboardSync(FileStore fileStore, string label)
+    public ClipboardSync(FileStore fileStore, string label, Func<int?> activeGeneration)
     {
+        this.activeGeneration = activeGeneration;
         ByLabel[label] = this;
     }
 
@@ -44,8 +46,11 @@ public class ClipboardSync
 
     public void Stop() { }
 
-    public void addToQueue(string content, string type = "text", bool fromElsewhere = false)
+    public void SkipCurrentClipboard() { }
+
+    public void addToQueue(string content, string type = "text", bool fromElsewhere = false, int? automaticGeneration = null)
     {
+        if (automaticGeneration.HasValue && automaticGeneration != activeGeneration()) return;
         lock (gate)
         {
             applied.Add((content, type));
@@ -60,37 +65,40 @@ public class ClipboardSync
     // last wrote or saw, as the real watcher does.
     public void Copy(string text)
     {
+        int? generation = activeGeneration();
         string print = ContentPrint.Text(text);
         bool already;
         lock (gate)
         {
             sequence++;
             already = lastWrite.Holds(print);
-            lastWrite.Classified(new[] { print });
+            if (generation.HasValue) lastWrite.Classified(new[] { print });
         }
-        if (!already) ClipboardChanged?.Invoke((text, "text", null, null));
+        if (!already && generation is int active) ClipboardChanged?.Invoke((text, "text", null, null), active);
     }
 
     // The user copied this picture (PNG bytes) on this PC, with the original
     // name the copy said (or null, as for a screenshot).
     public void CopyImage(byte[] png, string? name)
     {
+        int? generation = activeGeneration();
         string print = ContentPrint.Image(png);
         bool already;
         lock (gate)
         {
             sequence++;
             already = lastWrite.Holds(print);
-            lastWrite.Classified(new[] { print });
+            if (generation.HasValue) lastWrite.Classified(new[] { print });
         }
-        if (!already) ClipboardChanged?.Invoke((Convert.ToBase64String(png), "image", null, name));
+        if (!already && generation is int active)
+            ClipboardChanged?.Invoke((Convert.ToBase64String(png), "image", null, name), active);
     }
 
     // The user copied these files on this PC (each one's FilePayload JSON and path).
     public void CopyFiles(IReadOnlyList<(string content, string path)> files)
     {
         lock (gate) { sequence++; }
-        FilesCopied?.Invoke(files);
+        if (activeGeneration() is int active) FilesCopied?.Invoke(files, active);
     }
 
     // Something else was written to the clipboard (another app, the user).

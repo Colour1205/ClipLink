@@ -65,9 +65,11 @@ public sealed class EngineHost : Observable
     public bool HasPasscode { get; private set; }
 
     public int ConnectedCount => PairedDevices.Count(device => device.Connected);
+    public bool AutomaticClipboardSyncEnabled => Engine.AutomaticClipboardSyncEnabled;
 
     // Synced page's line under its title.
     public string ConnectionSummary => IsFaulted ? "Not syncing"
+        : !AutomaticClipboardSyncEnabled ? "Automatic clipboard sync paused"
         : ConnectedCount > 0 ? $"Syncing with {Format.Count(ConnectedCount, "device", "devices")}"
         : PairedDevices.Count > 0 ? "None of your devices are connected right now"
         : "No devices paired yet";
@@ -103,6 +105,12 @@ public sealed class EngineHost : Observable
         clock.Stop();
         transferClock.Stop();
         Engine.Stop();
+    }
+
+    public void SetAutomaticClipboardSyncEnabled(bool enabled)
+    {
+        Engine.SetAutomaticClipboardSyncEnabled(enabled);
+        Raise(nameof(AutomaticClipboardSyncEnabled), nameof(ConnectionSummary));
     }
 
     public void RefreshPasscode()

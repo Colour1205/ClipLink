@@ -68,8 +68,19 @@ with Inno Setup's compiler, fetched once from NuGet into `windows\.tools`
 Quit ClipLink first if it's running from `windows\dist`: its files are locked.
 
 - Double-click: the window opens. Closing the window keeps ClipLink running
-  in the notification area — left-click its icon to bring the window back;
-  right-click it for **Open** and **Quit**. **Settings > Quit** also stops it.
+  in the notification area. Left-click its icon to bring the window back or
+  right-click it for **Open**, **Auto-sync clipboard** and **Quit**.
+  **Settings > Quit** also stops it.
+- **Ctrl+Alt+Shift+V** toggles automatic clipboard sync from any app, and
+  ClipLink remembers the setting after a restart. To change the shortcut,
+  open **Settings > General > Clipboard sync shortcut**. A check mark on the tray
+  icon means auto-sync is on. A pause badge and the tooltip indicate when it
+  is paused or unavailable. If the icon is under the taskbar's overflow
+  arrow, drag it into the visible notification area. If another app already
+  uses the shortcut, the tray menu still works.
+- While paused, local copies aren't shared automatically and incoming
+  items go to Synced without replacing this PC's clipboard. You can still
+  copy an item from Synced or send files explicitly.
 - Starting it again while it runs just brings up the running one's window.
 - The sidebar can be collapsed to icons only (the button at its top); it's
   remembered.

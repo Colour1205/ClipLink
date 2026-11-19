@@ -6,16 +6,23 @@ using Microsoft.UI.Xaml.Controls;
 namespace ClipLink;
 
 // The notification-area icon: a left click opens the window, a right click
-// shows a small Fluent menu with Open and Quit, and it carries the balloon
+// shows a small Fluent menu with Open, the sync switch and Quit. It carries
 // notifications (what a share did, a sync that can't start).
 internal sealed class Tray : IDisposable
 {
     private readonly TaskbarIcon icon;
+    private readonly ToggleMenuFlyoutItem syncItem;
+    private readonly System.Drawing.Icon syncingIcon = AppIcon.Tray(syncing: true);
+    private readonly System.Drawing.Icon pausedIcon = AppIcon.Tray(syncing: false);
+    private readonly string name;
 
-    public Tray(string toolTip, Action open, Action quit)
+    public Tray(string name, Action open, Action toggleSync, Action quit)
     {
+        this.name = name;
         var openItem = new MenuFlyoutItem { Text = "Open", Icon = new SymbolIcon(Symbol.OpenWith) };
         openItem.Click += (_, _) => open();
+        syncItem = new ToggleMenuFlyoutItem { Text = "Auto-sync clipboard" };
+        syncItem.Click += (_, _) => toggleSync();
         var quitItem = new MenuFlyoutItem { Text = "Quit", Icon = new SymbolIcon(Symbol.Cancel) };
         quitItem.Click += (_, _) => quit();
 
@@ -23,13 +30,14 @@ internal sealed class Tray : IDisposable
         // a long one ("Quit ClipLink") is cut short.
         var menu = new MenuFlyout();
         menu.Items.Add(openItem);
+        menu.Items.Add(syncItem);
         menu.Items.Add(new MenuFlyoutSeparator());
         menu.Items.Add(quitItem);
 
         icon = new TaskbarIcon
         {
-            ToolTipText = toolTip,
-            Icon = AppIcon.Tray(),
+            ToolTipText = name,
+            Icon = pausedIcon,
             // The menu is a real WinUI flyout (in a window of its own), so it
             // follows the theme and looks like the rest of the app.
             ContextMenuMode = ContextMenuMode.SecondWindow,
@@ -42,6 +50,14 @@ internal sealed class Tray : IDisposable
         icon.ForceCreate(false);
     }
 
+    public void SetSyncState(bool enabled, bool available, string? shortcut)
+    {
+        syncItem.IsChecked = enabled;
+        string state = !enabled ? "Clipboard sync paused" : available ? "Clipboard sync on" : "Clipboard sync unavailable";
+        icon.Icon = enabled && available ? syncingIcon : pausedIcon;
+        icon.ToolTipText = $"{name} — {state} ({shortcut ?? "Shortcut unavailable"})";
+    }
+
     // A Windows notification from the icon (clicking it opens the window).
     // Windows cuts the text at 255 characters.
     public void Notify(string title, string text, bool warning)
@@ -50,7 +66,12 @@ internal sealed class Tray : IDisposable
         icon.ShowNotification(title, text, warning ? NotificationIcon.Warning : NotificationIcon.Info);
     }
 
-    public void Dispose() => icon.Dispose();
+    public void Dispose()
+    {
+        icon.Dispose();
+        syncingIcon.Dispose();
+        pausedIcon.Dispose();
+    }
 
     private sealed class Command(Action action) : ICommand
     {
