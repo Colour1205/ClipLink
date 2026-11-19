@@ -585,11 +585,10 @@ struct SyncedDock: View {
     @ViewBuilder
     private var pasteButton: some View {
         if #available(iOS 16.0, *) {
-            SyncedPasteControl(accent: settings.accentTheme.uiColor) { providers in
+            SyncedPasteButton(accent: settings.accentTheme.uiColor) { providers in
                 Haptics.tap(settings.haptics)
                 Task { await model.sendProviders(providers, fromPasteboard: true) }
             }
-            .fixedSize()
             .id(settings.accentTheme)
         } else {
             Button {
