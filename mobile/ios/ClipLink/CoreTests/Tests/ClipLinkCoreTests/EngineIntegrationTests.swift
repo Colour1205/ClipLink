@@ -417,12 +417,13 @@ final class EngineIntegrationTests: XCTestCase {
         func shown() -> String? { a.engine.queue.sync { a.engine.buildSnapshot().deviceNames[peerId] } }
         func connect(as name: String) throws -> PeerLink {
             let link = try handshake(with: a, as: peer, named: name, passcode: passcode)
-            wait("A registered \(name)") { a.recorder.connectedCount == 1 }
+            // Registered, not "connected": the silent link below never sends a line.
+            wait("A registered \(name)") { a.engine.queue.sync { a.engine.links.count == 1 } }
             return link
         }
         func hangUp(_ link: PeerLink) {
             link.close()
-            wait("A dropped it") { a.recorder.connectedCount == 0 }
+            wait("A dropped it") { a.engine.queue.sync { a.engine.links.isEmpty } }
         }
 
         // First contact, by passcode, on a link that never sends a line - all
@@ -633,7 +634,9 @@ final class EngineIntegrationTests: XCTestCase {
         XCTAssertEqual(b.recorder.pairingRequests.first?.name, "Phone 0")
 
         b.engine.acceptPairing()   // the oldest
-        wait("accepted the first") { b.recorder.connectedCount == 1 }
+        // Registered, not "connected": the test's raw link sends no line.
+        wait("accepted the first") { b.engine.queue.sync { b.engine.links.count == 1 } }
+        wait("the other two still wait") { b.recorder.pairingRequests.map(\.deviceId) == ids[1..<3].map(\.publicKeyBase64) }
         XCTAssertEqual(b.recorder.pairingRequests.map(\.deviceId), ids[1..<3].map(\.publicKeyBase64))
         links.forEach { $0.close() }
     }
@@ -1166,7 +1169,9 @@ final class EngineIntegrationTests: XCTestCase {
                       let request = FileRequestMessage.parse(envelope.payload) else { return }
                 requested.append(FileStore.key(request.fileHash))
             }
-            wait("A registered the peer") { a.recorder.connectedCount == 1 }
+            // Registered, not "connected": a bare test peer sends no line, and the
+            // connected count waits for one.
+            wait("A registered the peer") { a.engine.queue.sync { a.engine.links.count == 1 } }
             link.goLive()
             return link
         }
@@ -1233,7 +1238,9 @@ final class EngineIntegrationTests: XCTestCase {
                   let request = FileRequestMessage.parse(envelope.payload) else { return }
             requested.append(FileStore.key(request.fileHash))
         }
-        wait("A registered the peer") { a.recorder.connectedCount == 1 }
+        // Registered, not "connected": a bare test peer sends no line, and the
+        // connected count waits for one.
+        wait("A registered the peer") { a.engine.queue.sync { a.engine.links.count == 1 } }
         link.goLive()
 
         // Two more files than A takes at once, two chunks each, Windows' way.
@@ -1311,7 +1318,9 @@ final class EngineIntegrationTests: XCTestCase {
                       let request = FileRequestMessage.parse(envelope.payload), FileStore.key(request.fileHash) == key else { return }
                 asked += 1
             }
-            wait("A registered the peer") { a.recorder.connectedCount == 1 }
+            // Registered, not "connected": a bare test peer sends no line, and the
+            // connected count waits for one.
+            wait("A registered the peer") { a.engine.queue.sync { a.engine.links.count == 1 } }
             link.goLive()
             return link
         }
@@ -1373,7 +1382,9 @@ final class EngineIntegrationTests: XCTestCase {
             received[key]?.append(bytes)
             if chunk.isLast { open.remove(key) }
         }
-        wait("A registered the peer") { a.recorder.connectedCount == 1 }
+        // Registered, not "connected": a bare test peer sends no line, and the
+        // connected count waits for one.
+        wait("A registered the peer") { a.engine.queue.sync { a.engine.links.count == 1 } }
         link.goLive()
 
         // Shared all at once, a few chunks each.
@@ -1898,7 +1909,7 @@ final class EngineIntegrationTests: XCTestCase {
         // A delete means nothing on a version 1 connection.
         peer.send(Wire.MessageType.delete, KeysMessage(keys: [sig(entries[0])]).jsonString())
         RunLoop.main.run(until: Date().addingTimeInterval(0.5))
-        XCTAssertEqual(a.recorder.items.count, 4)
+        XCTAssertEqual(a.recorder.items.count, 5, "mine, the three old ones and the newer one: nothing was deleted")
     }
 
     func testTheNewestEntryOfAnOldStyleHeadIsIgnoredOnAVersion2Connection() throws {

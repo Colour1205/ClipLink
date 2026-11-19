@@ -185,12 +185,30 @@ enum TimeLabel {
         return f
     }()
 
+    private static let day: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("d MMM")
+        return f
+    }()
+
     static func short(_ date: Date?) -> String {
         guard let date else { return "" }
         let calendar = Calendar.current
         if calendar.isDateInToday(date) { return time.string(from: date) }
         if calendar.isDateInYesterday(date) { return "Yesterday \(time.string(from: date))" }
         return dayTime.string(from: date)
+    }
+
+    /// For the footer of a half-width grid card, which also holds a type
+    /// icon, the device and a stack's "+N": the time today, else just the day.
+    /// The time is never cut there (only the device name is), so it has to be
+    /// short enough to fit beside the badge on a 375 pt phone.
+    static func compact(_ date: Date?) -> String {
+        guard let date else { return "" }
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) { return time.string(from: date) }
+        if calendar.isDateInYesterday(date) { return "Yesterday" }
+        return day.string(from: date)
     }
 
     static func full(_ date: Date?) -> String {

@@ -4,7 +4,7 @@ import Foundation
 /// A made-up engine snapshot, for looking at UI states that need other
 /// devices (the Simulator has none): launch a Debug build with
 /// `-ClipLinkDebugFixtures <kind>` - `devices`, `request` (devices plus a
-/// pairing request) or `empty`. The engine's own updates are then ignored.
+/// pairing request), `stack` (devices plus a stack of synced items) or `empty`. The engine's own updates are then ignored.
 /// Compiled out of Release builds.
 enum DebugFixtures {
     static func snapshot(_ kind: String) -> EngineSnapshot {
@@ -59,6 +59,36 @@ enum DebugFixtures {
         s.deviceName = "Chuck's iPhone"
         if kind == "request" {
             s.pairingRequests = [PairingRequest(deviceId: stranger, address: "192.168.1.88", name: "Guest Tablet")]
+        }
+        if kind == "stack" {
+            // One batch from one device: a stack card (the newest in front,
+            // "+6" behind it) over an ordinary card.
+            let texts = [
+                "Pixel_7_Pro_API_31",
+                "& \"$env:LOCALAPPDATA\\Android\\Sdk\\emulator\\emulator.exe\" -list-avds",
+                "Skip to main content Honest and experienced BMW mechanic in Toronto? : r/askTO",
+                "https://www.reddit.com/r/askTO/comments/17krowf/",
+                "Hi, this is Chuck. Can I get a quote for parts and labour on a 2016 BMW 328i xDrive?",
+                "Toronto folks with a 100k km BMW, where's the best place in the city for a change?",
+                "A short one",
+            ]
+            let iso = ISO8601DateFormatter()
+            var items: [SyncedItem] = []
+            for (index, text) in texts.enumerated() {
+                let date = now.addingTimeInterval(-Double(index) * 90 - 20)
+                let entry = ClipboardEntry(content: text, type: Wire.EntryType.text, deviceId: office, timestamp: iso.string(from: date))
+                items.append(SyncedItem(
+                    id: HistoryStore.identity(of: entry), entry: entry, isOwn: false, kind: text.hasPrefix("http") ? .link : .text,
+                    filePayload: nil, fileAvailable: true, date: date, sourceLabel: "Office PC"
+                ))
+            }
+            let own = ClipboardEntry(content: "Copied on this iPhone", type: Wire.EntryType.text, deviceId: s.ownDeviceId, timestamp: iso.string(from: now.addingTimeInterval(-3600)))
+            items.append(SyncedItem(
+                id: HistoryStore.identity(of: own), entry: own, isOwn: true, kind: .text,
+                filePayload: nil, fileAvailable: true, date: now.addingTimeInterval(-3600), sourceLabel: "This device"
+            ))
+            s.items = items
+            s.blocks = [BatchGroup(id: "fixture-batch", memberIDs: Array(items.prefix(texts.count).map(\.id)), frontID: items[0].id)]
         }
         return s
     }

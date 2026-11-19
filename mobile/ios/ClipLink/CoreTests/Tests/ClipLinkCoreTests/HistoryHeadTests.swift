@@ -339,7 +339,9 @@ final class HistoryHeadTests: XCTestCase {
         let outcome = applyHead(engine, try head(for: entries), from: peer, on: connectionOne)
         settle()
 
-        XCTAssertTrue(outcome.accepted)
+        // Nothing newer than what is here: the head is ignored (not accepted)
+        // and the batch behind it works on its own.
+        XCTAssertFalse(outcome.accepted)
         XCTAssertFalse(outcome.newestIsNew)
         XCTAssertEqual(outcome.expectedNew, 0)
         XCTAssertNil(outcome.group)
