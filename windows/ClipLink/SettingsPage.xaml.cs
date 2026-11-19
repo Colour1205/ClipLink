@@ -3,11 +3,13 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using ClipboardDaemon.Engine;
+using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Windows.Foundation;
 using Windows.System;
 
 namespace ClipLink;
@@ -19,7 +21,10 @@ namespace ClipLink;
 public sealed partial class SettingsPage : Page
 {
     private readonly EngineHost host = App.Host;
+    private readonly PointerEventHandler clipboardShortcutPointerPressed;
     private bool loadingToggle;
+    private ClipboardShortcutCapture? clipboardShortcutCapture;
+    private InputNonClientPointerSource? clipboardShortcutNonClientInput;
     // The update button that had the focus went away (Check -> Cancel,
     // Download -> Retry...): the focus moves to the next one that's there
     // instead of being lost - unless the user has moved it elsewhere meanwhile.
@@ -33,6 +38,7 @@ public sealed partial class SettingsPage : Page
     public SettingsPage()
     {
         InitializeComponent();
+        clipboardShortcutPointerPressed = ClipboardShortcutWindow_PointerPressed;
         EngineBanner.Track(StatusBanner, host);
         WheelScroll.Attach(Scroller);
         DeviceNameBox.PlaceholderText = ComputerName();
@@ -49,6 +55,7 @@ public sealed partial class SettingsPage : Page
         };
         Unloaded += (_, _) =>
         {
+            EndClipboardShortcutCapture();
             App.Instance.ExplorerShareMenuChanged -= UpdateShareMenuToggle;
             App.Updates.State.PropertyChanged -= OnUpdateStateChanged;
             restoreUpdateFocus = false;
@@ -70,6 +77,7 @@ public sealed partial class SettingsPage : Page
         UpdateTailscale(host.Engine.TailscaleAddress);
         _ = RefreshTailscaleAsync();
         UpdatePasscode();
+        UpdateClipboardShortcut();
 
         loadingToggle = true;
         try
@@ -248,6 +256,119 @@ public sealed partial class SettingsPage : Page
     }
 
     // ---- general -----------------------------------------------------------
+
+    private void UpdateClipboardShortcut()
+    {
+        string shortcut = App.Settings.ClipboardSyncShortcut.ToString();
+        ClipboardShortcutText.Text = shortcut;
+        AutomationProperties.SetName(ClipboardShortcutButton, $"Change clipboard sync shortcut ({shortcut})");
+        ClipboardShortcutCard.Description = App.Instance.ClipboardSyncShortcutRegistered
+            ? "Toggle automatic clipboard sync from any app."
+            : "This shortcut is unavailable. Choose a different combination.";
+    }
+
+    private void ChangeClipboardShortcut_Click(object sender, RoutedEventArgs e)
+    {
+        if (clipboardShortcutCapture != null) return;
+        if (!ClipboardShortcutButton.Focus(FocusState.Programmatic)) return;
+
+        var window = App.MainAppWindow;
+        var nonClientInput = InputNonClientPointerSource.GetForWindowId(window.AppWindow.Id);
+        nint hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+        var dispatcher = DispatcherQueue;
+        ClipboardShortcutCapture? session = null;
+        try
+        {
+            session = new ClipboardShortcutCapture(hwnd, shortcut =>
+            {
+                dispatcher.TryEnqueue(() =>
+                {
+                    if (ReferenceEquals(clipboardShortcutCapture, session)) ApplyCapturedClipboardShortcut(shortcut);
+                });
+            });
+        }
+        catch (Win32Exception ex)
+        {
+            Console.WriteLine($"[hotkey] couldn't start capturing a shortcut: {ex.Message}");
+            ShowClipboardShortcutFeedback("Couldn't listen for a shortcut. Click to try again.");
+            return;
+        }
+
+        clipboardShortcutCapture = session;
+        window.Activated += ClipboardShortcutWindow_Activated;
+        window.Content.AddHandler(PointerPressedEvent, clipboardShortcutPointerPressed, true);
+        clipboardShortcutNonClientInput = nonClientInput;
+        if (nonClientInput != null) nonClientInput.PointerPressed += ClipboardShortcutWindow_NonClientPointerPressed;
+        ClipboardShortcutOutline.Visibility = Visibility.Visible;
+        ClipboardShortcutText.Opacity = 0.45;
+        ShowClipboardShortcutFeedback("Press a new shortcut. Press Esc to cancel.");
+    }
+
+    private void ApplyCapturedClipboardShortcut(ClipboardShortcut? captured)
+    {
+        if (captured is not { } shortcut)
+        {
+            EndClipboardShortcutCapture();
+            return;
+        }
+
+        if (!shortcut.IsSupported())
+        {
+            ShowClipboardShortcutFeedback("Use at least two of Ctrl, Alt and Shift with a letter, number, or F1–F11.");
+            return;
+        }
+
+        if (App.Instance.TrySetClipboardSyncShortcut(shortcut, out bool conflict))
+        {
+            EndClipboardShortcutCapture();
+            return;
+        }
+
+        ShowClipboardShortcutFeedback(conflict
+            ? $"{shortcut} is already in use. Try another shortcut."
+            : $"Windows couldn't register {shortcut}. Try another shortcut.");
+    }
+
+    private void ClipboardShortcutButton_LostFocus(object sender, RoutedEventArgs e) => EndClipboardShortcutCapture();
+
+    private void ClipboardShortcutWindow_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        var bounds = new Rect(0, 0, ClipboardShortcutButton.ActualWidth, ClipboardShortcutButton.ActualHeight);
+        if (!bounds.Contains(e.GetCurrentPoint(ClipboardShortcutButton).Position)) EndClipboardShortcutCapture();
+    }
+
+    private void ClipboardShortcutWindow_NonClientPointerPressed(InputNonClientPointerSource sender, NonClientPointerEventArgs e)
+        => EndClipboardShortcutCapture();
+
+    private void ClipboardShortcutWindow_Activated(object sender, WindowActivatedEventArgs e)
+    {
+        if (e.WindowActivationState == WindowActivationState.Deactivated) EndClipboardShortcutCapture();
+    }
+
+    private void EndClipboardShortcutCapture()
+    {
+        if (clipboardShortcutCapture is not { } session) return;
+        clipboardShortcutCapture = null;
+        session.Dispose();
+        var window = App.MainAppWindow;
+        window.Activated -= ClipboardShortcutWindow_Activated;
+        window.Content.RemoveHandler(PointerPressedEvent, clipboardShortcutPointerPressed);
+        if (clipboardShortcutNonClientInput is { } nonClientInput)
+        {
+            nonClientInput.PointerPressed -= ClipboardShortcutWindow_NonClientPointerPressed;
+            clipboardShortcutNonClientInput = null;
+        }
+        ClipboardShortcutOutline.Visibility = Visibility.Collapsed;
+        ClipboardShortcutText.Opacity = 1;
+        UpdateClipboardShortcut();
+    }
+
+    private void ShowClipboardShortcutFeedback(string message)
+    {
+        ClipboardShortcutCard.Description = message;
+        FrameworkElementAutomationPeer.FromElement(ClipboardShortcutButton)?.RaiseNotificationEvent(
+            AutomationNotificationKind.Other, AutomationNotificationProcessing.ImportantMostRecent, message, "ClipboardShortcut");
+    }
 
     private void SignInToggle_Toggled(object sender, RoutedEventArgs e)
     {

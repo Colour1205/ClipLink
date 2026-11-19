@@ -13,12 +13,13 @@ using ClipboardDaemon.Storage;
 public class ClipboardSync
 {
     private readonly FileStore fileStore;
+    private readonly Func<int?> activeGeneration;
     private string? _lastKnownHash;
 
-    public event Action<(string content, string type, string? sourceFilePath)>? ClipboardChanged;
+    public event Action<(string content, string type, string? sourceFilePath, string? name), int>? ClipboardChanged;
     // (The real watcher's file selections; a copied file here goes through ClipboardChanged.)
 #pragma warning disable CS0067
-    public event Action<IReadOnlyList<(string content, string path)>>? FilesCopied;
+    public event Action<IReadOnlyList<(string content, string path)>, int>? FilesCopied;
 #pragma warning restore CS0067
 
     // The real watcher's sequence number and what-ClipLink-wrote check: nothing
@@ -27,9 +28,10 @@ public class ClipboardSync
     public uint Sequence => 0;
     public bool Holds(string? print) => false;
 
-    public ClipboardSync(FileStore fileStore, string label)
+    public ClipboardSync(FileStore fileStore, string label, Func<int?> activeGeneration)
     {
         this.fileStore = fileStore;
+        this.activeGeneration = activeGeneration;
     }
 
     private static string ComputeHash(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
@@ -50,7 +52,8 @@ public class ClipboardSync
                         string hash = ComputeHash(Encoding.UTF8.GetBytes(text));
                         if (hash == _lastKnownHash) { Console.WriteLine("ECHO-SUPPRESSED text"); break; }
                         _lastKnownHash = hash;
-                        ClipboardChanged?.Invoke((text, "text", null));
+                        if (activeGeneration() is int generation)
+                            ClipboardChanged?.Invoke((text, "text", null, null), generation);
                         break;
                     }
                     case "copyimage":
@@ -59,7 +62,8 @@ public class ClipboardSync
                         string hash = ComputeHash(bytes);
                         if (hash == _lastKnownHash) { Console.WriteLine("ECHO-SUPPRESSED image"); break; }
                         _lastKnownHash = hash;
-                        ClipboardChanged?.Invoke((Convert.ToBase64String(bytes), "image", null));
+                        if (activeGeneration() is int generation)
+                            ClipboardChanged?.Invoke((Convert.ToBase64String(bytes), "image", null, null), generation);
                         break;
                     }
                     case "copyfile":
@@ -71,7 +75,8 @@ public class ClipboardSync
                         string combined = ComputeHash(Encoding.UTF8.GetBytes(fileHash));
                         if (combined == _lastKnownHash) { Console.WriteLine("ECHO-SUPPRESSED file"); break; }
                         _lastKnownHash = combined;
-                        ClipboardChanged?.Invoke((System.Text.Json.JsonSerializer.Serialize(payload), "file", info.FullName));
+                        if (activeGeneration() is int generation)
+                            ClipboardChanged?.Invoke((System.Text.Json.JsonSerializer.Serialize(payload), "file", info.FullName, null), generation);
                         break;
                     }
                     case "recopy":
@@ -96,7 +101,12 @@ public class ClipboardSync
     // The engine stopping. Watch() ends with stdin; the test kills the process.
     public void Stop() { }
 
-    public void addToQueue(string content, string type = "text", bool fromElsewhere = false) => setContent(content, type);
+    public void SkipCurrentClipboard() { }
+
+    public void addToQueue(string content, string type = "text", bool fromElsewhere = false, int? automaticGeneration = null)
+    {
+        if (!automaticGeneration.HasValue || automaticGeneration == activeGeneration()) setContent(content, type);
+    }
 
     // No image is ever saved as a file here, so none is on the clipboard.
     public string? ImageFileOnClipboard() => null;

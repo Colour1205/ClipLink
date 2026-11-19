@@ -27,6 +27,9 @@ internal sealed class AppSettings
     // everything copied on a phone would otherwise announce itself.
     public bool NotifyReceivedItems { get; set; }
 
+    public bool AutomaticClipboardSyncEnabled { get; set; } = true;
+    public ClipboardShortcut ClipboardSyncShortcut { get; set; } = ClipboardShortcut.Default;
+
     // "Show 'Share to ClipLink' in File Explorer" (ShellIntegration). Null
     // until the user chooses: on for the real ClipLink, off for a test copy
     // (another --label) - see ExplorerShareMenuOn.
@@ -58,6 +61,7 @@ internal sealed class AppSettings
             Console.WriteLine($"[settings] couldn't read {path} ({ex.Message}) - using defaults");
         }
         settings ??= new AppSettings();
+        if (!settings.ClipboardSyncShortcut.IsSupported()) settings.ClipboardSyncShortcut = ClipboardShortcut.Default;
         settings.path = path;
         return settings;
     }

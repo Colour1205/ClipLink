@@ -15,6 +15,7 @@ public class ClipboardSync
 {
     private readonly FileStore fileStore;
     private readonly string label; // whose received images these are - see ReceivedFiles
+    private readonly Func<int?> activeGeneration;
     private const int MaxApplyAttempts = 5;
     // A copy whose read fails (the app that copied it still holds the
     // clipboard, rendering) is read again RetryMs later, this many times in
@@ -28,7 +29,7 @@ public class ClipboardSync
     // only to be trimmed at once.
     private const int MaxFilesPerCopy = HistoryAccess.MaxHistoryItems;
 
-    private sealed record PendingSet(string Content, string Type, bool FromElsewhere, int Attempts);
+    private sealed record PendingSet(string Content, string Type, bool FromElsewhere, int Attempts, int? AutomaticGeneration);
 
     // A write goes through two queues. Prepare - everything slow about it:
     // saving a received picture, copying a received file (up to 1 GB) into
@@ -56,6 +57,7 @@ public class ClipboardSync
     // dealt with (read, or ClipLink's own write), and how often reading the
     // one after it has failed so far.
     private uint _seenSequence;
+    private long _skippedSequence = -1;
     private uint _failedSequence;
     private int _readFailures;
 
@@ -75,17 +77,27 @@ public class ClipboardSync
     // engine's to say.) name: a picture's original name, when the copy said
     // one (see ReadImageName); null for text and for a picture without one.
     // Raised on the watcher thread.
-    public event Action<(string content, string type, string? sourceFilePath, string? name)>? ClipboardChanged;
+    public event Action<(string content, string type, string? sourceFilePath, string? name), int>? ClipboardChanged;
 
     // Files copied here (Explorer), the same way: each one's FilePayload as
     // JSON, and its path to read the bytes from when streaming to peers. At
     // most MaxFilesPerCopy, the same file once. Raised off the watcher thread.
-    public event Action<IReadOnlyList<(string content, string path)>>? FilesCopied;
+    public event Action<IReadOnlyList<(string content, string path)>, int>? FilesCopied;
 
-    public ClipboardSync(FileStore fileStore, string label)
+    public ClipboardSync(FileStore fileStore, string label, Func<int?> activeGeneration)
     {
         this.fileStore = fileStore;
         this.label = label;
+        this.activeGeneration = activeGeneration;
+    }
+
+    // Resume from the next copy, even if a clipboard notification posted
+    // while paused is still waiting on the watcher thread.
+    public void SkipCurrentClipboard()
+    {
+        uint current = Win32Clipboard.Sequence;
+        Volatile.Write(ref _skippedSequence, current);
+        if (current != Volatile.Read(ref _seenSequence)) _lastWrite.Classified(Array.Empty<string>());
     }
 
     // The clipboard's sequence number: changes with every write to it, by
@@ -158,6 +170,13 @@ public class ClipboardSync
     {
         uint current = Win32Clipboard.Sequence;
         if (current == _seenSequence) return;
+        if (activeGeneration() is not int generation || current == Volatile.Read(ref _skippedSequence))
+        {
+            if (!_lastWrite.IsOwnWrite(current)) _lastWrite.Classified(Array.Empty<string>());
+            _seenSequence = current;
+            _readFailures = 0;
+            return;
+        }
         // Still ClipLink's own write: nothing to read.
         if (_lastWrite.IsOwnWrite(current))
         {
@@ -172,7 +191,7 @@ public class ClipboardSync
         bool read;
         try
         {
-            read = Capture();
+            read = Capture(generation);
         }
         catch (Exception)
         {
@@ -192,7 +211,7 @@ public class ClipboardSync
     }
 
     // One read of the clipboard. False if it couldn't be read (try again).
-    private bool Capture()
+    private bool Capture(int generation)
     {
         // What kind of copy it is, and what it holds, in one opening of the
         // clipboard; a picture is encoded once it's closed again, so the app
@@ -235,7 +254,7 @@ public class ClipboardSync
             using (image) imageBytes = PngOf(image).ToArray();
             if (IsNew(new[] { ContentPrint.Image(imageBytes) }))
             {
-                ClipboardChanged?.Invoke((Convert.ToBase64String(imageBytes), "image", null, imageName));
+                ClipboardChanged?.Invoke((Convert.ToBase64String(imageBytes), "image", null, imageName), generation);
             }
         }
         else if (text != null)
@@ -244,12 +263,12 @@ public class ClipboardSync
             // read could get a newer copy, sent now and then again next time.)
             if (IsNew(new[] { ContentPrint.Text(text) }))
             {
-                ClipboardChanged?.Invoke((text, "text", null, null));
+                ClipboardChanged?.Invoke((text, "text", null, null), generation);
             }
         }
         else if (paths != null)
         {
-            HandleFileDropList(paths);
+            HandleFileDropList(paths, generation);
         }
         else
         {
@@ -325,7 +344,7 @@ public class ClipboardSync
     // (The per-file checks and payload are LocalFiles.Describe, which "Share
     // to ClipLink" uses too.) Only the list is read here; the hashing is done
     // off the watcher thread (see _filesGate).
-    private void HandleFileDropList(List<string> paths)
+    private void HandleFileDropList(List<string> paths, int generation)
     {
         if (paths.Count == 0) return;
         long since = _lastWrite.Generation;
@@ -334,7 +353,7 @@ public class ClipboardSync
             await _filesGate.WaitAsync();
             try
             {
-                DescribeAndPublish(paths, since);
+                if (generation == activeGeneration()) DescribeAndPublish(paths, since, generation);
             }
             catch (Exception ex)
             {
@@ -349,11 +368,12 @@ public class ClipboardSync
 
     // since: LastWrite's generation when the files were copied - if ClipLink
     // wrote the clipboard while they were hashed, the record keeps saying that.
-    private void DescribeAndPublish(IReadOnlyList<string> paths, long since)
+    private void DescribeAndPublish(IReadOnlyList<string> paths, long since, int generation)
     {
         var readableFiles = new List<(string path, FilePayload payload)>();
         for (int i = 0; i < paths.Count; i++)
         {
+            if (generation != activeGeneration()) return;
             if (readableFiles.Count == MaxFilesPerCopy)
             {
                 Console.WriteLine($"copied {paths.Count} items: only the first {MaxFilesPerCopy} files are synced (what history keeps)");
@@ -370,7 +390,7 @@ public class ClipboardSync
             }
             readableFiles.Add((path, payload));
         }
-        if (readableFiles.Count == 0) return;
+        if (readableFiles.Count == 0 || generation != activeGeneration()) return;
 
         // A file's print is its hash in lowercase (ContentPrint.File): this
         // PC hashes in uppercase and the phones in lowercase, so a file
@@ -387,7 +407,7 @@ public class ClipboardSync
         var files = readableFiles.Where((_, index) => seen.Add(prints[index]))
             .Select(file => (System.Text.Json.JsonSerializer.Serialize(file.payload), file.path))
             .ToList();
-        FilesCopied?.Invoke(files);
+        FilesCopied?.Invoke(files, generation);
     }
 
     // Ends Watch() (from any thread): its loop exits, and nothing queued
@@ -402,9 +422,9 @@ public class ClipboardSync
     // Puts content on the clipboard, on the watcher's thread. fromElsewhere:
     // another device's - a file then gets the Mark of the Web (see
     // ReceivedFiles.SaveFile).
-    public void addToQueue(string content, string type = "text", bool fromElsewhere = false)
+    public void addToQueue(string content, string type = "text", bool fromElsewhere = false, int? automaticGeneration = null)
     {
-        _toPrepare.Writer.TryWrite(new PendingSet(content, type, fromElsewhere, 0));
+        _toPrepare.Writer.TryWrite(new PendingSet(content, type, fromElsewhere, 0, automaticGeneration));
     }
 
     // The received image's file the clipboard refers to right now - the one
@@ -425,6 +445,7 @@ public class ClipboardSync
         await foreach (var pending in _toPrepare.Reader.ReadAllAsync())
         {
             if (_stopRequested) return;
+            if (!CanApply(pending)) continue;
             Write? write;
             try
             {
@@ -449,7 +470,8 @@ public class ClipboardSync
     {
         while (!_stopRequested && _ready.TryDequeue(out var ready))
         {
-            if (!Apply(ready.Write))
+            if (!CanApply(ready.Pending)) continue;
+            if (!Apply(ready))
             {
                 RetryLater(ready.Pending, () => _ready.Enqueue(ready with { Pending = ready.Pending with { Attempts = ready.Pending.Attempts + 1 } }));
                 RetrySoon();
@@ -480,13 +502,18 @@ public class ClipboardSync
     // read - or while a big received file was being copied into place - is
     // read and sent first: the write replaces it on this PC, and it used to
     // be lost for good. False if the clipboard couldn't be written.
-    private bool Apply(Write write)
+    private bool CanApply(PendingSet pending) =>
+        !pending.AutomaticGeneration.HasValue || pending.AutomaticGeneration == activeGeneration();
+
+    private bool Apply(ReadyWrite ready)
     {
+        Write write = ready.Write;
         bool writing = false;
         uint before = 0;
         try
         {
             CaptureIfChanged();
+            if (!CanApply(ready.Pending)) return true;
             before = Win32Clipboard.Sequence;
             writing = true;
             bool bitmap = write.Put();

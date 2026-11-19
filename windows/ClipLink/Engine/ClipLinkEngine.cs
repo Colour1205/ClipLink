@@ -122,6 +122,7 @@ public sealed partial class ClipLinkEngine : IDisposable
     private PassphraseKeyStore passphraseKeyStore = null!;
     private DeviceNameStore deviceName = null!;
     private ClipboardSync clipboardSync = null!;
+    private int automaticClipboardSyncGeneration;
     private volatile bool storesLoaded;
 
     private readonly FileTransferState fileTransferState = new();
@@ -202,6 +203,29 @@ public sealed partial class ClipLinkEngine : IDisposable
     public string Label => label;
     public int Port => port;
 
+    // An odd generation means paused. A toggle invalidates work already
+    // queued by the watcher, even if sync resumes before that work runs.
+    private int? ActiveClipboardSyncGeneration
+    {
+        get
+        {
+            int generation = Volatile.Read(ref automaticClipboardSyncGeneration);
+            return (generation & 1) == 0 ? generation : null;
+        }
+    }
+
+    public bool AutomaticClipboardSyncEnabled => ActiveClipboardSyncGeneration.HasValue;
+
+    public void SetAutomaticClipboardSyncEnabled(bool enabled)
+    {
+        lock (stateGate)
+        {
+            if (AutomaticClipboardSyncEnabled == enabled) return;
+            if (enabled && storesLoaded && options.WatchClipboard) clipboardSync.SkipCurrentClipboard();
+            Interlocked.Increment(ref automaticClipboardSyncGeneration);
+        }
+    }
+
     // Loads this device's stores for `label` (the app uses "default" - the
     // data folder's existing files) and starts listening for peers on TCP
     // `port`, LAN discovery, the clipboard watcher and the off-LAN reconnect
@@ -232,9 +256,11 @@ public sealed partial class ClipLinkEngine : IDisposable
             blockStore = new BlockStore(label);
             passphraseKeyStore = new PassphraseKeyStore(label);
             deviceName = new DeviceNameStore(label);
-            clipboardSync = new ClipboardSync(fileStore, label);
-            clipboardSync.ClipboardChanged += content => localCopies.Writer.TryWrite(() => OnLocalClipboardChanged(content));
-            clipboardSync.FilesCopied += files => localCopies.Writer.TryWrite(() => OnLocalFilesCopied(files));
+            clipboardSync = new ClipboardSync(fileStore, label, () => ActiveClipboardSyncGeneration);
+            clipboardSync.ClipboardChanged += (content, generation) =>
+                localCopies.Writer.TryWrite(() => OnLocalClipboardChanged(content, generation));
+            clipboardSync.FilesCopied += (files, generation) =>
+                localCopies.Writer.TryWrite(() => OnLocalFilesCopied(files, generation));
             ownId = identity.GetPublicKey();
             storesLoaded = true;
             Console.WriteLine($"Device ID (public key): {ownId}");
@@ -617,26 +643,29 @@ public sealed partial class ClipLinkEngine : IDisposable
     // shared by Windows or the phone itself) - but an older item copied again
     // is: that's how the user gets it back onto the other devices (the
     // Synced page then shows it once, on top - see HistoryAccess.GetHistoryWithBatches).
-    private void OnLocalClipboardChanged((string content, string type, string? sourceFilePath, string? name) content)
+    private void OnLocalClipboardChanged((string content, string type, string? sourceFilePath, string? name) content, int generation)
     {
+        if (generation != ActiveClipboardSyncGeneration) return;
         Console.WriteLine($"[clip] detected local {content.type} change ({content.content.Length} chars/bytes-base64) - {connectionsByDeviceId.Count} peer(s) connected");
         if (ContentPrint.Of(content.content, content.type) is string print && historyAccess.NewestHas(new[] { print }, 1))
         {
             Console.WriteLine($"[clip] that {content.type} is the newest item already - not sent again");
             return;
         }
-        PublishLocal(content.content, content.type, content.sourceFilePath, "copied", content.type == "image" ? content.name : null);
+        PublishLocal(content.content, content.type, content.sourceFilePath, "copied",
+            content.type == "image" ? content.name : null, generation);
     }
 
     // Files copied in Explorer (see ClipboardSync.FilesCopied): each goes out
     // as if copied alone, except those the newest items already have - as
     // many newest as files were copied, from before any of them went out.
-    private void OnLocalFilesCopied(IReadOnlyList<(string content, string path)> files)
+    private void OnLocalFilesCopied(IReadOnlyList<(string content, string path)> files, int generation)
     {
+        if (generation != ActiveClipboardSyncGeneration) return;
         Console.WriteLine($"[clip] detected {files.Count} local file(s) copied - {connectionsByDeviceId.Count} peer(s) connected");
         foreach (var file in SkipNewest(files, file => ContentPrint.Of(file.content, "file")))
         {
-            PublishLocal(file.content, "file", file.path, "copied");
+            PublishLocal(file.content, "file", file.path, "copied", automaticGeneration: generation);
         }
     }
 
@@ -671,7 +700,8 @@ public sealed partial class ClipLinkEngine : IDisposable
     // behind it, on every device, for good. name: a picture's original name
     // (see ImageName), carried as the entry's unsigned Name; only for an
     // image.
-    private void PublishLocal(string content, string type, string? sourceFilePath, string how, string? name = null)
+    private void PublishLocal(string content, string type, string? sourceFilePath, string how, string? name = null,
+        int? automaticGeneration = null)
     {
         FilePayload? payload = null;
         if (type == "file" && sourceFilePath != null)
@@ -689,6 +719,8 @@ public sealed partial class ClipLinkEngine : IDisposable
                 return;
             }
         }
+
+        if (automaticGeneration.HasValue && automaticGeneration != ActiveClipboardSyncGeneration) return;
 
         var entry = new ClipboardEntry(content, type, ownId, DateTime.UtcNow, Name: type == "image" ? ImageName.Clean(name) : null);
         var signedEntry = SigningService.Sign(entry, identity);

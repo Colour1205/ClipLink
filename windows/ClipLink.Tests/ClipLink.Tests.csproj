@@ -54,6 +54,7 @@
     <Compile Include="..\ClipLink\Engine\Networking\Wire.cs" Link="Engine\Wire.cs" />
     <Compile Include="..\ClipLink\Engine\Networking\FileChunkMessage.cs" Link="Engine\FileChunkMessage.cs" />
     <Compile Include="..\ClipLink\BatchGrouping.cs" Link="BatchGrouping.cs" />
+    <Compile Include="..\ClipLink\ClipboardShortcut.cs" Link="ClipboardShortcut.cs" />
     <Compile Include="..\ClipLink\ZoomMorph.cs" Link="ZoomMorph.cs" />
   </ItemGroup>
 

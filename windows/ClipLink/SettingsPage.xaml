@@ -87,6 +87,20 @@
 
                     <!-- General -->
                     <TextBlock Text="General" Style="{StaticResource SectionHeader}" />
+                    <controls:SettingsCard x:Name="ClipboardShortcutCard" Header="Clipboard sync shortcut">
+                        <controls:SettingsCard.HeaderIcon>
+                            <SymbolIcon Symbol="Keyboard" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <Grid>
+                            <Button x:Name="ClipboardShortcutButton" Click="ChangeClipboardShortcut_Click"
+                                    LostFocus="ClipboardShortcutButton_LostFocus">
+                                <TextBlock x:Name="ClipboardShortcutText" />
+                            </Button>
+                            <Border x:Name="ClipboardShortcutOutline" BorderThickness="1" CornerRadius="4"
+                                    BorderBrush="{ThemeResource TextFillColorPrimaryBrush}"
+                                    Visibility="Collapsed" IsHitTestVisible="False" />
+                        </Grid>
+                    </controls:SettingsCard>
                     <controls:SettingsCard Header="Start ClipLink when I sign in"
                                            Description="It starts in the notification area, so your devices stay in sync.">
                         <controls:SettingsCard.HeaderIcon>

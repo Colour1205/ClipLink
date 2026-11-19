@@ -17,6 +17,7 @@ public partial class App : Application
     private AppSettings settings = new();
     private EngineHost? host;
     private Tray? tray;
+    private ClipboardSyncHotkey? clipboardSyncHotkey;
     private MainWindow? window;
     private ShareBatcher? shares;
     private UpdateService? updates;
@@ -70,6 +71,7 @@ public partial class App : Application
         _ = InstancePipe.ListenAsync(options.Label, message => dispatcher.TryEnqueue(() => OnInstanceMessage(message)), quitting.Token);
 
         host = new EngineHost(dispatcher);
+        host.SetAutomaticClipboardSyncEnabled(settings.AutomaticClipboardSyncEnabled);
         bool running;
         try
         {
@@ -86,7 +88,15 @@ public partial class App : Application
             return;
         }
 
-        tray = new Tray(options.IsDefaultLabel ? "ClipLink" : $"ClipLink ({options.Label})", ShowMainWindow, Quit);
+        tray = new Tray(options.IsDefaultLabel ? "ClipLink" : $"ClipLink ({options.Label})",
+            ShowMainWindow, Quit);
+        clipboardSyncHotkey = ClipboardSyncHotkey.TryRegister(settings.ClipboardSyncShortcut, ToggleAutomaticClipboardSync, out _);
+        host.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName is nameof(EngineHost.AutomaticClipboardSyncEnabled) or nameof(EngineHost.Status))
+                RefreshTraySyncState();
+        };
+        RefreshTraySyncState();
         SetUpSignInStartup();
         SetUpShellIntegration();
         SystemEvents.SessionEnding += (_, e) => dispatcher.TryEnqueue(Quit); // signing out or shutting down
@@ -110,6 +120,43 @@ public partial class App : Application
 
         // Its first look at GitHub waits a few seconds: not part of starting up.
         updates.Start();
+    }
+
+    private void ToggleAutomaticClipboardSync()
+    {
+        if (IsQuitting || host == null) return;
+
+        settings.AutomaticClipboardSyncEnabled = !host.AutomaticClipboardSyncEnabled;
+        host.SetAutomaticClipboardSyncEnabled(settings.AutomaticClipboardSyncEnabled);
+        settings.Save();
+    }
+
+    internal bool ClipboardSyncShortcutRegistered => clipboardSyncHotkey != null;
+
+    internal bool TrySetClipboardSyncShortcut(ClipboardShortcut shortcut, out bool conflict)
+    {
+        conflict = false;
+        if (IsQuitting || !shortcut.IsSupported()) return false;
+        if (clipboardSyncHotkey != null && settings.ClipboardSyncShortcut == shortcut) return true;
+
+        // The old registration stays available until Windows accepts the new one.
+        var replacement = ClipboardSyncHotkey.TryRegister(shortcut, ToggleAutomaticClipboardSync, out conflict);
+        if (replacement == null) return false;
+
+        clipboardSyncHotkey?.Dispose();
+        clipboardSyncHotkey = replacement;
+        settings.ClipboardSyncShortcut = shortcut;
+        settings.Save();
+        RefreshTraySyncState();
+        return true;
+    }
+
+    private void RefreshTraySyncState()
+    {
+        if (IsQuitting || host == null) return;
+
+        tray?.SetSyncState(host.AutomaticClipboardSyncEnabled, host.Status.State == EngineState.Running && !options.NoClipboard,
+            ClipboardSyncShortcutRegistered ? settings.ClipboardSyncShortcut.ToString() : null);
     }
 
     // On by default the first time the real ClipLink runs; after that it's
@@ -279,6 +326,7 @@ public partial class App : Application
         quitting.Cancel();
         shares?.Dispose();
         updates?.Dispose();
+        clipboardSyncHotkey?.Dispose();
         // First, so peers see this device go right away.
         host?.Stop();
         // Or its icon lingers in the tray until the mouse passes over it.
