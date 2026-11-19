@@ -4,17 +4,19 @@ import SwiftUI
 /// handshakes and the pairing code). Like the Tailscale IP, it edits a local
 /// draft and publishes it only on Save.
 struct MeDeviceNameView: View {
-    @EnvironmentObject private var model: AppModel
+    /// Not watched: only the Me fields are (see MeStore).
+    private var model: AppModel { AppModel.shared }
+    @ObservedObject private var me = AppModel.shared.me
     @EnvironmentObject private var settings: AppSettings
 
     @State private var draft = ""
     @State private var loaded = false
     @FocusState private var fieldFocused: Bool
 
-    private var saved: String { model.snapshot.deviceNameOverride }
+    private var saved: String { me.value.deviceNameOverride }
     /// The OS default, used while nothing is saved.
     private var defaultName: String {
-        model.snapshot.systemDeviceName.isEmpty ? ThisDeviceNoun.current : model.snapshot.systemDeviceName
+        me.value.systemDeviceName.isEmpty ? ThisDeviceNoun.current : me.value.systemDeviceName
     }
     /// The draft as it would be stored: trimmed, capped at 64 characters.
     private var cleanedDraft: String { DeviceName.clean(draft) ?? "" }

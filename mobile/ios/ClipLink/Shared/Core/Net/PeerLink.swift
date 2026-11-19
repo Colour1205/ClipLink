@@ -540,12 +540,12 @@ final class PeerLink {
     private func sendNow(_ plaintext: String, completion: ((Bool) -> Void)?) {
         // Never while held: a pairing candidate must receive nothing until the
         // user accepts - HarmonyOS reads any byte as "the other side accepted".
-        guard phase == .live, let cipher, let sealed = try? cipher.seal(plaintext) else {
+        guard phase == .live, let cipher, var data = try? cipher.sealData(plaintext) else {
             completion?(false)
             return
         }
-        sentNonces?.insert(String(sealed.prefix(Self.nonceChars)))
-        var data = Data(sealed.utf8)
+        // Base64 is ASCII: these bytes are the line's text, unchanged.
+        sentNonces?.insert(String(decoding: data.prefix(Self.nonceChars), as: UTF8.self))
         data.append(0x0A)
         connection.send(content: data, completion: .contentProcessed { error in
             completion?(error == nil)

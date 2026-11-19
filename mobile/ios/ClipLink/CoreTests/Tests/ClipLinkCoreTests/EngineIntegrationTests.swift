@@ -1571,6 +1571,43 @@ final class EngineIntegrationTests: XCTestCase {
         XCTAssertEqual(a.engine.queue.sync { a.engine.badCopies[FileStore.key(payload.fileHash)]?[peer.identity.publicKeyBase64] }, SyncEngine.maxBadCopies)
     }
 
+    /// A file's hash is worked out as its bytes are written: a stream the
+    /// sender restarts part way (chunk 0 again) starts that hash over with the
+    /// file, so the file arrives and verifies as if sent once.
+    func testARestartedStreamStillVerifies() throws {
+        let a = startedNode()
+        let peer = try connect(a, protocolVersion: nil)
+        waitRegistered(a)
+        let parts = [Data("the real ".utf8), Data("bytes, in two chunks".utf8)]
+        let real = parts[0] + parts[1]
+        let payload = FilePayload(fileName: "notes.txt", fileHash: ContentHash.sha256Hex(real).uppercased(), fileSize: Int64(real.count))
+        let entry = try EntrySigning.sign(content: payload.jsonString(), type: Wire.EntryType.file, identity: peer.identity)
+        func chunk(_ index: Int, _ data: Data, last: Bool) -> String {
+            let message = FileChunkMessage(fileHash: payload.fileHash, chunkIndex: index, isLast: last, dataBase64: data.base64EncodedString())
+            return Envelope(type: Wire.MessageType.fileChunk, payload: message.jsonString()).jsonString()
+        }
+        let inbox = peer.inbox
+        var answered = false
+        peer.link.onMessage = { link, text in
+            guard let envelope = Envelope.parse(text) else { return }
+            inbox.add(envelope)
+            guard envelope.type == Wire.MessageType.fileRequest, !answered else { return }
+            answered = true
+            // Two chunks of other bytes, then the whole stream from the start.
+            link.send(chunk(0, Data("stale start".utf8), last: false))
+            link.send(chunk(1, Data("stale middle".utf8), last: false))
+            link.send(chunk(0, parts[0], last: false))
+            link.send(chunk(1, parts[1], last: true))
+        }
+        peer.send(Wire.MessageType.entry, entry.jsonString())
+
+        wait("the file arrived") { a.engine.files.exists(payload.fileHash) }
+        let stored = try XCTUnwrap(a.engine.files.url(for: FileStore.key(payload.fileHash)))
+        XCTAssertEqual(try Data(contentsOf: stored), real)
+        XCTAssertEqual(inbox.messages(ofType: Wire.MessageType.fileRequest).count, 1, "never asked again")
+        XCTAssertNil(a.engine.queue.sync { a.engine.badCopies[FileStore.key(payload.fileHash)] })
+    }
+
     func testTheHandshakeSaysWhichSyncVersionEachSideSpeaks() throws {
         let a = startedNode()
         let newer = try connect(a, protocolVersion: Wire.protocolVersion)

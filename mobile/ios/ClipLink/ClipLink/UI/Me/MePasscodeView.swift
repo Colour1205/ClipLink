@@ -4,7 +4,11 @@ import SwiftUI
 /// same passcode trust each other without a QR code. It can be set, changed
 /// or cleared at any time; the next beacon and handshake use the new state.
 struct MePasscodeView: View {
-    @EnvironmentObject private var model: AppModel
+    /// Not watched: only whether a passcode is set (MeStore) and whether one
+    /// is being set (ProgressStore) are.
+    private var model: AppModel { AppModel.shared }
+    @ObservedObject private var me = AppModel.shared.me
+    @ObservedObject private var progress = AppModel.shared.progress
     @EnvironmentObject private var settings: AppSettings
 
     @State private var passcode = ""
@@ -12,12 +16,12 @@ struct MePasscodeView: View {
     @State private var confirmingClear = false
     @FocusState private var fieldFocused: Bool
 
-    private var isSet: Bool { model.snapshot.hasPassphrase }
+    private var isSet: Bool { me.value.hasPassphrase }
     private var showsStatus: Bool { isSet && !changing }
     /// The only rule, the same on every platform: not blank once trimmed
     /// (the engine derives the key from the trimmed passcode).
     private var isEntered: Bool { !passcode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    private var canSubmit: Bool { isEntered && !model.passcodeBusy }
+    private var canSubmit: Bool { isEntered && !progress.value.passcodeBusy }
 
     var body: some View {
         List {
@@ -65,14 +69,14 @@ struct MePasscodeView: View {
                 }
                 // Both wait out a set that's still deriving (the user left
                 // and came back): it would land after a clear and undo it.
-                .disabled(model.passcodeBusy)
+                .disabled(progress.value.passcodeBusy)
 
                 Button(role: .destructive) {
                     confirmingClear = true
                 } label: {
                     Text("Clear Passcode")
                 }
-                .disabled(model.passcodeBusy)
+                .disabled(progress.value.passcodeBusy)
                 .confirmationDialog("Clear passcode?", isPresented: $confirmingClear, titleVisibility: .visible) {
                     Button("Clear Passcode", role: .destructive) {
                         model.clearPassphrase()
@@ -99,12 +103,12 @@ struct MePasscodeView: View {
                     .disableAutocorrection(true)
                     .submitLabel(.done)
                     .onSubmit(submit)
-                    .disabled(model.passcodeBusy)
+                    .disabled(progress.value.passcodeBusy)
                     .accessibilityLabel("Passcode")
 
                 Button(action: submit) {
                     HStack(spacing: 8) {
-                        if model.passcodeBusy {
+                        if progress.value.passcodeBusy {
                             ProgressView()
                             Text("Setting…")
                         } else {
@@ -121,13 +125,13 @@ struct MePasscodeView: View {
                         fieldFocused = false
                         changing = false
                     }
-                    .disabled(model.passcodeBusy)
+                    .disabled(progress.value.passcodeBusy)
                 }
             }
             .meRow(transparency: settings.cardTransparency)
         } footer: {
             VStack(alignment: .leading, spacing: 6) {
-                if model.passcodeBusy {
+                if progress.value.passcodeBusy {
                     Text("Deriving the key takes a moment.")
                 }
                 Text("Your devices announce a proof of the passcode on the network, so a longer passcode is harder for anyone nearby to guess.")

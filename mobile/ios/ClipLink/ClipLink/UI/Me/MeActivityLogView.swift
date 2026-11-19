@@ -2,11 +2,13 @@ import SwiftUI
 
 /// Me › Activity Log: the engine's recent events, newest first.
 struct MeActivityLogView: View {
-    @EnvironmentObject private var model: AppModel
+    /// Not watched: only the log is (see LogStore).
+    private var model: AppModel { AppModel.shared }
+    @ObservedObject private var log = AppModel.shared.log
     @EnvironmentObject private var settings: AppSettings
 
     /// The engine already keeps the log newest first.
-    private var lines: [LogLine] { model.snapshot.log }
+    private var lines: [LogLine] { log.lines }
 
     var body: some View {
         content

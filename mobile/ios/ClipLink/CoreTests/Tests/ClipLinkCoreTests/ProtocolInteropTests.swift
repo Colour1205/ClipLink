@@ -135,6 +135,27 @@ final class ProtocolInteropTests: XCTestCase {
         XCTAssertFalse(line.contains("\n"))
     }
 
+    /// What PeerLink writes (sealData) is the very text `seal` returns, as bytes.
+    func testSealDataIsTheSealedTextsBytes() throws {
+        let keyBytes = Data((0..<32).map { UInt8($0) })
+        let cipher = SessionCipher(keyBytes: keyBytes)
+        // Base64 text vs base64 bytes, for every padding case and a long line
+        // (Foundation's String form never wraps lines unless asked).
+        for count in [0, 1, 2, 3, 4, 57, 76, 1000, 1 << 20] {
+            let packed = Data((0..<count).map { UInt8(truncatingIfNeeded: $0 &* 31) })
+            XCTAssertEqual(packed.base64EncodedData(), Data(packed.base64EncodedString().utf8))
+        }
+        let text = "{\"Type\":\"ping\",\"Payload\":\"é\"}" + String(repeating: "x", count: 5000)
+        let line = try cipher.sealData(text)
+        XCTAssertFalse(line.contains(0x0A))
+        XCTAssertFalse(line.contains(0x0D))
+        XCTAssertEqual(try cipher.open(line), text)
+        let packed = Data(base64Encoded: line)!
+        XCTAssertEqual(packed.count, 12 + 16 + Data(text.utf8).count)
+        let box = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: packed.prefix(12)), ciphertext: packed.suffix(from: 28), tag: packed.subdata(in: 12..<28))
+        XCTAssertEqual(String(data: try AES.GCM.open(box, using: SymmetricKey(data: keyBytes)), encoding: .utf8), text)
+    }
+
     func testSignableBytesAreTheJoinedTextInUTF8() {
         let data = EntrySigning.signableData(content: "a:é\r\n😀", type: "text", deviceId: "MFkw", timestamp: "2026-09-26T12:34:56.1234567Z")
         XCTAssertEqual(data, Data("a:é\r\n😀:text:MFkw:2026-09-26T12:34:56.1234567Z".utf8))
