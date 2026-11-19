@@ -156,12 +156,23 @@ public struct SessionCipher {
     public init(keyBytes: Data) { self.key = SymmetricKey(data: keyBytes) }
 
     public func seal(_ plaintext: String) throws -> String {
+        try pack(plaintext).base64EncodedString()
+    }
+
+    /// `seal` as the base64 text's ASCII bytes, ready to write: the same
+    /// characters, without going through a String (a line can be megabytes,
+    /// and turning that String back into bytes copied it once more).
+    public func sealData(_ plaintext: String) throws -> Data {
+        try pack(plaintext).base64EncodedData()
+    }
+
+    private func pack(_ plaintext: String) throws -> Data {
         let box = try AES.GCM.seal(Data(plaintext.utf8), using: key, nonce: AES.GCM.Nonce())
         var packed = Data(capacity: Self.nonceSize + Self.tagSize + box.ciphertext.count)
         box.nonce.withUnsafeBytes { packed.append(contentsOf: $0) }
         packed.append(box.tag)
         packed.append(box.ciphertext)
-        return packed.base64EncodedString()
+        return packed
     }
 
     /// Throws on corrupt, forged or truncated input - the caller treats that
@@ -266,13 +277,16 @@ public enum ContentHash {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    /// Streams the file - these can be up to 1 GB.
+    /// Streams the file - these can be up to 1 GB. Each chunk is read in its
+    /// own autorelease pool: FileHandle hands back autoreleased buffers, and
+    /// off the main thread nothing drains them until the loop ends, so a big
+    /// file would otherwise sit in memory whole until it is hashed.
     public static func sha256Hex(fileAt url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
         while true {
-            let chunk = try handle.read(upToCount: 1 << 20) ?? Data()
+            let chunk = try autoreleasepool { try handle.read(upToCount: 1 << 20) } ?? Data()
             if chunk.isEmpty { break }
             hasher.update(data: chunk)
         }

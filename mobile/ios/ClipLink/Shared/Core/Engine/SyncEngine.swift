@@ -1263,6 +1263,11 @@ final class IncomingTransfer {
     var nextIndex = 0
     var received: Int64 = 0
     var lastProgressPublish = Date.distantPast
+    /// SHA-256 of every byte written so far, in order. A transfer always
+    /// starts at chunk 0 in a fresh object over a fresh, empty file (a
+    /// restarted stream is a new IncomingTransfer, see handleFileChunk), so
+    /// this is the hash of the file's whole content.
+    private var hasher = SHA256()
 
     init?(wireHash: String, fileName: String, total: Int64, owner: ObjectIdentifier, peerId: String, url: URL) {
         try? FileManager.default.removeItem(at: url)
@@ -1276,6 +1281,17 @@ final class IncomingTransfer {
         self.peerId = peerId
         self.url = url
         self.handle = handle
+    }
+
+    /// Appends `bytes` to the file, and to the hash once they are written.
+    func write(_ bytes: Data) throws {
+        try handle.write(contentsOf: bytes)
+        hasher.update(data: bytes)
+    }
+
+    /// Lowercase hex, as ContentHash.sha256Hex(fileAt:) gives for the file.
+    func writtenHash() -> String {
+        hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     func abort() {
