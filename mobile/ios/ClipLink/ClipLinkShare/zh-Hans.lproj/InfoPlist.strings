@@ -1,0 +1,7 @@
+/* ClipLink Share extension: Info.plist strings in Simplified Chinese. The
+   English originals are in ClipLinkShare-Info.plist. */
+
+"CFBundleDisplayName" = "ClipLink";
+
+/* Local Network permission prompt (shown if the extension asks first). */
+"NSLocalNetworkUsageDescription" = "ClipLink 会把你分享的内容发送到此 Wi-Fi 网络中你已配对的电脑和手机。";
