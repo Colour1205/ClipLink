@@ -5,6 +5,8 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace ClipLink;
 
+internal enum TraySyncState { Syncing, Paused, Unavailable }
+
 // The notification-area icon: a left click opens the window, a right click
 // shows a small Fluent menu with Open, the sync switch and Quit. It carries
 // notifications (what a share did, a sync that can't start).
@@ -12,8 +14,9 @@ internal sealed class Tray : IDisposable
 {
     private readonly TaskbarIcon icon;
     private readonly ToggleMenuFlyoutItem syncItem;
-    private readonly System.Drawing.Icon syncingIcon = AppIcon.Tray(syncing: true);
-    private readonly System.Drawing.Icon pausedIcon = AppIcon.Tray(syncing: false);
+    private readonly System.Drawing.Icon syncingIcon = AppIcon.Tray(TraySyncState.Syncing);
+    private readonly System.Drawing.Icon pausedIcon = AppIcon.Tray(TraySyncState.Paused);
+    private readonly System.Drawing.Icon unavailableIcon = AppIcon.Tray(TraySyncState.Unavailable);
     private readonly string name;
 
     public Tray(string name, Action open, Action toggleSync, Action quit)
@@ -37,7 +40,6 @@ internal sealed class Tray : IDisposable
         icon = new TaskbarIcon
         {
             ToolTipText = name,
-            Icon = pausedIcon,
             // The menu is a real WinUI flyout (in a window of its own), so it
             // follows the theme and looks like the rest of the app.
             ContextMenuMode = ContextMenuMode.SecondWindow,
@@ -47,14 +49,20 @@ internal sealed class Tray : IDisposable
         };
         // false: no Efficiency Mode - the engine syncs while the window is
         // hidden, and Windows must not throttle it.
+        icon.UpdateIcon(unavailableIcon);
         icon.ForceCreate(false);
     }
 
     public void SetSyncState(bool enabled, bool available, string? shortcut)
     {
         syncItem.IsChecked = enabled;
-        string state = !enabled ? "Clipboard sync paused" : available ? "Clipboard sync on" : "Clipboard sync unavailable";
-        icon.Icon = enabled && available ? syncingIcon : pausedIcon;
+        var (badge, state) = !enabled ? (pausedIcon, "Clipboard sync paused")
+            : available ? (syncingIcon, "Clipboard sync on")
+            : (unavailableIcon, "Clipboard sync unavailable");
+        // Setting TaskbarIcon.Icon disposes the previous icon. Keep ownership of
+        // these badges so we can switch back to them on the next toggle.
+        if (!icon.UpdateIcon(badge))
+            Console.WriteLine($"[tray] couldn't update the icon: {state}");
         icon.ToolTipText = $"{name} — {state} ({shortcut ?? "Shortcut unavailable"})";
     }
 
@@ -71,6 +79,7 @@ internal sealed class Tray : IDisposable
         icon.Dispose();
         syncingIcon.Dispose();
         pausedIcon.Dispose();
+        unavailableIcon.Dispose();
     }
 
     private sealed class Command(Action action) : ICommand
