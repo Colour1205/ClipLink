@@ -271,8 +271,11 @@ struct SyncedRowView: View {
             .frame(maxWidth: .infinity)
             .frame(height: stripHeight(stack), alignment: .top)
             .clipped()
-            // The strip's top edge 1 pt up, under the card's bottom edge.
-            .alignmentGuide(.bottom) { dimensions in dimensions[.top] + 1 }
+            // The background is bottom-aligned, so the strip starts out inside
+            // the card; moving it down by its own height puts its top edge 1 pt
+            // up, under the card's bottom edge. (An alignment guide did this
+            // before, and iOS 16 drew the strip above the card instead.)
+            .offset(y: stripHeight(stack) - 1)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
             .transition(.opacity)

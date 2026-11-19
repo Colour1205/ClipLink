@@ -180,7 +180,7 @@ struct SyncedCard: View {
         HStack(spacing: 6) {
             KindChip(kind: isPictureCard ? .image : item.kind, size: 20)
             HStack(spacing: 0) {
-                Text(TimeLabel.short(item.date))
+                Text(compact ? TimeLabel.compact(item.date) : TimeLabel.short(item.date))
                     .lineLimit(1)
                     .fixedSize()
                 if !item.isOwn {
