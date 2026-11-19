@@ -35,7 +35,7 @@ internal static class AppIcon
         float corner = size - badge;
         using var fill = new SolidBrush(state switch
         {
-            TraySyncState.Syncing => Color.FromArgb(16, 110, 72),
+            TraySyncState.Syncing => Color.FromArgb(0, 103, 192),
             TraySyncState.Paused => Color.FromArgb(105, 75, 25),
             _ => Color.FromArgb(76, 82, 92),
         });

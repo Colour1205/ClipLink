@@ -75,8 +75,8 @@ Quit ClipLink first if it's running from `windows\dist`: its files are locked.
   ClipLink remembers the setting after a restart. To change the shortcut,
   click the displayed combination under **Settings > General > Clipboard sync shortcut**
   and press the new combination. If it is already in use, ClipLink keeps the previous
-  shortcut and lets you try again. Press **Esc** to cancel. A check mark on the tray
-  icon means auto-sync is on. The pause badge means it is paused, and a gray
+  shortcut and lets you try again. Press **Esc** to cancel. A blue badge with a white
+  check means auto-sync is on. The pause badge means it is paused, and a gray
   dash means it is unavailable. If the icon is under the taskbar's overflow
   arrow, drag it into the visible notification area. If another app already
   uses the shortcut, the tray menu still works.
