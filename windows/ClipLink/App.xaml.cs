@@ -89,7 +89,7 @@ public partial class App : Application
         }
 
         tray = new Tray(options.IsDefaultLabel ? "ClipLink" : $"ClipLink ({options.Label})",
-            ShowMainWindow, ToggleAutomaticClipboardSync, Quit);
+            ShowMainWindow, Quit);
         clipboardSyncHotkey = ClipboardSyncHotkey.TryRegister(settings.ClipboardSyncShortcut, ToggleAutomaticClipboardSync, out _);
         host.PropertyChanged += (_, e) =>
         {

@@ -8,32 +8,43 @@ namespace ClipLink;
 internal enum TraySyncState { Syncing, Paused, Unavailable }
 
 // The notification-area icon: a left click opens the window, a right click
-// shows a native Windows menu with Open, the sync switch and Quit. It carries
+// shows a menu with Open and Quit. It carries
 // notifications (what a share did, a sync that can't start).
 internal sealed class Tray : IDisposable
 {
+    // H.NotifyIcon measures each row outside the presenter to size its popup.
+    // Allow room for the icon column as well as the label.
+    private const double MenuItemMinWidth = 168;
+
     private readonly TaskbarIcon icon;
-    private readonly ToggleMenuFlyoutItem syncItem;
     private readonly System.Drawing.Icon syncingIcon = AppIcon.Tray(TraySyncState.Syncing);
     private readonly System.Drawing.Icon pausedIcon = AppIcon.Tray(TraySyncState.Paused);
     private readonly System.Drawing.Icon unavailableIcon = AppIcon.Tray(TraySyncState.Unavailable);
     private readonly string name;
 
-    public Tray(string name, Action open, Action toggleSync, Action quit)
+    public Tray(string name, Action open, Action quit)
     {
         this.name = name;
         var menu = new MenuFlyout();
-        menu.Items.Add(new MenuFlyoutItem { Text = "Open", Command = new Command(open) });
-        syncItem = new ToggleMenuFlyoutItem { Text = "Auto-sync clipboard", Command = new Command(toggleSync) };
-        menu.Items.Add(syncItem);
-        menu.Items.Add(new MenuFlyoutSeparator());
-        menu.Items.Add(new MenuFlyoutItem { Text = "Quit", Command = new Command(quit) });
+        menu.Items.Add(new MenuFlyoutItem
+        {
+            Text = "Open",
+            Icon = new SymbolIcon(Symbol.OpenWith),
+            MinWidth = MenuItemMinWidth,
+            Command = new Command(open),
+        });
+        menu.Items.Add(new MenuFlyoutItem
+        {
+            Text = "Quit",
+            Icon = new SymbolIcon(Symbol.Cancel),
+            MinWidth = MenuItemMinWidth,
+            Command = new Command(quit),
+        });
 
         icon = new TaskbarIcon
         {
             ToolTipText = name,
-            // Let Windows size the menu from the labels at the taskbar's DPI.
-            ContextMenuMode = ContextMenuMode.PopupMenu,
+            ContextMenuMode = ContextMenuMode.SecondWindow,
             ContextFlyout = menu,
             NoLeftClickDelay = true,
             LeftClickCommand = new Command(open),
@@ -46,7 +57,6 @@ internal sealed class Tray : IDisposable
 
     public void SetSyncState(bool enabled, bool available, string? shortcut)
     {
-        syncItem.IsChecked = enabled;
         var (badge, state) = !enabled ? (pausedIcon, "Clipboard sync paused")
             : available ? (syncingIcon, "Clipboard sync on")
             : (unavailableIcon, "Clipboard sync unavailable");
