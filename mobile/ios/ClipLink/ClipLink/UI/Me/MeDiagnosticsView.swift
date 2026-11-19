@@ -82,7 +82,7 @@ struct MeDiagnosticsView: View {
         Section {
             Group {
                 MeDetailRow(title: "Status", value: snapshot.network.running ? "Running" : "Stopped")
-                MeDetailRow(title: "Listening", value: snapshot.network.listening ? String(localized: "Port \(Wire.port)") : "Not listening")
+                MeDetailRow(title: "Listening", value: snapshot.network.listening ? String(localized: "Port \(String(Wire.port))") : "Not listening")
                 MeDetailRow(title: "Discovery", value: discovery)
                 MeDetailRow(title: "Local Network", value: localNetwork)
                 MeDetailRow(title: "Wi-Fi Address", value: snapshot.network.lanAddress ?? "Not on Wi-Fi", monospaced: snapshot.network.lanAddress != nil)

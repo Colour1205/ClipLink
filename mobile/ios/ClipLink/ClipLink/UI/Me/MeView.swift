@@ -424,7 +424,7 @@ struct MeView: View {
                     title: "Listening",
                     systemImage: "antenna.radiowaves.left.and.right",
                     tint: .orange,
-                    value: network.listening ? String(localized: "Port \(Wire.port)") : "Not listening"
+                    value: network.listening ? String(localized: "Port \(String(Wire.port))") : "Not listening"
                 )
                 MeValueRow(title: "Wi-Fi Address", systemImage: "wifi", tint: .blue, value: network.lanAddress ?? "Not on Wi-Fi")
                 // Progress shows in the row itself - no toast.

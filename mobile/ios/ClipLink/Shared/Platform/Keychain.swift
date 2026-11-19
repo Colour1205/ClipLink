@@ -180,7 +180,7 @@ final class KeychainIdentity: IdentitySigner {
 
         var description: String {
             switch self {
-            case .keychainUnavailable(let s): return String(localized: "The Keychain isn't available yet (\(Int(s))). Unlock your device — ClipLink starts as soon as it can.")
+            case .keychainUnavailable(let s): return String(localized: "The Keychain isn't available yet (\(String(s))). Unlock your device — ClipLink starts as soon as it can.")
             case .corrupt: return String(localized: "This device's identity key couldn't be read.")
             case .couldNotSave: return String(localized: "Couldn't save this device's identity key.")
             }
