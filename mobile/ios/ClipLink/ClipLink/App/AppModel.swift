@@ -379,6 +379,35 @@ final class AppModel: ObservableObject {
         hint.set(settings.noticeNewCopies && clipboard.hasUnseenChange)
     }
 
+    /// When the engine's updates last looked at the pasteboard, and whether a
+    /// look is already set for the end of the current second.
+    private var lastHintPoll: UInt64 = 0
+    private var hintPollScheduled = false
+    private static let hintPollInterval: UInt64 = 1_000_000_000
+
+    /// `refreshClipboardHint` for the engine's updates, which are also how a
+    /// copy in another app is noticed (split view, Universal Clipboard). They
+    /// come several times a second while busy, and each read the pasteboard
+    /// on the main thread: now at most once a second, and an update inside
+    /// that second still gets its look at the end of it, so none is missed.
+    private func pollClipboardHint() {
+        guard !hintPollScheduled else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        if now &- lastHintPoll >= Self.hintPollInterval {
+            lastHintPoll = now
+            refreshClipboardHint()
+            return
+        }
+        hintPollScheduled = true
+        let due = DispatchTime(uptimeNanoseconds: lastHintPoll + Self.hintPollInterval)
+        DispatchQueue.main.asyncAfter(deadline: due) { [weak self] in
+            guard let self else { return }
+            self.hintPollScheduled = false
+            self.lastHintPoll = DispatchTime.now().uptimeNanoseconds
+            self.refreshClipboardHint()
+        }
+    }
+
     func dismissClipboardHint() {
         clipboard.markSeen()
         refreshClipboardHint()
@@ -1130,7 +1159,7 @@ extension AppModel: SyncEngineDelegate {
             // Unchanged (a beacon from a device whose row says nothing new):
             // nothing that watches the model is redrawn.
             if self.snapshot != snapshot { self.snapshot = snapshot }
-            self.refreshClipboardHint()
+            self.pollClipboardHint()
             self.requestsChanged(snapshot.pairingRequests)
         }
     }
