@@ -126,7 +126,7 @@ struct SyncedCard: View {
 
     private func textBody(lines: Int) -> some View {
         let preview = Self.displayText(item.entry.content, compact: compact)
-        return Text(preview.isEmpty ? "Empty text" : preview)
+        return Text(preview.isEmpty ? String(localized: "Empty text") : preview)
             .font(compact ? .subheadline : .body)
             .foregroundColor(preview.isEmpty ? .secondary : .primary)
             .lineLimit(lines)
@@ -135,7 +135,7 @@ struct SyncedCard: View {
     }
 
     private var linkChip: some View {
-        let host = SyncedItemActions.linkURL(item)?.host ?? "Link"
+        let host = SyncedItemActions.linkURL(item)?.host ?? String(localized: "Link")
         return HStack(spacing: 4) {
             Image(systemName: "link")
             Text(host).lineLimit(1)
@@ -148,7 +148,7 @@ struct SyncedCard: View {
     }
 
     private func fileBody(transfers: [String: TransferProgress]) -> some View {
-        let name = item.filePayload?.fileName ?? "File"
+        let name = item.filePayload?.fileName ?? String(localized: "File")
         let fraction = SyncedItemActions.transferFraction(item, transfers: transfers)
         return HStack(alignment: .center, spacing: 10) {
             SyncedFileTile(fileName: name, size: compact ? 36 : 44)

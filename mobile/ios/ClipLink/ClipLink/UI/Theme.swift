@@ -8,7 +8,7 @@ enum AccentTheme: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    var name: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
+    var name: String { NSLocalizedString(rawValue.prefix(1).uppercased() + rawValue.dropFirst(), comment: "Accent theme") }
 
     /// Tint: the HarmonyOS palette, the dark variants lightened to read well as
     /// text and glyphs on dark backgrounds.
@@ -195,7 +195,7 @@ enum TimeLabel {
         guard let date else { return "" }
         let calendar = Calendar.current
         if calendar.isDateInToday(date) { return time.string(from: date) }
-        if calendar.isDateInYesterday(date) { return "Yesterday \(time.string(from: date))" }
+        if calendar.isDateInYesterday(date) { return String(localized: "Yesterday \(time.string(from: date))") }
         return dayTime.string(from: date)
     }
 
@@ -207,7 +207,7 @@ enum TimeLabel {
         guard let date else { return "" }
         let calendar = Calendar.current
         if calendar.isDateInToday(date) { return time.string(from: date) }
-        if calendar.isDateInYesterday(date) { return "Yesterday" }
+        if calendar.isDateInYesterday(date) { return String(localized: "Yesterday") }
         return day.string(from: date)
     }
 

@@ -69,7 +69,7 @@ struct MeView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("This iPhone")
                             .font(.title3.weight(.semibold))
-                        Text(ownId.isEmpty ? "Generating identity…" : DeviceLabel.short(ownId))
+                        Text(ownId.isEmpty ? String(localized: "Generating identity…") : DeviceLabel.short(ownId))
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                     }
@@ -81,7 +81,7 @@ struct MeView: View {
                     HStack(spacing: 12) {
                         MeRowLabel(title: "Device Name", systemImage: "textformat", tint: .orange)
                         Spacer(minLength: 8)
-                        Text(me.value.deviceName.isEmpty ? "Not set" : me.value.deviceName)
+                        Text(me.value.deviceName.isEmpty ? String(localized: "Not set") : me.value.deviceName)
                             .foregroundColor(.secondary)
                             .lineLimit(1)
                     }
@@ -109,13 +109,13 @@ struct MeView: View {
                     Text("Device ID")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
-                    Text(ownId.isEmpty ? "Generating identity…" : ownId)
+                    Text(ownId.isEmpty ? String(localized: "Generating identity…") : ownId)
                         .font(.system(.caption, design: .monospaced))
                         .lineLimit(4)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                         .accessibilityLabel("Device ID")
-                        .accessibilityValue(ownId.isEmpty ? "Generating identity" : ownId)
+                        .accessibilityValue(ownId.isEmpty ? String(localized: "Generating identity") : ownId)
                     if !me.value.localAddresses.isEmpty {
                         Text(me.value.localAddresses.joined(separator: "  •  "))
                             .font(.footnote.monospacedDigit())
@@ -390,7 +390,7 @@ struct MeView: View {
                     HStack(spacing: 12) {
                         MeRowLabel(title: "Tailscale IP", systemImage: "globe", tint: .indigo)
                         Spacer(minLength: 8)
-                        Text(me.value.tailscaleIP.isEmpty ? "Not set" : me.value.tailscaleIP)
+                        Text(me.value.tailscaleIP.isEmpty ? String(localized: "Not set") : me.value.tailscaleIP)
                             .font(.body.monospacedDigit())
                             .foregroundColor(.secondary)
                             .lineLimit(1)
@@ -424,7 +424,7 @@ struct MeView: View {
                     title: "Listening",
                     systemImage: "antenna.radiowaves.left.and.right",
                     tint: .orange,
-                    value: network.listening ? "Port \(Wire.port)" : "Not listening"
+                    value: network.listening ? String(localized: "Port \(Wire.port)") : "Not listening"
                 )
                 MeValueRow(title: "Wi-Fi Address", systemImage: "wifi", tint: .blue, value: network.lanAddress ?? "Not on Wi-Fi")
                 // Progress shows in the row itself - no toast.

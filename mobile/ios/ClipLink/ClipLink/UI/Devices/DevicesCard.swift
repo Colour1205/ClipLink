@@ -45,7 +45,7 @@ struct DevicesCard: View {
     private var lastSeenText: String? {
         guard !row.connected, !blocked, let lastSeen = row.lastSeen else { return nil }
         guard status == .pairedOffline || status == .away else { return nil }
-        return "Last seen \(DevicesRelativeTime.string(for: lastSeen))"
+        return String(localized: "Last seen \(DevicesRelativeTime.string(for: lastSeen))")
     }
 
     private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous) }
@@ -236,7 +236,7 @@ struct DevicesCard: View {
 
     private var accessibilityLabel: String {
         var parts = [name, status.spokenText]
-        if let address { parts.append("address \(address)") }
+        if let address { parts.append(String(localized: "address \(address)")) }
         if let lastSeenText { parts.append(lastSeenText.lowercased()) }
         return parts.joined(separator: ", ")
     }

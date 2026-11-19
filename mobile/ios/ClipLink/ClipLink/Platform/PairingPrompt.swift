@@ -34,11 +34,11 @@ final class PairingPromptPresenter {
         let (title, message) = Self.text(for: request, name: nameFor(request.deviceId))
         let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
         // Ignore is the bold default: the safe answer is the easy one.
-        let ignore = UIAlertAction(title: "Ignore", style: .cancel) { [weak self] _ in
+        let ignore = UIAlertAction(title: String(localized: "Ignore"), style: .cancel) { [weak self] _ in
             self?.finish(request)
             self?.onIgnore?(request)
         }
-        let trust = UIAlertAction(title: "Trust", style: .default) { [weak self] _ in
+        let trust = UIAlertAction(title: String(localized: "Trust"), style: .default) { [weak self] _ in
             self?.finish(request)
             self?.onTrust?(request)
         }
@@ -67,14 +67,19 @@ final class PairingPromptPresenter {
     /// address when known. The code is the one in Me on that device.
     static func text(for request: PairingRequest, name: String) -> (title: String, message: String) {
         let code = DeviceLabel.short(request.deviceId)
-        let who = name == code ? code : "\(name) (\(code))"
-        let at = request.address.map { " at \($0)" } ?? ""
+        let who = name == code ? code : String(localized: "\(name) (\(code))")
         let noun = ThisDeviceNoun.current
+        // Whole sentences with and without the address, so each language can
+        // put it where it belongs.
         if request.initiatedByUs {
-            return ("Pair with \(name)?",
-                    "You reached \(who)\(at). Trust it to sync clipboards with this \(noun). Only continue if it's the device you meant.")
+            let message = request.address.map {
+                String(localized: "You reached \(who) at \($0). Trust it to sync clipboards with this \(noun). Only continue if it's the device you meant.")
+            } ?? String(localized: "You reached \(who). Trust it to sync clipboards with this \(noun). Only continue if it's the device you meant.")
+            return (String(localized: "Pair with \(name)?"), message)
         }
-        return ("Pairing Request",
-                "\(who)\(at) wants to pair with this \(noun).\n\nOnly trust it if you recognize it — its code should match the one in Me on that device.")
+        let message = request.address.map {
+            String(localized: "\(who) at \($0) wants to pair with this \(noun).\n\nOnly trust it if you recognize it — its code should match the one in Me on that device.")
+        } ?? String(localized: "\(who) wants to pair with this \(noun).\n\nOnly trust it if you recognize it — its code should match the one in Me on that device.")
+        return (String(localized: "Pairing Request"), message)
     }
 }

@@ -198,7 +198,7 @@ struct DeviceDetailView: View {
     }
 
     private func lastSeen(_ row: DeviceRow) -> String {
-        if row.connected { return "Now" }
+        if row.connected { return String(localized: "Now") }
         guard let date = row.lastSeen else { return "—" }
         return DevicesRelativeTime.sentence(for: date)
     }
@@ -315,12 +315,12 @@ private struct DeviceInfoRow: View {
         Group {
             if typeSize.isAccessibilitySize {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
+                    Text(NSLocalizedString(title, comment: ""))
                     valueText
                 }
             } else {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text(title)
+                    Text(NSLocalizedString(title, comment: ""))
                     Spacer(minLength: 8)
                     valueText.multilineTextAlignment(.trailing)
                 }
@@ -402,7 +402,7 @@ private struct DeviceAddressRow: View {
         switch address.kind {
         case .lan: return "Wi‑Fi"
         case .tailscale: return "Tailscale"
-        case .other: return "Other"
+        case .other: return String(localized: "Other")
         }
     }
 
@@ -418,23 +418,23 @@ private struct DeviceAddressRow: View {
     private var provenance: String {
         var parts = address.sources.map(Self.sourceText)
         if let date = address.lastSeen, !address.inUse {
-            parts.append("Last seen \(DevicesRelativeTime.string(for: date))")
+            parts.append(String(localized: "Last seen \(DevicesRelativeTime.string(for: date))"))
         }
-        return parts.isEmpty ? "Not seen yet" : parts.joined(separator: " · ")
+        return parts.isEmpty ? String(localized: "Not seen yet") : parts.joined(separator: " · ")
     }
 
     private static func sourceText(_ source: DeviceAddress.Source) -> String {
         switch source {
-        case .heard: return "Heard on this network"
-        case .reached: return "Connected"
-        case .stored: return "Saved with the pairing"
-        case .advertised: return "Advertised by the device"
+        case .heard: return String(localized: "Heard on this network")
+        case .reached: return String(localized: "Connected")
+        case .stored: return String(localized: "Saved with the pairing")
+        case .advertised: return String(localized: "Advertised by the device")
         }
     }
 
     private var accessibilityLabel: String {
         var text = "\(address.ip), \(kindTitle.replacingOccurrences(of: "\u{2011}", with: "-"))"
-        if address.inUse { text += ", in use" }
+        if address.inUse { text += String(localized: ", in use") }
         return "\(text). \(provenance.replacingOccurrences(of: " · ", with: ", "))"
     }
 }

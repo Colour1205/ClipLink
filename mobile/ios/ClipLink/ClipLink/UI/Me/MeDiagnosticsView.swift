@@ -11,7 +11,7 @@ struct MeDiagnosticsView: View {
     @State private var running = false
 
     private var snapshot: EngineSnapshot { model.snapshot }
-    private var passed: Bool { result?.hasPrefix("Self-test passed") == true }
+    private var passed: Bool { result == AppModel.selfTestPassed }
 
     var body: some View {
         List {
@@ -68,7 +68,7 @@ struct MeDiagnosticsView: View {
             let outcome = model.runSelfTest()
             withAnimation { result = outcome }
             running = false
-            if outcome.hasPrefix("Self-test passed") {
+            if outcome == AppModel.selfTestPassed {
                 Haptics.success(settings.haptics)
             } else if settings.haptics {
                 UINotificationFeedbackGenerator().notificationOccurred(.error)
@@ -82,7 +82,7 @@ struct MeDiagnosticsView: View {
         Section {
             Group {
                 MeDetailRow(title: "Status", value: snapshot.network.running ? "Running" : "Stopped")
-                MeDetailRow(title: "Listening", value: snapshot.network.listening ? "Port \(Wire.port)" : "Not listening")
+                MeDetailRow(title: "Listening", value: snapshot.network.listening ? String(localized: "Port \(Wire.port)") : "Not listening")
                 MeDetailRow(title: "Discovery", value: discovery)
                 MeDetailRow(title: "Local Network", value: localNetwork)
                 MeDetailRow(title: "Wi-Fi Address", value: snapshot.network.lanAddress ?? "Not on Wi-Fi", monospaced: snapshot.network.lanAddress != nil)

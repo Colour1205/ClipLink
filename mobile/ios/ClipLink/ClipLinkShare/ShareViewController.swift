@@ -99,7 +99,7 @@ final class ShareModel: ObservableObject {
 
     func start(providers: [NSItemProvider]) {
         guard SharedContainer.isAvailable else {
-            phase = .failed("ClipLink's shared storage isn't set up. Open ClipLink once, then try again.")
+            phase = .failed(String(localized: "ClipLink's shared storage isn't set up. Open ClipLink once, then try again."))
             return
         }
         let identity: KeychainIdentity
@@ -132,7 +132,7 @@ final class ShareModel: ObservableObject {
             problems = ShareModel.leftOut(in: shared)
             guard !shared.captures.isEmpty else {
                 let nothingSaid = shared.tooLarge.isEmpty && shared.folders == 0
-                phase = .failed(nothingSaid ? "ClipLink can't send this kind of item." : problems.joined(separator: " "))
+                phase = .failed(nothingSaid ? String(localized: "ClipLink can't send this kind of item.") : problems.joined(separator: " "))
                 return
             }
             await send(shared.captures, with: engine)
@@ -195,14 +195,14 @@ final class ShareModel: ObservableObject {
         switch failures.count {
         case 0: break
         case 1: problems.append(failures[0])
-        default: problems.append("\(failures.count) items couldn't be sent.")
+        default: problems.append(String(localized: "\(failures.count) items couldn't be sent."))
         }
         if storedCount == 0 {
             phase = .failed(problems.joined(separator: " "))
         } else if handoff {
             // The items are in the shared history: the live app sends them now.
             SyncEngine.announceExternalChange()
-            phase = .sent(withProblems("Sent through ClipLink."))
+            phase = .sent(withProblems(String(localized: "Sent through ClipLink.")))
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2 + readingTime) { [weak self] in self?.stop() }
         }
         let then = afterStored
@@ -212,26 +212,26 @@ final class ShareModel: ObservableObject {
 
     private func describe(_ captures: [Capture]) {
         guard captures.count == 1, let only = captures.first else {
-            title = "\(captures.count) items"
+            title = String(localized: "\(captures.count) items")
             icon = "doc.on.doc.fill"
             let names = captures.map { capture -> String in
                 if case .file(_, let name) = capture { return name }
-                return "Image"
+                return String(localized: "Image")
             }
-            preview = names.prefix(5).joined(separator: "\n") + (names.count > 5 ? "\n+ \(names.count - 5) more" : "")
+            preview = names.prefix(5).joined(separator: "\n") + (names.count > 5 ? "\n" + String(localized: "+ \(names.count - 5) more") : "")
             return
         }
         switch only {
         case .text(let text):
             let link = SyncedItem.kind(for: ClipboardEntry(content: text, type: Wire.EntryType.text, deviceId: "", timestamp: "")) == .link
-            title = link ? "Link" : "Text"
+            title = link ? String(localized: "Link") : String(localized: "Text")
             icon = link ? "link" : "doc.on.clipboard"
             preview = String(text.prefix(400))
         case .image:
-            title = "Image"
+            title = String(localized: "Image")
             icon = "photo"
         case .file(_, let name):
-            title = "File"
+            title = String(localized: "File")
             icon = "doc.fill"
             preview = name
         }
@@ -259,13 +259,16 @@ final class ShareModel: ObservableObject {
         var out: [String] = []
         switch shared.tooLarge.count {
         case 0: break
-        case 1: out.append("\(shared.tooLarge[0]) is over 1 GB, too big to sync.")
-        default: out.append("\(shared.tooLarge.count) files are over 1 GB, too big to sync.")
+        case 1: out.append(String(localized: "\(shared.tooLarge[0]) is over 1 GB, too big to sync."))
+        default: out.append(String(localized: "\(shared.tooLarge.count) files are over 1 GB, too big to sync."))
         }
-        if shared.folders > 0 { out.append("ClipLink syncs files, not folders.") }
-        if shared.unreadable > 0 { out.append("Couldn't read \(shared.unreadable) item\(shared.unreadable == 1 ? "" : "s").") }
+        if shared.folders > 0 { out.append(String(localized: "ClipLink syncs files, not folders.")) }
+        if shared.unreadable == 1 { out.append(String(localized: "Couldn't read 1 item.")) }
+        if shared.unreadable > 1 { out.append(String(localized: "Couldn't read \(shared.unreadable) items.")) }
         if shared.skipped > 0 {
-            out.append("ClipLink keeps \(Wire.historyCap) items, so \(shared.skipped) more \(shared.skipped == 1 ? "was" : "were") left out.")
+            out.append(shared.skipped == 1
+                ? String(localized: "ClipLink keeps \(Wire.historyCap) items, so 1 more was left out.")
+                : String(localized: "ClipLink keeps \(Wire.historyCap) items, so \(shared.skipped) more were left out."))
         }
         return out
     }
@@ -317,18 +320,30 @@ final class ShareModel: ObservableObject {
     }
 
     private func summary() -> String {
+        // Whole sentences, one per case and number, so each translates as one.
         let many = storedCount > 1
-        let what = many ? " \(storedCount) items" : ""
-        let them = many ? "them" : "it"
+        let count = storedCount
         let message: String
         if paired == 0 {
-            message = "Saved\(what). Pair a device in ClipLink to sync \(them)."
+            message = many
+                ? String(localized: "Saved \(count) items. Pair a device in ClipLink to sync them.")
+                : String(localized: "Saved. Pair a device in ClipLink to sync it.")
         } else if connected == 0 {
-            message = "Saved\(what) — \(many ? "they sync" : "it syncs") the next time ClipLink reaches your devices."
+            message = many
+                ? String(localized: "Saved \(count) items — they sync the next time ClipLink reaches your devices.")
+                : String(localized: "Saved — it syncs the next time ClipLink reaches your devices.")
         } else if connected < paired {
-            message = "Sent\(what) to \(connected) of \(paired) devices. The rest get \(them) next time."
+            message = many
+                ? String(localized: "Sent \(count) items to \(connected) of \(paired) devices. The rest get them next time.")
+                : String(localized: "Sent to \(connected) of \(paired) devices. The rest get it next time.")
+        } else if connected == 1 {
+            message = many
+                ? String(localized: "Sent \(count) items to 1 device.")
+                : String(localized: "Sent to 1 device.")
         } else {
-            message = "Sent\(what) to \(connected) device\(connected == 1 ? "" : "s")."
+            message = many
+                ? String(localized: "Sent \(count) items to \(connected) devices.")
+                : String(localized: "Sent to \(connected) devices.")
         }
         return withProblems(message)
     }
@@ -409,7 +424,7 @@ private struct ShareView: View {
         }
     }
 
-    private var buttonTitle: String {
+    private var buttonTitle: LocalizedStringKey {
         model.phase == .preparing ? "Cancel" : "Done"
     }
 
@@ -420,8 +435,10 @@ private struct ShareView: View {
         case .sending:
             HStack(spacing: 8) {
                 ProgressView()
-                Text(model.connected > 0
-                     ? "Sending — \(model.connected) device\(model.connected == 1 ? "" : "s") connected…"
+                Text(model.connected == 1
+                     ? "Sending — 1 device connected…"
+                     : model.connected > 0
+                     ? "Sending — \(model.connected) devices connected…"
                      : "Looking for your devices…")
                     .foregroundStyle(.secondary)
             }

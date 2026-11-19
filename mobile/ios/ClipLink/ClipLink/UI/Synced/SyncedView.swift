@@ -132,7 +132,7 @@ struct SyncedView: View {
             EmptyStateView(
                 systemImage: "doc.on.clipboard",
                 title: "Nothing Synced Yet",
-                message: "Copy something on a paired device, or tap Paste below to send what's on this \(UIDevice.current.model)'s clipboard."
+                message: String(localized: "Copy something on a paired device, or tap Paste below to send what's on this \(UIDevice.current.model)'s clipboard.")
             )
             .padding(.top, 24)
             .transition(.opacity)

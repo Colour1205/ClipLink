@@ -75,9 +75,9 @@ struct EmptyStateView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 96, height: 96)
                 .background(Circle().fill(Color(UIColor.tertiarySystemFill)))
-            Text(title)
+            Text(NSLocalizedString(title, comment: ""))
                 .font(.title3.weight(.semibold))
-            Text(message)
+            Text(NSLocalizedString(message, comment: ""))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -94,7 +94,7 @@ struct SectionLabel: View {
     let text: String
 
     var body: some View {
-        Text(text.uppercased())
+        Text(NSLocalizedString(text, comment: "").uppercased())
             .font(.footnote)
             .foregroundStyle(.secondary)
             .padding(.leading, 4)
@@ -117,11 +117,11 @@ extension SyncedItem.Kind {
 
     var label: String {
         switch self {
-        case .text: return "Text"
-        case .link: return "Link"
-        case .opaque: return "Encoded data"
-        case .image: return "Image"
-        case .file: return "File"
+        case .text: return String(localized: "Text")
+        case .link: return String(localized: "Link")
+        case .opaque: return String(localized: "Encoded data")
+        case .image: return String(localized: "Image")
+        case .file: return String(localized: "File")
         }
     }
 }
@@ -168,8 +168,8 @@ struct ConnectionPill: View {
 
     private var text: String {
         let n = connectedCount
-        if n > 0 { return "\(n) device\(n == 1 ? "" : "s") connected" }
-        if network.localNetwork == .denied { return "Local Network off" }
-        return network.running ? "Looking for devices…" : "Not connected"
+        if n > 0 { return n == 1 ? String(localized: "1 device connected") : String(localized: "\(n) devices connected") }
+        if network.localNetwork == .denied { return String(localized: "Local Network off") }
+        return network.running ? String(localized: "Looking for devices…") : String(localized: "Not connected")
     }
 }

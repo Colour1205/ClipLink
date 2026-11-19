@@ -17,7 +17,7 @@ struct MeActivityLogView: View {
                     Menu {
                         Button {
                             model.clipboard.copyText(exportText)
-                            model.showToast("Activity log copied.")
+                            model.showToast(String(localized: "Activity log copied."))
                             Haptics.tap(settings.haptics)
                         } label: {
                             Label("Copy All", systemImage: "doc.on.doc")
