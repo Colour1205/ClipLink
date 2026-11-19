@@ -8,7 +8,7 @@ namespace ClipLink;
 internal enum TraySyncState { Syncing, Paused, Unavailable }
 
 // The notification-area icon: a left click opens the window, a right click
-// shows a small Fluent menu with Open, the sync switch and Quit. It carries
+// shows a native Windows menu with Open, the sync switch and Quit. It carries
 // notifications (what a share did, a sync that can't start).
 internal sealed class Tray : IDisposable
 {
@@ -22,27 +22,18 @@ internal sealed class Tray : IDisposable
     public Tray(string name, Action open, Action toggleSync, Action quit)
     {
         this.name = name;
-        var openItem = new MenuFlyoutItem { Text = "Open", Icon = new SymbolIcon(Symbol.OpenWith) };
-        openItem.Click += (_, _) => open();
-        syncItem = new ToggleMenuFlyoutItem { Text = "Auto-sync clipboard" };
-        syncItem.Click += (_, _) => toggleSync();
-        var quitItem = new MenuFlyoutItem { Text = "Quit", Icon = new SymbolIcon(Symbol.Cancel) };
-        quitItem.Click += (_, _) => quit();
-
-        // Short labels: the flyout's own window is sized from its items, and
-        // a long one ("Quit ClipLink") is cut short.
         var menu = new MenuFlyout();
-        menu.Items.Add(openItem);
+        menu.Items.Add(new MenuFlyoutItem { Text = "Open", Command = new Command(open) });
+        syncItem = new ToggleMenuFlyoutItem { Text = "Auto-sync clipboard", Command = new Command(toggleSync) };
         menu.Items.Add(syncItem);
         menu.Items.Add(new MenuFlyoutSeparator());
-        menu.Items.Add(quitItem);
+        menu.Items.Add(new MenuFlyoutItem { Text = "Quit", Command = new Command(quit) });
 
         icon = new TaskbarIcon
         {
             ToolTipText = name,
-            // The menu is a real WinUI flyout (in a window of its own), so it
-            // follows the theme and looks like the rest of the app.
-            ContextMenuMode = ContextMenuMode.SecondWindow,
+            // Let Windows size the menu from the labels at the taskbar's DPI.
+            ContextMenuMode = ContextMenuMode.PopupMenu,
             ContextFlyout = menu,
             NoLeftClickDelay = true,
             LeftClickCommand = new Command(open),
