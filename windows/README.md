@@ -73,7 +73,9 @@ Quit ClipLink first if it's running from `windows\dist`: its files are locked.
   **Settings > Quit** also stops it.
 - **Ctrl+Alt+Shift+V** toggles automatic clipboard sync from any app, and
   ClipLink remembers the setting after a restart. To change the shortcut,
-  open **Settings > General > Clipboard sync shortcut**. A check mark on the tray
+  click the displayed combination under **Settings > General > Clipboard sync shortcut**
+  and press the new combination. If it is already in use, ClipLink keeps the previous
+  shortcut and lets you try again. Press **Esc** to cancel. A check mark on the tray
   icon means auto-sync is on. A pause badge and the tooltip indicate when it
   is paused or unavailable. If the icon is under the taskbar's overflow
   arrow, drag it into the visible notification area. If another app already

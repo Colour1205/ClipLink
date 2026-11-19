@@ -13,8 +13,9 @@ internal sealed class ClipboardSyncHotkey : IDisposable
 
     private ClipboardSyncHotkey(MessageWindow window) => this.window = window;
 
-    public static ClipboardSyncHotkey? TryRegister(ClipboardShortcut shortcut, Action toggle)
+    public static ClipboardSyncHotkey? TryRegister(ClipboardShortcut shortcut, Action toggle, out bool conflict)
     {
+        conflict = false;
         MessageWindow window;
         try
         {
@@ -33,7 +34,9 @@ internal sealed class ClipboardSyncHotkey : IDisposable
         if (RegisterHotKey(window.Handle, HotkeyId, shortcut.Modifiers | ModNoRepeat, shortcut.Key))
             return new ClipboardSyncHotkey(window);
 
-        Console.WriteLine($"[hotkey] couldn't register {shortcut} (Windows error {Marshal.GetLastPInvokeError()})");
+        int error = Marshal.GetLastPInvokeError();
+        conflict = error == 1409; // ERROR_HOTKEY_ALREADY_REGISTERED
+        Console.WriteLine($"[hotkey] couldn't register {shortcut} (Windows error {error})");
         window.Dispose();
         return null;
     }

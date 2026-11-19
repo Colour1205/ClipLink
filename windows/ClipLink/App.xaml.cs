@@ -90,7 +90,7 @@ public partial class App : Application
 
         tray = new Tray(options.IsDefaultLabel ? "ClipLink" : $"ClipLink ({options.Label})",
             ShowMainWindow, ToggleAutomaticClipboardSync, Quit);
-        clipboardSyncHotkey = ClipboardSyncHotkey.TryRegister(settings.ClipboardSyncShortcut, ToggleAutomaticClipboardSync);
+        clipboardSyncHotkey = ClipboardSyncHotkey.TryRegister(settings.ClipboardSyncShortcut, ToggleAutomaticClipboardSync, out _);
         host.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName is nameof(EngineHost.AutomaticClipboardSyncEnabled) or nameof(EngineHost.Status))
@@ -133,13 +133,14 @@ public partial class App : Application
 
     internal bool ClipboardSyncShortcutRegistered => clipboardSyncHotkey != null;
 
-    internal bool TrySetClipboardSyncShortcut(ClipboardShortcut shortcut)
+    internal bool TrySetClipboardSyncShortcut(ClipboardShortcut shortcut, out bool conflict)
     {
+        conflict = false;
         if (IsQuitting || !shortcut.IsSupported()) return false;
         if (clipboardSyncHotkey != null && settings.ClipboardSyncShortcut == shortcut) return true;
 
         // The old registration stays available until Windows accepts the new one.
-        var replacement = ClipboardSyncHotkey.TryRegister(shortcut, ToggleAutomaticClipboardSync);
+        var replacement = ClipboardSyncHotkey.TryRegister(shortcut, ToggleAutomaticClipboardSync, out conflict);
         if (replacement == null) return false;
 
         clipboardSyncHotkey?.Dispose();
