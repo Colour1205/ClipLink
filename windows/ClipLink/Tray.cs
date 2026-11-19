@@ -12,9 +12,9 @@ internal enum TraySyncState { Syncing, Paused, Unavailable }
 // notifications (what a share did, a sync that can't start).
 internal sealed class Tray : IDisposable
 {
-    // H.NotifyIcon measures each row outside the presenter to size its popup.
-    // Allow room for the icon column as well as the label.
-    private const double MenuItemMinWidth = 168;
+    // H.NotifyIcon sizes its window from the rows, so apply WinUI's standard
+    // flyout minimum there too. Wider labels can still expand the window.
+    private const double MenuItemMinWidth = 96;
 
     private readonly TaskbarIcon icon;
     private readonly System.Drawing.Icon syncingIcon = AppIcon.Tray(TraySyncState.Syncing);
