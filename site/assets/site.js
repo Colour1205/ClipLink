@@ -21,46 +21,7 @@
     }
   }
 
-  // ---- 1b. Download: one platform at a time. ----
-  // The tabs pick which platform's row shows. It opens on the visitor's own
-  // platform (or the one a link points at, like the platform tags at the top),
-  // and the address keeps the choice (#dl-android) without adding history.
-  var dlBox = document.querySelector('.downloads');
-  var dlTabs = document.querySelectorAll('.dl-tabs [data-for]');
-  if (dlBox && dlTabs.length) {
-    dlBox.classList.add('js-tabs');
-    var pickPlatform = function (key, scroll) {
-      var row = document.getElementById('dl-' + key);
-      if (!row) return false;
-      Array.prototype.forEach.call(dlBox.querySelectorAll('.dl'), function (r) {
-        r.classList.toggle('is-active', r === row);
-      });
-      Array.prototype.forEach.call(dlTabs, function (t) {
-        if (t.getAttribute('data-for') === key) t.setAttribute('aria-current', 'true');
-        else t.removeAttribute('aria-current');
-      });
-      if (scroll) {
-        var section = document.getElementById('download');
-        if (section) section.scrollIntoView({ block: 'start' });
-      }
-      return true;
-    };
-    var fromHash = function () {
-      var m = /^#dl-([a-z]+)$/.exec(location.hash);
-      return m && pickPlatform(m[1], true);
-    };
-    if (!fromHash()) pickPlatform(mine || 'windows', false);
-    Array.prototype.forEach.call(dlTabs, function (t) {
-      t.addEventListener('click', function (event) {
-        event.preventDefault();
-        var key = t.getAttribute('data-for');
-        if (pickPlatform(key, false) && history.replaceState) history.replaceState(null, '', '#dl-' + key);
-      });
-    });
-    window.addEventListener('hashchange', fromHash);
-  }
-
-  // ---- 1c. Reveal: the pointer lights the edges of the leaning shapes. ----
+  // ---- 1b. Reveal: the pointer lights the edges of the slanted shapes. ----
   // For each shape near the pointer, set where the light is, in the shape's
   // own frame: its glass is skewed by --skew around its middle, so a point at
   // height y sits tan(skew) * (y - h/2) further along than it looks. Only for a
@@ -68,7 +29,7 @@
   var reveal = window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
   if (reveal) {
     var shapes = Array.prototype.slice.call(document.querySelectorAll(
-      '.site-header .wrap, .chip, .btn, .feature-panel, .trust-diagram, .dl, .dl-pending, .feature'));
+      '.hero .btn.primary, .hero .chip, .feature-panel, .trust-diagram, .dl'));
     var skewDeg = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--skew')) || 0;
     var tilt = Math.tan(skewDeg * Math.PI / 180);
     var REACH = 160; // px around a shape where its edge starts to catch the light
@@ -85,7 +46,9 @@
         var d = Math.sqrt(dx * dx + dy * dy);
         if (d > REACH) return;
         var y = py - r.top;
-        var x = px - r.left - tilt * (y - r.height / 2);
+        // On narrow screens the tall shapes stand straight: no lean to undo there.
+        var lean = getComputedStyle(el, '::before').transform === 'none' ? 0 : tilt;
+        var x = px - r.left - lean * (y - r.height / 2);
         el.style.setProperty('--rx', x.toFixed(1) + 'px');
         el.style.setProperty('--ry', y.toFixed(1) + 'px');
         el.style.setProperty('--ro', (1 - d / REACH).toFixed(2));
@@ -210,7 +173,7 @@
       active = (active + 1) % count;
       leaving = old; // it flies off to the left, then waits at the back
       clearTimeout(leaveTimer);
-      leaveTimer = setTimeout(function () { leaving = -1; render(); }, 560);
+      leaveTimer = setTimeout(function () { leaving = -1; render(); }, 900);
       render();
     }
 
