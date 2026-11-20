@@ -639,7 +639,7 @@ extension SyncEngine {
         }
 
         do {
-            try transfer.handle.write(contentsOf: bytes)
+            try transfer.write(bytes)
         } catch {
             log("failed writing file chunk (\(error)) - abandoning this transfer")
             transfer.abort()
@@ -669,47 +669,49 @@ extension SyncEngine {
         retryStalledFiles()
         try? transfer.handle.close()
         let url = transfer.url
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let actual = (try? ContentHash.sha256Hex(fileAt: url)) ?? ""
-            self?.queue.async {
-                guard let self else { return }
-                self.verifying.remove(key)
-                // The hash inside the SIGNED entry is what's trusted, never
-                // whatever bytes turned up.
-                guard actual == key else {
-                    self.log("file transfer failed hash verification - discarding")
-                    try? FileManager.default.removeItem(at: url)
-                    self.requestedAt[key] = nil
-                    // Ask again - maybe another peer's copy is intact. One
-                    // whose copy failed `maxBadCopies` times is not asked any
-                    // more (until it connects anew): its file is corrupt, and
-                    // was downloaded again and again.
-                    if self.pendingFiles[key] != nil {
-                        self.badCopies[key, default: [:]][transfer.peerId, default: 0] += 1
-                        if self.badCopies[key]?[transfer.peerId] == SyncEngine.maxBadCopies {
-                            self.log("\(self.displayName(for: transfer.peerId))'s copy of a file is corrupt - not asking it again")
-                        }
-                        self.requestFile(transfer.wireHash, from: Array(self.links.values))
+        // The hash of exactly the bytes written, worked out as they were
+        // written (see IncomingTransfer.write): a file of up to 1 GB is no
+        // longer read back in full just to be hashed. Still settled a turn of
+        // the queue later, as when the hash came back from another queue.
+        let actual = transfer.writtenHash()
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.verifying.remove(key)
+            // The hash inside the SIGNED entry is what's trusted, never
+            // whatever bytes turned up.
+            guard actual == key else {
+                self.log("file transfer failed hash verification - discarding")
+                try? FileManager.default.removeItem(at: url)
+                self.requestedAt[key] = nil
+                // Ask again - maybe another peer's copy is intact. One
+                // whose copy failed `maxBadCopies` times is not asked any
+                // more (until it connects anew): its file is corrupt, and
+                // was downloaded again and again.
+                if self.pendingFiles[key] != nil {
+                    self.badCopies[key, default: [:]][transfer.peerId, default: 0] += 1
+                    if self.badCopies[key]?[transfer.peerId] == SyncEngine.maxBadCopies {
+                        self.log("\(self.displayName(for: transfer.peerId))'s copy of a file is corrupt - not asking it again")
                     }
-                    self.schedulePublish()
-                    return
+                    self.requestFile(transfer.wireHash, from: Array(self.links.values))
                 }
-                // Its item was deleted (or history cleared) while this was
-                // being checked: nothing wants these bytes any more.
-                guard self.pendingFiles[key] != nil || self.referencedFileKeys().contains(key) else {
-                    try? FileManager.default.removeItem(at: url)
-                    self.schedulePublish()
-                    return
-                }
-                do {
-                    try self.files.adopt(url, hash: key, move: true)
-                } catch {
-                    self.log("could not store received file: \(error)")
-                    return
-                }
-                self.fulfillPendingFile(key)
                 self.schedulePublish()
+                return
             }
+            // Its item was deleted (or history cleared) while this was
+            // being checked: nothing wants these bytes any more.
+            guard self.pendingFiles[key] != nil || self.referencedFileKeys().contains(key) else {
+                try? FileManager.default.removeItem(at: url)
+                self.schedulePublish()
+                return
+            }
+            do {
+                try self.files.adopt(url, hash: key, move: true)
+            } catch {
+                self.log("could not store received file: \(error)")
+                return
+            }
+            self.fulfillPendingFile(key)
+            self.schedulePublish()
         }
     }
 
@@ -829,19 +831,19 @@ extension SyncEngine {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? -1
             guard size >= 0 else {
-                return finish(completion, .failed("Couldn't read that file."))
+                return finish(completion, .failed(String(localized: "Couldn't read that file.")))
             }
             guard size <= Wire.maxFileBytes else {
-                return finish(completion, .failed("That file is larger than 1 GB."))
+                return finish(completion, .failed(String(localized: "That file is larger than 1 GB.")))
             }
             guard let hash = try? ContentHash.sha256Hex(fileAt: url) else {
-                return finish(completion, .failed("Couldn't read that file."))
+                return finish(completion, .failed(String(localized: "Couldn't read that file.")))
             }
             queue.async { [self] in
                 do {
                     try files.adopt(url, hash: hash, move: moveIntoStore)
                 } catch {
-                    return finish(completion, .failed("Couldn't store that file."))
+                    return finish(completion, .failed(String(localized: "Couldn't store that file.")))
                 }
                 // Bytes are in the store BEFORE the entry goes out: receivers
                 // send file_request the instant they see the entry.
@@ -870,7 +872,7 @@ extension SyncEngine {
         do {
             entry = try EntrySigning.sign(content: content, type: type, identity: identity)
         } catch {
-            finish(completion, .failed("Couldn't sign that item."))
+            finish(completion, .failed(String(localized: "Couldn't sign that item.")))
             return false
         }
         let json = Envelope(type: Wire.MessageType.entry, payload: entry.jsonString()).jsonString()

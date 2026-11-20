@@ -57,7 +57,7 @@ struct PairingScannerView: View {
                 message(
                     systemImage: "camera.fill",
                     title: "Camera access is restricted",
-                    detail: "This \(ThisDeviceNoun.current) doesn't allow camera access. Pair by address instead.",
+                    detail: String(localized: "This \(ThisDeviceNoun.current) doesn't allow camera access. Pair by address instead."),
                     showSettings: false
                 )
             case .unavailable:
@@ -110,10 +110,10 @@ struct PairingScannerView: View {
                 .font(.largeTitle)
                 .foregroundColor(.secondary)
                 .accessibilityHidden(true)
-            Text(title)
+            Text(NSLocalizedString(title, comment: ""))
                 .font(.title3.weight(.semibold))
                 .foregroundColor(.white)
-            Text(detail)
+            Text(NSLocalizedString(detail, comment: ""))
                 .font(.subheadline)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -412,13 +412,13 @@ final class PairingScannerSession: NSObject, AVCaptureMetadataOutputObjectsDeleg
         case .videoDeviceNotAvailableInBackground:
             return nil // Nothing on screen meanwhile; it resumes on return.
         case .videoDeviceNotAvailableWithMultipleForegroundApps:
-            return "The camera isn't available while ClipLink shares the screen with other apps. Make ClipLink full screen to scan, or pair by address instead."
+            return String(localized: "The camera isn't available while ClipLink shares the screen with other apps. Make ClipLink full screen to scan, or pair by address instead.")
         case .videoDeviceInUseByAnotherClient:
-            return "Another app is using the camera. Scanning resumes when it's done, or pair by address instead."
+            return String(localized: "Another app is using the camera. Scanning resumes when it's done, or pair by address instead.")
         case .videoDeviceNotAvailableDueToSystemPressure:
-            return "The camera paused to let the device cool down. Scanning resumes in a moment, or pair by address instead."
+            return String(localized: "The camera paused to let the device cool down. Scanning resumes in a moment, or pair by address instead.")
         default:
-            return "The camera is unavailable right now. Scanning resumes when it's free, or pair by address instead."
+            return String(localized: "The camera is unavailable right now. Scanning resumes when it's free, or pair by address instead.")
         }
     }
 

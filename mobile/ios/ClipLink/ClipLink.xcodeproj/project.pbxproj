@@ -168,6 +168,7 @@
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				en,
+				"zh-Hans",
 				Base,
 			);
 			mainGroup = 7AF5643D3068C549000EB0BC;
@@ -353,6 +354,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "ClipLink-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = ClipLink;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSCameraUsageDescription = "ClipLink uses the camera to scan another device's pairing QR code.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "ClipLink finds and connects to your paired computers and phones on this Wi-Fi network to sync your clipboard.";
@@ -395,6 +397,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "ClipLink-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = ClipLink;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSCameraUsageDescription = "ClipLink uses the camera to scan another device's pairing QR code.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "ClipLink finds and connects to your paired computers and phones on this Wi-Fi network to sync your clipboard.";
@@ -435,6 +438,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "ClipLinkShare-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = ClipLink;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -466,6 +470,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "ClipLinkShare-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = ClipLink;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = (

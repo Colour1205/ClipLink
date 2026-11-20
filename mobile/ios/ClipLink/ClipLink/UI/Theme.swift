@@ -8,7 +8,7 @@ enum AccentTheme: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    var name: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
+    var name: String { NSLocalizedString(rawValue.prefix(1).uppercased() + rawValue.dropFirst(), comment: "Accent theme") }
 
     /// Tint: the HarmonyOS palette, the dark variants lightened to read well as
     /// text and glyphs on dark backgrounds.
@@ -51,7 +51,15 @@ enum AccentTheme: String, CaseIterable, Identifiable {
         }
     }
 
-    var uiColor: UIColor {
+    /// One dynamic colour per theme, made once: built anew on every read, the
+    /// accent was never equal to itself, so every view handed it (the root's
+    /// accentColor, each screen's tint, the page glow) counted as changed and
+    /// redrew on every pass.
+    private static let uiColors: [AccentTheme: UIColor] =
+        Dictionary(uniqueKeysWithValues: allCases.map { ($0, $0.makeUIColor()) })
+    private static let colors: [AccentTheme: Color] = uiColors.mapValues { Color($0) }
+
+    private func makeUIColor() -> UIColor {
         let (light, dark) = hex
         let fill = fillHex, highContrastDark = highContrastDarkHex
         return UIColor { trait in
@@ -64,7 +72,9 @@ enum AccentTheme: String, CaseIterable, Identifiable {
         }
     }
 
-    var color: Color { Color(uiColor) }
+    var uiColor: UIColor { Self.uiColors[self]! }
+
+    var color: Color { Self.colors[self]! }
 
     /// For surfaces under white content (icon tiles, swatches, filled
     /// buttons); keep `color` for text and glyphs in the accent.
@@ -195,7 +205,7 @@ enum TimeLabel {
         guard let date else { return "" }
         let calendar = Calendar.current
         if calendar.isDateInToday(date) { return time.string(from: date) }
-        if calendar.isDateInYesterday(date) { return "Yesterday \(time.string(from: date))" }
+        if calendar.isDateInYesterday(date) { return String(localized: "Yesterday \(time.string(from: date))") }
         return dayTime.string(from: date)
     }
 
@@ -207,7 +217,7 @@ enum TimeLabel {
         guard let date else { return "" }
         let calendar = Calendar.current
         if calendar.isDateInToday(date) { return time.string(from: date) }
-        if calendar.isDateInYesterday(date) { return "Yesterday" }
+        if calendar.isDateInYesterday(date) { return String(localized: "Yesterday") }
         return day.string(from: date)
     }
 

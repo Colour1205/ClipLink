@@ -1,0 +1,16 @@
+/* ClipLink app: Info.plist strings in Simplified Chinese. The English
+   originals are the INFOPLIST_KEY_* build settings of the ClipLink target. */
+
+"CFBundleDisplayName" = "ClipLink";
+
+/* Camera permission prompt. */
+"NSCameraUsageDescription" = "ClipLink 使用相机扫描另一台设备的配对二维码。";
+
+/* Local Network permission prompt. */
+"NSLocalNetworkUsageDescription" = "ClipLink 会在此 Wi-Fi 网络中查找并连接你已配对的电脑和手机，以同步剪贴板。";
+
+/* Photo library (add only) permission prompt. */
+"NSPhotoLibraryAddUsageDescription" = "在你需要时，ClipLink 会将同步的图片存储到你的照片图库。";
+
+/* Document type name (Open in ClipLink). */
+"Any file" = "任意文件";

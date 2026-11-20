@@ -29,7 +29,7 @@ struct SyncedItemActions {
             let model = self.model
             Task {
                 guard let url = await model.pictureShareURL(for: item) else {
-                    model.showToast("Couldn't read that image.")
+                    model.showToast(String(localized: "Couldn't read that image."))
                     return
                 }
                 // The copy is only for the sheet: gone once it is done with it.
@@ -37,7 +37,7 @@ struct SyncedItemActions {
             }
         case .file:
             guard let url = model.shareURL(for: item) else {
-                model.showToast("That file hasn't finished transferring yet.")
+                model.showToast(String(localized: "That file hasn't finished transferring yet."))
                 return
             }
             SyncedShareSheet.share([url])
@@ -54,8 +54,8 @@ struct SyncedItemActions {
         Task {
             guard let data = await model.pictureData(for: item) else {
                 model.showToast(item.kind == .file && !item.fileAvailable
-                    ? "That file hasn't finished transferring yet."
-                    : "Couldn't save the image.")
+                    ? String(localized: "That file hasn't finished transferring yet.")
+                    : String(localized: "Couldn't save the image."))
                 return
             }
             SyncedPhotoSaver.save(data)
@@ -64,7 +64,7 @@ struct SyncedItemActions {
 
     func quickLook(_ item: SyncedItem) {
         guard let url = model.shareURL(for: item) else {
-            model.showToast("That file hasn't finished transferring yet.")
+            model.showToast(String(localized: "That file hasn't finished transferring yet."))
             return
         }
         SyncedQuickLookController.present(url)
@@ -72,7 +72,7 @@ struct SyncedItemActions {
 
     func saveToFiles(_ item: SyncedItem) {
         guard let url = model.shareURL(for: item) else {
-            model.showToast("That file hasn't finished transferring yet.")
+            model.showToast(String(localized: "That file hasn't finished transferring yet."))
             return
         }
         SyncedDocumentExporter.export(url)
@@ -139,11 +139,11 @@ struct SyncedItemActions {
     static func fileStatus(_ item: SyncedItem, transfers: [String: TransferProgress]) -> String {
         guard let payload = item.filePayload else { return "" }
         if let progress = transferFraction(item, transfers: transfers) {
-            return "Transferring… \(Int((progress * 100).rounded(.down)))%"
+            return String(localized: "Transferring… \(Int((progress * 100).rounded(.down)))%")
         }
         // Fetched once there is room (see SyncEngine.needsSpace).
-        if !item.fileAvailable, item.needsSpace { return "Not enough storage" }
-        if !item.fileAvailable { return "Transferring…" }
+        if !item.fileAvailable, item.needsSpace { return String(localized: "Not enough storage") }
+        if !item.fileAvailable { return String(localized: "Transferring…") }
         return ByteSize.format(payload.fileSize)
     }
 
@@ -172,12 +172,12 @@ struct SyncedItemActions {
         switch item.kind {
         case .text, .link: parts.append(String(item.entry.content.prefix(200)))
         case .file:
-            parts.append(item.filePayload?.fileName ?? "File")
+            parts.append(item.filePayload?.fileName ?? String(localized: "File"))
             parts.append(fileStatus(item, transfers: transfers))
         case .opaque, .image: break
         }
         parts.append(TimeLabel.short(item.date))
-        parts.append(item.isOwn ? "From this device" : "From \(item.sourceLabel)")
+        parts.append(item.isOwn ? String(localized: "From this device") : String(localized: "From \(item.sourceLabel)"))
         return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }
 }

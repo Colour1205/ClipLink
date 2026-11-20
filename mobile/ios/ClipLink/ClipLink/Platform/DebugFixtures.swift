@@ -4,7 +4,8 @@ import Foundation
 /// A made-up engine snapshot, for looking at UI states that need other
 /// devices (the Simulator has none): launch a Debug build with
 /// `-ClipLinkDebugFixtures <kind>` - `devices`, `request` (devices plus a
-/// pairing request), `stack` (devices plus a stack of synced items) or `empty`. The engine's own updates are then ignored.
+/// pairing request), `stack` (devices plus a stack of synced items), `store` (sample content
+/// for the App Store screenshots) or `empty`. The engine's own updates are then ignored.
 /// Compiled out of Release builds.
 enum DebugFixtures {
     static func snapshot(_ kind: String) -> EngineSnapshot {
@@ -90,7 +91,66 @@ enum DebugFixtures {
             s.items = items
             s.blocks = [BatchGroup(id: "fixture-batch", memberIDs: Array(items.prefix(texts.count).map(\.id)), frontID: items[0].id)]
         }
+        if kind == "store" {
+            storeSample(&s, office: office, phone: phone, now: now)
+        }
         return s
+    }
+
+    /// Sample content for the App Store screenshots (`-ClipLinkDebugFixtures store`,
+    /// with `-ClipLinkDebugSampleDir <folder with sunset.png, dawn.png, hills.png>`):
+    /// pictures, files, links and text from a few devices, and a tidier device list.
+    private static func storeSample(_ s: inout EngineSnapshot, office: String, phone: String, now: Date) {
+        // A key that looks like a real one, and a name that isn't anybody's.
+        let bytes = (0..<64).map { UInt8(truncatingIfNeeded: ($0 &* 73 &+ 41) ^ ($0 << 3)) }
+        s.ownDeviceId = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE" + Data(bytes).base64EncodedString()
+        s.deviceName = "My iPhone"
+        let names = [office: "Studio PC", phone: "Pixel 9"]
+        s.devices = s.devices.filter { !$0.blocked }.map { row in
+            var title = names[row.deviceId] ?? row.name
+            if title == "Old Laptop" { title = "Travel Laptop" }
+            var renamed = DeviceRow(
+                deviceId: row.deviceId, name: title, trusted: row.trusted, connected: row.connected,
+                addresses: row.addresses, lastSeen: row.lastSeen, nearby: row.nearby
+            )
+            renamed.blocked = row.blocked
+            renamed.waiting = row.waiting
+            renamed.connectionAddress = row.connectionAddress
+            renamed.addressDetails = row.addressDetails
+            return renamed
+        }
+        for (id, name) in names { s.deviceNames[id] = name }
+
+        let folder = UserDefaults.standard.string(forKey: "ClipLinkDebugSampleDir") ?? "/tmp/cliplink-samples"
+        func picture(_ file: String) -> String {
+            (try? Data(contentsOf: URL(fileURLWithPath: folder).appendingPathComponent(file)))?.base64EncodedString() ?? ""
+        }
+        let iso = ISO8601DateFormatter()
+        // "Now" is 9:41 this morning, as the status bar says in the screenshots.
+        let morning = Calendar.current.date(bySettingHour: 9, minute: 41, second: 0, of: now) ?? now
+        var items: [SyncedItem] = []
+        func add(_ type: String, _ content: String, kind: SyncedItem.Kind, from device: String, label: String, minutesAgo: Double, payload: FilePayload? = nil) {
+            let date = morning.addingTimeInterval(-minutesAgo * 60)
+            let entry = ClipboardEntry(content: content, type: type, deviceId: device, timestamp: iso.string(from: date))
+            items.append(SyncedItem(id: HistoryStore.identity(of: entry), entry: entry, isOwn: device == s.ownDeviceId, kind: kind,
+                                    filePayload: payload, fileAvailable: true, date: date, sourceLabel: label))
+        }
+        func file(_ name: String, bytes: Int64, from device: String, label: String, minutesAgo: Double) {
+            let payload = FilePayload(fileName: name, fileHash: String(repeating: "AB", count: 32), fileSize: bytes)
+            add(Wire.EntryType.file, payload.jsonString(), kind: .file, from: device, label: label, minutesAgo: minutesAgo, payload: payload)
+        }
+        let own = s.ownDeviceId
+        add(Wire.EntryType.image, picture("sunset.png"), kind: .image, from: phone, label: "Pixel 9", minutesAgo: 1)
+        file("Budget 2026.pdf", bytes: 296_000, from: office, label: "Studio PC", minutesAgo: 3)
+        add(Wire.EntryType.text, "Meeting moved to 3 pm, room 2B", kind: .text, from: own, label: "This device", minutesAgo: 6)
+        add(Wire.EntryType.image, picture("dawn.png"), kind: .image, from: office, label: "Studio PC", minutesAgo: 9)
+        file("main.c", bytes: 70, from: office, label: "Studio PC", minutesAgo: 12)
+        add(Wire.EntryType.text, "https://cliplink.uaena.io", kind: .link, from: phone, label: "Pixel 9", minutesAgo: 15)
+        add(Wire.EntryType.text, "Grocery list: oat milk, eggs, sourdough, coffee", kind: .text, from: own, label: "This device", minutesAgo: 22)
+        add(Wire.EntryType.image, picture("hills.png"), kind: .image, from: phone, label: "Pixel 9", minutesAgo: 28)
+        add(Wire.EntryType.text, "Flight BA117 lands at 18:40, terminal 5", kind: .text, from: phone, label: "Pixel 9", minutesAgo: 41)
+        s.items = items
+        s.blocks = []
     }
 
     // The fake snapshot reacts to the same actions the real engine would

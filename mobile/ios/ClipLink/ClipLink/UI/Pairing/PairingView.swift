@@ -5,7 +5,11 @@ import UIKit
 /// QR code, a scanner for the other device's code, and pair-by-address for
 /// devices without a camera.
 struct PairingView: View {
-    @EnvironmentObject private var model: AppModel
+    /// Not watched: only this device's code and addresses (PairingStore) and
+    /// the dial's progress (ProgressStore) are.
+    private var model: AppModel { AppModel.shared }
+    @ObservedObject private var pairing = AppModel.shared.pairing
+    @ObservedObject private var progress = AppModel.shared.progress
     @EnvironmentObject private var settings: AppSettings
 
     @State private var address = ""
@@ -15,7 +19,7 @@ struct PairingView: View {
     @Environment(\.openURL) private var openURL
 
     private var accent: Color { settings.accentTheme.color }
-    private var payload: String { model.snapshot.pairingPayload }
+    private var payload: String { pairing.value.payload }
     private var trimmedAddress: String { address.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
@@ -24,13 +28,13 @@ struct PairingView: View {
                 ScrollView {
                     VStack(spacing: 16) {
                         explainerCard
-                        if model.snapshot.network.localNetwork == .denied {
+                        if pairing.value.localNetworkDenied {
                             localNetworkCard
                         }
                         qrCard
                         scanButton
                         addressCard
-                        if let status = model.pairStatus {
+                        if let status = progress.value.pairStatus {
                             statusCard(status)
                                 .id(PairingAnchor.status)
                                 .transition(.opacity)
@@ -47,10 +51,10 @@ struct PairingView: View {
                     .padding(.bottom, 32)
                     .frame(maxWidth: 560)
                     .frame(maxWidth: .infinity)
-                    .animation(.easeInOut(duration: 0.2), value: model.pairStatus)
+                    .animation(.easeInOut(duration: 0.2), value: progress.value.pairStatus)
                 }
-                .onChange(of: model.pairStatus) { status in
-                    guard let status, !model.pairInProgress else { return }
+                .onChange(of: progress.value.pairStatus) { status in
+                    guard let status, !progress.value.pairInProgress else { return }
                     withAnimation { proxy.scrollTo(PairingAnchor.status, anchor: .bottom) }
                     UIAccessibility.post(notification: .announcement, argument: status)
                 }
@@ -164,8 +168,8 @@ struct PairingView: View {
     @ViewBuilder
     private var ownAddresses: some View {
         let rows: [(title: String, value: String)] = [
-            ("Wi-Fi", model.snapshot.network.lanAddress ?? ""),
-            ("Tailscale", model.snapshot.tailscaleIP),
+            ("Wi-Fi", pairing.value.lanAddress ?? ""),
+            ("Tailscale", pairing.value.tailscaleIP),
         ].filter { !$0.value.isEmpty }
         if !rows.isEmpty {
             VStack(spacing: 6) {
@@ -226,7 +230,7 @@ struct PairingView: View {
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
-        .disabled(model.pairInProgress)
+        .disabled(progress.value.pairInProgress)
     }
 
     private var addressCard: some View {
@@ -247,7 +251,7 @@ struct PairingView: View {
                         .submitLabel(.go)
                         .onSubmit(connect)
                         .focused($addressFocused)
-                        .disabled(model.pairInProgress)
+                        .disabled(progress.value.pairInProgress)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
                         .background(
@@ -256,11 +260,11 @@ struct PairingView: View {
                         )
                         .accessibilityLabel("Address or pairing info")
                     pasteButton
-                        .disabled(model.pairInProgress)
+                        .disabled(progress.value.pairInProgress)
                 }
                 Button(action: connect) {
                     HStack(spacing: 8) {
-                        if model.pairInProgress {
+                        if progress.value.pairInProgress {
                             ProgressView()
                             Text("Connecting…")
                         } else {
@@ -271,7 +275,7 @@ struct PairingView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
-                .disabled(trimmedAddress.isEmpty || model.pairInProgress)
+                .disabled(trimmedAddress.isEmpty || progress.value.pairInProgress)
             }
         }
     }
@@ -294,7 +298,7 @@ struct PairingView: View {
                 if let text = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
                     address = text
                 } else {
-                    model.showToast("Nothing to paste.")
+                    model.showToast(String(localized: "Nothing to paste."))
                 }
             } label: {
                 Label("Paste", systemImage: "doc.on.clipboard")
@@ -309,7 +313,7 @@ struct PairingView: View {
     private func statusCard(_ status: String) -> some View {
         card {
             HStack(alignment: .top, spacing: 10) {
-                if model.pairInProgress {
+                if progress.value.pairInProgress {
                     ProgressView()
                 } else {
                     Image(systemName: "info.circle.fill")
@@ -329,7 +333,7 @@ struct PairingView: View {
 
     private func connect() {
         let text = trimmedAddress
-        guard !text.isEmpty, !model.pairInProgress else { return }
+        guard !text.isEmpty, !progress.value.pairInProgress else { return }
         addressFocused = false
         Haptics.tap(settings.haptics)
         model.pair(with: text)

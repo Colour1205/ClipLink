@@ -74,8 +74,8 @@ final class SyncedZoomScrollView: UIScrollView, UIScrollViewDelegate {
 
         imageView.contentMode = .scaleAspectFit
         imageView.isAccessibilityElement = true
-        imageView.accessibilityLabel = "Synced image"
-        imageView.accessibilityHint = "Pinch or double-tap to zoom."
+        imageView.accessibilityLabel = String(localized: "Synced image")
+        imageView.accessibilityHint = String(localized: "Pinch or double-tap to zoom.")
         imageView.accessibilityTraits = .image
         addSubview(imageView)
 
