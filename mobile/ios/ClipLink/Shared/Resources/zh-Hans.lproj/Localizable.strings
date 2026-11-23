@@ -352,9 +352,6 @@
 "Devices with the same passcode trust each other automatically — no QR code needed. The passcode never leaves this iPhone; only a proof derived from it is shared." = "设置了相同口令的设备会自动互相信任，无需扫描二维码。口令本身绝不会离开这台 iPhone，共享的只是由它推导出的证明。";
 
 /* Me › Tailscale IP */
-"Use detected address" = "使用检测到的地址";
-"Use detected address %@" = "使用检测到的地址 %@";
-"Tailscale is running on this iPhone, so ClipLink can fill this in for you." = "这台 iPhone 上正在运行 Tailscale，ClipLink 可以替你填写。";
 "This iPhone's Tailscale IP" = "这台 iPhone 的 Tailscale IP";
 "Not set. Paired devices can only reach this iPhone on the same Wi-Fi." = "未设置。已配对的设备只能在同一 Wi-Fi 下访问这台 iPhone。";
 "Saved: %@. It's included in your pairing QR code." = "已保存：%@。它已包含在你的配对二维码中。";

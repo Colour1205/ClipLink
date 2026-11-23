@@ -81,7 +81,7 @@ extension SyncEngine {
 
     func pathChanged(_ path: NWPath) {
         let lan = NetworkInterfaces.lan()
-        let key = "\(path.status)|\(lan?.ip ?? "-")|\(NetworkInterfaces.tailscale() ?? "-")"
+        let key = "\(path.status)|\(lan?.ip ?? "-")"
         guard key != lastPathKey else { return }
         let first = lastPathKey.isEmpty
         lastPathKey = key

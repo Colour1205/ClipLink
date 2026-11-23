@@ -1126,9 +1126,6 @@ final class AppModel: ObservableObject {
         engine?.setTailscaleIP(trimmed)
     }
 
-    /// iOS can see the Tailscale VPN interface, unlike the other platforms.
-    var detectedTailscaleIP: String? { NetworkInterfaces.tailscale() }
-
     /// What `runSelfTest` returns when everything works.
     static var selfTestPassed: String { String(localized: "Self-test passed — identity, signing, and storage all working.") }
 

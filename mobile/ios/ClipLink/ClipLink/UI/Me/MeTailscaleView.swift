@@ -11,7 +11,6 @@ struct MeTailscaleView: View {
 
     @State private var draft = ""
     @State private var loaded = false
-    @State private var detected: String?
     @FocusState private var fieldFocused: Bool
 
     private var saved: String { me.value.tailscaleIP }
@@ -22,27 +21,6 @@ struct MeTailscaleView: View {
             Section {
                 MeTailscaleIntro(accent: settings.accentTheme.fill)
                     .meRow(transparency: settings.cardTransparency)
-            }
-
-            if let detected, detected != saved {
-                Section {
-                    Button {
-                        draft = detected
-                        Haptics.tap(settings.haptics)
-                    } label: {
-                        HStack(spacing: 12) {
-                            MeRowLabel(title: "Use detected address", systemImage: "wand.and.stars", tint: .indigo, titleColor: .accentColor)
-                            Spacer(minLength: 8)
-                            Text(detected)
-                                .font(.body.monospacedDigit())
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    .accessibilityLabel("Use detected address \(detected)")
-                    .meRow(transparency: settings.cardTransparency)
-                } footer: {
-                    Text("Tailscale is running on this iPhone, so ClipLink can fill this in for you.")
-                }
             }
 
             Section {
@@ -82,7 +60,6 @@ struct MeTailscaleView: View {
         .navigationTitle("Tailscale IP")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
-            detected = model.detectedTailscaleIP
             guard !loaded else { return }
             loaded = true
             draft = saved
