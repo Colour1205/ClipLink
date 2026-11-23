@@ -2,11 +2,13 @@ import SwiftUI
 
 /// Me › Activity Log: the engine's recent events, newest first.
 struct MeActivityLogView: View {
-    @EnvironmentObject private var model: AppModel
+    /// Not watched: only the log is (see LogStore).
+    private var model: AppModel { AppModel.shared }
+    @ObservedObject private var log = AppModel.shared.log
     @EnvironmentObject private var settings: AppSettings
 
     /// The engine already keeps the log newest first.
-    private var lines: [LogLine] { model.snapshot.log }
+    private var lines: [LogLine] { log.lines }
 
     var body: some View {
         content
@@ -17,7 +19,7 @@ struct MeActivityLogView: View {
                     Menu {
                         Button {
                             model.clipboard.copyText(exportText)
-                            model.showToast("Activity log copied.")
+                            model.showToast(String(localized: "Activity log copied."))
                             Haptics.tap(settings.haptics)
                         } label: {
                             Label("Copy All", systemImage: "doc.on.doc")

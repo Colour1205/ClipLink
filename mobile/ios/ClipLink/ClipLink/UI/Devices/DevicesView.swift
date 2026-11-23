@@ -304,9 +304,9 @@ private struct DevicesStatusRow: View {
 
     private var summary: String {
         switch connected {
-        case 0: return "No devices connected"
-        case 1: return "1 device connected"
-        default: return "\(connected) devices connected"
+        case 0: return String(localized: "No devices connected")
+        case 1: return String(localized: "1 device connected")
+        default: return String(localized: "\(connected) devices connected")
         }
     }
 }
@@ -349,7 +349,7 @@ private struct DevicesNetworkSection: View {
     var body: some View {
         Section(header: Text("Network"), footer: footer) {
             DevicesValueRow(
-                title: "This \(ThisDeviceNoun.current)",
+                title: String(localized: "This \(ThisDeviceNoun.current)"),
                 systemImage: UIDevice.current.userInterfaceIdiom == .pad ? "ipad" : "iphone",
                 value: network.lanAddress ?? "Not on Wi-Fi",
                 copyable: network.lanAddress != nil
@@ -386,9 +386,9 @@ private struct DevicesValueRow: View {
 
     var body: some View {
         HStack {
-            Label(title, systemImage: systemImage)
+            Label(NSLocalizedString(title, comment: ""), systemImage: systemImage)
             Spacer(minLength: 12)
-            Text(value)
+            Text(NSLocalizedString(value, comment: ""))
                 .font(.body.monospacedDigit())
                 .foregroundColor(.secondary)
                 .lineLimit(1)
@@ -399,7 +399,7 @@ private struct DevicesValueRow: View {
             if copyable {
                 Button {
                     model.clipboard.copyText(value)
-                    model.showToast("Address copied.")
+                    model.showToast(String(localized: "Address copied."))
                 } label: {
                     Label("Copy Address", systemImage: "doc.on.doc")
                 }

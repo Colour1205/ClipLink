@@ -112,13 +112,13 @@ enum Notifier {
     /// (blocking it is a deliberate step in the Devices tab). Trust needs
     /// the phone unlocked: it's a security decision.
     static func registerCategories() {
-        let trust = UNNotificationAction(identifier: trustAction, title: "Trust", options: [.authenticationRequired])
-        let ignore = UNNotificationAction(identifier: ignoreAction, title: "Ignore", options: [])
+        let trust = UNNotificationAction(identifier: trustAction, title: String(localized: "Trust"), options: [.authenticationRequired])
+        let ignore = UNNotificationAction(identifier: ignoreAction, title: String(localized: "Ignore"), options: [])
         let category = UNNotificationCategory(
             identifier: pairingCategory,
             actions: [trust, ignore],
             intentIdentifiers: [],
-            hiddenPreviewsBodyPlaceholder: "Pairing request",
+            hiddenPreviewsBodyPlaceholder: String(localized: "Pairing request"),
             options: []
         )
         UNUserNotificationCenter.current().setNotificationCategories([category])
@@ -136,10 +136,10 @@ enum Notifier {
     static func notifyPairingRequest(_ request: PairingRequest, name: String) {
         let code = DeviceLabel.short(request.deviceId)
         let content = UNMutableNotificationContent()
-        content.title = "Pairing Request"
+        content.title = String(localized: "Pairing Request")
         content.body = name == code
-            ? "\(code) wants to pair with this \(ThisDeviceNoun.current)."
-            : "\(name) (\(code)) wants to pair with this \(ThisDeviceNoun.current)."
+            ? String(localized: "\(code) wants to pair with this \(ThisDeviceNoun.current).")
+            : String(localized: "\(name) (\(code)) wants to pair with this \(ThisDeviceNoun.current).")
         content.categoryIdentifier = pairingCategory
         content.threadIdentifier = "pairing"
         content.sound = .default
@@ -161,18 +161,18 @@ enum Notifier {
     static func notify(_ entries: [ClipboardEntry], name: (String) -> String) {
         guard let newest = entries.first else { return }
         let content = UNMutableNotificationContent()
-        content.title = entries.count == 1 ? "New from \(name(newest.deviceId))" : "\(entries.count) new items synced"
+        content.title = entries.count == 1 ? String(localized: "New from \(name(newest.deviceId))") : String(localized: "\(entries.count) new items synced")
         // The body can end up on the lock screen, in Notification Center and
         // on a paired Watch: no keys or tokens, no full links, and only a
         // short first line of text.
         switch SyncedItem.kind(for: newest) {
-        case .opaque: content.body = "Key or token"
-        case .link: content.body = URL(string: newest.content.trimmingCharacters(in: .whitespacesAndNewlines))?.host ?? "Link"
+        case .opaque: content.body = String(localized: "Key or token")
+        case .link: content.body = URL(string: newest.content.trimmingCharacters(in: .whitespacesAndNewlines))?.host ?? String(localized: "Link")
         case .text:
             let firstLine = newest.content.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
-            content.body = firstLine.isEmpty ? "Text" : firstLine.count > 60 ? String(firstLine.prefix(60)) + "…" : firstLine
-        case .image: content.body = "Image"
-        case .file: content.body = FilePayload.parse(newest.content)?.fileName ?? "File"
+            content.body = firstLine.isEmpty ? String(localized: "Text") : firstLine.count > 60 ? String(firstLine.prefix(60)) + "…" : firstLine
+        case .image: content.body = String(localized: "Image")
+        case .file: content.body = FilePayload.parse(newest.content)?.fileName ?? String(localized: "File")
         }
         content.sound = nil
         content.threadIdentifier = "synced"

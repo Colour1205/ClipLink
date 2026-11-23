@@ -17,7 +17,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 @main
 struct ClipLinkApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var model = AppModel.shared
+    /// Not watched: a scene that observed the whole model re-ran its body with
+    /// every snapshot. The root view watches the little it shows (RootStore).
+    /// Read where the StateObject used to be first read, so the model still
+    /// comes up at the same moment of launch.
+    private var model: AppModel { AppModel.shared }
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {

@@ -119,7 +119,7 @@ final class SyncedDocumentExporter: NSObject, UIDocumentPickerDelegate {
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        AppModel.shared.showToast("Saved to Files.")
+        AppModel.shared.showToast(String(localized: "Saved to Files."))
         Self.active = nil
     }
 
@@ -151,7 +151,7 @@ final class SyncedDocumentImporter: NSObject, UIDocumentPickerDelegate {
         guard let url = urls.first else { return }
         defer { try? FileManager.default.removeItem(at: url) }
         if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
-            AppModel.shared.showToast("Folders can't be sent — pick a file instead.")
+            AppModel.shared.showToast(String(localized: "Folders can't be sent — pick a file instead."))
             return
         }
         AppModel.shared.sendFile(at: url)
@@ -186,7 +186,7 @@ final class SyncedPhotoPicker: NSObject, PHPickerViewControllerDelegate {
         guard let provider = results.first?.itemProvider else { return }
         let type = UTType.image.identifier
         guard provider.hasItemConformingToTypeIdentifier(type) else {
-            AppModel.shared.showToast("Couldn't read that image.")
+            AppModel.shared.showToast(String(localized: "Couldn't read that image."))
             return
         }
         provider.loadDataRepresentation(forTypeIdentifier: type) { data, _ in
@@ -194,7 +194,7 @@ final class SyncedPhotoPicker: NSObject, PHPickerViewControllerDelegate {
                 if let data {
                     AppModel.shared.sendImageData(data)
                 } else {
-                    AppModel.shared.showToast("Couldn't read that image.")
+                    AppModel.shared.showToast(String(localized: "Couldn't read that image."))
                 }
             }
         }
@@ -210,24 +210,24 @@ enum SyncedPhotoSaver {
     static func save(_ data: Data) {
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
             guard status == .authorized || status == .limited else {
-                toast("ClipLink can't add to Photos — allow it in Settings › Privacy & Security › Photos.")
+                toast(String(localized: "ClipLink can't add to Photos — allow it in Settings › Privacy & Security › Photos."))
                 return
             }
             PHPhotoLibrary.shared().performChanges({
                 PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
             }) { saved, _ in
                 if saved {
-                    toast("Saved to Photos.")
+                    toast(String(localized: "Saved to Photos."))
                     return
                 }
                 guard let image = UIImage(data: data) else {
-                    toast("Couldn't save the image.")
+                    toast(String(localized: "Couldn't save the image."))
                     return
                 }
                 PHPhotoLibrary.shared().performChanges({
                     PHAssetChangeRequest.creationRequestForAsset(from: image)
                 }) { savedAgain, _ in
-                    toast(savedAgain ? "Saved to Photos." : "Couldn't save the image.")
+                    toast(savedAgain ? String(localized: "Saved to Photos.") : String(localized: "Couldn't save the image."))
                 }
             }
         }

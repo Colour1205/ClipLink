@@ -52,13 +52,6 @@ public enum NetworkInterfaces {
             ?? all.first { $0.name.hasPrefix("en") && isPrivateLAN($0.ipValue) }
     }
 
-    /// A Tailscale address, if the Tailscale VPN is up on this device
-    /// (utun* in 100.64.0.0/10). The other platforms make the user type this;
-    /// on iOS it is visible, so the app can offer it as a suggestion.
-    public static func tailscale() -> String? {
-        ipv4().first { $0.name.hasPrefix("utun") && isCGNAT($0.ipValue) }?.ip
-    }
-
     /// Every IPv4 worth showing on the Me screen.
     public static func displayAddresses() -> [String] {
         var seen = Set<String>()

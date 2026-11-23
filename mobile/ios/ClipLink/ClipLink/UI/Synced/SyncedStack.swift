@@ -48,7 +48,7 @@ enum SyncedStackStyle {
 
     /// "Expand 4 more items".
     static func expandLabel(hidden: Int) -> String {
-        hidden == 1 ? "Expand 1 more item" : "Expand \(hidden) more items"
+        hidden == 1 ? String(localized: "Expand 1 more item") : String(localized: "Expand \(hidden) more items")
     }
 }
 
@@ -199,7 +199,7 @@ struct SyncedRowView: View {
                    zoom: zoom)
             .background(alignment: .bottom) { layers }
             .overlay(alignment: .bottom) { handle }
-            .background(frameReader)
+            .background { frameReader }
             .padding(.bottom, reservedBottom)
             .modifier(RevealPlaceEffect(place: revealPlace ?? .rest))
             .opacity(revealHidden ? 0 : 1)
@@ -217,12 +217,19 @@ struct SyncedRowView: View {
             .transition(arrival)
     }
 
+    /// Only while a stack opening needs this card's frame: a GeometryReader
+    /// on every card ran with every layout pass of the list. Only the
+    /// background's content comes and goes, so the card keeps its identity;
+    /// an unmeasured card reports nothing, as its empty value did before.
+    @ViewBuilder
     private var frameReader: some View {
-        GeometryReader { proxy in
-            Color.clear.preference(
-                key: SyncedCardFrames.self,
-                value: measured ? [row.id: proxy.frame(in: .named(SyncedCardFrames.space))] : [:]
-            )
+        if measured {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: SyncedCardFrames.self,
+                    value: [row.id: proxy.frame(in: .named(SyncedCardFrames.space))]
+                )
+            }
         }
     }
 

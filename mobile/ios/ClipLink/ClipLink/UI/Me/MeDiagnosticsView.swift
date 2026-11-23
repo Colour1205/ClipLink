@@ -4,14 +4,18 @@ import UIKit
 /// Me › Diagnostics: a self-test (identity, signing, storage), the live engine
 /// status, and the protocol facts every ClipLink shares.
 struct MeDiagnosticsView: View {
-    @EnvironmentObject private var model: AppModel
+    /// Not watched: only what this screen shows is (see DiagnosticsStore;
+    /// MeStore for the identity key).
+    private var model: AppModel { AppModel.shared }
+    @ObservedObject private var store = AppModel.shared.diagnostics
+    @ObservedObject private var me = AppModel.shared.me
     @EnvironmentObject private var settings: AppSettings
 
     @State private var result: String?
     @State private var running = false
 
-    private var snapshot: EngineSnapshot { model.snapshot }
-    private var passed: Bool { result?.hasPrefix("Self-test passed") == true }
+    private var snapshot: DiagnosticsState { store.value }
+    private var passed: Bool { result == AppModel.selfTestPassed }
 
     var body: some View {
         List {
@@ -68,7 +72,7 @@ struct MeDiagnosticsView: View {
             let outcome = model.runSelfTest()
             withAnimation { result = outcome }
             running = false
-            if outcome.hasPrefix("Self-test passed") {
+            if outcome == AppModel.selfTestPassed {
                 Haptics.success(settings.haptics)
             } else if settings.haptics {
                 UINotificationFeedbackGenerator().notificationOccurred(.error)
@@ -82,14 +86,14 @@ struct MeDiagnosticsView: View {
         Section {
             Group {
                 MeDetailRow(title: "Status", value: snapshot.network.running ? "Running" : "Stopped")
-                MeDetailRow(title: "Listening", value: snapshot.network.listening ? "Port \(Wire.port)" : "Not listening")
+                MeDetailRow(title: "Listening", value: snapshot.network.listening ? String(localized: "Port \(String(Wire.port))") : "Not listening")
                 MeDetailRow(title: "Discovery", value: discovery)
                 MeDetailRow(title: "Local Network", value: localNetwork)
                 MeDetailRow(title: "Wi-Fi Address", value: snapshot.network.lanAddress ?? "Not on Wi-Fi", monospaced: snapshot.network.lanAddress != nil)
                 MeDetailRow(title: "Connected Devices", value: "\(snapshot.connectedCount)")
-                MeDetailRow(title: "Trusted Devices", value: "\(snapshot.devices.filter(\.trusted).count)")
-                MeDetailRow(title: "Synced Items", value: "\(snapshot.items.count)")
-                MeDetailRow(title: "Identity Key", value: model.identityIsHardwareBacked ? "Secure Enclave" : "Keychain")
+                MeDetailRow(title: "Trusted Devices", value: "\(snapshot.trustedCount)")
+                MeDetailRow(title: "Synced Items", value: "\(snapshot.itemCount)")
+                MeDetailRow(title: "Identity Key", value: me.value.hardwareBacked ? "Secure Enclave" : "Keychain")
                 MeDetailRow(title: "Passcode", value: snapshot.hasPassphrase ? "On" : "Off")
                 if let error = snapshot.network.lastError {
                     VStack(alignment: .leading, spacing: 4) {
